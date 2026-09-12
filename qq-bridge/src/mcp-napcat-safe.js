@@ -269,13 +269,19 @@ const server = new McpServer({ name: 'napcat-safe', version: '0.1.0' });
 //        · `allow` 非空时改成**只注册 allow 里的**（白名单，最省，但新增工具要手动加）。
 //   未配置 / enabled 不为 true → **全部注册**，行为与改动之前**完全一致**。
 // 改动这份名单只需要重启隔离 DSH（DSH 启动时向 MCP server 取一次工具表），不用改别的地方。
+// 名单里的工具名**允许带或不带 MCP server 前缀**（`mcp__napcat__qq_x` 与 `qq_x` 等价）。
+// 踩过的坑：管理端「出厂默认名单」写的是**带前缀**的全名，而这里注册用的是裸名 →
+// deny 名单一条都匹配不上 → 实际裁剪 0 个、"省 schema" 静默失效（实测：77 个工具一个没少）。
+// 现在两边都归一化，谁写都能生效；`qq_status` 用裸 server.tool 注册，本来就不参与裁剪。
+const bareToolName = (n) => String(n).replace(/^mcp__[A-Za-z0-9_-]+__/, '');
+const toNameSet = (arr) => new Set((Array.isArray(arr) ? arr : []).map(bareToolName));
 const slimTools = getConfig().social?.slimTools;
 const SLIM_ON = !!slimTools && slimTools.enabled === true;
 const SLIM_ALLOW = (SLIM_ON && Array.isArray(slimTools.allow) && slimTools.allow.length)
-  ? new Set(slimTools.allow.map(String))
+  ? toNameSet(slimTools.allow)
   : null;
 const SLIM_DENY = (SLIM_ON && Array.isArray(slimTools.deny))
-  ? new Set(slimTools.deny.map(String))
+  ? toNameSet(slimTools.deny)
   : null;
 if (SLIM_ON && (SLIM_ALLOW || SLIM_DENY)) {
   // stdout 是 MCP 的协议通道，日志一律走 stderr
@@ -284,8 +290,9 @@ if (SLIM_ON && (SLIM_ALLOW || SLIM_DENY)) {
 
 /** 注册工具；精简模式下被排除的**直接不注册** —— 它的 JSON schema 从此不出现在任何一次请求里。 */
 function registerTool(name, ...rest) {
-  if (SLIM_ALLOW && !SLIM_ALLOW.has(name)) return;
-  if (!SLIM_ALLOW && SLIM_DENY && SLIM_DENY.has(name)) return;
+  const bare = bareToolName(name);
+  if (SLIM_ALLOW && !SLIM_ALLOW.has(bare)) return;
+  if (!SLIM_ALLOW && SLIM_DENY && SLIM_DENY.has(bare)) return;
   return server.tool(name, ...rest);
 }
 
