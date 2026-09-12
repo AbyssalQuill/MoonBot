@@ -545,7 +545,8 @@ node server/index.js        # → http://127.0.0.1:1921
 
 ### 8.6 学习 / 用量 / 画像（代理到"当前活动桥"）
 
-这些接口会把请求转发给**当前活动的桥控制台**（远端优先：已连服务器且隧道在 → `127.0.0.1:13100`；否则本机 `127.0.0.1:3100`），鉴权用桥的 `consoleToken`。
+这些接口会把请求转发给**当前活动的桥控制台**（远端优先：已连服务器且隧道在 → `127.0.0.1:13100`；否则本机 `127.0.0.1:3100`）。
+桥的控制台**只绑 `127.0.0.1`**，默认视为"本机可信"；只有在桥的 `config.json` 里显式配了合法的 `consoleToken` 时才启用令牌校验（`x-console-token` 头或 `?token=`），并同时校验 Origin。
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
@@ -581,23 +582,40 @@ node server/index.js        # → http://127.0.0.1:1921
 
 每条消息进来都要先过一次唤醒判定（`core/mux.js` + `core/social-flow.js`），只有判定为"该醒"才会真正调用模型（不醒的消息仍然入库，作为上下文与学习素材）。**判断规则写在系统提示词的 `[WAKE TYPES]` 段落里**（改行为改那里），代码只负责给出 reason。
 
-| 唤醒原因（`[Wake <reason>]`） | 触发条件（简述） |
-|---|---|
-| `bootstrap` | **新会话首次连接**：注入完整提示词（preset + 人设）与最近消息窗口（首轮还会带 `[Guide]`） |
-| `private` | **私聊消息**（主人私聊还会带 `[OWNER]` 标记） |
-| `atMention` | 群里被 **@** 或消息引用了机器人 |
-| `question` | 消息在**直接提问** |
-| `nameMention` | 消息里**点了名字**（昵称/别名命中） |
-| `keyword` | 命中配置的**触发关键词** |
-| `speaker` | 正常发言（"够像在跟你说话"的一类） |
-| `poke` | 被**戳一戳** |
-| `probability` | **概率唤醒**：按配置概率主动开口 |
-| `proactiveCheck` | **系统给的开场**：没人先说话，给它一次主动闲聊的机会 |
-| `replyCheck` | **回复后的兜底复查**：对方又补了一句、或要不要再说一句 |
-| `timeout` | **潜水到期**：睡够了，回来看消息 |
+**A. 消息型原因**（由 `evaluateWakeTrigger()` 判定出来，`core/wake-send.js`）：
 
-> `[Wake x]` 里的 `x` 就是上表的 reason（内部 `reason.split(':')[0]`）；无工具兜底版会把 `atMention` 显示成 `@`、
-> `proactiveCheck` 显示成 `proactive`。
+| `[Wake …]` | 触发条件 |
+|---|---|
+| `private` | **私聊消息**（不受睡眠窗与触发器限制；主人私聊还会带 `[OWNER]`） |
+| `atMention` | 群里被 **@**，或消息**引用了机器人**（此时额外注入 `[The @ to me]` 指明是哪条） |
+| `question` | 消息在**直接提问** |
+| `nameMention` | 消息里**点了机器人的名字**（昵称/别名，大小写不敏感） |
+| `keyword:<词>` | 命中配置的**触发关键词**（短英文/数字用词边界匹配；哨兵轮只显示 `[Wake keyword]`） |
+| `speaker:<谁>` | 命中配置的**指定发言人** |
+| `anyMessage` | 该会话是**活跃模式**（`anyMessage=true`），有人说话就醒 |
+| `topic` | 消息命中**话题词**（AI / 大模型 / 机器人 / 人设名…），全局无条件 |
+| `probability` | **概率接话**：`triggers.probability`（推荐 0.05）命中 |
+
+**B. 内部原因**（系统自己排的，不是某条消息触发的）：
+
+| `[Wake …]` | 触发条件 |
+|---|---|
+| `bootstrap` | **新会话首次连接**（首轮还会带 `[Guide]`） |
+| `poke` | 被**戳一戳** |
+| `timeout` | **潜水到期**（睡够了回来看） |
+| `proactiveCheck` | **主动闲聊机会**：没人先说话，给它一次开口的机会 |
+| `replyCheck` | **回复后的兜底复查**（对方又补了一句 / 要不要再说一句） |
+| `activityStart` | 进入**活跃时段**时把它叫起来 |
+| `deliveryWatchdog` | **投递看门狗**：判定"该交付却没交付"时补一次 |
+| `loopRecovery` | **复读恢复**：检测到复读、重开上下文后还有未读 |
+| `timeoutRecovery` | **卡死恢复**：回合卡死被隔离后还有未读 |
+| `admin` | 管理端/控制台**手动点**的一次唤醒 |
+| `turnHold` | 回合保持循环（**只产生 `[Mid-turn]`**，不产生 `[Wake …]`） |
+
+- 合并窗口内多条消息会合并成**一次**唤醒，原因按优先级取最高：
+  `private(100) > atMention(90) > question(80) > speaker(75) > nameMention(70) > topic(65) > keyword(60) > anyMessage(50) > replyCheck(40) > timeout(30) > proactiveCheck(20)`。
+- 判据只认 base name（`reason.split(':')[0]`）；无工具兜底版里 `atMention` 显示成 `@`、`proactiveCheck` 显示成 `proactive`。
+- 回合里又来消息时用的是**在途注入**：正文变成 `[Mid-turn] N new message(s)…`，不产生新的 `[Wake …]`。
 
 **注入只带数据，规则写在 preset**（这是这一版刻意做的分层）：
 - 唤醒时注入的正文是**数据形态**的短行，例如 `[Token] <会话令牌> [Wake <类型>] [Unread N] <发送者>: <内容>`；
@@ -644,10 +662,36 @@ node server/index.js        # → http://127.0.0.1:1921
 
 ### 9.5 消息与媒体
 
-- 出站：长文本切分、`@`、引用回复、markdown → 纯文本降级、CQ 码与纯文本两种形态自动选择；
-- 图片：单边超过 4096px 或超过 5MB 会**自动缩放重压**（内置纯 JS 编解码，不依赖 sharp 之类原生模块）；
-- 语音/视频/文件：走 NapCat 的能力读取与转发，转发（含合并转发）在入站时会**就地展开**，模型不用额外调工具就能看到"转发里到底说了什么"；
-- 表情：`state/stickers.json` 管理收藏、贴纸备注；随包表情库（`meme/`）可用 `qq_whale_meme_search` 搜索后发送。
+**文本**
+- 长文本自动切分：单条上限 **4000 字符**（优先在换行处切、不切断 emoji）；
+- 出站前做 markdown → 纯文本降级（代码围栏、行内反引号、链接、粗斜体、标题、引用、列表、表格）；
+- 模型用**空格**表示"这里分成下一条"，桥按空格拆成多条气泡连发；
+- 清洗模型乱写的表情占位符（`[表情:x]`/`[face:x]`/`[sticker:x]`…）：能解析出表情 id 就改发真表情，整条都是占位符就直接丢弃（根治"文字版表情"）；
+- CQ 码防护：文本里的 `[CQ:` 会转义成全角，防止被当成协议注入。
+
+**@ 与引用**
+- `@` 只接受数字 QQ 号，**禁止 `@全体成员`**；模型手写 `[CQ:at,qq=…]` 也会被解析成真 @；
+- 引用回复需要合法的消息 id；
+- **自动智能引用**：只有在"10 分钟内有人 @ 过它 / 引用过它"且那条就是最新一条别人发的消息时才自动引用，并在发送那一刻复核。
+
+**图片与媒体**
+
+| 环节 | 阈值 |
+|---|---|
+| 常态缩放目标 | 长边 **1280px** |
+| 硬上限 | 单边 **4096px** / 单文件 **5MB**（超过就缩放重压，压不动就退化成文字占位，**绝不把超限图丢给模型**） |
+| 单条消息媒体总量 | **25MB** / 单张 **64M 像素**，最多内联 **5** 张 |
+| 压缩实现 | 优先 `sharp`（可选）→ 内置纯 JS 编解码（pngjs + jpeg-js）→ 不行就放弃。**没有任何原生编译依赖** |
+| 动图 | ≤4MB 且不超硬限则原样保留 |
+| 语音 / 视频 | **发送侧不支持**（入站只渲染成 `[语音]`/`[视频]` 占位） |
+
+**转发**：合并转发最多 **50** 条、单条 ≤3000 字；**入站转发会就地展开成可读文本**，模型不用额外调工具就能看到"转发里到底说了什么"。
+
+**发送节奏与限流**（防刷屏 / 防风控）：线性节拍 `延迟 = min(4000ms, 0 + n×350ms)`（n = 这一批里第几条，**第一条永远 0 延迟**），另有限流 **8 条/分钟、60 条/小时**，单条 ≤500 字符、一批最多 8 条；90 秒内重复文本会被拒、60 秒内调用 ≥12 次会被限流。
+
+**表情**：`state/stickers.json` 管理收藏与备注（收藏限频 2 次/分钟、10 次/小时）；随包表情库（`meme/`）可用 `qq_whale_meme_search` 搜索后发送。
+
+**Word 文档**：单文档正文上限 **100 万字**，配额默认 **10 万字/会话/天**（北京 0 点重置），临时文件 1 小时后清理。
 
 ### 9.6 桥的运行时数据
 
@@ -767,11 +811,22 @@ node server/index.js        # → http://127.0.0.1:1921
 
 | 工具 | 作用 |
 |---|---|
-| `web_search` / `web_fetch` | 联网搜索 / 抓网页正文（安全封装） |
+| `web_search` / `web_fetch` | 联网搜索 / 抓网页正文（`web_fetch` 带 SSRF 防护：只允许 http(s)、禁内网与本机地址、逐跳校验重定向） |
 | `napcat_status` | NapCat 与 OneBot 网关状态 |
-| `start_napcat` / `stop_napcat` | 启动/停止 NapCat（**需要显式开启进程控制**，默认关闭；启动走隐藏方式，不弹窗口） |
+| `start_napcat` / `stop_napcat` | 启动/停止 NapCat（**只有开启进程控制后才注册**；启动走隐藏方式，不弹窗口） |
 
-**权限边界**：管理类工具（改配置、静默、清记忆、加管理员…）在**主人私聊**会话才放行；其它会话的写操作会被拒。桥还会校验会话令牌，工具结果里的密钥形态会被遮挡后才交给模型。
+**默认并不是 84 个全开**：`start_napcat` / `stop_napcat` 只在配置里显式打开进程控制（`napcat.allowProcessControl: true`）时**才会注册**，
+所以默认可用是 **82 个**（84 定义 / 82 默认 / 开启进程控制后 84）。
+
+**权限边界**：
+- **只有主人私聊能用**：`qq_admin_set`（设管理员）、`qq_whitelist`（改群白名单）、`qq_set_system_config`（改系统配置）；
+- 另有保护：`qq_blacklist` 不能拉黑主人、`qq_remove_friend` 不能删主人；
+- 发送类工具必须带会话令牌，且**目标会话必须在白名单内**；主人会话的令牌另外授权"跨会话代发"（`qq_proactive_send` / `qq_schedule_message` / `qq_crosschat_send`）；
+- 工具有两种"关掉"的方式，效果完全不同：
+  - **调用时拒绝**（`social.tools.*` 开关）：工具还在工具表里，**schema 照样每次重发 → 不省额度**；
+  - **注册期不注册**（`social.slimTools.deny` 或 `allow` 白名单、以及约 20 处按功能开关的条件注册）：**schema 直接从每次请求里消失 → 真省额度**。
+    注意 `slimTools` 用的是**裸工具名**（如 `qq_get_group_history`），写全名 `mcp__napcat__qq_…` **不会生效**；
+- **MCP 进程是由 DSH 拉起的**：改完 `mcp-*.js`（工具名/描述/参数）必须**重启隔离 DSH** 才生效 —— 工具表只在 DSH 启动时读一次。
 
 ---
 
@@ -833,7 +888,19 @@ node server/index.js        # → http://127.0.0.1:1921
 | 其它 `/xxx` | **原样交给 agent 执行**（例如 DSH 自己的命令），桥不拦截 |
 | 不说斜杠 | 直接说人话也行 —— 这些命令只是"快捷方式"，日常聊天不需要记 |
 
-> 说明：`/help`（曾经发一份能力概览文档）已经删除；现在发 `/help` 会按"其它 `/xxx`"交给模型正常回应。
+**不用斜杠也能用的（主人自然语言指令，桥直接执行、不经过模型）**：
+
+| 说法 | 作用 |
+|---|---|
+| `开始学习` / `start learning`（后面可跟 QQ 号） | 开始人格学习 |
+| `停止学习` / `stop learning` | 停止人格学习（不落半成品） |
+| `学习状态` / `learn status` | 查人格学习进度 |
+| `/portrait learn` / `/portrait stop` / `/portrait status`（也认「画像学习」「群友画像学习」） | 群友画像学习：开始 / 停止 / 查状态 |
+| 回复「通过」/「拒绝」 | 审批工具请求（仅主人） |
+
+> 说明：① 管理类命令**只有主人 QQ**（以及配置里的管理员）能用，别人发 `/` 会收到「管理命令仅管理员可用」；
+> ② 这些管理命令在 `/deepsleep` 与暂停状态下**依然生效**（否则你就没法把它叫醒了）；
+> ③ `/help`（曾经发一份能力概览文档）已经删除，现在发 `/help` 会按"其它 `/xxx`"交给模型正常回应。
 
 ---
 
@@ -887,7 +954,7 @@ node server/index.js        # → http://127.0.0.1:1921
 | `dsh` | 模型服务商 / 模型 id / 推理档位 / 桥与 DSH 的连接地址 |
 | `napcat` | OneBot 的 HTTP/WS 地址、access token、NapCat 启动器路径、是否允许进程控制 |
 | `ownerQQ` | 主人 QQ（特权私聊会话的判定依据；出厂模板为 `0`） |
-| `allow` / `deny` | 私聊与群聊白名单、黑名单 |
+| `allow` / `deny` | 私聊与群聊白名单、黑名单；`allowAllWhenEmpty`（**注意**：为 `true` 时"白名单为空"= 允许所有人，为 `false` 时 = 全部拒绝；默认 `false`，即**白名单没配就没人能用**） |
 | `social` | 社交行为：潜水/活跃、主动闲聊概率与检查间隔、活动时段、回合保持、跨会话、发送节奏、表情包收藏 |
 | `slimTools` | 工具精简名单（只注册需要的 MCP 工具，省 token —— 工具 schema 是单次请求体积的大头） |
 
@@ -899,16 +966,30 @@ node server/index.js        # → http://127.0.0.1:1921
 
 | 文件 | 内容 | 敏感 |
 |---|---|---|
-| `memory.db` | SQLite：群友画像、记忆条目、聊天记录（含撤回/已读标记） | ⚠️ 含聊天记录与 QQ 号 |
-| `social-state.json` | 每个会话的状态：模式、未读、已答消息 id、会话令牌、跨会话设置 | ⚠️ |
-| `sessions.json` | QQ 会话 ↔ DSH 会话 的映射 | ⚠️ |
-| `token-usage.jsonl` | 每次调用的 token 用量（用量面板与成本估算的数据源） | 低 |
-| `tool-calls.jsonl` | 工具调用轨迹（哪个会话调了什么工具、参数摘要） | 中 |
-| `activity-windows.json` | 每个群的活跃时段（分钟数窗口） | 低 |
-| `stickers.json` / `slang.json` / `crosschat.json` | 贴纸收藏、黑话词条、跨会话记忆 | 中 |
-| `persona-library.json` / `persona-agent.json` | 人设学习结果 / 当前生效人设版本 | 中 |
-| `learning-config.json` / `session-archive.json` / `dsh-seq.json` | 学习开关、会话归档、DSH 序号 | 低 |
-| `bridge.log` / `qq-activity.log` / `dsh-qq-hold.log` / `qq-mode-plugin.log` | 桥与插件日志（UTF-8） | 中 |
+| `memory.db` | **SQLite（Node 内置 `node:sqlite`，无原生依赖）**，三张表：`profiles`（群友档案：昵称/性格/爱好/生日/备注）、`memory_entries`（记忆条目，`category='persona'` 人格摘要、`'qzone_post'` 说说）、`chat_messages`（**完整聊天记录**：发送者、正文、引用、媒体、已读/撤回时间） | ⚠️⚠️ 最高 |
+| `social-state.json` | 每个会话的社交状态：唤醒配置、最近消息、未读、已答 id、**会话令牌**、发送计数 | ⚠️⚠️ 最高（含聊天正文与令牌） |
+| `sessions.json` | QQ 会话 ↔ DSH 会话 的映射（key 就是群号/QQ 号） | ⚠️ |
+| `activity-windows.json` | 每个群的活跃时段（北京时间分钟数窗口，`end>1440` 表示跨到次日） | ⚠️ |
+| `learning-config.json` | 三种学习的开关/时刻/间隔 + 人格学习的目标 QQ 列表 | ⚠️ |
+| `slang.json` | 黑话词条库（含 `evidence[]`：群聊原文证据） | ⚠️ |
+| `stickers.json` / `sticker-tmp/` | 收藏表情元数据（含账号 uin 的 url）/ 临时图片（30 分钟清理） | 中 |
+| `crosschat.json` | 跨会话摘要与留言信箱 | ⚠️ |
+| `persona-library.json` / `persona-agent.json` / `persona-agent/` | 人格档案库、学习会话登记与工作区 | ⚠️ |
+| `learning-token` | 学习会话专用的 32 位 hex 令牌（权限 0600），只解锁"提交学习结果" | ⚠️ 口令 |
+| `token-usage.jsonl` | 每次调用的 token 用量（用量面板与成本估算的数据源） | 中 |
+| `tool-calls.jsonl` | 工具调用轨迹（会话、工具名、参数摘要，已脱敏） | 中 |
+| `scheduled-tasks.json` | 定时/预约消息任务 | ⚠️ |
+| `docx-quota.json` / `doc-tmp/` | Word 文档每日配额 / 临时 docx（1 小时清理） | 中 |
+| `feedback.json` / `current-role.json` / `dsh-seq.json` | 反馈记录 / 当前角色 / DSH 事件水位 | 低 |
+| `bridge.log` / `qq-activity.log` / `bridge-stdout.log` / `bridge-stderr.log` | 桥主日志与收发活动日志（环形保留，写前脱敏） | 中 |
+| `dsh-qq-hold.log` / `qq-mode-plugin.log` | 两个 DSH 插件的诊断日志 | 低 |
+| `bridge.lock` | 单实例锁（PID，退出即删） | 低 |
+
+> ⚠️ **整个 `state/` 目录都不要对外分享**：它等于机器人的全部记忆与会话身份。本仓库的 `.gitignore`
+> 已经排除它；打包/拷贝给别人时也要记得排除。
+>
+> 另外：本项目开发过程中在 `state/` 留下过几个一次性调试脚本（`tmp-*.mjs` / `tmp-*.cjs`），
+> 其中 `tmp-qqlink.mjs` **明文写着两个令牌**。它们在 `.gitignore` 之外没有别的保护，**建议直接删掉**。
 
 ### 13.2 管理端日志
 
