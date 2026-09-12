@@ -19,6 +19,11 @@ if (Test-Path $gf) { Get-Content $gf -Raw -Encoding UTF8 } else { '  (未武装�
 $gl = Join-Path $env:USERPROFILE '.qq-bridge-manager\logs\napcat-guardian.log'
 if (Test-Path $gl) { Write-Output '--- 守卫动作日志 ---'; Get-Content $gl -Encoding UTF8 | Select-Object -Last 10 } else { Write-Output '  (守卫从未动作过：没有 napcat-guardian.log)' }
 Write-Output '=== 硬链接 ==='
-foreach ($p in @('D:\MoonBot\resources\runtime\guard-node.exe', 'D:\MoonBot\resources\runtime\.guard\guard-node.exe')) {
-  if (Test-Path $p) { Write-Output ("  EXISTS {0}  {1} bytes" -f $p, (Get-Item $p).Length) } else { Write-Output ("  missing {0}" -f $p) }
+$rt = [string]$env:QBM_LIVE_RUNTIME
+if (-not $rt) {
+  Write-Output '  (设置 QBM_LIVE_RUNTIME 为你的运行时目录后，可检查守卫用的硬链接 guard-node.exe)'
+} else {
+  foreach ($p in @((Join-Path $rt 'guard-node.exe'), (Join-Path $rt '.guard\guard-node.exe'))) {
+    if (Test-Path $p) { Write-Output ("  EXISTS {0}  {1} bytes" -f $p, (Get-Item $p).Length) } else { Write-Output ("  missing {0}" -f $p) }
+  }
 }

@@ -109,8 +109,8 @@ DSH 存在两个不同的 DSH_HOME：
 | cordis.patch.yml (桌面) | MCP + agent-presets | `%APPDATA%\DeepSeek Harness\dsh-home\profiles\web\cordis.patch.yml` |
 | host.schema.js | home 字段 optional | `.../@deepseek-ai/dsh-host-apiproxy/lib/types/api/host.schema.js` |
 | server-boot.cjs (已安装) | 自动补丁 | `%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\backend\server-boot.cjs` |
-| server-boot.cjs (开发) | 自动补丁 | `C:\Users\17367\Desktop\DeepSeek Harness\depends\server-boot.cjs` |
-| server-boot.cjs (shell) | 自动补丁 | `C:\Users\17367\Desktop\DeepSeek Harness\shell\server-boot.cjs` |
+| server-boot.cjs (开发) | 自动补丁 | `C:\Users\<你>\Desktop\DeepSeek Harness\depends\server-boot.cjs` |
+| server-boot.cjs (shell) | 自动补丁 | `C:\Users\<你>\Desktop\DeepSeek Harness\shell\server-boot.cjs` |
 | setup-dsh.mjs | DSH 安装脚本 | `qq-bridge/scripts/setup-dsh.mjs` |
 
 ---
