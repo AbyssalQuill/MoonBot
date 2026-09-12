@@ -657,7 +657,10 @@ node server/index.js        # → http://127.0.0.1:1921
 
 ## 十、MCP 工具清单
 
-桥通过 MCP 把 QQ 能力暴露给 agent，**共注册 84 个工具**：`qq_*` 类 79 个（`mcp-napcat-safe.js`，也就是"省额度"里说的 NapCat 工具集）、联网搜索 2 个（`mcp-web-search-safe.js`）、宿主/进程控制 3 个（`mcp-host-server.js`，**默认关闭**）。
+桥通过 MCP 把 QQ 能力暴露给 agent，**共注册 84 个工具**，分三个文件：
+`mcp-napcat-safe.js` **77 个**（QQ / NapCat 能力，就是"省额度"里说的那批）、
+`mcp-host-server.js` **5 个**（`qq_learning_corpus` / `qq_learning_submit` + `napcat_status` / `start_napcat` / `stop_napcat`，
+后三个需要显式开启进程控制，**默认关闭**）、`mcp-web-search-safe.js` **2 个**（`web_search` / `web_fetch`）。
 
 > 想省额度：这些工具的 JSON schema 会**每一步请求都重发一遍**，占单次请求体积的大头。用「工具与规则 → 工具 schema 精简」把不用的工具**不注册**即可（比"开关"有效——开关只是调用时拒绝，schema 照发）。
 
