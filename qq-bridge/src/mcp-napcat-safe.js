@@ -20,7 +20,7 @@ const ROOT = path.resolve(__dirname, '..');
 // 鲸鱼娘同人表情资源根：优先项目 meme/ 目录（随项目分发，已从服务器打包集成，分类在 meme/whale-fanart-001/memes/），
 // 再退到项目 .runtime / 项目 meme-packs / 用户主目录 .dsh（服务器旧形态），全部运行时探测，禁止写死。
 //
-// 【2026-09-13 修「表情包图库搜索失败」】现网 D:\MoonBot\resources\runtime 与所有安装包 payload
+// 【2026-09-13 修「表情包图库搜索失败」】现网 <安装目录>\resources\runtime 与所有安装包 payload
 // 都漏装了 meme/ 表情包 → MEME_ROOT 解析为 null → 工具直接回"本机没装鲸鱼娘同人表情库"，
 // 而且是**静默降级**（只在被调用时才暴露）。现在：
 //   1) 候选表补上隔离 DSH home / 桌面端 DSH home 下的 meme-packs 与 plugins 形态；

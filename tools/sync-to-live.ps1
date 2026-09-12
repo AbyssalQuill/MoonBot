@@ -1,13 +1,20 @@
-# Sync this session's QQ-Bridge changes into the 4 runtime copies.
+# Sync this repo's source into the runtime copies (live install + packaging payloads).
 # NOTE: keep this file ASCII-only -- Windows PowerShell 5.1 reads .ps1 as GBK and CJK literals break parsing.
-#   live    : D:\MoonBot\resources\runtime           (the actually running runtime: manager + DSH + bridge)
-#   payload : QQ-Bridge-packaging\moonbot-app\runtime-full  (electron-builder full variant)
-#             QQ-Bridge-packaging\moonbot-app\runtime-src   (core variant: manager only)
-#             QQ-Bridge-packaging\full\app                  (legacy NSIS payload)
+#
+# No hardcoded paths: everything is derived, so the repo works from any drive/user folder.
+#   repo root : parent of this script's folder (tools\)
+#   payloads  : <sibling>\QQ-Bridge-packaging\...     (the packaging project next to this repo)
+#   live      : $env:QBM_LIVE_RUNTIME                 (the running install; unset = skip it)
+#
+#   powershell -File tools\sync-to-live.ps1
+#   $env:QBM_LIVE_RUNTIME = 'C:\MoonBot\resources\runtime'    # optional
 $ErrorActionPreference = 'Stop'
 
-$srcBridge = 'C:\Users\17367\Desktop\MoonBot Public\qq-bridge'
-$srcMgr    = 'C:\Users\17367\Desktop\MoonBot Public'
+$repoRoot  = Split-Path $PSScriptRoot -Parent
+$pkgRoot   = Join-Path (Split-Path $repoRoot -Parent) 'QQ-Bridge-packaging'
+$liveRoot  = [string]$env:QBM_LIVE_RUNTIME
+$srcBridge = Join-Path $repoRoot 'qq-bridge'
+$srcMgr    = $repoRoot
 
 # Sync the whole src/ and tools/ trees: the invariant we want is "live src == source src, byte for byte".
 # That beats maintaining a per-change file list (miss one file and production silently runs old code).
@@ -18,22 +25,24 @@ $srcMgr    = 'C:\Users\17367\Desktop\MoonBot Public'
 # is loaded at runtime but was NEVER in the sync list, and scripts/ (setup-dsh, check-*) had drifted too.
 $bridgeDirs = @('src', 'tools', 'dsh', 'scripts', 'plugins')
 
-$bridgeDests = @(
-  'D:\MoonBot\resources\runtime\qq-bridge',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\moonbot-app\runtime-full\qq-bridge',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\full\app\qq-bridge',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\moonbot-app\dist-eb\win-unpacked\resources\runtime\qq-bridge'
-)
-
-$mgrDests = @(
-  'D:\MoonBot\resources\runtime',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\moonbot-app\runtime-full',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\moonbot-app\runtime-src',
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\full\app',
+# Packaging payloads (relative to the packaging project). runtime-src is the manager-only variant,
+# so it carries no qq-bridge and is filtered out of the bridge list below.
+$payloadDirs = @(
+  'moonbot-app\runtime-full',
+  'moonbot-app\runtime-src',
+  'full\app',
   # electron-builder intermediate output (win-unpacked): the installer is packed from it, so
   # editing it here is the same as editing the files inside the installer.
-  'C:\Users\17367\Desktop\QQ-Bridge-packaging\moonbot-app\dist-eb\win-unpacked\resources\runtime'
+  'moonbot-app\dist-eb\win-unpacked\resources\runtime'
 )
+
+$mgrDests = @()
+if ($liveRoot) { $mgrDests += $liveRoot }
+foreach ($rel in $payloadDirs) { $mgrDests += (Join-Path $pkgRoot $rel) }
+$bridgeDests = @($mgrDests | Where-Object { Test-Path (Join-Path $_ 'qq-bridge') } | ForEach-Object { Join-Path $_ 'qq-bridge' })
+
+if (-not $liveRoot) { Write-Host 'NOTE: QBM_LIVE_RUNTIME not set -> live runtime skipped (payloads only).' }
+if (-not (Test-Path $pkgRoot)) { Write-Host ('WARNING: packaging root not found: ' + $pkgRoot) }
 
 function Hash8($p) { if (Test-Path $p) { (Get-FileHash $p -Algorithm MD5).Hash.Substring(0,8) } else { 'MISSING' } }
 
@@ -82,7 +91,7 @@ Write-Host '=== 3) meme pack (whale-fanart-001) ==='
 # under another user). 2026-09-13: this directory was never shipped, so the live runtime
 # and every installer payload lacked it and qq_whale_meme_search kept answering
 # "no meme pack installed" (what the owner saw as the search failure).
-$srcMeme = 'C:\Users\17367\Desktop\MoonBot Public\meme'
+$srcMeme = Join-Path $repoRoot 'meme'
 $memeDests = @()
 foreach ($d in $mgrDests) {
   # Only mirror into targets that actually carry qq-bridge (runtime-src is the manager-only
@@ -120,22 +129,26 @@ if (-not (Test-Path $srcMeme)) {
 }
 
 Write-Host '=== 4) verify: qq-bridge/src source vs live tree ==='
-$live = 'D:\MoonBot\resources\runtime\qq-bridge'
-$diff = 0
-$n = 0
-Get-ChildItem (Join-Path $srcBridge 'src') -Recurse -File | ForEach-Object {
-  $rel = $_.FullName.Substring($srcBridge.Length + 1)
-  $a = Hash8 $_.FullName
-  $b = Hash8 (Join-Path $live $rel)
-  $n++
-  if ($a -ne $b) { $diff++; Write-Host ("  DIFF " + $rel + "  src=" + $a + " live=" + $b) }
-}
-if ($diff -eq 0) { Write-Host ("  source and live qq-bridge/src are identical (" + $n + " files)") } else { Write-Host ("  " + $diff + " differences listed above") }
+$live = if ($liveRoot) { Join-Path $liveRoot 'qq-bridge' } else { '' }
+if (-not $live) {
+  Write-Host '  skipped (QBM_LIVE_RUNTIME not set)'
+} else {
+  $diff = 0
+  $n = 0
+  Get-ChildItem (Join-Path $srcBridge 'src') -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($srcBridge.Length + 1)
+    $a = Hash8 $_.FullName
+    $b = Hash8 (Join-Path $live $rel)
+    $n++
+    if ($a -ne $b) { $diff++; Write-Host ("  DIFF " + $rel + "  src=" + $a + " live=" + $b) }
+  }
+  if ($diff -eq 0) { Write-Host ("  source and live qq-bridge/src are identical (" + $n + " files)") } else { Write-Host ("  " + $diff + " differences listed above") }
 
-Write-Host '=== 5) verify: agent preset (persona / WAKE TYPES / RULES) source vs live ==='
-$presetRel = 'dsh\agent-presets\default\agent.cordis.yml'
-$presetSrc = Hash8 (Join-Path $srcBridge $presetRel)
-$presetLive = Hash8 (Join-Path $live $presetRel)
-Write-Host ("  preset src=" + $presetSrc + " live=" + $presetLive)
-if ($presetSrc -ne $presetLive) { Write-Host '  DIFF: live preset is stale -- restart the bridge so it re-installs presets' }
+  Write-Host '=== 5) verify: agent preset (persona / WAKE TYPES / RULES) source vs live ==='
+  $presetRel = 'dsh\agent-presets\default\agent.cordis.yml'
+  $presetSrc = Hash8 (Join-Path $srcBridge $presetRel)
+  $presetLive = Hash8 (Join-Path $live $presetRel)
+  Write-Host ("  preset src=" + $presetSrc + " live=" + $presetLive)
+  if ($presetSrc -ne $presetLive) { Write-Host '  DIFF: live preset is stale -- restart the bridge so it re-installs presets' }
+}
 Write-Host 'DONE'

@@ -21,7 +21,7 @@ const NEGATIVE = argv.includes('--negative');
 const packArgIdx = argv.indexOf('--pack');
 const PACK_ARG = packArgIdx >= 0 ? argv[packArgIdx + 1] : '';
 const execIdx = argv.indexOf('--exec');
-// --exec：换解释器（例如线上真正用的 D:\MoonBot\resources\runtime\qbm-node.exe），默认系统 node
+// --exec：换解释器（例如线上真正用的 <安装目录>\resources\runtime\qbm-node.exe），默认系统 node
 const EXEC_PATH = execIdx >= 0 ? path.resolve(argv[execIdx + 1]) : process.execPath;
 const SERVER = path.resolve(
   NEGATIVE ? path.join(REPO, 'src', 'mcp-napcat-safe.js')
@@ -121,7 +121,7 @@ if (NEGATIVE) {
   section('反向自测：无 pack 时必须响亮报错（不许静默降级）');
   // 【2026-09-13 事故修复】原来把隔离副本建在 `qq-bridge/node_modules/.meme-selftest-X/qq-bridge`，
   // 清理时却 `Remove-Item dirname(dirname(tmp))` —— 那正好是 **qq-bridge/node_modules 本身**，
-  // 于是跑一次 --negative 就把整套桥依赖删了（现网 `D:\MoonBot\resources\runtime\qq-bridge\node_modules`
+  // 于是跑一次 --negative 就把整套桥依赖删了（现网 `<安装目录>\resources\runtime\qq-bridge\node_modules`
   // 就是这样被删掉的，重启桥就会起不来）。现在：副本放在项目根下的点目录（**不在 node_modules 里**），
   // 清理只删那一个 `.meme-selftest-*` 目录，并加一道"名字必须是 .meme-selftest- 开头"的安全断言。
   // 放这里仍然满足 ESM 解析：`@modelcontextprotocol/sdk` 靠向上找 `<REPO>/node_modules` 命中。

@@ -8,7 +8,7 @@ export default defineConfig({
     alias: { '@': resolve(__dirname, 'src') },
   },
   server: {
-    port: 1921,
+    port: 5173,
     strictPort: true,
     proxy: {
       '/api': {
