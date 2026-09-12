@@ -1,0 +1,31 @@
+{
+  "name": "qq-bridge-manager",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "QQ-Bridge 管理端 — 集成 NapCat 与 DSH 官方界面",
+  "scripts": {
+    "dev": "concurrently -k -n web,api -c blue,green \"vite\" \"node server/index.js\"",
+    "dev:web": "vite",
+    "dev:api": "node server/index.js",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "ssh2": "^1.16.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3"
+  }
+}

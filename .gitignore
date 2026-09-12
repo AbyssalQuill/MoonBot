@@ -1,0 +1,61 @@
+# ============================================================
+# MoonBot — 仓库只放**代码 + 骨架文档**。
+# 运行数据、个人配置、第三方运行时、安装包一律不进版本管理
+# （它们都还留在本地目录里，只是不会被 git 跟踪）。
+# ============================================================
+
+# ---- 依赖 / 构建产物 ----
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+.DS_Store
+*.local
+.tauri/target
+.vite/
+
+# ---- 第三方运行时 / 巨型资源（合计 ~2.5 GB，进不了 GitHub 也毫无必要）----
+/napcat-onekey/
+/dsh/
+/dsh-runtime/
+/.runtime/
+/.guard/
+/release/
+/meme/
+/public/
+/logs/
+/.tscheck/
+/bridge-sync.tar.gz
+*.tar.gz
+*.log
+
+# ---- 运行数据 / 个人配置（绝不上传）----
+/qq-bridge/state/
+/qq-bridge/config.json
+/qq-bridge/config.json.bak*
+/qq-bridge/config.example.json.bak*
+/qq-bridge/persona.md
+/qq-bridge/roles/
+/qq-bridge/assets/
+/qq-bridge/.dsh/
+/qq-bridge/.tscheck/
+/qq-bridge/.git/
+/qq-bridge/.git-upstream/
+**/state/
+**/*.sqlite
+**/*.db
+*.bak
+*.bak-*
+
+# ---- 本机专用：内部交接文档 / 运维笔记（含服务器 IP、QQ 号）----
+/docs/
+/手动同步与SSH说明.md
+/本地运行指引.md
+/qq-bridge/docs/HANDOFF.md
+
+# ---- 一次性开发中间产物（文本压缩工作单 / 前后清单 / 改前备份副本）----
+/qq-bridge/tools/tool-text-worklist*.json
+/qq-bridge/tools/tooltext-*.json
+/qq-bridge/tools/top-tool-text*.txt
+/qq-bridge/tools/manifest-*.json
+/qq-bridge/tools/*.before-compress.js
+/qq-bridge/tools/wl-group-*.json

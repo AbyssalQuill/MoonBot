@@ -1,0 +1,8 @@
+- insert:
+    - id: dsh-qq-hold
+      name: dsh-qq-hold
+      config:
+        endpoint: 'http://127.0.0.1:3100/api/qq/turn-hold'
+        # 单次请求超时，只需略大于桥侧 requestBudgetMs（55000）；**总**持有时长靠插件续问轮次延续，
+        # 所以这里不需要（也不能）设成一个很大的值 —— undici/fetch 300s 会先把它截断。
+        timeoutMs: 60000

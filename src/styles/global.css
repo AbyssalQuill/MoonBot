@@ -1,0 +1,250 @@
+/* ============================================================
+   QQ-Bridge Manager — NapCat nc_pink 官方主题（亮色粉）
+   Token 来源：NapCatQQ napcat-webui-frontend 构建产物 nc_pink.light
+   （HeroUI light 变量：白底、粉 339° 主色、圆角 8/12/14px）
+   ============================================================ */
+
+:root {
+  /* HeroUI light 基础 */
+  --nc-bg: hsl(0 0% 100%);                      /* background */
+  --nc-foreground: hsl(210 5.56% 7.06%);         /* 主文字 */
+  --nc-foreground-50: hsl(240 5.88% 95%);
+  --nc-foreground-100: hsl(240 3.7% 90%);
+  --nc-foreground-200: hsl(240 5.26% 80%);
+  --nc-foreground-300: hsl(240 5.2% 70%);
+  --nc-foreground-400: hsl(240 3.83% 60%);
+  --nc-foreground-500: hsl(240 5.03% 50%);
+  --nc-foreground-600: hsl(240 4.88% 40%);
+  --nc-foreground-700: hsl(240 5.88% 30%);
+  --nc-foreground-800: hsl(240 4.76% 20%);
+  --nc-foreground-900: hsl(0 0% 10%);
+
+  /* 内容面板（HeroUI light content1-4） */
+  --nc-content1: hsl(240 5.88% 95%);
+  --nc-content1-fg: hsl(0 0% 10%);
+  --nc-content2: hsl(240 3.7% 90%);
+  --nc-content3: hsl(240 5.26% 80%);
+  --nc-content4: hsl(240 5.2% 70%);
+
+  /* default 灰阶（按钮/边框底色用） */
+  --nc-default-50: hsl(240 5.88% 95%);
+  --nc-default-100: hsl(240 3.7% 90%);
+  --nc-default-200: hsl(240 5.26% 80%);
+  --nc-default-300: hsl(240 5.2% 70%);
+  --nc-default-400: hsl(240 3.83% 60%);
+  --nc-default-500: hsl(240 5.03% 50%);
+  --nc-default: hsl(240 5.26% 80%);
+  --nc-border: hsl(240 5.26% 80% / .65);
+
+  /* primary 粉（nc_pink） */
+  --nc-primary-50: hsl(339.13 92% 95.1%);
+  --nc-primary-100: hsl(340 91.84% 90.39%);
+  --nc-primary-200: hsl(339.33 90% 80.39%);
+  --nc-primary-300: hsl(339.11 90.6% 70.78%);
+  --nc-primary-400: hsl(339 90% 60.78%);
+  --nc-primary-500: hsl(339.2 90.36% 51.18%);
+  --nc-primary-600: hsl(339 86.54% 40.78%);
+  --nc-primary-700: hsl(339.11 85.99% 30.78%);
+  --nc-primary: hsl(339.2 90.36% 60%);
+  --nc-primary-fg: hsl(0 0% 100%);
+
+  /* secondary 紫 */
+  --nc-secondary-100: hsl(270 59.26% 89.41%);
+  --nc-secondary-200: hsl(270 59.26% 78.82%);
+  --nc-secondary: hsl(270 66.67% 47.06%);
+
+  /* danger/success/warning */
+  --nc-danger-100: hsl(350.53 90.48% 91.76%);
+  --nc-danger-400: hsl(331.82 75% 65.49%);
+  --nc-danger-500: hsl(325.82 69.62% 53.53%);
+  --nc-danger-600: hsl(319.73 65.64% 44.51%);
+  --nc-danger: hsl(325.82 69.62% 53.53%);
+  --nc-success-100: hsl(145.71 61.4% 88.82%);
+  --nc-success-400: hsl(146.01 62.45% 55.1%);
+  --nc-success-500: hsl(145.96 79.46% 43.92%);
+  --nc-success: hsl(145.96 79.46% 43.92%);
+  --nc-warning-100: hsl(37.14 91.3% 90.98%);
+  --nc-warning-400: hsl(37.01 91.26% 64.12%);
+  --nc-warning-500: hsl(37.03 91.27% 55.1%);
+  --nc-warning: hsl(37.03 91.27% 55.1%);
+  --nc-focus: hsl(212.02 100% 53.33%);
+  --nc-divider: hsl(0 0% 0% / .06);
+
+  /* 圆角 */
+  --nc-radius-s: 8px;
+  --nc-radius-m: 12px;
+  --nc-radius-l: 14px;
+
+  /* 阴影（HeroUI light） */
+  --nc-shadow-s: 0px 0px 5px 0px rgba(0,0,0,.02), 0px 2px 10px 0px rgba(0,0,0,.06), 0px 0px 1px 0px rgba(0,0,0,.3);
+  --nc-shadow-m: 0px 0px 15px 0px rgba(0,0,0,.03), 0px 2px 30px 0px rgba(0,0,0,.08), 0px 0px 1px 0px rgba(0,0,0,.3);
+  --nc-shadow-l: 0px 0px 30px 0px rgba(0,0,0,.04), 0px 30px 60px 0px rgba(0,0,0,.12), 0px 0px 1px 0px rgba(0,0,0,.3);
+
+  /* —— 兼容旧组件用名 —— */
+  --bg-base: hsl(240 6% 97%);
+  --bg-surface: hsl(0 0% 100%);
+  --bg-elevated: hsl(0 0% 100%);
+  --bg-hover: var(--nc-content1);
+  --border: var(--nc-border);
+  --border-light: var(--nc-default-200);
+  --text-primary: var(--nc-foreground-800);
+  --text-secondary: var(--nc-foreground-500);
+  --text-muted: var(--nc-foreground-400);
+  --accent: var(--nc-primary-500);
+  --accent-hover: var(--nc-primary-600);
+  --accent-dim: var(--nc-primary-100);
+  --success: var(--nc-success-500);
+  --warning: var(--nc-warning-500);
+  --error: var(--nc-danger-500);
+  --info: var(--nc-focus);
+  --radius: 12px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+@font-face {
+  font-family: 'AaCute';
+  src: url('/fonts/AaCute.ttf') format('truetype');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'AaCute-full';
+  src: url('/fonts/AaCute-full.ttf') format('truetype');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+html, body, #root { height: 100%; width: 100%; }
+body {
+  /* 全界面统一可爱圆体；JSON/代码/log 区在下方显式保持等宽（见 code/.json-text/.log-viewer 等规则） */
+  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--nc-bg);
+  color: var(--nc-foreground);
+  font-size: 15px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility; letter-spacing: 0.01em;
+}
+h1,h2,h3,h4,h5,h6 { color: hsl(222.2 47.4% 11.2%); letter-spacing: -0.02em; }
+::selection { background-color: #ffcdba; color: #fff; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: rgba(255,182,193,.4); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,127,172,.6); }
+
+/* ---------- 纯输入：全站数字输入框一律去掉原生上下箭头（2026-09-12 主人要求） ----------
+   `type="number"` 的 spinner 会"点一下加一"，而且受控输入在删空时会回填一个删不掉的 0。
+   新版数字框（src/components/NumInput.tsx）本身用 type="text"，这里再兜一层：
+   万一还有遗漏的原生 number 框（旧页面/浏览器），也不显示箭头。 */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button { -webkit-appearance: none; appearance: none; margin: 0; height: auto; }
+input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
+
+/* ---------- 通用控件（HeroUI 风格：粉主色、圆角、hover 80%） ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 10px 18px; border-radius: var(--nc-radius-m);
+  border: 1px solid transparent;
+  background: var(--nc-default-100); color: var(--nc-foreground-700);
+  font-size: 14px; font-weight: 500; cursor: pointer;
+  transition: background .15s, border-color .15s, transform .05s, box-shadow .15s;
+  user-select: none; white-space: nowrap;
+}
+.btn:hover { background: var(--nc-default-200); }
+.btn:active { transform: scale(.98); }
+.btn-primary { background: var(--nc-primary-500); color: #fff; box-shadow: 0 1px 4px hsl(339.2 90.36% 51.18% / .3); }
+.btn-primary:hover { background: var(--nc-primary-600); }
+.btn-soft-primary { background: var(--nc-primary-100); color: var(--nc-primary-700); }
+.btn-soft-primary:hover { background: var(--nc-primary-200); }
+.btn-soft { background: var(--nc-content1); color: var(--nc-foreground-800); }
+.btn-soft:hover { background: var(--nc-content2); }
+.btn-outline { background: transparent; border-color: var(--nc-default-200); color: var(--nc-foreground-700); }
+.btn-outline:hover { border-color: var(--nc-primary-400); color: var(--nc-primary-600); background: var(--nc-primary-50); }
+.btn-danger { background: var(--nc-danger-100); color: var(--nc-danger-600); }
+.btn-danger:hover { background: hsl(343.42 90.48% 83.53%); }
+/* 危险轮廓按钮（白底红边红字红图标）：与 NapCat 配置页停止按钮同款 */
+.btn-outline-danger {
+  background: #fff; color: var(--nc-danger-600);
+  border: 1.5px solid var(--nc-danger-400);
+}
+.btn-outline-danger:hover:not(:disabled) { background: var(--nc-danger-100); border-color: var(--nc-danger-500); color: var(--nc-danger-600); }
+.btn-outline-danger:disabled { opacity: .55; }
+.btn-success { background: var(--nc-success-100); color: var(--nc-success-500); }
+.btn-sm { padding: 6px 12px; font-size: 13px; border-radius: var(--nc-radius-s); }
+.btn-lg { padding: 13px 22px; font-size: 15px; }
+.btn-block { width: 100%; }
+.btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+
+/* 输入控件 */
+.input, .select, .textarea {
+  width: 100%; padding: 9px 13px; font-size: 14px;
+  background: var(--nc-bg); border: 1px solid var(--nc-default-200);
+  border-radius: var(--nc-radius-m); color: var(--nc-foreground);
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.input:focus, .select:focus, .textarea:focus {
+  border-color: var(--nc-primary-400);
+  box-shadow: 0 0 0 3px var(--nc-primary-100);
+}
+.textarea { resize: vertical; font-family: 'JetBrains Mono', 'Cascadia Code', monospace; font-size: 13px; }
+.label { display: block; font-size: 12px; font-weight: 600; color: var(--nc-foreground-500); margin-bottom: 6px; }
+.form-group { margin-bottom: 14px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* 卡片 */
+.card {
+  background: var(--nc-bg);
+  border: 1px solid var(--nc-border);
+  border-radius: var(--nc-radius-l);
+  padding: 20px;
+  box-shadow: var(--nc-shadow-s);
+}
+/* 已删除 .card-title 的重复定义（2026-09-11）：原规则
+   `font-size:14px; font-weight:700; margin-bottom:14px; display:flex; align-items:center; gap:8px;
+    color:var(--nc-foreground-800)` 的**每一个属性**都被 app.css 的 .card-title 覆盖
+   （main.tsx 里 app.css 紧跟 global.css 导入，同特异性后者胜），整条都是死规则。
+   .card-title 的权威定义现在只有 app.css 那一处。 */
+
+/* 状态点 / 徽章 */
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.status-dot.online { background: var(--nc-success-500); box-shadow: 0 0 6px var(--nc-success-500); }
+.status-dot.offline { background: var(--nc-danger-400); }
+.status-dot.loading { background: var(--nc-warning-400); animation: pulse 1.4s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+}
+.badge-success { background: var(--nc-success-100); color: var(--nc-success-500); }
+.badge-error { background: var(--nc-danger-100); color: var(--nc-danger-600); }
+.badge-info { background: var(--nc-primary-100); color: var(--nc-primary-600); }
+.badge-warn { background: var(--nc-warning-100); color: var(--nc-warning-500); }
+.badge-soft { background: var(--nc-content2); color: var(--nc-foreground-600); }
+
+/* 表格 */
+.table { width: 100%; border-collapse: collapse; }
+.table th { text-align: left; padding: 9px 12px; font-size: 11px; font-weight: 700; color: var(--nc-foreground-500); text-transform: uppercase; letter-spacing: .4px; border-bottom: 1px solid var(--nc-border); }
+.table td { padding: 9px 12px; border-bottom: 1px solid var(--nc-border); font-size: 13px; vertical-align: middle; }
+.table tbody tr:hover { background: var(--nc-content1); }
+
+.connection-bar {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+  background: var(--nc-content1); border-radius: 999px; font-size: 13px; color: var(--nc-foreground-700);
+}
+.page { height: 100%; display: flex; flex-direction: column; }
+.page-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 28px; border-bottom: 1px solid var(--nc-border); flex-wrap: wrap; }
+/* 已删除 .page-title / .page-subtitle 的重复定义（2026-09-11）：
+   原文是 `.page-title{font-size:20px;font-weight:800;color:var(--nc-foreground-900)}` 与
+   `.page-subtitle{font-size:12px;color:var(--nc-foreground-500);margin-top:3px}`，
+   但**每个属性**都被 app.css 的对应规则覆盖（app.css 后导入、同特异性），是死规则。
+   它们的危害是把标题色写成 foreground-900/500，容易让人（和 AI）以为标题是深灰——
+   实际生效的永远是 app.css 的 primary-500。**改标题色只能改 app.css。** */
+.page-body { flex: 1; overflow-y: auto; padding: 20px 28px; }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 50px 20px; text-align: center; color: var(--nc-foreground-500); }
+.notice-bar { padding: 10px 15px; margin-bottom: 14px; background: var(--nc-primary-50); border: 1px solid var(--nc-primary-200); border-radius: var(--nc-radius-m); font-size: 13px; cursor: pointer; color: var(--nc-foreground-800); }
+code { font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace; font-size: 12px; background: var(--nc-content1); padding: 1px 5px; border-radius: 4px; }
+.link-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--nc-primary-600); font-size: 12px; cursor: pointer; padding: 2px; }
+.link-btn:hover { color: var(--nc-primary-500); text-decoration: none; }
+.icon-btn { background: none; border: none; color: var(--nc-foreground-400); cursor: pointer; padding: 2px; display: inline-flex; }
+.icon-btn:hover { color: var(--nc-primary-500); }
+.log-viewer { background: hsl(240 6% 97%); border: 1px solid var(--nc-border); border-radius: var(--nc-radius-m); padding: 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; line-height: 1.6; max-height: 260px; overflow-y: auto; }
+.log-line { padding: 1px 0; color: var(--nc-foreground-600); }
