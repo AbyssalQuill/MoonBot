@@ -8,6 +8,7 @@ export default defineConfig({
     alias: { '@': resolve(__dirname, 'src') },
   },
   server: {
+    host: '127.0.0.1',   // 显式绑 IPv4：绑定 localhost 时 Node 可能只监听 ::1，127.0.0.1 会连不上
     port: 5173,
     strictPort: true,
     proxy: {
