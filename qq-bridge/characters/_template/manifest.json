@@ -1,0 +1,8 @@
+{
+  "name": "模板角色（复制此文件夹改内容即可）",
+  "fullName": "Template Character",
+  "game": "示例出处/作品（可选）",
+  "developer": "",
+  "cv": "",
+  "description": "角色库模板：每个角色 = 一个独立子文件夹。复制 _template 改成你的 slug，按下面维度 .md 填写内容；ULTIMATE_ROLEPLAY_PROMPT.md 为完整人设正文（导入时优先使用它）。"
+}

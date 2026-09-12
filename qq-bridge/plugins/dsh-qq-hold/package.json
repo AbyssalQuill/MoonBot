@@ -1,0 +1,13 @@
+{
+  "name": "dsh-qq-hold",
+  "version": "0.1.0",
+  "description": "Turn-hold gate for the QQ bridge: blocks the DSH turn-close boundary while the bridge steers freshly arrived messages into the running turn.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "qq-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QQ ↔ NapCat (OneBot v11) ↔ DeepSeek Harness 桥接：QQ 消息变为 DSH agent 提示，agent 回复/动作回到 QQ。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node src/bridge.js",
+    "self-test": "node src/self-test.js",
+    "self-test-rc1": "node scripts/self-test-rc1.mjs",
+    "merge-state": "node scripts/merge-state.mjs",
+    "test-md": "node scripts/test-md-to-plain.mjs",
+    "test-wait": "node scripts/test-v2-wait.mjs",
+    "test-vision": "node scripts/test-vision-media.mjs",
+    "test-forward": "node scripts/test-forward.mjs",
+    "test-slang": "node scripts/test-slang-learn.mjs",
+    "test-stickers": "node scripts/test-stickers.mjs",
+    "check": "node scripts/check-scope.mjs && node scripts/check-size.mjs && node --check src/bridge.js && node tests/lib.test.js && node tests/paths.test.js",
+    "analyze": "node scripts/analyze-bridge.mjs src/bridge.js",
+    "test-lib": "node tests/lib.test.js && node tests/paths.test.js",
+    "check-scope": "node scripts/check-scope.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  }
+}

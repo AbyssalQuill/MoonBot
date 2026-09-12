@@ -1,0 +1,174 @@
+// DSH 会话创建/视觉模型
+// cfg 静态注入（initDshSessionCore），api 注入（setDshSessionApi），sessionEpoch 模块共享（bump 由 reset 用）。
+import fs from 'node:fs';
+import path from 'node:path';
+import { unwrap } from '../dsh-client.js';
+import { sleep } from '../lib/async.js';
+import { log } from '../lib/log.js';
+import { STATE_DIR } from '../lib/paths.js';
+import { state, saveState } from './config.js';
+import { modePreset, currentMode } from './mode.js';
+import { reverse, sessionPromises, visionModelAppliedSessions } from './session-state.js';
+
+export let sessionEpoch = 0;
+/** reset/清空工作区时递增（主内 console 调用） */
+export function bumpSessionEpoch() { sessionEpoch += 1; }
+
+export let dshReady = false;
+/** DSH 可用性开关（main 探活回调） */
+export function setDshReady(v) { dshReady = v; }
+
+let cfgRef = null;
+let apiRef = null;
+export function initDshSessionCore(cfg) { cfgRef = cfg; }
+export function setDshSessionApi(api) { apiRef = api; }
+
+/**
+ * 【2026-09-12】让**已有会话**也重新套用一次模型配置。
+ *
+ * `ensureVisionModel()` 每个会话只跑一次（`visionModelAppliedSessions` 记住已套用的 sessionId），
+ * 所以"在管理端改了 provider/model/reasoningEffort"之后，**老会话会一直用旧模型**——这正是"改了模型不生效"
+ * 的另一半原因（另一半是运行中的桥根本不重读 config.json，见 core/config.js 的 watchConfigFile）。
+ * 配置热加载时清掉这个集合，下一次 ensureSession 就会用新模型重新 selectModel。
+ *
+ * 实现放在 session-state.js（那个 Set 的归属模块），这里只做转发，避免两处各写一份。
+ */
+export { resetVisionModelApplications } from './session-state.js';
+
+export async function ensureVisionModel(sessionId) {
+  if (visionModelAppliedSessions.has(sessionId)) return;
+  if (!cfgRef.dsh?.provider && !cfgRef.dsh?.model) return; // 未显式配置则用 DSH 默认（官方 deepseek）
+  const provider = String(cfgRef.dsh?.provider || 'deepseek-official');
+  const model = String(cfgRef.dsh?.visionModel || cfgRef.dsh?.model || 'deepseek-v4-flash-vision-exp');
+  const effort = String(cfgRef.dsh?.reasoningEffort || 'max');
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const result = unwrap(await apiRef.sessions.selectModel({ sessionId, provider, model, reasoningEffort: effort }), 'session.selectModel');
+      visionModelAppliedSessions.add(sessionId);
+      log(`已设置会话视觉模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
+      return;
+    } catch (error) {
+      if (/session.not.found/i.test(String(error?.message ?? error))) throw error;
+      log(`设置会话视觉模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
+      if (attempt < 2) await sleep(1000);
+    }
+  }
+}
+
+export async function ensureSession(key) {
+  const epoch = sessionEpoch;
+  const existing = state.sessions[key];
+  if (existing) {
+    // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
+    if (epoch !== sessionEpoch) {
+      delete state.sessions[key];
+      if (reverse.get(existing) === key) reverse.delete(existing);
+      try { await apiRef.workspace.archiveSession({ sessionId: existing }); } catch {}
+    } else {
+      try {
+        await ensureVisionModel(existing);
+        return existing;
+      } catch (vErr) {
+        if (/session.not.found/i.test(String(vErr?.message ?? vErr))) {
+          log(`会话 ${existing} 不存在（DSH 可能已重启），清除映射并重建`);
+          delete state.sessions[key];
+          if (reverse.get(existing) === key) reverse.delete(existing);
+        } else {
+          throw vErr;
+        }
+      }
+    }
+  }
+  if (sessionPromises.has(key)) return sessionPromises.get(key);
+  const promise = (async () => {
+    const dir = cfgRef.sessionCwd ? String(cfgRef.sessionCwd) : path.join(STATE_DIR, 'agents');
+    fs.mkdirSync(dir, { recursive: true });
+    let sessionId;
+    let lastError = null;
+    // 归组：所有 QQ 会话挂到同一个 workspace（幂等创建），GUI 里不再散落「未分组」
+    for (const withPreset of [true, false]) {
+      try {
+        const wsValue = unwrap(await apiRef.workspace.create({ path: dir }), 'workspace.create');
+        if (wsValue.created && cfgRef.workspaceTitle) {
+          await apiRef.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfgRef.workspaceTitle });
+        }
+        const params = { workspaceId: wsValue.workspace.workspaceId };
+        const preset = modePreset(key, currentMode, cfgRef);
+        if (withPreset && preset) params.agentPreset = preset;
+        const value = unwrap(await apiRef.sessions.create(params), 'session.create');
+        sessionId = value.sessionId;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!sessionId) {
+      log(`归组创建失败（${lastError?.message}），回退无参创建`);
+      const value = unwrap(await apiRef.sessions.create({}), 'session.create');
+      sessionId = value.sessionId;
+    }
+    // reset/清空工作区期间创建完成：丢弃，防止旧会话复活
+    if (epoch !== sessionEpoch) {
+      log(`会话创建期间发生 reset，丢弃 ${key} 的新会话（${sessionId}）`);
+      try { await apiRef.workspace.archiveSession({ sessionId }); } catch {}
+      throw new Error('会话创建期间已重置，丢弃新会话');
+    }
+    state.sessions[key] = sessionId;
+    reverse.set(sessionId, key);
+    saveState();
+    await ensureVisionModel(sessionId);
+    log(`新会话 ${key} -> ${sessionId}（模式 ${currentMode}，preset: ${modePreset(key, currentMode, cfgRef) ?? '默认'}）`);
+    return sessionId;
+  })();
+  sessionPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    // 只有仍持有该条目的 promise 才删除，避免旧 promise 误删 reset 后新建的 promise。
+    if (sessionPromises.get(key) === promise) sessionPromises.delete(key);
+  }
+}
+
+/**
+ * 会话轮换「预热」：提前建好下一代 DSH 会话（同样的归组工作区 + agent preset + 视觉模型），
+ * 不写入 state.sessions / reverse 映射，也不触发任何投递——仅占用一个就绪的 sessionId，
+ * 供唤醒引擎在 12 轮阈值到达时直接切换过去（首轮提示词已被预热请求命中 provider 前缀缓存）。
+ * 返回 sessionId；彻底失败返回 null（调用方回退原「归档旧会话 + 下次现建」路径）。
+ */
+export async function createStandbySession(key) {
+  const dir = cfgRef.sessionCwd ? String(cfgRef.sessionCwd) : path.join(STATE_DIR, 'agents');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  let sessionId = null;
+  let lastError = null;
+  for (const withPreset of [true, false]) {
+    try {
+      const wsValue = unwrap(await apiRef.workspace.create({ path: dir }), 'workspace.create');
+      if (wsValue.created && cfgRef.workspaceTitle) {
+        await apiRef.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: cfgRef.workspaceTitle });
+      }
+      const params = { workspaceId: wsValue.workspace.workspaceId };
+      const preset = modePreset(key, currentMode, cfgRef);
+      if (withPreset && preset) params.agentPreset = preset;
+      const value = unwrap(await apiRef.sessions.create(params), 'session.create');
+      sessionId = value.sessionId;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!sessionId) {
+    try {
+      const value = unwrap(await apiRef.sessions.create({}), 'session.create');
+      sessionId = value.sessionId;
+    } catch (error) { lastError = error; }
+  }
+  if (!sessionId) {
+    log(`预热会话创建失败（${key}）：${lastError?.message ?? lastError}`);
+    return null;
+  }
+  try { await ensureVisionModel(sessionId); } catch (error) {
+    log(`预热会话设置视觉模型失败（${key}）：${error?.message ?? error}`);
+  }
+  log(`已预建预热会话 ${key} -> ${sessionId}（待轮换使用，未入映射）`);
+  return sessionId;
+}
