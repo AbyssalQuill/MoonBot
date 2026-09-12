@@ -511,7 +511,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           </div>
         </div>
         <div className="page-actions">
-          <button title="GitHub @AbyssalQuill" onClick={() => window.open('https://github.com/AbyssalQuill', '_blank', 'noopener')}
+          <button title="GitHub: AbyssalQuill/MoonBot" onClick={() => window.open('https://github.com/AbyssalQuill/MoonBot', '_blank', 'noopener')}
             style={{ background: 'transparent', border: 'none', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 4, borderRadius: 8, color: '#57606a', lineHeight: 0 }}
             onMouseEnter={(e) => { e.currentTarget.style.color = '#24292f'; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = '#57606a'; }}>
