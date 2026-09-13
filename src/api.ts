@@ -198,6 +198,8 @@ export interface OwnerProfileResp {
 export const getLearningGraph = () => api<GraphData>('/learning/graph');
 /** 黑话库（桥的 state/slang.json，经管理端代理） */
 export const getSlangLibrary = () => api<any>('/learning/slang-library');
+/** 单人**完整**画像资料（直读 memory.db，不做截断） */
+export const getPersonProfile = (uid: string) => api<any>(`/learning/profile?uid=${encodeURIComponent(uid)}`);
 export const getOwnerProfile = () => api<OwnerProfileResp>('/learning/owner-profile');
 
 /* ================= 角色库导入(characters 目录) ================= */

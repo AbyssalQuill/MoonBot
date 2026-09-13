@@ -3135,6 +3135,37 @@ function groupCooccurPairs(db, sinceMs) {
   return raw;
 }
 
+app.get('/api/learning/profile', async (req, res) => {
+  // 单人**完整**资料（不做长度截断）：图谱接口为了体积把 personality/likes/notes 截到 200~260 字符，
+  // 展开卡片时看不到全文（主人踩到的就是这个）。这里直读 memory.db，原样返回。
+  const uid = String(req.query?.uid ?? '').trim();
+  if (!/^\d{5,11}$/.test(uid)) return res.status(400).json({ ok: false, error: 'uid 必须是 5~11 位数字 QQ 号' });
+  let db = null;
+  try {
+    db = await openBridgeMemoryDbRo();
+    const cut30 = Date.now() - 30 * DAY_MS;
+    const p = db.prepare('SELECT uid, name, personality, likes, dislikes, birthday, notes, updated_at FROM profiles WHERE uid = ?').get(uid) || null;
+    const persona = db.prepare("SELECT content, created_at FROM memory_entries WHERE uid = ? AND category = 'persona' ORDER BY created_at DESC LIMIT 1").get(uid) || null;
+    const stat = db.prepare("SELECT COUNT(*) AS c, MAX(ts_ms) AS last FROM chat_messages WHERE sender_uid = ? AND is_self = 0 AND direction = 'in' AND ts_ms >= ?").get(uid, cut30) || null;
+    const mc = db.prepare('SELECT COUNT(*) AS c FROM memory_entries WHERE uid = ?').get(uid) || null;
+    res.json({
+      ok: true, uid,
+      profile: p ? {
+        uid: String(p.uid), name: String(p.name ?? ''), personality: String(p.personality ?? ''),
+        likes: String(p.likes ?? ''), dislikes: String(p.dislikes ?? ''), birthday: String(p.birthday ?? ''),
+        notes: String(p.notes ?? ''), updatedAt: Number(p.updated_at) || 0,
+      } : null,
+      personaSummary: persona ? String(persona.content ?? '') : '',
+      personaAt: Number(persona?.created_at) || 0,
+      msgCount: Number(stat?.c) || 0,
+      lastSeen: Number(stat?.last) || 0,
+      memoryCount: Number(mc?.c) || 0,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+  }
+});
+
 app.get('/api/learning/graph', async (_req, res) => {
   let db = null;
   try {
