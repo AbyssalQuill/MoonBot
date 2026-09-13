@@ -241,10 +241,17 @@ npm run dev
 | `/role off` | 清除角色 |
 | `/op <QQ 号或昵称>` | 设置管理员 |
 | `/op del <QQ 号或昵称>` | 取消管理员 |
-| `/slang 学习` | 立即执行黑话学习 |
-| `/slang 停止` | 停止黑话学习 |
-| `/portrait learn`、`/portrait stop`、`/portrait status` | 群友画像学习 |
+| `/slang 学习`、`/slang learn`、`/slanglearn` | 立即执行黑话学习 |
+| `/slang 停止`、`/slang stop`、`/slangstop` | 停止黑话学习 |
+| `/portrait learn`、`/portrait start`、`/portrait 学习` | 开始群友画像学习 |
+| `/portrait stop`、`/portrait 停止` | 停止群友画像学习 |
+| `/portrait status`、`/portrait 状态` | 查看群友画像学习状态 |
 | `/like <QQ 号> [次数]` | 点赞 |
+| `开始学习`、`start learning` | 开始人格学习，可附带 QQ 号 |
+| `停止学习`、`stop learning` | 停止人格学习 |
+| `学习状态`、`learn status` | 查看人格学习状态 |
+
+`/portrait` 也接受别名 `画像学习` 与 `群友画像学习`，子命令可省略。
 
 其他以 `/` 开头的内容交给模型处理。
 
