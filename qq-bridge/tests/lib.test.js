@@ -71,7 +71,7 @@ assert.equal(hanOnly('鲸'), true);
 assert.equal(hanOnly('，'), false);
 assert.deepEqual(splitByCjkSpaces('你好 世界 hello world'), ['你好', '世界', 'hello world']);
 assert.deepEqual(splitByCjkSpaces('single'), ['single']);
-// 二代角色卡语义：汉字 + CJK 标点（U+3000-303F；全角逗号 U+FF0C 不在其列）
+// 角色卡语义：汉字 + CJK 标点（U+3000-303F；全角逗号 U+FF0C 不在其列）
 assert.equal(isCjkLikeChar('鲸'), true);
 assert.equal(isCjkLikeChar('、'), true);
 assert.equal(isCjkLikeChar('，'), false);

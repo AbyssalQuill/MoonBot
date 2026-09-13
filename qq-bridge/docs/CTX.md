@@ -175,7 +175,7 @@ export function createCtx() {
 - âœ… P4-12ï¼ˆ2026-09-05ï¼‰ï¼šplanSocialTimelineï¼ˆåˆ†å¥æƒäº¤ç»™ AIï¼Œçº¯å‡½æ•°ï¼‰â†’ src/lib/social-timeline.js
   ï¼ˆ27 è¡Œï¼Œè‡ªå¼• lib/segment ä¸ lib/cjk-splitï¼‰ã€‚bridge.js 9626 è¡Œï¼Œcheck å…¨ç»¿ï¼Œå†’çƒŸæ—  ReferenceErrorã€‚
   å¤‡ä»½ .bak-p4timelineã€‚ç´¯è®¡ -2020ã€‚
-- âœ… P4-13ï¼ˆ2026-09-05ï¼‰ï¼šseenForwardIdsï¼ˆäºŒä»£ä¼šè¯ forward ç¼“å­˜ï¼‰å£°æ˜è¿å…¥ social-state.js æ¨¡å—å…±äº«
+- âœ… P4-13ï¼ˆ2026-09-05ï¼‰ï¼šseenForwardIdsï¼ˆèŠå¤©ä¼šè¯ forward ç¼“å­˜ï¼‰å£°æ˜è¿å…¥ social-state.js æ¨¡å—å…±äº«
   ï¼ˆmain 86 å¤„å¼•ç”¨èµ° import æ´»ç»‘å®šï¼‰ï¼›saveSocialV2Stateï¼ˆæŒä¹…åŒ–ï¼‰éšè¿ï¼ˆ32 è¡Œï¼Œåç§°é”šå®šåˆ é™¤è„šæœ¬ï¼‰ã€‚
   bridge.js 9593 è¡Œï¼Œcheck å…¨ç»¿ï¼Œå†’çƒŸæ—  ReferenceErrorã€‚å¤‡ä»½ .bak-p4saveã€‚ç´¯è®¡ -2053ã€‚
   å‰© loadSocialV2State/getSocialV2State ä¾èµ– M8 è°ƒåº¦å‡½æ•°ï¼ˆensureWakeableV2/scheduleProactiveCheckV2/
@@ -245,69 +245,69 @@ export function createCtx() {
   bridge.js 8198 è¡Œï¼Œcheck å…¨ç»¿ï¼Œå†’çƒŸæ—  ReferenceErrorã€‚å¤‡ä»½ .bak-p4guard/-p4wake/-p4mc/-p4v1ã€‚
   ç´¯è®¡ -3448ã€‚
 
-- ? P5-1£¨×Ô¶¯ÂÖ£©£ºaudit ËÄº¯Êı£¨shouldAuditKey/shouldBlockSilentReply/handleSensitiveIntercept/
-  auditAndSend£©¡ú src/core/audit.js£¨initAuditCore + mode/qq-send/sensitive ×ÔÒı£©£»startActivityTick
-  + activityTickTimer ¡ú src/core/activity.js£¨socialV2/wake-send/session-state ×¢Èë£©¡£bridge.js 8150 ĞĞ¡£
-  ±¸·İ .bak-p5audit¡£
-- ? P5-2£¨×Ô¶¯ÂÖ£©£ºensureVisionModel/ensureSession ¡ú src/core/dsh-session.js£¨sessionEpoch Ä£¿é¹²Ïí£¬
-  4 ´¦ ++ ¸Ä bumpSessionEpoch£»initDshSessionCore/setDshSessionApi£©¡£bridge.js 8063 ĞĞ£¬check È«ÂÌ£¬
-  Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5sess¡£ÀÛ¼Æ -3583¡£
-- ? ÏÂÒ»ÅúºòÑ¡£ºM3 slang ÒıÇæ£¨state ¹²Ïí + ENGINE ´Ø£©»ò M4 deliverPromptNow/processPromptQueue/
-  deliverPrompt Í¶µİÈı¼ş£¨Ğè withSlangContext/resolveMediaList Ç°ÖÃ»ò»Øµ÷×¢Èë£©¡£
-- ? P5-3£¨×Ô¶¯ÂÖ£©£ºM3 ºÚ»°ÒıÇæ 13 º¯Êı + È«×´Ì¬ ¡ú src/core/slang.js£¨slangEntries µÈ 10 Map/Set +
-  learner Á´ + 13 ÒıÇæº¯Êı£»cfg/api ×¢Èë¡¢dshReady ¶ÁÈ¡ dsh-session ¹²Ïí£»slangEntries ÖØ¸³Öµ 4 ´¦¸Ä
-  setSlangEntries¡¢Ç¶Ì×Ëõ½ø¸³ÖµÒ²Í³Ò»´¦Àí£»main ×Ô¶¯É¾ÉùÃ÷²¢°´¼ì²â²¹ import£©¡£bridge.js 7808 ĞĞ£¬
-  check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5slang/-p5slangfix¡£ÀÛ¼Æ -3838¡£
-- ? ÏÂÅú£ºM4 Í¶µİ´Ø£¨deliverPromptNow/processPromptQueue/deliverPrompt/flushQueue/enqueueForRetry +
-  drainPromptQueue£©Ç°ÖÃ resolveMediaList Ã½Ìå´ØÇ¨ÒÆ¡£
-- ? P5-4£¨×Ô¶¯ÂÖ£©£ºM4 Í¶µİ¶ÓÁĞ´Ø ¡ú src/core/prompt-deliver.js£¨enqueueForRetry/flushQueue/
+- ? P5-1ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½audit ï¿½Äºï¿½ï¿½ï¿½ï¿½ï¿½shouldAuditKey/shouldBlockSilentReply/handleSensitiveIntercept/
+  auditAndSendï¿½ï¿½ï¿½ï¿½ src/core/audit.jsï¿½ï¿½initAuditCore + mode/qq-send/sensitive ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½startActivityTick
+  + activityTickTimer ï¿½ï¿½ src/core/activity.jsï¿½ï¿½socialV2/wake-send/session-state ×¢ï¿½ë£©ï¿½ï¿½bridge.js 8150 ï¿½Ğ¡ï¿½
+  ï¿½ï¿½ï¿½ï¿½ .bak-p5auditï¿½ï¿½
+- ? P5-2ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ensureVisionModel/ensureSession ï¿½ï¿½ src/core/dsh-session.jsï¿½ï¿½sessionEpoch Ä£ï¿½é¹²ï¿½ï¿½ï¿½ï¿½
+  4 ï¿½ï¿½ ++ ï¿½ï¿½ bumpSessionEpochï¿½ï¿½initDshSessionCore/setDshSessionApiï¿½ï¿½ï¿½ï¿½bridge.js 8063 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½
+  Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5sessï¿½ï¿½ï¿½Û¼ï¿½ -3583ï¿½ï¿½
+- ? ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½M3 slang ï¿½ï¿½ï¿½æ£¨state ï¿½ï¿½ï¿½ï¿½ + ENGINE ï¿½Ø£ï¿½ï¿½ï¿½ M4 deliverPromptNow/processPromptQueue/
+  deliverPrompt Í¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ withSlangContext/resolveMediaList Ç°ï¿½Ã»ï¿½Øµï¿½×¢ï¿½ë£©ï¿½ï¿½
+- ? P5-3ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½M3 ï¿½Ú»ï¿½ï¿½ï¿½ï¿½ï¿½ 13 ï¿½ï¿½ï¿½ï¿½ + È«×´Ì¬ ï¿½ï¿½ src/core/slang.jsï¿½ï¿½slangEntries ï¿½ï¿½ 10 Map/Set +
+  learner ï¿½ï¿½ + 13 ï¿½ï¿½ï¿½æº¯ï¿½ï¿½ï¿½ï¿½cfg/api ×¢ï¿½ë¡¢dshReady ï¿½ï¿½È¡ dsh-session ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½slangEntries ï¿½Ø¸ï¿½Öµ 4 ï¿½ï¿½ï¿½ï¿½
+  setSlangEntriesï¿½ï¿½Ç¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ÖµÒ²Í³Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½main ï¿½Ô¶ï¿½É¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â²¹ importï¿½ï¿½ï¿½ï¿½bridge.js 7808 ï¿½Ğ£ï¿½
+  check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5slang/-p5slangfixï¿½ï¿½ï¿½Û¼ï¿½ -3838ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M4 Í¶ï¿½İ´Ø£ï¿½deliverPromptNow/processPromptQueue/deliverPrompt/flushQueue/enqueueForRetry +
+  drainPromptQueueï¿½ï¿½Ç°ï¿½ï¿½ resolveMediaList Ã½ï¿½ï¿½ï¿½Ç¨ï¿½Æ¡ï¿½
+- ? P5-4ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½M4 Í¶ï¿½İ¶ï¿½ï¿½Ğ´ï¿½ ï¿½ï¿½ src/core/prompt-deliver.jsï¿½ï¿½enqueueForRetry/flushQueue/
   deliverPromptNow/deliverPrompt/processPromptQueue/drainPromptQueue/drainAllPromptQueues +
-  QUEUE_MAX/flushingQueue£»resolveMediaList ×¢Èë setPromptMediaResolver¡¢api ×¢Èë setPromptApi£©¡£
-  main °´ÓÃÁ¿×Ô¶¯²¹ import¡£bridge.js 7643 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ
-  .bak-p5deliver¡£ÀÛ¼Æ -4003¡£
-- ? ÏÂÅú£ºM9 Ò»´úÉç½»×´Ì¬»ú£¨scheduleSocialReply/socialLoopTick µÈ£¬~1500 ĞĞ£¬ĞèÕûÇø¶ÁÈ¡ºó·ÖÅú£©
-  Óë M4 Ê£Óà ensureSessions?£»È»ºó M11 pumpMux/handleIncoming£»×îºó M5 ¿ØÖÆÌ¨¡£
-- ? P5-5£¨×Ô¶¯ÂÖ£©£ºM9 Ò»´úÉç½»×´Ì¬»ú 17 º¯Êı£¨mediaHintFor/appendRecentMessage/appendSummary/
+  QUEUE_MAX/flushingQueueï¿½ï¿½resolveMediaList ×¢ï¿½ï¿½ setPromptMediaResolverï¿½ï¿½api ×¢ï¿½ï¿½ setPromptApiï¿½ï¿½ï¿½ï¿½
+  main ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ importï¿½ï¿½bridge.js 7643 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  .bak-p5deliverï¿½ï¿½ï¿½Û¼ï¿½ -4003ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M9 Ò»ï¿½ï¿½ï¿½ç½»×´Ì¬ï¿½ï¿½ï¿½ï¿½scheduleSocialReply/socialLoopTick ï¿½È£ï¿½~1500 ï¿½Ğ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  ï¿½ï¿½ M4 Ê£ï¿½ï¿½ ensureSessions?ï¿½ï¿½È»ï¿½ï¿½ M11 pumpMux/handleIncomingï¿½ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½
+- ? P5-5ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½M9 Ò»ï¿½ï¿½ï¿½ç½»×´Ì¬ï¿½ï¿½ 17 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½mediaHintFor/appendRecentMessage/appendSummary/
   buildContextBlock/enterActive/leaveActive/cleanupSocialForModeChange/buildBatchPrompt/buildProbePrompt/
   buildActiveExitPrompt/triggerActiveDurationExit/buildProactivePrompt/scheduleSocialReply/socialLoopTick/
-  startSocialLoop/flushSummaries/currentRoleHint£©+ roleHintCache ¡ú src/core/social-v1.js£»
-  SPACE_SPLIT_HINT/DIRECTION_HINT ¡ú lib/markers.js¡£bridge.js 7326 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£
-  ±¸·İ .bak-p5v1¡£ÀÛ¼Æ -4320¡£
-- ? ÏÂÅú£ºM11 ÈëÕ¾/±Ã£¨handleIncoming/pumpMux Çø£©»ò M9 ¶ş´ú v2 Ê£ÓàÏûÏ¢Á÷º¯Êı¡£
-- ? P5-6£¨×Ô¶¯ÂÖ£©£º¶ş´úÏûÏ¢Á÷ 4 º¯Êı£¨appendSocialV2Message/appendSocialV2Poke/resolveReplyTargetV2/
-  isQuoteTargetSelf£©¡ú src/core/social-v2-flow.js£¨memory/social-state/message-cache ×ÔÒı£¬ÎŞÑ­»·£©¡£
-  bridge.js 7176 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5v2flow¡£ÀÛ¼Æ -4470¡£
-- ? ÏÂÅú£º·¢ËÍÁ´Î²²¿£¨sendMessagesV2/onebotSend ¶Ô£©»ò M11 handleIncoming/pumpMux£»Ëæºó M5 ¿ØÖÆÌ¨¡£
-- ? P5-7£¨×Ô¶¯ÂÖ£©£ºonebotSend/sendMessagesV2£¨³öÕ¾¶Î×é×°+ÅúÁ¿·¢ËÍº¬ÖÇÄÜÒıÓÃ/±¾µØÍ¼Ó³Éä£©¡ú ²¢Èë
-  src/core/qq-send.js£¨cfg¡úcfgRef£¬×Ô¶¯²¹ fs/outbound-text/qq-face-parse µÈ import£©¡£bridge.js 7024 ĞĞ£¬
-  check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5send¡£ÀÛ¼Æ -4622¡£
-- ? ÏÂÅú£ºÃ½Ìå¹ÜµÀ´Ø£¨fetchOneBotImage/resolveMediaList/getImageDimensions/MAX ³£Á¿Çø£©¡ú core/media-pipe.js£»
-  È»ºó M11 handleIncoming/pumpMux£»×îºó M5 ¿ØÖÆÌ¨¡£
-- ? P5-8£¨×Ô¶¯ÂÖ£©£ºÃ½Ìå¹ÜµÀ´Ø 6 º¯Êı£¨getImageDimensions/fetchOneBotImage/fetchFaceMedia/
-  resolveOneMedia/resolveMediaList/fetchMediaData£©+ MAX_MEDIA_BYTES/PIXELS/STORE ³£Á¿ ¡ú src/core/
-  media-pipe.js£¨cfg/bot ×¢Èë£©¡£bridge.js 6778 ĞĞ¡ª¡ªµøÆÆ 7000£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£
-  ±¸·İ .bak-p5media¡£ÀÛ¼Æ -4868¡£
-- ? ÏÂÅú£ºM11 handleIncoming/pumpMux ÇøÓë M5 ¿ØÖÆÌ¨£¨Ê£Óà´ó¿é£©¡£
-- ? P5-9£¨×Ô¶¯ÂÖ£©£º¢Ù clearSocialV2Timers/clearAllSocialV2Timers ¡ú social-state.js£»¢Ú M12 ¶¨Ê±ÈÎÎñ´Ø
-  7 º¯Êı+×´Ì¬ ¡ú src/core/scheduler.js£¨recordSentMessagesV2 ¾­ setScheduledRecorder ×¢Èë£©¡£
-  bridge.js 6629 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5sched¡£ÀÛ¼Æ -5017¡£
-- ? ÏÂÅú£ºM11 handleIncoming/pumpMux Çø²ğ½â£»Ëæºó M5 ¿ØÖÆÌ¨Îª×îºó½×¶Î¡£
-- ? P5-10£¨×Ô¶¯ÂÖ£¬ËÄÄ¿±êĞ¡´Ø£©£ºfindCjkSpaceWarning/findSplitBoundaryWarning ¡ú lib/social-timeline.js£»
-  currentRoleHintV2 ¡ú core/social-v1.js£»recordSentMessagesV2 ¡ú core/social-v2-flow.js£¨¹© scheduler
-  ×¢ÈëÓÃ£©£»readFeedbackEntries/appendFeedbackEntry/readToolLog/appendToolLog ¡ú core/audit.js¡£
-  bridge.js 6470 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5small¡£ÀÛ¼Æ -5176¡£
-- ? ÏÂÅú£ºM11 handleIncoming/pumpMux ÊÂ¼ş²ã£¨~1200 ĞĞ£©£»Ëæºó M5 ¿ØÖÆÌ¨Îª×îºóÊÕÎ²½×¶Î¡£
-- ? P5-11£¨×Ô¶¯ÂÖ£©£ºexpandIncomingForwardPreview£¨ºÏ²¢×ª·¢×Ô¶¯Õ¹¿ª£©¡ú core/message-cache.js£»
-  findMessageMedia£¨v1/v2 Ã½Ìå»ØËİ£©¡ú core/social-v2-flow.js¡£bridge.js 6397 ĞĞ£¬check È«ÂÌ£¬
-  Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p5fwd¡£ÀÛ¼Æ -5249¡£
-- ? ÏÂÅú£ºM11 handleIncoming ÊÂ¼ş²ã²ğ½âÓë M5 ¿ØÖÆÌ¨ÊÕÎ²¡£
-- ? P6-1/P6-2£¨µ¥ÂÖÄÚ¼ÌĞø£©£º¿ÚÍ·¿Éµ÷ÅäÖÃ´Ø£¨9 Ïî£©¡ú src/core/tunables.js£¨setTunableCfg ×¢Èë¿É±ä
-  cfg£©£»postRandomQzone ¡ú src/core/qzone.js£¨initQzoneCore£©£»writeStickerTmpFile ¡ú sticker.js¡£
-  bridge.js 6284 ĞĞ£¬check È«ÂÌ£¬Ã°ÑÌÎŞ ReferenceError¡£±¸·İ .bak-p6tun/-p6qz¡£ÀÛ¼Æ -5362¡£
-- ? P6-3£¨Í¬ÂÖ£©£ºrecordDocxSentV2¡úsocial-v2-flow£»sendHelpDocV2+HELP ³£Á¿¡úcore/docx.js¡£
-  bridge.js 6228 ĞĞ£¬check È«ÂÌ¡£±¸·İ .bak-p6help¡£ÀÛ¼Æ -5418¡£
-- ? P6-4£ºÊÂ¼ş¸¨Öú´Ø 5 º¯Êı¡úcore/events-aux.js£»APPROVE/REJECT_WORDS¡úlib/markers.js¡£
-  bridge.js 6015 ĞĞ£¨µøÆÆ 6.1k£©£¬check È«ÂÌ¡£±¸·İ .bak-p6aux¡£ÀÛ¼Æ -5631¡£
+  startSocialLoop/flushSummaries/currentRoleHintï¿½ï¿½+ roleHintCache ï¿½ï¿½ src/core/social-v1.jsï¿½ï¿½
+  SPACE_SPLIT_HINT/DIRECTION_HINT ï¿½ï¿½ lib/markers.jsï¿½ï¿½bridge.js 7326 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½
+  ï¿½ï¿½ï¿½ï¿½ .bak-p5v1ï¿½ï¿½ï¿½Û¼ï¿½ -4320ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M11 ï¿½ï¿½Õ¾/ï¿½Ã£ï¿½handleIncoming/pumpMux ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ M9 ï¿½ï¿½ï¿½ï¿½ v2 Ê£ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+- ? P5-6ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ï¢ï¿½ï¿½ 4 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½appendSocialV2Message/appendSocialV2Poke/resolveReplyTargetV2/
+  isQuoteTargetSelfï¿½ï¿½ï¿½ï¿½ src/core/social-v2-flow.jsï¿½ï¿½memory/social-state/message-cache ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  bridge.js 7176 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5v2flowï¿½ï¿½ï¿½Û¼ï¿½ -4470ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î²ï¿½ï¿½ï¿½ï¿½sendMessagesV2/onebotSend ï¿½Ô£ï¿½ï¿½ï¿½ M11 handleIncoming/pumpMuxï¿½ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½
+- ? P5-7ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½onebotSend/sendMessagesV2ï¿½ï¿½ï¿½ï¿½Õ¾ï¿½ï¿½ï¿½ï¿½×°+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Íºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½/ï¿½ï¿½ï¿½ï¿½Í¼Ó³ï¿½ä£©ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
+  src/core/qq-send.jsï¿½ï¿½cfgï¿½ï¿½cfgRefï¿½ï¿½ï¿½Ô¶ï¿½ï¿½ï¿½ fs/outbound-text/qq-face-parse ï¿½ï¿½ importï¿½ï¿½ï¿½ï¿½bridge.js 7024 ï¿½Ğ£ï¿½
+  check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5sendï¿½ï¿½ï¿½Û¼ï¿½ -4622ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã½ï¿½ï¿½Üµï¿½ï¿½Ø£ï¿½fetchOneBotImage/resolveMediaList/getImageDimensions/MAX ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ core/media-pipe.jsï¿½ï¿½
+  È»ï¿½ï¿½ M11 handleIncoming/pumpMuxï¿½ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½
+- ? P5-8ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½Ã½ï¿½ï¿½Üµï¿½ï¿½ï¿½ 6 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½getImageDimensions/fetchOneBotImage/fetchFaceMedia/
+  resolveOneMedia/resolveMediaList/fetchMediaDataï¿½ï¿½+ MAX_MEDIA_BYTES/PIXELS/STORE ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ src/core/
+  media-pipe.jsï¿½ï¿½cfg/bot ×¢ï¿½ë£©ï¿½ï¿½bridge.js 6778 ï¿½Ğ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 7000ï¿½ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½
+  ï¿½ï¿½ï¿½ï¿½ .bak-p5mediaï¿½ï¿½ï¿½Û¼ï¿½ -4868ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M11 handleIncoming/pumpMux ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½Ê£ï¿½ï¿½ï¿½é£©ï¿½ï¿½
+- ? P5-9ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½ï¿½ï¿½ clearSocialV2Timers/clearAllSocialV2Timers ï¿½ï¿½ social-state.jsï¿½ï¿½ï¿½ï¿½ M12 ï¿½ï¿½Ê±ï¿½ï¿½ï¿½ï¿½ï¿½
+  7 ï¿½ï¿½ï¿½ï¿½+×´Ì¬ ï¿½ï¿½ src/core/scheduler.jsï¿½ï¿½recordSentMessagesV2 ï¿½ï¿½ setScheduledRecorder ×¢ï¿½ë£©ï¿½ï¿½
+  bridge.js 6629 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5schedï¿½ï¿½ï¿½Û¼ï¿½ -5017ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M11 handleIncoming/pumpMux ï¿½ï¿½ï¿½ï¿½â£»ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨Îªï¿½ï¿½ï¿½×¶Î¡ï¿½
+- ? P5-10ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½Ä¿ï¿½ï¿½Ğ¡ï¿½Ø£ï¿½ï¿½ï¿½findCjkSpaceWarning/findSplitBoundaryWarning ï¿½ï¿½ lib/social-timeline.jsï¿½ï¿½
+  currentRoleHintV2 ï¿½ï¿½ core/social-v1.jsï¿½ï¿½recordSentMessagesV2 ï¿½ï¿½ core/social-v2-flow.jsï¿½ï¿½ï¿½ï¿½ scheduler
+  ×¢ï¿½ï¿½ï¿½Ã£ï¿½ï¿½ï¿½readFeedbackEntries/appendFeedbackEntry/readToolLog/appendToolLog ï¿½ï¿½ core/audit.jsï¿½ï¿½
+  bridge.js 6470 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5smallï¿½ï¿½ï¿½Û¼ï¿½ -5176ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M11 handleIncoming/pumpMux ï¿½Â¼ï¿½ï¿½ã£¨~1200 ï¿½Ğ£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨Îªï¿½ï¿½ï¿½ï¿½ï¿½Î²ï¿½×¶Î¡ï¿½
+- ? P5-11ï¿½ï¿½ï¿½Ô¶ï¿½ï¿½Ö£ï¿½ï¿½ï¿½expandIncomingForwardPreviewï¿½ï¿½ï¿½Ï²ï¿½×ªï¿½ï¿½ï¿½Ô¶ï¿½Õ¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ core/message-cache.jsï¿½ï¿½
+  findMessageMediaï¿½ï¿½v1/v2 Ã½ï¿½ï¿½ï¿½ï¿½İ£ï¿½ï¿½ï¿½ core/social-v2-flow.jsï¿½ï¿½bridge.js 6397 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½
+  Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p5fwdï¿½ï¿½ï¿½Û¼ï¿½ -5249ï¿½ï¿½
+- ? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½M11 handleIncoming ï¿½Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ M5 ï¿½ï¿½ï¿½ï¿½Ì¨ï¿½ï¿½Î²ï¿½ï¿½
+- ? P6-1/P6-2ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ú¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í·ï¿½Éµï¿½ï¿½ï¿½ï¿½Ã´Ø£ï¿½9 ï¿½î£©ï¿½ï¿½ src/core/tunables.jsï¿½ï¿½setTunableCfg ×¢ï¿½ï¿½É±ï¿½
+  cfgï¿½ï¿½ï¿½ï¿½postRandomQzone ï¿½ï¿½ src/core/qzone.jsï¿½ï¿½initQzoneCoreï¿½ï¿½ï¿½ï¿½writeStickerTmpFile ï¿½ï¿½ sticker.jsï¿½ï¿½
+  bridge.js 6284 ï¿½Ğ£ï¿½check È«ï¿½Ì£ï¿½Ã°ï¿½ï¿½ï¿½ï¿½ ReferenceErrorï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p6tun/-p6qzï¿½ï¿½ï¿½Û¼ï¿½ -5362ï¿½ï¿½
+- ? P6-3ï¿½ï¿½Í¬ï¿½Ö£ï¿½ï¿½ï¿½recordDocxSentV2ï¿½ï¿½social-v2-flowï¿½ï¿½sendHelpDocV2+HELP ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½core/docx.jsï¿½ï¿½
+  bridge.js 6228 ï¿½Ğ£ï¿½check È«ï¿½Ì¡ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p6helpï¿½ï¿½ï¿½Û¼ï¿½ -5418ï¿½ï¿½
+- ? P6-4ï¿½ï¿½ï¿½Â¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 5 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½core/events-aux.jsï¿½ï¿½APPROVE/REJECT_WORDSï¿½ï¿½lib/markers.jsï¿½ï¿½
+  bridge.js 6015 ï¿½Ğ£ï¿½ï¿½ï¿½ï¿½ï¿½ 6.1kï¿½ï¿½ï¿½ï¿½check È«ï¿½Ì¡ï¿½ï¿½ï¿½ï¿½ï¿½ .bak-p6auxï¿½ï¿½ï¿½Û¼ï¿½ -5631ï¿½ï¿½
 
 ## P6-5ï¼ˆ2026-09-05 ä¼šè¯å†…ï¼‰
 - applyStickerNoteV2 / setStickerRemarkV2 / collectStickerV2 è¿å…¥ src/core/sticker.jsï¼ˆæ–°å¢ cryptoã€fetchOneBotImage/fetchFaceMedia/getSocialV2State å¯¼å…¥ï¼ŒapplyStickerNote åŠ è¿› sticker-lib å¯¼å…¥æ¸…å•ï¼‰ï¼Œbridge.js åˆ é™¤åŒä¸‰å‡½æ•° â†’ 6228â†’5893 è¡Œã€‚

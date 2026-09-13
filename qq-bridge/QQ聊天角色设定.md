@@ -1,4 +1,4 @@
-# QQ Bridge 二代仿真设定（default）
+# QQ Bridge QQ 聊天角色设定（default）
 
 > 目标：让 AI 像一个"有自己的生活、偶尔看看群、被叫必回、有话题就接、没话题就安静"的真人，
 > 而不是 24 小时在线的客服机器人。
@@ -122,7 +122,7 @@ node scripts/apply-socialv2-config.mjs
 
 1. 浏览器打开 `http://127.0.0.1:3100`
 2. 输入令牌：`061228-bridge-console`
-3. 进入二代仿真配置页面修改
+3. 进入QQ 聊天角色配置页面修改
 
 ### 方式三：直接改 config.json
 

@@ -12,7 +12,7 @@
 | `chat` | 白名单群 + 白名单私聊 | qq-chat（安全聊天） | 日常聊天 |
 | `closed-agent` | **仅** 私聊 ownerQQ | router-standard（完整工具） | 你在 QQ 私聊里操控 DSH |
 | `reserved`（一代仿真） | 暂同 chat | qq-chat | 仿真群友：观望/活跃/试探/退场状态机，选择性参与并主动收尾 |
-| `default`（二代仿真，运行 `setup-dsh.mjs` 后默认） | 暂同 chat | default | 文本不自动转发，AI 通过工具自主看消息/发言/等待/设置唤醒与潜水 |
+| `default`（运行 `setup-dsh.mjs` 后默认） | 暂同 chat | default | 文本不自动转发，AI 通过工具自主看消息/发言/等待/设置唤醒与潜水 |
 
 > ⚠️ `closed-agent` 模式下 owner 私聊 agent 拥有**完整本地工具**（router-standard），
 > 这是有意为之（QQ 远程操控 DSH）。该模式只放行 owner 私聊，群友完全无法触达；

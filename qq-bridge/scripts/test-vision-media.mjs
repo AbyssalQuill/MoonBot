@@ -1,7 +1,7 @@
 // 视觉/图片链路自检脚本：
 // 1. 校验配置默认模型为 DeepSeek-V4-Flash-Vision-Exp
 // 2. 校验 safe-fetch 的 SSRF 防护（本机地址应被拒绝）
-// 3. 若桥接运行中，校验 /api/images/message 端点可用（用二代 agent token）
+// 3. 若桥接运行中，校验 /api/images/message 端点可用（用agent token）
 // 运行：node scripts/test-vision-media.mjs
 import fs from 'node:fs';
 import path from 'node:path';
