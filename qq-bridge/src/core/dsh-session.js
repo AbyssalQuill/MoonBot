@@ -40,17 +40,38 @@ export async function ensureVisionModel(sessionId) {
   if (!cfgRef.dsh?.provider && !cfgRef.dsh?.model) return; // 未显式配置则用 DSH 默认（官方 deepseek）
   const provider = String(cfgRef.dsh?.provider || 'deepseek-official');
   const model = String(cfgRef.dsh?.visionModel || cfgRef.dsh?.model || 'deepseek-v4-flash-vision-exp');
-  const effort = String(cfgRef.dsh?.reasoningEffort || 'max');
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      const result = unwrap(await apiRef.sessions.selectModel({ sessionId, provider, model, reasoningEffort: effort }), 'session.selectModel');
-      visionModelAppliedSessions.add(sessionId);
-      log(`已设置会话视觉模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
-      return;
-    } catch (error) {
-      if (/session.not.found/i.test(String(error?.message ?? error))) throw error;
-      log(`设置会话视觉模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
-      if (attempt < 2) await sleep(1000);
+  const configured = String(cfgRef.dsh?.reasoningEffort ?? '').trim();
+
+  const selectWith = async (effort) => {
+    const payload = { sessionId, provider, model };
+    if (effort) payload.reasoningEffort = effort;   // 没配档位 = 连参数都不带（服务商默认档位）
+    return unwrap(await apiRef.sessions.selectModel(payload), 'session.selectModel');
+  };
+
+  /* 档位计划：配了就按配置先试，被服务商**明确拒绝**时退回"不带档位"。
+   *
+   * 【2026-09-13 实测踩坑】pi-ai 只认 profile 里显式声明过的 `xhigh`/`max`：小米 MiMo（mimo-v2.5）
+   * 的 settings.yaml 没声明 reasoningEfforts，传 max 直接 UNSUPPORTED_REASONING_EFFORT。
+   * 原来这里把"没配档位"当成 `max`，于是 selectModel 一直失败 → **会话模型永远切不过去**，
+   * 整条会话卡在旧模型（deepseek-official + mimo-v2.5 这种错配）上，之后每一轮都在网关报
+   * "The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed mimo-v2.5" / 400。
+   * 所以：空档位不带参数，档位不被支持就退回默认，而不是死磕。 */
+  const plan = configured ? [configured, ''] : [''];
+  for (const effort of plan) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const result = await selectWith(effort);
+        visionModelAppliedSessions.add(sessionId);
+        if (!effort && configured) log(`档位 ${configured} 不被 ${provider}/${model} 支持，已改用服务商默认档位`);
+        log(`已设置会话视觉模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
+        return;
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        if (/session.not.found/i.test(message)) throw error;
+        log(`设置会话视觉模型失败 ${sessionId}（${effort ? `档位 ${effort}` : '服务商默认档位'}，第 ${attempt}/2 次）: ${message}`);
+        if (effort && /UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(message)) break;  // 该档位不被支持 → 换默认档位
+        if (attempt < 2) await sleep(1000);
+      }
     }
   }
 }
