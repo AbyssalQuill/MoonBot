@@ -215,7 +215,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 | `qq_reply` | 专用“引用/回复”工具 | 同上 |
 | `qq_send_private_message` | 发私聊；可选 `replyToMessageId` | 同上 |
 
-二代仿真模式（`reserved2`）还有：
+QQ 聊天角色模式（`reserved2`）还有：
 
 - 状态/消息：`qq_get_prompt`、`qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message_detail`、`qq_get_active_members`、`qq_social_state`
 - 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`
@@ -260,7 +260,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 
 黑话学习参数包括：`slang.enabled`、`extractMinMessages`、`extractCooldownMs`、`inferenceThresholds`、`injectMax`、`learnerPreset`、`workspaceTitle`、`autoResearch`。
 
-二代仿真参数包括：`socialV2.enabled`、`tools.*` 开关、`wake.*`、`send.*`、`wait.*`、`sticker.*`、`proactive.*`、`feedback.*`、`context.*`。
+聊天角色参数包括：`socialV2.enabled`、`tools.*` 开关、`wake.*`、`send.*`、`wait.*`、`sticker.*`、`proactive.*`、`feedback.*`、`context.*`。
 
 ---
 
@@ -277,7 +277,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 9. **只读联网搜索**：`mcp-web-search-safe.js` 只暴露 `web_search` / `web_fetch`，带 SSRF 防护。
 10. **黑话人工确认**：自动提取/联网研究的黑话默认 candidate，只有控制台确认后才注入聊天上下文。
 11. **日志脱敏**：日志统一经过 `redactSensitiveText`，不记录路径/凭据等敏感原文。
-12. **二代会话隔离**：每个二代会话生成独立 agent token，MCP 状态/发送工具必须携带 token。
+12. **聊天会话隔离**：每个聊天会话生成独立 agent token，MCP 状态/发送工具必须携带 token。
 
 ---
 

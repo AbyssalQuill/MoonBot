@@ -56,7 +56,7 @@
      - `mcp-napcat-host`（`src/mcp-host-server.js`）
      - `mcp-web-search-safe`（`src/mcp-web-search-safe.js`）
    - 在 `~/.dsh/profiles/web/package.json` 注册 `qq-mode-console` 插件
-   - 把 `qq-mode-console` 插件的默认模式设为 `reserved2`（二代仿真）
+   - 把 `qq-mode-console` 插件的默认模式设为 `reserved2`
    - 创建本地 `state/mode.json`（`mode: reserved2`）作为 DSH settings 不可用时的兜底
    - 尝试自动执行 `dsh plugin --profile web install`（当 `dsh` CLI 在 PATH 中可用时），注册 `qq-mode-console` 的 bundle 依赖；若 `dsh` 不在 PATH，缺失依赖时 DSH 会提示补跑
 
@@ -69,14 +69,14 @@
 
    必须重启 DSH（或让 DSH 重新加载 profile），新 preset 和 MCP 工具才会生效。
 
-   > 默认模式为 **`reserved2`（二代仿真）**，即“文本不自动转发、AI 通过工具自主收发”。如果你想改用 `chat` / `closed-agent` / `reserved`，可在 DSH 设置页的 `qq-mode` 卡片切换，或修改 `state/mode.json` 后重启桥接。
+   > 默认模式为 **`reserved2`**，即“文本不自动转发、AI 通过工具自主收发”。如果你想改用 `chat` / `closed-agent` / `reserved`，可在 DSH 设置页的 `qq-mode` 卡片切换，或修改 `state/mode.json` 后重启桥接。
 
 ## 验证是否装好
 
 1. **DSH WebUI 设置页**：应能看到 `qq-mode` 配置卡片，可切换 `chat` / `closed-agent` / `reserved` / `reserved2`。
 2. **新建会话时**：agent preset 列表中应能看到：
    - `QQ 聊天角色`（`qq-chat`）
-   - `QQ 聊天角色（二代仿真）`（`default`）
+   - `QQ 聊天角色`（`default`）
 3. **工具列表**：QQ 会话中应能看到 `mcp__napcat__*`、`mcp__napcat-host__*`、`mcp__web-search-safe__*` 等工具；不应看到 `dev_*` 等开发工具。
 
 ## 常见问题
