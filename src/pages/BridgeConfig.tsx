@@ -169,7 +169,7 @@ const TOOL_MCP: Record<string, string> = {
   apiKey: '如你的服务商需要在 DSH 侧配置密钥，请到隔离 DSH 的密钥/设置页配置；此处填写的 Key 只会随本配置保存，不会注入运行进程。',
   model: '主对话模型。留空由 DSH 默认决定。',
   visionModel: '识图（多模态）模型，用于带图片消息的会话。留空时自动使用上面的主模型——请保证主模型是多模态的（默认已是）。',
-  reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。改完会自动重启隔离 DSH 生效。',
+  reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。',
   launcherPath: '仅在你手动拉 QQ 网关时使用；本项目 NapCat 已内置并由管理端拉起，一般保持留空。',
   homeDir: '网关侧可写目录（容器映射等），本地 NapCat 一般不需要。',
   allowProcessControl: '是否允许 DSH 内的 agent 自动启停本机 QQ 网关。请仅在完全信任时开启。',
@@ -1325,8 +1325,8 @@ const EFFORT_PRESETS: Array<{ id: string; hint?: string }> = [
   { id: 'low', hint: '快但粗略' },
   { id: 'medium', hint: '平衡' },
   { id: 'high', hint: '仔细但慢' },
-  { id: 'xhigh', hint: '更高' },
-  { id: 'max', hint: '最高' },
+  { id: 'xhigh', hint: '更高（部分服务商不支持）' },
+  { id: 'max', hint: '最高（部分服务商不支持）' },
 ];
 function EffortField({ path, val, ch, renderLabel }: {
   path: string; val: string;
