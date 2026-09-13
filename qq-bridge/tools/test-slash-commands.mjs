@@ -32,21 +32,29 @@ let fails = 0;
 const check = (name, ok, extra = '') => { if (!ok) fails += 1; console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`); };
 const handle = (text, ctx = { isOwner: false, kind: 'private' }) => slangMod.handleSlangSlashCommand(text, ctx);
 
-// ① 各种写法的归一化结果必须一致（这就是代码里实际的比对方式）
-const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, '');
+// ① 各种写法的归一化结果（这就是代码里实际的比对方式：小写 + 连续空白压成一个空格）
+const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
 for (const [label, text, want] of [
-  ['带空格「/slang 学习」', '/slang 学习', '/slang学习'],
-  ['不带空格「/slang学习」', '/slang学习', '/slang学习'],
-  ['英文「/slang learn」', '/slang learn', '/slanglearn'],
-  ['全大写「/SLANG LEARN」', '/SLANG LEARN', '/slanglearn'],
-  ['带空格「/slang 停止」', '/slang 停止', '/slang停止'],
-  ['英文「/slang stop」', '/slang stop', '/slangstop'],
+  ['带空格「/slang 学习」', '/slang 学习', '/slang 学习'],
+  ['英文「/slang learn」', '/slang learn', '/slang learn'],
+  ['全大写「/SLANG LEARN」', '/SLANG LEARN', '/slang learn'],
+  ['多空格「/slang   learn」', '/slang   learn', '/slang learn'],
+  ['带空格「/slang 停止」', '/slang 停止', '/slang 停止'],
+  ['英文「/slang stop」', '/slang stop', '/slang stop'],
+  ['历史简写「/slanglearn」不再等同规范写法', '/slanglearn', '/slanglearn'],
 ]) check(`① ${label} 归一化正确`, norm(text) === want, `${norm(text)} vs ${want}`);
 
 // ② 全都会被 /slang 处理器接住（非主人 → 回「仅主人可操作」，说明它没被当成普通消息）
-for (const text of ['/slang 学习', '/slang学习', '/slang learn', '/slang 停止', '/slang stop', '/slang']) {
+for (const text of ['/slang 学习', '/slang learn', '/slang 停止', '/slang stop', '/slang']) {
   const r = await handle(text);
   check(`② ${text} 被识别为 /slang 指令（不交给模型）`, r.handled === true, JSON.stringify(r).slice(0, 80));
+}
+
+// ⑥ 历史简写不再被识别（2026-09-13 主人要求：代码里也不要认 /slanglearn、/slangstop、无空格中文写法）
+for (const text of ['/slang学习', '/slang停止', '/slanglearn', '/slangstop']) {
+  const r = await handle(text, { isOwner: true, kind: 'private' });
+  const txt = (r.reply ?? []).join(' ');
+  check(`⑥ ${text} 不再被当成学习指令（只回用法）`, r.handled === true && /黑话指令/.test(txt), txt.slice(0, 70));
 }
 
 // ③ 帮助文案给的是带空格的规范写法
