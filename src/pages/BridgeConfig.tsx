@@ -72,6 +72,8 @@ const LABEL: Record<string, string> = {
   longGapMaxMs: '长停顿最长', maxSendPerMinute: '每分钟发送上限', maxSendPerHour: '每小时发送上限',
   maxMessageChars: '单条最长字数', maxGapMs: '最大间隔', gapBaseMs: '基础间隔', gapPerCharMs: '每字间隔',
   gapJitterRatio: '间隔抖动', maxReplyChars: '回复最大字数', skipProbability: '跳过概率', surrenderProbability: '认输概率',
+  linearEnabled: '线性节拍', linearBaseMs: '线性节拍·底延迟', linearStepMs: '线性节拍·每条递增',
+  linearCapMs: '线性节拍·封顶', linearResetMs: '线性节拍·静默重置',
   // 主动闲聊 / 旧社交参数
   proactiveEnabled: '主动闲聊', proactiveProbability: '主动闲聊概率', proactiveIdleThresholdMs: '空闲阈值',
   proactiveCheckMinMs: '检查下限', proactiveCheckMaxMs: '检查上限', idleWindowMs: '冷场判定', idleRetryProbability: '试探概率',
@@ -91,6 +93,7 @@ const LABEL: Record<string, string> = {
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
   maxRemarkChars: '备注字数上限', defaultMs: '默认等待', minMs: '最短等待', maxMs: '最长等待',
   defaultQuietMs: '默认静默', minQuietAfterNewMs: '新消息后最短静默', sendProbability: '发表情概率',
+  unfinishedQuietMs: '话没说完时的静默', burstQuietMs: '对方连发时的静默',
   deepsleepGroups: '单群静默名单',
   // 智能体其他
   enabled: '启用', autoReplyCheckMs: '回复检查间隔', provideRecommendations: '给模型推荐参数',
@@ -194,6 +197,13 @@ const TOOL_MCP: Record<string, string> = {
   'social.wait.minMs': '每次停顿的随机下限（毫秒）。实际停顿会在 最短~最长 之间随机挑一个，避免每次都一模一样、显得机械。',
   'social.wait.maxMs': '每次停顿的随机上限（毫秒）。上下限差得越大，节奏越自然；设成和下限一样 = 每次都固定停这么久。',
   'social.wait.defaultQuietMs': '「默认静默」：轮到你开口前，先安静观察这么久。给自己留出判断“这话题该不该接”的时间，群聊里尤其管用。',
+  'social.wait.unfinishedQuietMs': '「话没说完时的静默」：对方最后一句看起来还没说完（例如结尾是“然后…”“等我一下”），就多等这么久再开口，别急着插话。',
+  'social.wait.burstQuietMs': '「对方连发时的静默」：对方在很短时间内连着发了好几条（15 秒内 ≥3 条），就多等这么久，等他把话说完再一次性回应。',
+  'social.send.linearBaseMs': '「线性节拍·底延迟」：一次回复里，**第一条**气泡等多久才发（0 = 收到就发，最像秒回）。',
+  'social.send.linearStepMs': '「线性节拍·每条递增」：同一次回复里，每多一条气泡就多等这么久（第一条 +0，第二条 +1 个步进，依此类推），模拟人打字越打越慢。',
+  'social.send.linearCapMs': '「线性节拍·封顶」：上面算出来的等待最长不超过这个值（防止连发到后面越等越久）。',
+  'social.send.linearResetMs': '「线性节拍·静默重置」：安静这么久之后，连发计数归零 —— 下一条回复重新从“第一条气泡即时发出”开始。',
+  'social.send.linearEnabled': '「线性节拍」：一条一条按固定节奏发（推荐）。关掉就回落到下面那套“按字数/随机”的拟人间隔。',
   'social.wait.minQuietAfterNewMs': '「新消息后最短静默」：群里刚有人说话时，至少安静这么久再插嘴，防止抢话、刷屏、显得很急。',
   // —— 表情包 ——
   'social.sticker.enabled': '表情包总开关。开着：机器人会用你 QQ 的收藏表情回消息（接梗、赞同、晚安等场合）；关掉：只用文字聊天。',
