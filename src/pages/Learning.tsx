@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
-  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport,
+  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getLearningGraph,
 } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
@@ -25,8 +25,7 @@ const pick = (...ks: string[]) => (o: any): string => {
   }
   return '';
 };
-/** manager 失败信封（success:false/桥 ok:false）→ 错误文本；无错误返回 '' */
-const firstErr = (r: any): string => {
+/** manager 失败信封（success:false/桥 ok:false）→ 错误文本；无错误返回 '' */const firstErr = (r: any): string => {
   if (isObj(r) && (r.success === false || r.ok === false)) {
     return pick('error', 'message', 'detail')(r) || '请求失败';
   }
@@ -141,6 +140,16 @@ function normStatus(r: any): PItem[] {
   }));
 }
 
+/** HH:MM 时间输入归一化。
+ *  踩过的坑：中文输入法下打 ":" 常常出的是**全角「：」**（以及全角数字），
+ *  原来的过滤 `[^0-9:]` 会把它直接吃掉 → 表现为"这个框输不了冒号"。这里先把全角转半角再过滤。 */
+const normHHMM = (raw: any): string => String(raw ?? '')
+  .replace(/[：]/g, ':')
+  .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+  .replace(/[^0-9:]/g, '')
+  .replace(/:{2,}/g, ':')
+  .slice(0, 5);
+
 /* ================================================================== */
 export default function Learning({ onBack }: Props) {
   const [cfg, setCfg] = useState<any>(null);
@@ -164,6 +173,24 @@ export default function Learning({ onBack }: Props) {
   const [pStatus, setPStatus] = useState<PItem[]>([]);
   const [statusAt, setStatusAt] = useState<string>('');
   const [statusErr, setStatusErr] = useState<string>('');
+  // 展开某人时按需取「完整资料」（来自桥的 memory.db profiles 表，经 /api/learning/graph），取一次后缓存
+  const [openUid, setOpenUid] = useState<string>('');
+  const [profMap, setProfMap] = useState<Record<string, any>>({});
+  const profLoadedRef = useRef(false);
+
+  const openProfile = async (uid: string) => {
+    if (openUid === uid) { setOpenUid(''); return; }
+    setOpenUid(uid);
+    if (profLoadedRef.current) return;
+    try {
+      const r: any = await getLearningGraph();
+      const nodes: any[] = Array.isArray(r?.nodes) ? r.nodes : (Array.isArray(r?.data?.nodes) ? r.data.nodes : []);
+      const m: Record<string, any> = {};
+      for (const n of nodes) if (n && n.uid) m[String(n.uid)] = n;
+      setProfMap(m);
+      profLoadedRef.current = true;
+    } catch { /* 取不到就只显示状态行已有的信息，不影响页面 */ }
+  };
 
   const qqs = qqListOf(qqText);
 /** 间隔小时数钳制到 1~720（合法输入），非法回退 24 */
@@ -246,7 +273,7 @@ const clampHrs = (v: any): number => {
     if (e) { setMsg(`失败：${e}`); return; }
     const res = unwrap(r);
     const text = pick('message', 'msg', 'detail')(res) || pick('message', 'msg', 'detail')(r);
-    setMsg(text ? `黑话学习：${text}` : '已受理「立即黑话学习」：从上次学习点/今日 0 点起提取并研究，完成后置学习标记');
+    setMsg(text ? `黑话学习：${text}` : '已受理「黑话人格学习」：从上次学习点/今日 0 点起提取并研究，完成后置学习标记');
     await refreshStatus(true);
   });
 
@@ -330,7 +357,8 @@ const clampHrs = (v: any): number => {
                       </label>
                       <label className="field-row">
                         <span className="f-label">定时时间（北京时）</span>
-                        <input className="input" type="time" value={slgTime} onChange={(e) => setSlgTime(e.target.value)} />
+                        <input className="input" type="text" inputMode="numeric" placeholder="如 04:00（留空=不定时）"
+                          value={slgTime} onChange={(e) => setSlgTime(normHHMM(e.target.value))} />
                       </label>
                       <label className="switch-row">
                         <input type="checkbox" checked={slgLiveWin} onChange={(e) => setSlgLiveWin(e.target.checked)} />
@@ -362,7 +390,7 @@ const clampHrs = (v: any): number => {
                         {busy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
                       </button>
                       <button className="btn btn-soft-primary btn-sm" disabled={busy !== null} onClick={learnSlang}>
-                        {busy === 'slang' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 立即黑话学习
+                        {busy === 'slang' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 黑话人格学习
                       </button>
                       <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={stopSlang}>
                         {busy === 'slang-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止
@@ -416,8 +444,8 @@ const clampHrs = (v: any): number => {
               )}
             </div>
 
-            {/* ============ 右：人格学习状态 ============ */}
-            <div className="card">
+            {/* ============ 右：人格学习状态（与左卡片等高；超出滚动；点开看完整资料） ============ */}
+            <div className="card lrn-status-card">
               <div className="card-title">
                 <Users size={17} /> 人格学习状态
                 <span className="lrn-updated">只读展示 · 每 60 秒自动刷新{statusAt ? ` · 更新于 ${statusAt}` : ''}</span>
@@ -434,27 +462,51 @@ const clampHrs = (v: any): number => {
                   <div style={{ color: 'var(--nc-foreground-400)', fontSize: 13 }}>暂无档案<br />学习过 / 正在学习的目标会显示在这里（点「人格立即学习」开始）</div>
                 </div>
               ) : (
-                <div className="lrn-status-list">
-                  {pStatus.map((it) => (
-                    <div className="lrn-status-row" key={it.uid}>
-                      <div className="lrn-status-main">
-                        <div className="lrn-status-uid">
-                          <b>{it.uid}</b>
-                          {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
+                <div className="lrn-status-list lrn-status-scroll">
+                  {pStatus.map((it) => {
+                    const open = openUid === it.uid;
+                    const p = profMap[it.uid] || null;
+                    const tags: any[] = Array.isArray(p?.tags) ? p.tags : [];
+                    return (
+                      <div className={`lrn-status-row${open ? ' is-open' : ''}`} key={it.uid}
+                        onClick={() => openProfile(it.uid)} title={open ? '点一下收起' : '点一下看完整资料'}>
+                        <div className="lrn-status-main">
+                          <div className="lrn-status-uid">
+                            <b>{it.uid}</b>
+                            {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
+                            <span className="lrn-status-caret">{open ? '收起 ▾' : '展开 ▸'}</span>
+                          </div>
+                          <div className="lrn-status-meta">
+                            {it.state === 'learning'
+                              ? <span className="badge badge-warn">学习中…</span>
+                              : it.learnedAtMs > 0
+                                ? <span className="badge badge-success">已学习</span>
+                                : <span className="badge badge-soft">无档案</span>}
+                            <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
+                            {it.samples > 0 && <span>样本 {it.samples} 条</span>}
+                          </div>
+                          {!open && it.preview && <div className="lrn-status-preview">{it.preview}</div>}
+                          {open && (
+                            <div className="lrn-status-detail">
+                              <div><span className="lrn-dk">样本</span>{it.samples} 条{num(p?.msgCount) > 0 ? ` · 近 30 天发言 ${num(p.msgCount)} 条` : ''}</div>
+                              {it.learnedAtMs > 0 && <div><span className="lrn-dk">最近学习</span>{bjClock(it.learnedAtMs)}</div>}
+                              {p?.name && <div><span className="lrn-dk">通讯录昵称</span>{String(p.name)}</div>}
+                              {p?.birthday && <div><span className="lrn-dk">生日</span>{String(p.birthday)}</div>}
+                              {p?.personality && <div><span className="lrn-dk">性格</span>{String(p.personality)}</div>}
+                              {p?.likes && <div><span className="lrn-dk">喜好</span>{String(p.likes)}</div>}
+                              {p?.notes && <div><span className="lrn-dk">备注</span>{String(p.notes)}</div>}
+                              {p?.personaSummary && <div><span className="lrn-dk">人格摘要</span>{String(p.personaSummary)}</div>}
+                              {tags.length > 0 && (
+                                <div><span className="lrn-dk">标签</span>{tags.map((t) => <span className="lrn-tag" key={String(t)}>{String(t)}</span>)}</div>
+                              )}
+                              {num(p?.lastSeen) > 0 && <div><span className="lrn-dk">最近活跃</span>{bjClock(num(p.lastSeen))}</div>}
+                              {!p && <div className="lrn-dk">（完整资料存在桥的 memory.db 里，桥没连上时只能看到上面这些状态）</div>}
+                            </div>
+                          )}
                         </div>
-                        <div className="lrn-status-meta">
-                          {it.state === 'learning'
-                            ? <span className="badge badge-warn">学习中…</span>
-                            : it.learnedAtMs > 0
-                              ? <span className="badge badge-success">已学习</span>
-                              : <span className="badge badge-soft">无档案</span>}
-                          <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
-                          {it.samples > 0 && <span>样本 {it.samples} 条</span>}
-                        </div>
-                        {it.preview && <div className="lrn-status-preview">{it.preview}</div>}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1137,8 +1189,8 @@ function PortraitLearnBlock() {
         </div>
         <div className="form-group">
           <label className="label">每日定时（北京时，留空=不定时）</label>
-          <input className="input" type="text" placeholder="如 04:00" value={cfg.timeHHMM}
-            onChange={(e) => patch({ timeHHMM: e.target.value.replace(/[^0-9:]/g, '').slice(0, 5) })} />
+          <input className="input" type="text" inputMode="numeric" placeholder="如 04:00" value={cfg.timeHHMM}
+            onChange={(e) => patch({ timeHHMM: normHHMM(e.target.value) })} />
         </div>
       </div>
 
