@@ -251,12 +251,12 @@ npm run dev
 
 ### 黑话学习
 
-以 `/slang` 开头即命中，比较前去掉全部空白并忽略大小写。
+以 `/slang` 开头即命中，忽略大小写。
 
 | 写法 | 作用 |
 | --- | --- |
-| `/slang 学习`、`/slang学习`、`/slang learn`、`/slanglearn` | 立即执行一次黑话学习 |
-| `/slang 停止`、`/slang停止`、`/slang stop`、`/slangstop` | 停止进行中的黑话学习与研究 |
+| `/slang 学习`、`/slang learn`、`/slanglearn` | 立即执行一次黑话学习 |
+| `/slang 停止`、`/slang stop`、`/slangstop` | 停止进行中的黑话学习与研究 |
 | 其他 `/slang` 内容 | 返回用法说明 |
 
 非主人会收到「仅主人可操作」。
