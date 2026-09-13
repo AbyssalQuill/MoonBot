@@ -563,12 +563,19 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       const dshVer = isLocal ? String(opts.dshVersion || '').trim() : '0.1.1-rc.2';
       const spec = dshVer ? `@deepseek-ai/dsh@${dshVer}` : '@deepseek-ai/dsh';
       // 【2026-09-12】多给一次机会 + 装完用真实可执行复核（原来一次 npm i -g 失败就 throw）。
+      // 【2026-09-13 修「dsh 明明装上了却报未装上」】实测：npm 全局装完（/usr/lib/node_modules 里已有包）
+      // 但 bin 链接晚一两秒才出现，紧跟其后的 `command -v dsh` 当场判定失败。现在：
+      //   ① 装完后最多重试 5 次（每次间隔 2s）等 bin 出现；
+      //   ② 还没有就直接写一个包装脚本 /usr/bin/dsh → <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+      //      （本机管理器也是用这个入口起 DSH 的，比“软链到 $P/bin/dsh”可靠：$P 常等于 /usr，软链等于自己指自己）；
+      //   ③ 最后统一用 `dsh --version` 复核，有输出才算 OK。
       const script = [
         `npm ls -g ${spec} >/dev/null 2>&1 || npm i -g ${spec} --no-audit --no-fund 2>&1 | tail -3 || true`,
-        `command -v dsh >/dev/null 2>&1 || npm i -g ${spec} --force --no-audit --no-fund 2>&1 | tail -3 || true`,
-        // npm 全局 bin 目录有时不在 PATH（root 的 npm prefix 被改过）→ 主动软链到 /usr/bin/dsh
-        'P=$(npm prefix -g 2>/dev/null); if [ -n "$P" ] && [ -x "$P/bin/dsh" ]; then ln -sf "$P/bin/dsh" /usr/bin/dsh 2>/dev/null || true; fi',
-        'command -v dsh >/dev/null 2>&1 && ln -sf "$(command -v dsh)" /usr/bin/dsh 2>/dev/null',
+        'for i in 1 2 3 4 5; do command -v dsh >/dev/null 2>&1 && break; sleep 2; done',
+        'command -v dsh >/dev/null 2>&1 || npm i -g ' + spec + ' --force --no-audit --no-fund 2>&1 | tail -3 || true',
+        'for i in 1 2 3 4 5; do command -v dsh >/dev/null 2>&1 && break; sleep 2; done',
+        'if ! command -v dsh >/dev/null 2>&1; then P=$(npm prefix -g 2>/dev/null || echo /usr); J="$P/lib/node_modules/@deepseek-ai/dsh/lib/bin.js"; if [ -x "$P/bin/dsh" ]; then ln -sf "$P/bin/dsh" /usr/bin/dsh 2>/dev/null || true; elif [ -f "$J" ]; then printf "#!/bin/sh\\nexec node %s \\"$@\\"\\n" "$J" > /usr/bin/dsh && chmod 755 /usr/bin/dsh; fi; fi',
+        'if [ -x /usr/bin/dsh ] && ! command -v dsh >/dev/null 2>&1; then export PATH="$PATH:/usr/bin"; fi',
         'command -v dsh >/dev/null 2>&1 && echo DSH_OK || echo DSH_MISSING',
         'dsh --version 2>&1 | head -1',
       ].join('; ');
