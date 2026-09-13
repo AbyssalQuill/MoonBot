@@ -789,8 +789,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
               <DocSection title="黑话学习">
                 <ul>
-                  <li><code>/slang 学习</code>（也认不带空格的 <code>/slang学习</code>、英文 <code>/slang learn</code>）：立刻跑一次黑话学习。</li>
-                  <li><code>/slang 停止</code>（也认 <code>/slang停止</code>、英文 <code>/slang stop</code>）：停止正在跑的黑话学习 / 研究任务。</li>
+                  <li><code>/slang 学习</code> 或 <code>/slang learn</code>：立刻跑一次黑话学习。</li>
+                  <li><code>/slang 停止</code> 或 <code>/slang stop</code>：停止正在跑的黑话学习 / 研究任务。</li>
                   <li><code>/slang</code>：看黑话模块的用法说明。</li>
                 </ul>
               </DocSection>

@@ -718,13 +718,16 @@ function slangHelpText() {
 export async function handleSlangSlashCommand(text, ctx = {}) {
   const raw = String(text ?? '').trim();
   if (!raw) return { handled: false };
-  // 去掉所有空白后再比对：`/slang 学习`、`/slang学习`、`/slang learn`、`/SLANG Learn` 都是同一条指令
-  const low = raw.toLowerCase().replace(/\s+/g, '');
+  // 归一化：转小写并把连续空白压成一个空格。只认规范写法：
+  //   `/slang 学习`、`/slang learn`、`/slang 停止`、`/slang stop`
+  // 【2026-09-13 主人要求】不再兜底 `/slanglearn`、`/slangstop`、`/slang学习` 这些历史简写 ——
+  // 所以这里**不能**把空格删掉，否则 `/slang learn` 会被当成 `/slanglearn` 而失去区分。
+  const low = raw.toLowerCase().replace(/\s+/g, ' ').trim();
   if (!low.startsWith('/slang')) return { handled: false };
   if (!ctx.isOwner) return { handled: true, reply: ['仅主人可操作'] };
   const kind = ctx.kind;
   if (kind !== 'group' && kind !== 'private') return { handled: true, reply: [slangHelpText()] };
-  if (low === '/slanglearn' || low === '/slang学习') {
+  if (low === '/slang 学习' || low === '/slang learn') {
     if (learnInFlight) return { handled: true, reply: ['已有黑话学习任务在跑，请稍候或先 /slang 停止'] };
     const summary = await slangLearnNow(false);
     if (!summary || summary.ok !== true) {
@@ -738,7 +741,7 @@ export async function handleSlangSlashCommand(text, ctx = {}) {
     const r = summary;
     return { handled: true, reply: [`已立即学习黑话：新增${r.added ?? 0} 更新${r.updated ?? 0} 候选${r.candidates ?? 0}${r.stopped ? '（已停止）' : ''}`] };
   }
-  if (low === '/slangstop' || low === '/slang停止') {
+  if (low === '/slang 停止' || low === '/slang stop') {
     const r = slangStopNow();
     return { handled: true, reply: ['已停止当前黑话学习/研究任务' + (r.cancelled ? '' : '（当前没有在跑的任务）')] };
   }
