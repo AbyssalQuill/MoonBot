@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
-  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getLearningGraph, getSlangLibrary,
+  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
 } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
@@ -174,10 +174,29 @@ export default function Learning({ onBack }: Props) {
   const [pStatus, setPStatus] = useState<PItem[]>([]);
   const [statusAt, setStatusAt] = useState<string>('');
   const [statusErr, setStatusErr] = useState<string>('');
-  // 展开某人时按需取「完整资料」（来自桥的 memory.db profiles 表，经 /api/learning/graph），取一次后缓存
+  // 展开某人时按需取「完整资料」（直读桥的 memory.db，**不截断**；图谱接口会截断，所以不能用它）
   const [openUid, setOpenUid] = useState<string>('');
-  const [profMap, setProfMap] = useState<Record<string, any>>({});
-  const profLoadedRef = useRef(false);
+  const [profDetail, setProfDetail] = useState<Record<string, any>>({});
+  const [profErr, setProfErr] = useState<Record<string, string>>({});
+  const [profBusy, setProfBusy] = useState<string>('');
+
+  const openProfile = async (uid: string) => {
+    if (openUid === uid) { setOpenUid(''); return; }
+    setOpenUid(uid);
+    // 展开后把这条滚进可视区（列表本身是滚动的，避免"最后一个人的资料看着像被截断"）
+    setTimeout(() => { try { document.getElementById(`lrn-row-${uid}`)?.scrollIntoView({ block: 'nearest' }); } catch { /* ignore */ } }, 80);
+    if (profDetail[uid]) return;                       // 已缓存：直接展开
+    setProfBusy(uid);
+    try {
+      const r: any = await getPersonProfile(uid);
+      const d = (r && r.ok === false) ? null : (r?.profile !== undefined ? r : (r?.result ?? r));
+      if (r && r.ok === false) setProfErr((m) => ({ ...m, [uid]: String(r?.error || '读取失败') }));
+      else setProfErr((m) => { const n = { ...m }; delete n[uid]; return n; });
+      setProfDetail((m) => ({ ...m, [uid]: d }));
+    } catch (e: any) {
+      setProfErr((m) => ({ ...m, [uid]: String(e?.message ?? e) }));
+    } finally { setProfBusy(''); }
+  };
   // 黑话库弹窗
   const [slangOpen, setSlangOpen] = useState(false);
   const [slangEntries, setSlangEntries] = useState<any[]>([]);
@@ -199,20 +218,6 @@ export default function Learning({ onBack }: Props) {
     } catch (e: any) {
       if (!quiet) setSlangErr(String(e?.message ?? e));
     }
-  };
-
-  const openProfile = async (uid: string) => {
-    if (openUid === uid) { setOpenUid(''); return; }
-    setOpenUid(uid);
-    if (profLoadedRef.current) return;
-    try {
-      const r: any = await getLearningGraph();
-      const nodes: any[] = Array.isArray(r?.nodes) ? r.nodes : (Array.isArray(r?.data?.nodes) ? r.data.nodes : []);
-      const m: Record<string, any> = {};
-      for (const n of nodes) if (n && n.uid) m[String(n.uid)] = n;
-      setProfMap(m);
-      profLoadedRef.current = true;
-    } catch { /* 取不到就只显示状态行已有的信息，不影响页面 */ }
   };
 
   const qqs = qqListOf(qqText);
@@ -506,28 +511,58 @@ const clampHrs = (v: any): number => {
                 </div>
               ) : (
                 <div className="lrn-status-list lrn-status-scroll">
-                  {pStatus.map((it) => (
-                    <div className="lrn-status-row" key={it.uid} onClick={() => openProfile(it.uid)}
-                      title="点一下看这个人的完整资料">
-                      <div className="lrn-status-main">
-                        <div className="lrn-status-uid">
-                          <b>{it.uid}</b>
-                          {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
-                          <span className="lrn-status-caret">查看资料 ›</span>
+                  {pStatus.map((it) => {
+                    const open = openUid === it.uid;
+                    const d = profDetail[it.uid] || null;
+                    const pf = d?.profile || null;
+                    return (
+                      <div className={`lrn-status-row${open ? ' is-open' : ''}`} key={it.uid} id={`lrn-row-${it.uid}`}
+                        onClick={() => openProfile(it.uid)} title={open ? '点一下收起' : '点一下看完整资料'}>
+                        <div className="lrn-status-main">
+                          <div className="lrn-status-uid">
+                            <b>{it.uid}</b>
+                            {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
+                            <span className="lrn-status-caret">{open ? '收起 ▾' : '展开 ▸'}</span>
+                          </div>
+                          <div className="lrn-status-meta">
+                            {it.state === 'learning'
+                              ? <span className="badge badge-warn">学习中…</span>
+                              : it.learnedAtMs > 0
+                                ? <span className="badge badge-success">已学习</span>
+                                : <span className="badge badge-soft">无档案</span>}
+                            <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
+                            {it.samples > 0 && <span>样本 {it.samples} 条</span>}
+                          </div>
+                          {!open && it.preview && <div className="lrn-status-preview">{it.preview}</div>}
+                          {open && (
+                            <div className="lrn-status-detail">
+                              {profBusy === it.uid && <div className="lrn-dk">正在读取完整资料…</div>}
+                              {profErr[it.uid] && <div className="lrn-dk">读取失败：{profErr[it.uid]}</div>}
+                              <div>
+                                <span className="lrn-dk">人格样本</span>
+                                {it.samples} 条
+                                {num(d?.msgCount) > 0 ? ` · 近 30 天发言 ${num(d.msgCount)} 条` : ''}
+                                {num(d?.memoryCount) > 0 ? ` · 记忆条目 ${num(d.memoryCount)} 条` : ''}
+                              </div>
+                              {it.learnedAtMs > 0 && <div><span className="lrn-dk">最近学习</span>{bjClock(it.learnedAtMs)}</div>}
+                              {num(pf?.updatedAt) > 0 && <div><span className="lrn-dk">档案更新</span>{bjClock(num(pf.updatedAt))}</div>}
+                              {num(d?.lastSeen) > 0 && <div><span className="lrn-dk">最近活跃</span>{bjClock(num(d.lastSeen))}</div>}
+                              {pf?.name && <div><span className="lrn-dk">通讯录昵称</span>{pf.name}</div>}
+                              {pf?.birthday && <div><span className="lrn-dk">生日</span>{pf.birthday}</div>}
+                              {pf?.personality && <div><span className="lrn-dk">性格</span>{pf.personality}</div>}
+                              {pf?.likes && <div><span className="lrn-dk">喜好</span>{pf.likes}</div>}
+                              {pf?.dislikes && <div><span className="lrn-dk">不喜欢</span>{pf.dislikes}</div>}
+                              {pf?.notes && <div><span className="lrn-dk">备注</span>{pf.notes}</div>}
+                              {d?.personaSummary && <div><span className="lrn-dk">人格摘要</span>{d.personaSummary}</div>}
+                              {!profBusy && !profErr[it.uid] && !pf && !d?.personaSummary && (
+                                <div className="lrn-dk">这个人在记忆库里还没有档案（只有上面的学习状态）。</div>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <div className="lrn-status-meta">
-                          {it.state === 'learning'
-                            ? <span className="badge badge-warn">学习中…</span>
-                            : it.learnedAtMs > 0
-                              ? <span className="badge badge-success">已学习</span>
-                              : <span className="badge badge-soft">无档案</span>}
-                          <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
-                          {it.samples > 0 && <span>样本 {it.samples} 条</span>}
-                        </div>
-                        {it.preview && <div className="lrn-status-preview">{it.preview}</div>}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -594,50 +629,6 @@ const clampHrs = (v: any): number => {
                         </div>
                       );
                     })}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* ============ 人物资料弹窗（点人格学习状态里的任意一条）============ */}
-          {openUid && (() => {
-            const p = profMap[openUid] || null;
-            const st = pStatus.find((x) => x.uid === openUid) || null;
-            const tags: any[] = Array.isArray(p?.tags) ? p.tags : [];
-            const row = (k: string, v: any) => (v === undefined || v === null || String(v).trim() === ''
-              ? null
-              : <div className="pfp-row" key={k}><span className="pfp-k">{k}</span><span className="pfp-v">{String(v)}</span></div>);
-            return (
-              <div className="pfp-mask" onClick={() => setOpenUid('')}>
-                <div className="pfp-modal" onClick={(e) => e.stopPropagation()}>
-                  <div className="pfp-head">
-                    <div>
-                      <div className="pfp-title">{String(p?.name || st?.nickname || openUid)}</div>
-                      <div className="pfp-sub">
-                        QQ {openUid}
-                        {st?.state === 'learning' ? ' · 学习中…' : (num(st?.learnedAtMs) > 0 ? ` · 最近学习 ${bjClock(num(st?.learnedAtMs))}` : ' · 尚未学习')}
-                      </div>
-                    </div>
-                    <button className="btn btn-sm" onClick={() => setOpenUid('')}>关闭</button>
-                  </div>
-                  <div className="pfp-body">
-                    {row('人格样本', st && num(st.samples) > 0 ? `${num(st.samples)} 条` : '')}
-                    {row('近 30 天发言', num(p?.msgCount) > 0 ? `${num(p.msgCount)} 条` : '')}
-                    {row('通讯录昵称', p?.name)}
-                    {row('生日', p?.birthday)}
-                    {row('性格', p?.personality)}
-                    {row('喜好', p?.likes)}
-                    {row('备注', p?.notes)}
-                    {row('人格摘要', p?.personaSummary)}
-                    {row('最近活跃', num(p?.lastSeen) > 0 ? bjClock(num(p.lastSeen)) : '')}
-                    {tags.length > 0 && (
-                      <div className="pfp-row">
-                        <span className="pfp-k">标签</span>
-                        <span className="pfp-v">{tags.map((t) => <span className="lrn-tag" key={String(t)}>{String(t)}</span>)}</span>
-                      </div>
-                    )}
-                    {!p && <div className="pfp-empty">完整资料存在桥的 memory.db 里；桥没连上时这里只能显示上面的学习状态。</div>}
                   </div>
                 </div>
               </div>
