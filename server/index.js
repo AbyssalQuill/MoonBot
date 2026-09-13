@@ -1687,57 +1687,114 @@ function packLocalBridge(includeState) {
   return { ok: true, path: tmp };
 }
 
+/** 传输超时策略：**无进展**才算超时。
+ *  【2026-09-13 修「部署上传超时」】原来是一个固定 300 秒的**总**超时：
+ *  12.7 MB 的桥包在慢链路上（实测约 40 KB/s）传到 5 分钟就被判超时，部署直接失败。
+ *  现在改成两段判据：只要还有数据在流动就重置计时（idleMs），另设一个绝对上限（maxTotalMs）兜底。
+ *  idleMs 默认 120 秒、maxTotalMs 默认 60 分钟；可用环境变量 QBM_TRANSFER_IDLE_MS / QBM_TRANSFER_MAX_MS 覆盖。 */
+const TRANSFER_IDLE_MS = Math.max(30000, Number(process.env.QBM_TRANSFER_IDLE_MS) || 120000);
+const TRANSFER_MAX_MS = Math.max(600000, Number(process.env.QBM_TRANSFER_MAX_MS) || 3600000);
+const fmtMb = (n) => `${(Number(n) / 1048576).toFixed(1)} MB`;
+
 /** 本地文件流 → 远端 stdin(远端命令从 stdin 收, 如 cat > /root/xxx.tar.gz) */
-function pipeLocalFileToRemote(conn, localPath, remoteCmd, timeoutMs = 300000) {
+function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDLE_MS, maxTotalMs = TRANSFER_MAX_MS) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let timer = null;
-    const settle = (fn) => {
+    let idleTimer = null;
+    let hardTimer = null;
+    let sent = 0;
+    let allSent = false;
+    let total = 0;
+    try { total = statSync(localPath).size; } catch {}
+    const graceMs = 30000;
+
+    const armGrace = () => {
+      // 文件已全部发出：只再等一小段让通道自然关闭；等不到就按成功返回。
+      if (hardTimer) clearTimeout(hardTimer);
+      hardTimer = setTimeout(() => {
+        if (total > 0 && sent >= total) done(() => resolve());
+        else done(() => reject(new Error(`上传未完成：已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}`)));
+      }, graceMs);
+    };
+    const done = (fn) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
       try { rs.destroy(); } catch {}
       fn();
     };
+
     const rs = createReadStream(localPath);
-    rs.on('error', (e) => settle(() => reject(e)));
+    rs.on('error', (e) => done(() => reject(e)));
+    rs.on('data', (chunk) => {
+      sent += chunk.length;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => done(() => reject(new Error(
+        `上传超时：${idleMs / 1000} 秒没有进展（已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}）—— 链路太慢或已中断，可加大 QBM_TRANSFER_IDLE_MS 或换网络后重试`
+      ))), idleMs);
+    });
+    // 【2026-09-13 修「传完了却判超时」】实测：13.3 MB 的桥包在 300 秒固定超时之前**整份**已写进远端文件
+    // （远端 qq-bridge.tar.gz 字节数与本地一致），但 SSH 通道的 close 事件迟迟不来，于是被判超时、部署失败。
+    // 现在：文件全部发完后只再等 graceMs，等不到就按成功返回 —— 数据确实发出去了；
+    // 真有截断的话，紧跟着的解包步骤会以非 0 退出码报出来，不会静默成功。
+    rs.on('end', () => { allSent = true; if (idleTimer) clearTimeout(idleTimer); armGrace(); });
     conn.exec(remoteCmd, (err, stream) => {
-      if (err) return settle(() => reject(err));
+      if (err) return done(() => reject(err));
       let errOut = '';
-      timer = setTimeout(() => settle(() => reject(new Error('上传超时'))), timeoutMs);
+      idleTimer = setTimeout(() => done(() => reject(new Error(
+        `上传超时：${idleMs / 1000} 秒没有进展（已传 0 B / 共 ${fmtMb(total)}）`
+      ))), idleMs);
+      if (allSent) armGrace();
+      else hardTimer = setTimeout(() => done(() => reject(new Error(
+        `上传超时：总时长超过 ${Math.round(maxTotalMs / 60000)} 分钟（已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}）`
+      ))), maxTotalMs);
       stream.stderr.on('data', (d) => (errOut += d.toString()));
       stream.on('close', (code) => {
-        if (code !== 0) settle(() => reject(new Error(errOut.trim() || `远端 exit ${code}`)));
-        else settle(() => resolve());
+        if (code !== 0) done(() => reject(new Error(errOut.trim() || `远端 exit ${code}`)));
+        else done(() => resolve());
       });
       rs.pipe(stream.stdin, { end: true });
     });
   });
 }
 
-/** 远端命令输出(cat 文件) → 本地文件 */
-function pipeRemoteFileToLocal(conn, remoteCmd, localPath, timeoutMs = 300000) {
+/** 远端命令输出(cat 文件) → 本地文件（超时判据同上传：无进展才算超时） */
+function pipeRemoteFileToLocal(conn, remoteCmd, localPath, idleMs = TRANSFER_IDLE_MS, maxTotalMs = TRANSFER_MAX_MS) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    let timer = null;
-    const settle = (fn) => {
+    let idleTimer = null;
+    let hardTimer = null;
+    let got = 0;
+    const done = (fn) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
       try { ws.destroy(); } catch {}
       fn();
     };
     const ws = createWriteStream(localPath);
-    ws.on('error', (e) => settle(() => reject(e)));
+    ws.on('error', (e) => done(() => reject(e)));
     conn.exec(remoteCmd, (err, stream) => {
-      if (err) return settle(() => reject(err));
+      if (err) return done(() => reject(err));
       let errOut = '';
-      timer = setTimeout(() => settle(() => reject(new Error('下载超时'))), timeoutMs);
+      const resetIdle = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => done(() => reject(new Error(
+          `下载超时：${idleMs / 1000} 秒没有进展（已收 ${fmtMb(got)}）—— 链路太慢或已中断，可加大 QBM_TRANSFER_IDLE_MS 后重试`
+        ))), idleMs);
+      };
+      resetIdle();
+      hardTimer = setTimeout(() => done(() => reject(new Error(
+        `下载超时：总时长超过 ${Math.round(maxTotalMs / 60000)} 分钟（已收 ${fmtMb(got)}）`
+      ))), maxTotalMs);
+      stream.on('data', (chunk) => { got += chunk.length; resetIdle(); });
       stream.stderr.on('data', (d) => (errOut += d.toString()));
       stream.on('close', (code) => {
-        if (code !== 0) { ws.end(); settle(() => reject(new Error(errOut.trim() || `远端 exit ${code}`))); return; }
-        if (ws.writableFinished) settle(() => resolve());
-        else ws.on('finish', () => settle(() => resolve()));
+        if (code !== 0) { ws.end(); done(() => reject(new Error(errOut.trim() || `远端 exit ${code}`))); return; }
+        if (ws.writableFinished) done(() => resolve());
+        else ws.on('finish', () => done(() => resolve()));
       });
       stream.pipe(ws, { end: true });
     });
