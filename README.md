@@ -255,8 +255,8 @@ npm run dev
 
 | 写法 | 作用 |
 | --- | --- |
-| `/slang 学习`、`/slang learn`、`/slanglearn` | 立即执行一次黑话学习 |
-| `/slang 停止`、`/slang stop`、`/slangstop` | 停止进行中的黑话学习与研究 |
+| `/slang 学习`、`/slang learn` | 立即执行一次黑话学习 |
+| `/slang 停止`、`/slang stop` | 停止进行中的黑话学习与研究 |
 | 其他 `/slang` 内容 | 返回用法说明 |
 
 非主人会收到「仅主人可操作」。
