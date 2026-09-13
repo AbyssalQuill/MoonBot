@@ -364,7 +364,13 @@ export function confirmedSlangList() {
     .map(publicSlangEntry);
 }
 
+/** 把「已确认黑话表」拼进唤醒正文。
+ *  【2026-09-13 主人要求】默认**不再注入**：黑话表每一轮唤醒都要重发一遍，纯烧额度；
+ *  改成"要用的时候自己查" —— 模型需要时调 `qq_slang_query`（黑话库）或 `qq_memory_search`（SQLite 历史）。
+ *  想恢复旧行为：在桥的 `config.json` 里写 `"slang": { "injectIntoPrompt": true }`（或设 `injectMax` 并显式打开此开关）。 */
 export function withSlangContext(promptText) {
+  const wanted = cfgRef.slang?.injectIntoPrompt === true;   // 默认 false = 不注入
+  if (!wanted) return promptText;
   const parts = [];
   if (cfgRef.slang?.enabled !== false) {
     const block = buildSlangContext(slangEntries, cfgRef.slang?.injectMax ?? 5);

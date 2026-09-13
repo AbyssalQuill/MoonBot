@@ -45,6 +45,7 @@
       8
     ],
     "injectMax": 8,
+    "injectIntoPrompt": false,
     "learnerPreset": "qq-chat",
     "workspaceTitle": "QQ 黑话学习",
     "autoResearch": true
