@@ -196,6 +196,8 @@ export interface OwnerProfileResp {
 }
 
 export const getLearningGraph = () => api<GraphData>('/learning/graph');
+/** 黑话库（桥的 state/slang.json，经管理端代理） */
+export const getSlangLibrary = () => api<any>('/learning/slang-library');
 export const getOwnerProfile = () => api<OwnerProfileResp>('/learning/owner-profile');
 
 /* ================= 角色库导入(characters 目录) ================= */
@@ -244,7 +246,7 @@ export interface SyncStepsResp {
   message?: string;
 }
 /** 同步方向: to-server = 本地→远端 /root/qq-bridge; to-local = 远端→本地(覆盖); merge = 两端 state 数据双向合并 */
-export interface SyncFlags { code?: boolean; state?: boolean; stickers?: boolean }
+export interface SyncFlags { code?: boolean; state?: boolean; stickers?: boolean; config?: boolean }
 export const syncBridge = (server: Record<string, unknown>, direction: 'to-server' | 'to-local' | 'merge' = 'to-server', includeState = false, flags?: SyncFlags) =>
   api<SyncStepsResp>('/ssh/sync', { method: 'POST', body: JSON.stringify({ server, direction, includeState, flags }) });
 /** 彻底删除远端整套(桥+DSH+NapCat+代理), 目录移到回收目录备份 */

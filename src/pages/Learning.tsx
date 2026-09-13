@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
-  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getLearningGraph,
+  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getLearningGraph, getSlangLibrary,
 } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
-  Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw,
+  Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw, BookOpen,
 } from 'lucide-react';
 
 interface Props { onBack: () => void; }
@@ -167,6 +167,7 @@ export default function Learning({ onBack }: Props) {
   const [perEnabled, setPerEnabled] = useState(true);
   const [perIntv, setPerIntv] = useState(false);      // v2：人格自动间隔学习
   const [perIntvHours, setPerIntvHours] = useState(24);
+  const [perTime, setPerTime] = useState('');          // 人格学习：每日定时（北京时，留空=不定时）
   const [qqText, setQqText] = useState('');
 
   // 人格学习状态
@@ -177,6 +178,28 @@ export default function Learning({ onBack }: Props) {
   const [openUid, setOpenUid] = useState<string>('');
   const [profMap, setProfMap] = useState<Record<string, any>>({});
   const profLoadedRef = useRef(false);
+  // 黑话库弹窗
+  const [slangOpen, setSlangOpen] = useState(false);
+  const [slangEntries, setSlangEntries] = useState<any[]>([]);
+  const [slangErr, setSlangErr] = useState('');
+  const [slangQ, setSlangQ] = useState('');
+
+  const openSlangLib = async () => {
+    setSlangOpen(true); setSlangErr('');
+    if (slangEntries.length) { void loadSlangLib(true); return; }
+    await loadSlangLib();
+  };
+  const loadSlangLib = async (quiet = false) => {
+    try {
+      const r: any = await getSlangLibrary();
+      const list: any[] = Array.isArray(r?.entries) ? r.entries
+        : (Array.isArray(r?.result?.entries) ? r.result.entries : (Array.isArray(r?.data?.entries) ? r.data.entries : []));
+      setSlangEntries(list);
+      setSlangErr('');
+    } catch (e: any) {
+      if (!quiet) setSlangErr(String(e?.message ?? e));
+    }
+  };
 
   const openProfile = async (uid: string) => {
     if (openUid === uid) { setOpenUid(''); return; }
@@ -219,6 +242,7 @@ const clampHrs = (v: any): number => {
       setPerEnabled(p.enabled !== false);
       setPerIntv(p.autoIntervalEnabled === true);
       setPerIntvHours(clampHrs(p.autoIntervalHours));
+      setPerTime(String(p.timeHHMM ?? ''));
       setQqText(Array.isArray(p.targetQQ) ? p.targetQQ.join('\n') : '');
     } catch (err: any) {
       setLoadErr(String(err?.message ?? err)); setCfg(null);
@@ -253,14 +277,25 @@ const clampHrs = (v: any): number => {
   };
 
   const save = doBusy('save', async () => {
-    const body: any = cfg ? JSON.parse(JSON.stringify(cfg)) : {};
-    const s = (body.slang = isObj(body.slang) ? body.slang : {});
-    s.enabled = slgEnabled; s.timeHHMM = slgTime || '00:00';
-    s.autoResearch = slgResearch; s.liveWindowExtract = slgLiveWin;
-    s.autoIntervalEnabled = slgIntv; s.autoIntervalHours = clampHrs(slgIntvHours);
-    const p = (body.persona = isObj(body.persona) ? body.persona : {});
-    p.enabled = perEnabled; p.targetQQ = qqs;
-    p.autoIntervalEnabled = perIntv; p.autoIntervalHours = clampHrs(perIntvHours);
+    // ⚠️ 只提交**可编辑**字段：桥侧 PUT 有白名单，`slang.lastLearnAtMs` / `persona.lastRunAtMs` /
+    //    `portrait.*` 由模块自己维护，整包回传会被 400 拒绝（"slang 不支持字段：lastLearnAtMs"就是这么来的）。
+    const body: any = {
+      slang: {
+        enabled: slgEnabled,
+        timeHHMM: normHHMM(slgTime) || '00:00',
+        autoResearch: slgResearch,
+        liveWindowExtract: slgLiveWin,
+        autoIntervalEnabled: slgIntv,
+        autoIntervalHours: clampHrs(slgIntvHours),
+      },
+      persona: {
+        enabled: perEnabled,
+        targetQQ: qqs,
+        autoIntervalEnabled: perIntv,
+        autoIntervalHours: clampHrs(perIntvHours),
+        timeHHMM: normHHMM(perTime),      // 每日定时（留空=不定时）
+      },
+    };
     const r = await saveLearningConfig(body);
     const e = firstErr(r);
     if (e) { setMsg(`保存失败：${e}`); return; }
@@ -273,7 +308,7 @@ const clampHrs = (v: any): number => {
     if (e) { setMsg(`失败：${e}`); return; }
     const res = unwrap(r);
     const text = pick('message', 'msg', 'detail')(res) || pick('message', 'msg', 'detail')(r);
-    setMsg(text ? `黑话学习：${text}` : '已受理「黑话人格学习」：从上次学习点/今日 0 点起提取并研究，完成后置学习标记');
+    setMsg(text ? `黑话学习：${text}` : '已受理「黑话立即学习」：从上次学习点/今日 0 点起提取并研究，完成后置学习标记');
     await refreshStatus(true);
   });
 
@@ -390,10 +425,13 @@ const clampHrs = (v: any): number => {
                         {busy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
                       </button>
                       <button className="btn btn-soft-primary btn-sm" disabled={busy !== null} onClick={learnSlang}>
-                        {busy === 'slang' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 黑话人格学习
+                        {busy === 'slang' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 黑话立即学习
                       </button>
                       <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={stopSlang}>
-                        {busy === 'slang-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止
+                        {busy === 'slang-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
+                      </button>
+                      <button className="btn btn-sm" onClick={openSlangLib} title="看已经学到的黑话词条（含含义/使用例/出现次数）">
+                        <BookOpen size={14} /> 黑话库{slangEntries.length ? `（${slangEntries.length}）` : ''}
                       </button>
                     </div>
                   </div>
@@ -418,6 +456,11 @@ const clampHrs = (v: any): number => {
                         <span className="f-label">间隔（小时）</span>
                         <NumInput className="input" value={perIntvHours} onCommit={(n) => setPerIntvHours(clampHrs(n || 24))} />
                       </label>
+                      <label className="field-row">
+                        <span className="f-label">每日定时（北京时）</span>
+                        <input className="input" type="text" inputMode="numeric" placeholder="如 04:00（留空=不定时）"
+                          value={perTime} onChange={(e) => setPerTime(normHHMM(e.target.value))} />
+                      </label>
                     </div>
                     <div className="field-row full" style={{ marginTop: 8 }}>
                       <span className="f-label">目标 QQ（多填：每行一个，也支持逗号分隔）</span>
@@ -433,7 +476,7 @@ const clampHrs = (v: any): number => {
                         {busy === 'persona' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 人格立即学习
                       </button>
                       <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={stopPersona}>
-                        {busy === 'persona-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 人格停止
+                        {busy === 'persona-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
                       </button>
                     </div>
                   </div>
@@ -463,54 +506,143 @@ const clampHrs = (v: any): number => {
                 </div>
               ) : (
                 <div className="lrn-status-list lrn-status-scroll">
-                  {pStatus.map((it) => {
-                    const open = openUid === it.uid;
-                    const p = profMap[it.uid] || null;
-                    const tags: any[] = Array.isArray(p?.tags) ? p.tags : [];
-                    return (
-                      <div className={`lrn-status-row${open ? ' is-open' : ''}`} key={it.uid}
-                        onClick={() => openProfile(it.uid)} title={open ? '点一下收起' : '点一下看完整资料'}>
-                        <div className="lrn-status-main">
-                          <div className="lrn-status-uid">
-                            <b>{it.uid}</b>
-                            {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
-                            <span className="lrn-status-caret">{open ? '收起 ▾' : '展开 ▸'}</span>
-                          </div>
-                          <div className="lrn-status-meta">
-                            {it.state === 'learning'
-                              ? <span className="badge badge-warn">学习中…</span>
-                              : it.learnedAtMs > 0
-                                ? <span className="badge badge-success">已学习</span>
-                                : <span className="badge badge-soft">无档案</span>}
-                            <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
-                            {it.samples > 0 && <span>样本 {it.samples} 条</span>}
-                          </div>
-                          {!open && it.preview && <div className="lrn-status-preview">{it.preview}</div>}
-                          {open && (
-                            <div className="lrn-status-detail">
-                              <div><span className="lrn-dk">样本</span>{it.samples} 条{num(p?.msgCount) > 0 ? ` · 近 30 天发言 ${num(p.msgCount)} 条` : ''}</div>
-                              {it.learnedAtMs > 0 && <div><span className="lrn-dk">最近学习</span>{bjClock(it.learnedAtMs)}</div>}
-                              {p?.name && <div><span className="lrn-dk">通讯录昵称</span>{String(p.name)}</div>}
-                              {p?.birthday && <div><span className="lrn-dk">生日</span>{String(p.birthday)}</div>}
-                              {p?.personality && <div><span className="lrn-dk">性格</span>{String(p.personality)}</div>}
-                              {p?.likes && <div><span className="lrn-dk">喜好</span>{String(p.likes)}</div>}
-                              {p?.notes && <div><span className="lrn-dk">备注</span>{String(p.notes)}</div>}
-                              {p?.personaSummary && <div><span className="lrn-dk">人格摘要</span>{String(p.personaSummary)}</div>}
-                              {tags.length > 0 && (
-                                <div><span className="lrn-dk">标签</span>{tags.map((t) => <span className="lrn-tag" key={String(t)}>{String(t)}</span>)}</div>
-                              )}
-                              {num(p?.lastSeen) > 0 && <div><span className="lrn-dk">最近活跃</span>{bjClock(num(p.lastSeen))}</div>}
-                              {!p && <div className="lrn-dk">（完整资料存在桥的 memory.db 里，桥没连上时只能看到上面这些状态）</div>}
-                            </div>
-                          )}
+                  {pStatus.map((it) => (
+                    <div className="lrn-status-row" key={it.uid} onClick={() => openProfile(it.uid)}
+                      title="点一下看这个人的完整资料">
+                      <div className="lrn-status-main">
+                        <div className="lrn-status-uid">
+                          <b>{it.uid}</b>
+                          {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
+                          <span className="lrn-status-caret">查看资料 ›</span>
                         </div>
+                        <div className="lrn-status-meta">
+                          {it.state === 'learning'
+                            ? <span className="badge badge-warn">学习中…</span>
+                            : it.learnedAtMs > 0
+                              ? <span className="badge badge-success">已学习</span>
+                              : <span className="badge badge-soft">无档案</span>}
+                          <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
+                          {it.samples > 0 && <span>样本 {it.samples} 条</span>}
+                        </div>
+                        {it.preview && <div className="lrn-status-preview">{it.preview}</div>}
                       </div>
-                    );
-                  })}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
           </div>
+
+          {/* ============ 黑话库弹窗 ============ */}
+          {slangOpen && (() => {
+            const kw = slangQ.trim().toLowerCase();
+            const list = slangEntries
+              .filter((e) => {
+                if (!kw) return true;
+                return [e?.content, e?.meaning, e?.usage, e?.example].some((v) => String(v ?? '').toLowerCase().includes(kw));
+              })
+              .sort((a, b) => (num(b?.count) - num(a?.count)) || String(a?.content ?? '').localeCompare(String(b?.content ?? '')));
+            const badge = (st: string) => (st === 'confirmed'
+              ? <span className="badge badge-success">已确认</span>
+              : st === 'rejected' ? <span className="badge badge-soft">已拒收</span> : <span className="badge badge-warn">候选</span>);
+            return (
+              <div className="pfp-mask" onClick={() => setSlangOpen(false)}>
+                <div className="pfp-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="pfp-head">
+                    <div>
+                      <div className="pfp-title">黑话库</div>
+                      <div className="pfp-sub">
+                        共 {slangEntries.length} 条{kw ? ` · 命中 ${list.length} 条` : ''} · 已确认的会注入到聊天上下文里
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button className="btn btn-sm" onClick={() => loadSlangLib()}><RefreshCw size={13} /> 刷新</button>
+                      <button className="btn btn-sm" onClick={() => setSlangOpen(false)}>关闭</button>
+                    </div>
+                  </div>
+                  <div style={{ padding: '10px 18px 0' }}>
+                    <input className="input" placeholder="搜词条 / 含义 / 例句…" value={slangQ} onChange={(e) => setSlangQ(e.target.value)} />
+                  </div>
+                  <div className="pfp-body">
+                    {slangErr && <div className="pfp-empty">读取失败：{slangErr}（黑话库在桥的 state/slang.json 里，桥没连上时读不到）</div>}
+                    {!slangErr && list.length === 0 && (
+                      <div className="pfp-empty">
+                        {slangEntries.length === 0 ? '还没有学到任何词条：点「黑话立即学习」跑一轮，或等定时学习到点。' : '没有匹配的词条。'}
+                      </div>
+                    )}
+                    {list.map((e, idx) => {
+                      const ev: any[] = Array.isArray(e?.evidence) ? e.evidence : [];
+                      return (
+                        <div className="lrn-status-row" key={String(e?.id ?? idx)} style={{ cursor: 'default' }}>
+                          <div className="lrn-status-main">
+                            <div className="lrn-status-uid">
+                              <b>{String(e?.content ?? '(空)')}</b>
+                              {badge(String(e?.status ?? ''))}
+                              <span className="lrn-status-caret">出现 {num(e?.count)} 次 · {String(e?.source ?? '')}</span>
+                            </div>
+                            {String(e?.meaning ?? '').trim()
+                              ? <div className="lrn-status-preview">{String(e.meaning)}</div>
+                              : <div className="lrn-status-preview" style={{ opacity: .65 }}>（还没有释义：达到出现次数阈值后会自动研究补齐）</div>}
+                            {String(e?.usage ?? '').trim() && <div className="lrn-dk">用法：{String(e.usage)}</div>}
+                            {String(e?.example ?? '').trim() && <div className="lrn-dk">例句：{String(e.example)}</div>}
+                            {ev.length > 0 && (
+                              <div className="lrn-dk">
+                                原话：{ev.slice(0, 2).map((x) => `「${String(x?.text ?? '').slice(0, 40)}」`).join(' ')}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ============ 人物资料弹窗（点人格学习状态里的任意一条）============ */}
+          {openUid && (() => {
+            const p = profMap[openUid] || null;
+            const st = pStatus.find((x) => x.uid === openUid) || null;
+            const tags: any[] = Array.isArray(p?.tags) ? p.tags : [];
+            const row = (k: string, v: any) => (v === undefined || v === null || String(v).trim() === ''
+              ? null
+              : <div className="pfp-row" key={k}><span className="pfp-k">{k}</span><span className="pfp-v">{String(v)}</span></div>);
+            return (
+              <div className="pfp-mask" onClick={() => setOpenUid('')}>
+                <div className="pfp-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="pfp-head">
+                    <div>
+                      <div className="pfp-title">{String(p?.name || st?.nickname || openUid)}</div>
+                      <div className="pfp-sub">
+                        QQ {openUid}
+                        {st?.state === 'learning' ? ' · 学习中…' : (num(st?.learnedAtMs) > 0 ? ` · 最近学习 ${bjClock(num(st?.learnedAtMs))}` : ' · 尚未学习')}
+                      </div>
+                    </div>
+                    <button className="btn btn-sm" onClick={() => setOpenUid('')}>关闭</button>
+                  </div>
+                  <div className="pfp-body">
+                    {row('人格样本', st && num(st.samples) > 0 ? `${num(st.samples)} 条` : '')}
+                    {row('近 30 天发言', num(p?.msgCount) > 0 ? `${num(p.msgCount)} 条` : '')}
+                    {row('通讯录昵称', p?.name)}
+                    {row('生日', p?.birthday)}
+                    {row('性格', p?.personality)}
+                    {row('喜好', p?.likes)}
+                    {row('备注', p?.notes)}
+                    {row('人格摘要', p?.personaSummary)}
+                    {row('最近活跃', num(p?.lastSeen) > 0 ? bjClock(num(p.lastSeen)) : '')}
+                    {tags.length > 0 && (
+                      <div className="pfp-row">
+                        <span className="pfp-k">标签</span>
+                        <span className="pfp-v">{tags.map((t) => <span className="lrn-tag" key={String(t)}>{String(t)}</span>)}</span>
+                      </div>
+                    )}
+                    {!p && <div className="pfp-empty">完整资料存在桥的 memory.db 里；桥没连上时这里只能显示上面的学习状态。</div>}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ============ 用量统计 ============ */}
           <UsagePanel />
@@ -1123,7 +1255,11 @@ function PortraitLearnBlock() {
   const save = async () => {
     setBusy('save'); setMsg('');
     try {
-      const r: any = await saveLearningConfig({ portrait: { ...cfg } } as any);
+      const r: any = await saveLearningConfig({ portrait: {
+        enabled: cfg.enabled, minMessages: cfg.minMessages, maxTargets: cfg.maxTargets,
+        windowHours: cfg.windowHours, autoIntervalEnabled: cfg.autoIntervalEnabled,
+        autoIntervalHours: cfg.autoIntervalHours, timeHHMM: normHHMM(cfg.timeHHMM),
+      } } as any);   // 只提交可编辑字段（lastRunAtMs 由画像模块自己维护）
       if (r?.ok === false || r?.success === false) { setMsg(String(r?.error || r?.message || '保存失败')); return; }
       setMsg('已保存');
       loadAll();
@@ -1202,7 +1338,7 @@ function PortraitLearnBlock() {
           {busy === 'start' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 画像立即学习
         </button>
         <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={() => act('stop')}>
-          {busy === 'stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 画像停止
+          {busy === 'stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
         </button>
         {msg && <span className="lrn-updated">{msg}</span>}
       </div>

@@ -1776,6 +1776,7 @@ app.post('/api/ssh/sync', async (req, res) => {
   const wantCode = dir === 'merge' ? false : (flags?.code ?? true);            // merge 不推代码
   const wantState = dir === 'merge' ? true : (flags?.state ?? includeState);   // merge 必合 state
   const wantStickers = flags?.stickers ?? (rawDir.includes('+stickers') ? true : false);
+  const wantConfig = flags?.config ?? (rawDir.includes('+config') ? true : false);   // 单独同步桥的 config.json（与代码/数据分开勾选）
   const steps = [];
   let conn = null;
   try {
@@ -1804,6 +1805,27 @@ app.post('/api/ssh/sync', async (req, res) => {
           const syn = await sshExecCapture(conn, "cd /root/qq-bridge && bad=$(for f in src/bridge.js src/core/*.js; do [ -f \"$f\" ] || continue; node --check \"$f\" >/dev/null 2>&1 || echo \"$f\"; done); if [ -n \"$bad\" ]; then echo \"$bad\"; exit 1; else echo SYNTAX-OK; fi", 120000);
           steps.push({ step: '远端语法体检', ok: syn.ok, msg: syn.ok ? (syn.out.includes('SYNTAX-OK') ? 'src 语法全部通过' : syn.out) : (syn.out || syn.error) });
           try { unlinkSync(pkg.path); } catch {}
+        }
+        if (wantConfig) {
+          // 单独同步「桥的 config.json」：代码同步本来就不带它（远端那份通常有自己的 dsh.baseUrl / 端口），
+          // 所以这里给一个显式开关 —— 只推这一个文件，推之前远端已经备份成 .bak-sync。
+          const localCfg = join(bridgeDir, 'config.json');
+          if (!existsSync(localCfg)) {
+            steps.push({ step: '同步 config.json', ok: false, msg: `本地没有 ${localCfg}` });
+          } else {
+            try {
+              const localBytes = readFileSync(localCfg).length;
+              await pipeLocalFileToRemote(conn, localCfg, 'cat > /root/qq-bridge/config.json');
+              const sz = await sshExecCapture(conn, 'wc -c < /root/qq-bridge/config.json', 20000);
+              const remoteBytes = Number(String(sz.out || '').trim().split(/\s+/)[0]) || 0;
+              steps.push({
+                step: '同步 config.json', ok: remoteBytes === localBytes,
+                msg: remoteBytes === localBytes ? `已推送 ${localBytes} 字节（远端原文件已备份为 config.json.bak-sync）` : `字节数不一致：本地 ${localBytes} / 远端 ${remoteBytes}`,
+              });
+            } catch (eCfg) {
+              steps.push({ step: '同步 config.json', ok: false, msg: String(eCfg?.message ?? eCfg) });
+            }
+          }
         }
         // 覆盖远端 state/表情包前暂停远端桥(其 memory.db 同样常开), 结束后统一重启
         if (wantState || wantStickers) {
@@ -1894,6 +1916,21 @@ app.post('/api/ssh/sync', async (req, res) => {
       }
       } else {
         steps.push({ step: '拉取桥代码', ok: true, msg: '未勾选代码, 跳过' });
+      }
+      if (wantConfig) {
+        // 单独拉取「桥的 config.json」：覆盖本地前先备份成本地 config.json.bak-local
+        const cfgLocal = join(localDir, 'config.json');
+        try {
+          if (existsSync(cfgLocal)) {
+            copyFileSync(cfgLocal, join(localDir, 'config.json.bak-local'));
+            steps.push({ step: '备份本地 config.json', ok: true, msg: '已备份为 config.json.bak-local' });
+          }
+          await pipeRemoteFileToLocal(conn, 'cat /root/qq-bridge/config.json', cfgLocal);
+          const localBytes = readFileSync(cfgLocal).length;
+          steps.push({ step: '拉取 config.json', ok: localBytes > 0, msg: `已写入 ${localBytes} 字节 → ${cfgLocal}` });
+        } catch (eCfg) {
+          steps.push({ step: '拉取 config.json', ok: false, msg: String(eCfg?.message ?? eCfg) });
+        }
       }
       // to-local 可选附加: state / 表情包从远端拉回本地(覆盖本地对应目录, 先本地备份)
       if (wantState || dir === 'merge') {
@@ -2885,6 +2922,7 @@ app.post('/api/learning/slang', (req, res) => proxyToBridgeConsole(req, res, { p
 app.post('/api/learning/persona', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/portrait', method: 'POST', body: req.body ?? {} }));
 app.get('/api/learning/token-report', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/token-report', method: 'GET' }));
+app.get('/api/learning/slang-library', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang', method: 'GET' }));
 
 /* 用量实时推流：把桥的 SSE 原样透传给浏览器（同源，前端无需直连 3100）。
    注意不能走 proxyToBridgeConsole —— 那条路径会 res.text() 把流读干。 */

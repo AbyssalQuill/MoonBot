@@ -289,20 +289,48 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
   // 【2026-09-12 加速】这一次调用 = 一次新的"连发批"：清掉前几轮攒下的连续发送计数，
   // 让批内节奏从 0 / step / 2×step 起算（配合下面"首条不等节拍"，第一条气泡零延迟出）。
   resetSendPace(key);
-  // 智能引用发送时刻复检: 引用对象必须仍是「对话里最新一条 @/引用自己」的消息, 否则放弃引用,
-  // 避免排队/节拍延迟(通常 0~4s+)期间群里又来人/再 @ 时, 把旧消息当最新引用(引用回复不精确)。
-  const recheckSmartReply = (k, wanted) => {
-    if (wanted === null || wanted === undefined) return null;
+  // 自动智能引用：挑「与这句话最相关」的那条消息，而不是死板地引用最新一条。
+  // 【2026-09-13 主人要求】原来要求"引用的那条必须还是对话里最新一条别人发的消息"，结果是：
+  //   · 群里 @ 我之后又有别人插了一句 → 引用被静默摘掉（用户看到"引用失败"）；
+  //   · 明明在回答 A 的那句话，却因为 B 更靠后就不引用 A，回复看起来"没对上"；
+  //   · 私聊压根不引用（旧逻辑只对群聊生效）。
+  // 现在改成按相关性打分（打分在**真正发送那一刻**做，天然免疫排队/节拍延迟）：
+  //   @ 我 / 引用过我        +3
+  //   与这条回复有共同词     每命中一个 +1（CJK 2-gram 与英文词，最多 +3）
+  //   是最近一条别人发的      +1（同分时偏新）
+  //   满分 ≥2 才引用；谁都不相关就不引用 —— 宁可不引，也不张冠李戴。群聊 / 私聊一视同仁。
+  const pickSmartQuoteFor = (k, bubbleText) => {
     try {
       const stQ = getSocialState(k);
       const nowQ = Date.now();
-      const msgs = Array.isArray(stQ.recentMessages) ? stQ.recentMessages : [];
-      const recentNonSelf = [...msgs].reverse().find((mm) => mm && !mm.isSelf);
-      if (!recentNonSelf || !recentNonSelf.messageId) return null;
-      const recentAt = [...msgs].reverse().find((mm) => mm && !mm.isSelf && (mm.atSelf || mm.quoteTargetIsSelf) && mm.messageId && (nowQ - Number(mm.time || 0) < 600000));
-      if (!recentAt || String(recentAt.messageId) !== String(wanted)) return null;
-      if (String(recentNonSelf.messageId) !== String(recentAt.messageId)) return null;
-      return String(wanted);
+      const msgs = (Array.isArray(stQ.recentMessages) ? stQ.recentMessages : [])
+        .filter((mm) => mm && !mm.isSelf && mm.messageId && (nowQ - Number(mm.time || 0) < 600000))
+        .slice(-12);
+      if (!msgs.length) return null;
+      const gramsOf = (s) => {
+        const t = String(s || '').toLowerCase();
+        const set = new Set();
+        for (const w of t.match(/[a-z0-9]{3,}/g) || []) set.add(w);
+        const cjk = t.replace(/[^\u4e00-\u9fa5]/g, '');
+        for (let j = 0; j + 2 <= cjk.length; j += 1) set.add(cjk.slice(j, j + 2));
+        return set;
+      };
+      const mine = gramsOf(bubbleText);
+      const newest = msgs[msgs.length - 1];
+      let best = null; let bestScore = 0;
+      for (const mm of msgs) {
+        let s = 0;
+        if (mm.atSelf || mm.quoteTargetIsSelf) s += 3;
+        if (mm === newest) s += 1;
+        if (mine.size) {
+          const g = gramsOf(mm.tail || mm.plain || mm.text || '');
+          let hit = 0;
+          for (const x of g) { if (mine.has(x)) { hit += 1; if (hit >= 3) break; } }
+          s += hit;
+        }
+        if (s > bestScore) { bestScore = s; best = mm; }
+      }
+      return bestScore >= 2 ? String(best.messageId) : null;
     } catch { return null; }
   };
   const sent = [];
@@ -313,26 +341,15 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
     // 模型显式指定的引用(显式 replyToMessageId)永远原样保留——复检只针对「自动智能引用」,
     // 否则显式引用一条较早消息也会被"必须是最新"规则悄悄摘掉引用, 用户看到的就是"引用失败"。
     const explicitQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
-    let smartReply = replyToMessageId;
-    if (!explicitQuote && kind === 'group' && cfgRef.social?.send?.smartQuoteEnabled !== false) {
-      // 智能引用（默认开启但严格受限）：只有「最近 10 分钟内有人 @ 我/引用我」且「那条消息就是对话里最新一条别人发的消息」时，
-      // 才自动引用——这时机器人就是直接回复对方，挂引用不会错。
-      // 若 @ 我之后又有别人发言（机器人大概率是在回更新的消息），绝不自动引用，避免张冠李戴（引用 A 的话来回复 B）。
-      try {
-        const stSmart = getSocialState(key);
-        const nowSmart = Date.now();
-        const recentNonSelf = [...(Array.isArray(stSmart.recentMessages) ? stSmart.recentMessages : [])].reverse().find((mm) => mm && !mm.isSelf);
-        const recentAt = [...(Array.isArray(stSmart.recentMessages) ? stSmart.recentMessages : [])].reverse().find((mm) => mm && !mm.isSelf && (mm.atSelf || mm.quoteTargetIsSelf) && mm.messageId && (nowSmart - Number(mm.time || 0) < 600000));
-        const lastNonSelfRef = recentNonSelf ? String(recentNonSelf.messageId || recentNonSelf.seq || '') : '';
-        if (recentAt && lastNonSelfRef && String(recentAt.messageId) === lastNonSelfRef) {
-          smartReply = String(recentAt.messageId);
-        }
-      } catch {}
-    }
     const useAt = i === 0 ? atUserId : null;
     enqueueSend(async () => {
       // 自动智能引用在真正发送那一刻复检(防排队延迟后引用到过时消息); 显式引用不在此列
-      const useReply = i === 0 ? (explicitQuote ? smartReply : recheckSmartReply(key, smartReply)) : null;
+      // 自动智能引用：在真正发送那一刻按相关性挑（不再要求"必须是最新一条"）；显式引用永远原样保留。
+      const useReply = i === 0
+        ? (explicitQuote
+          ? String(replyToMessageId).trim()
+          : (cfgRef.social?.send?.smartQuoteEnabled !== false ? pickSmartQuoteFor(key, msg) : null))
+        : null;
       // 发送线性节拍：pace=null=线性关闭 → 保留调用方传入的旧 delays 节奏；否则由会话连续计数决定。
       //
       // 【2026-09-12 加速 · 这是主人要的"qq_send_message 更快"】**这一条回复的第一条气泡不再等节拍**。

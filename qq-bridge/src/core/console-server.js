@@ -1,4 +1,4 @@
-﻿// M5 本地控制台：
+// M5 本地控制台：
 // 独立 Web 面板；cfg/api/bot/media 运行期注入；writeLastMode 写回 main 的 lastMode。
 import fs from 'node:fs';
 import http from 'node:http';
@@ -222,6 +222,7 @@ const DEFAULT_LEARNING_CONFIG = {
   persona: {
     enabled: true, targetQQ: [],
     autoIntervalEnabled: false, autoIntervalHours: 24,
+    timeHHMM: '',                 // 每日定时（北京时 HH:MM）；空 = 不定时（与 portrait 同语义）
     lastRunAtMs: 0
   },
   portrait: {
@@ -232,7 +233,7 @@ const DEFAULT_LEARNING_CONFIG = {
 };
 const LEARNING_TOP_KEYS = new Set(['slang', 'persona', 'portrait']);
 const LEARNING_SLANG_KEYS = new Set(['enabled', 'timeHHMM', 'autoResearch', 'liveWindowExtract', 'autoIntervalEnabled', 'autoIntervalHours']);
-const LEARNING_PERSONA_KEYS = new Set(['enabled', 'targetQQ', 'autoIntervalEnabled', 'autoIntervalHours']);
+const LEARNING_PERSONA_KEYS = new Set(['enabled', 'targetQQ', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
 const LEARNING_PORTRAIT_KEYS = new Set(['enabled', 'minMessages', 'maxTargets', 'windowHours', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
 
 function cloneLearningDefault() {
@@ -268,6 +269,12 @@ function loadLearningConfig() {
       out.persona.targetQQ = normalizeQQList(out.persona.targetQQ);
       if (typeof out.persona.autoIntervalEnabled !== 'boolean') out.persona.autoIntervalEnabled = DEFAULT_LEARNING_CONFIG.persona.autoIntervalEnabled;
       out.persona.autoIntervalHours = clampAutoIntervalHours(out.persona.autoIntervalHours);
+      // 每日定时时刻：空串 = 不定时；非空必须是合法 HH:MM（与 portrait 同口径）
+      if (typeof out.persona.timeHHMM !== 'string') out.persona.timeHHMM = DEFAULT_LEARNING_CONFIG.persona.timeHHMM;
+      else {
+        const tp = out.persona.timeHHMM.trim();
+        out.persona.timeHHMM = tp === '' || /^([01]\d|2[0-3]):[0-5]\d$/.test(tp) ? tp : DEFAULT_LEARNING_CONFIG.persona.timeHHMM;
+      }
       if (!Number.isFinite(Number(out.persona.lastRunAtMs))) out.persona.lastRunAtMs = 0;
       else out.persona.lastRunAtMs = Math.max(0, Math.round(Number(out.persona.lastRunAtMs)));
     }
@@ -399,6 +406,15 @@ export function sanitizeLearningConfigBody(body, cur) {
     if (p.autoIntervalHours !== undefined) {
       if (!Number.isFinite(Number(p.autoIntervalHours)) || Number(p.autoIntervalHours) <= 0) throw new Error('persona.autoIntervalHours 必须是数字（1~720 小时）');
       next.persona.autoIntervalHours = clampAutoIntervalHours(p.autoIntervalHours);
+    }
+    if (p.timeHHMM !== undefined) {
+      const raw = String(p.timeHHMM ?? '').trim();
+      if (raw === '') next.persona.timeHHMM = '';
+      else {
+        const norm = normalizeTimeHHMM(raw);
+        if (!norm) throw new Error('persona.timeHHMM 必须是 HH:MM（00:00~23:59）或留空表示不定时');
+        next.persona.timeHHMM = norm;
+      }
     }
   }
   if (body.portrait !== undefined) {

@@ -60,6 +60,7 @@ const personaSubmits = new Map();
 // 自动间隔定时器（initPersonaAutoLearn 注册，幂等）
 let personaAutoTimer = null;
 let personaAutoLastTriggerAt = 0; // 最近一次自动触发时刻（防抖：lastRunAtMs=0/失败重试时不至于每分钟连发）
+let personaNightlyAttemptAt = 0;  // 最近一次「每日定时」尝试时刻（失败重试节流 5 分钟）
 let personaRunOkCount = 0;        // 本轮批量学习中成功落档的目标数（决定是否推进 lastRunAtMs 水位）
 let personaFailBackoffUntil = 0;  // 整批失败后的重试退避截止时刻（防每分钟重试刷学习会话）
 
@@ -673,23 +674,44 @@ function personaAnyLearning() {
 /** 每 60s 校验：persona.autoIntervalEnabled && persona.enabled && 距 persona.lastRunAtMs ≥ autoIntervalHours
  *  → 空闲时对 persona.targetQQ 全体跑 personaLearnTargets(targets, { auto:true, windowMs })（增量窗口），
  *    由 personaLearnTargets 的链尾任务写回 lastRunAtMs=now。不依赖 DND/北京分钟。 */
+/** 今天的 HH:MM（北京时）对应的毫秒时间戳；未配置/非法返回 null */
+function todayTargetMsBeijing(hhmm, nowMs) {
+  const m = String(hhmm || '').trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!m) return null;
+  const h = Number(m[1]); const min = Number(m[2]);
+  const bj = new Date(nowMs + 8 * 3600 * 1000);
+  return Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate(), h, min) - 8 * 3600 * 1000;
+}
+
+/** 每 60s 校验两种自动触发：
+ *    ① 每日定时 `persona.timeHHMM`（北京时，留空=不定时）：过点且当天没跑过 → 跑一轮；
+ *    ② 自动间隔 `persona.autoIntervalEnabled` + `autoIntervalHours`：距 lastRunAtMs 满间隔 → 跑一轮。
+ *  两条都走同一条串行链，由链尾写回 persona.lastRunAtMs（也是下一轮的增量窗口起点）。 */
 function checkPersonaAutoTick() {
   const lcfg = readLearningConfig();
   const p = (lcfg?.persona && typeof lcfg.persona === 'object' && !Array.isArray(lcfg.persona)) ? lcfg.persona : {};
-  if (p.autoIntervalEnabled !== true || p.enabled === false) return;
+  if (p.enabled === false) return;
   if (!dshReady || !apiRef) return;             // 未就绪/API 未注入：下个 tick 再试
   if (personaAnyLearning()) return;             // 手工/自动任务在跑：等空闲，避免并发排队
   const nowMs = Date.now();
   const hours = resolveAutoIntervalHours(p.autoIntervalHours);
   const lastRunMs = Math.max(0, Number(p.lastRunAtMs) || 0);
-  if (lastRunMs > 0 && nowMs - lastRunMs < hours * 3600000) return; // 未到下次间隔
-  if (nowMs - personaAutoLastTriggerAt < 60 * 1000) return;          // 同分钟防抖（lastRunAtMs=0 首次/失败重试兜底）
-  if (nowMs < personaFailBackoffUntil) return;                       // 上轮整批失败：按退避间隔重试，不每分钟刷会话
+
+  const nightlyAt = todayTargetMsBeijing(p.timeHHMM, nowMs);
+  const dueNightly = nightlyAt !== null && nowMs >= nightlyAt && lastRunMs < nightlyAt;
+  const dueInterval = p.autoIntervalEnabled === true
+    && (lastRunMs === 0 || nowMs - lastRunMs >= hours * 3600000);
+  if (!dueNightly && !dueInterval) return;
+
+  if (dueNightly && nowMs - personaNightlyAttemptAt < 5 * 60 * 1000) return; // 定时失败重试节流 5 分钟
+  if (!dueNightly && nowMs - personaAutoLastTriggerAt < 60 * 1000) return;   // 间隔档同分钟防抖
+  if (nowMs < personaFailBackoffUntil) return;                               // 上轮整批失败：按退避间隔重试
   const targets = normalizeTargetUids(p.targetQQ);
   if (!targets.length) return;
   personaAutoLastTriggerAt = nowMs;
+  if (dueNightly) personaNightlyAttemptAt = nowMs;
   const windowMs = lastRunMs > 0 ? nowMs - lastRunMs : AUTO_WINDOW_DEFAULT_MS;
-  log(`[persona] 自动间隔学习触发(每${hours}h，窗口 ${Math.max(1, Math.round(windowMs / 3600000))}h，目标 ${targets.length} 个)`);
+  log(`[persona] ${dueNightly ? `每日定时 ${p.timeHHMM}` : `自动间隔(每${hours}h)`}学习触发（窗口 ${Math.max(1, Math.round(windowMs / 3600000))}h，目标 ${targets.length} 个）`);
   personaLearnTargets(targets, { auto: true, lastRunAtMs: lastRunMs, windowMs });
 }
 
