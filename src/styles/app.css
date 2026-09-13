@@ -349,13 +349,27 @@ body textarea.json-text, body .log-viewer, body .log-line {
 /* 右卡「人格学习状态」：与左卡等高（stretch + flex 撑满），列表超出就滚动而不是无限变长 */
 .lrn-status-card { display: flex; flex-direction: column; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
-.lrn-status-row { cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease; }
-.lrn-status-row:hover { border-color: hsl(339.33 90% 70.39% / .85); }
-.lrn-status-row.is-open { border-color: hsl(339.33 90% 62% / .95); box-shadow: 0 2px 10px hsl(339.13 92% 9% / .06); }
+/* 悬停动效：与主页那几张启动卡一致（微微抬起 + 阴影 + 边框变亮） */
+.lrn-status-row { cursor: pointer; transition: box-shadow .2s, transform .2s, border-color .2s; }
+.lrn-status-row:hover { transform: translateY(-2px); border-color: hsl(339.33 90% 70.39% / .9); box-shadow: 0 6px 16px hsl(339.13 92% 9% / .10); }
+.lrn-status-row:active { transform: translateY(0); }
 .lrn-status-caret { margin-left: auto; font-size: 11.5px; color: var(--nc-foreground-400); white-space: nowrap; }
 .lrn-status-detail { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.65; color: var(--nc-foreground-600); }
 .lrn-dk { display: inline-block; min-width: 76px; color: var(--nc-foreground-400); }
 .lrn-tag { display: inline-block; padding: 0 6px; margin: 0 4px 2px 0; border-radius: 6px; background: hsl(339.33 90% 96%); color: hsl(339.13 60% 42%); font-size: 11.5px; }
+
+/* 人物资料弹窗（点「人格学习状态」里的一条） */
+.pfp-mask { position: fixed; inset: 0; background: hsl(339 40% 12% / .35); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 24px; }
+.pfp-modal { width: min(680px, 94vw); max-height: 84vh; overflow: hidden; display: flex; flex-direction: column; background: #fff; border: 1px solid hsl(339.33 90% 86%); border-radius: 16px; box-shadow: 0 18px 48px hsl(339.13 92% 9% / .22); animation: pfpIn .16s ease-out; }
+@keyframes pfpIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+.pfp-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid hsl(339.33 90% 92%); }
+.pfp-title { font-size: 17px; font-weight: 700; color: var(--nc-foreground-900); }
+.pfp-sub { margin-top: 4px; font-size: 12.5px; color: var(--nc-foreground-400); }
+.pfp-body { padding: 14px 18px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.pfp-row { display: flex; gap: 10px; font-size: 13px; line-height: 1.7; }
+.pfp-k { flex: 0 0 88px; color: var(--nc-foreground-400); }
+.pfp-v { flex: 1 1 auto; color: var(--nc-foreground-800); white-space: pre-wrap; word-break: break-word; }
+.pfp-empty { margin-top: 6px; font-size: 12.5px; color: var(--nc-foreground-400); }
 
 /* 区块内分组 */
 .lrn-block { }

@@ -554,13 +554,19 @@ export function runSlangNightlyLearn() {
   return queueSlangOp(() => runSlangLearnFrom(sinceTsMs, 'nightly'));
 }
 
-/** C. /slang learn / console 按钮用：忽略定时直接按“lastLearnAtMs 或当天 0 点”增量学习（走串行链），成功即打标。
- *  force=true 时即使 learning-config slang.enabled=false 也强制执行（主人强推）。 */
+/** C. /slang learn / console 按钮用：忽略定时直接增量学习（走串行链），成功即打标。
+ *  force=true 时即使 learning-config slang.enabled=false 也强制执行（主人强推）。
+ *  【2026-09-13 修「点了立即学习却什么也没学」】原来窗口是 `[lastLearnAtMs+1, now]` ——
+ *  只要上次学习刚跑过（水位≈now），再点一次就只有几秒的窗口，必然"未发现候选"，
+ *  看起来就是"黑话学习坏了"。现在手动学习**至少回看 24 小时**（水位更早时仍从水位起，不重复扫古早历史）。 */
+const SLANG_MANUAL_LOOKBACK_MS = 24 * 3600 * 1000;
 export function slangLearnNow(force = false) {
   const live = readLearningConfig();
   if (!resolveNightlyEnabled(live) && !force) return Promise.resolve({ ...emptyLearnSummary('manual'), reason: 'disabled' });
   const marker = resolveLastLearnAtMs(live);
-  const sinceTsMs = marker > 0 ? marker + 1 : todayStartBjMs();
+  const lookbackFloor = Date.now() - SLANG_MANUAL_LOOKBACK_MS;
+  const sinceTsMs = marker > 0 ? Math.min(marker + 1, lookbackFloor) : lookbackFloor;
+  log(`[slang] 立即学习：窗口 ${new Date(sinceTsMs).toISOString()} ~ now（水位 ${marker || '无'}${marker > 0 && marker + 1 <= lookbackFloor ? '，从水位起' : '，回看 24h'}）`);
   return queueSlangOp(() => runSlangLearnFrom(sinceTsMs, 'manual'));
 }
 

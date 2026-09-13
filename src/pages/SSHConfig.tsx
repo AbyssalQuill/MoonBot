@@ -47,6 +47,7 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
   const [syncCode, setSyncCode] = useState(true);
   const [syncState, setSyncState] = useState(false);
   const [syncStickers, setSyncStickers] = useState(false);
+  const [syncConfig, setSyncConfig] = useState(false);   // 只同步桥的 config.json
   const [form, setForm] = useState({ name: '', host: '', port: 22, username: 'root', authType: 'password' as 'password' | 'key', password: '', privateKey: '', passphrase: '' });
 
   // ===== 克隆部署面板 =====
@@ -228,8 +229,8 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
       // 内容勾选经 flags 显式传递(与后端 wantCode/wantState/wantStickers 一一对应);
       // direction 只带方向不带后缀。merge 强制 state、禁代码(与 UI 禁用/提示一致)。
       const flags = syncDir === 'merge'
-        ? { code: false, state: true, stickers: syncStickers }
-        : { code: syncCode, state: syncState, stickers: syncStickers };
+        ? { code: false, state: true, stickers: syncStickers, config: false }
+        : { code: syncCode, state: syncState, stickers: syncStickers, config: syncConfig };
       const r = await syncBridge({ ...s }, syncDir, false, flags);
       if (r.steps?.length) setSyncLog(r.steps.map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + x.msg : ''}`));
       setMsg(r.success ? '同步完成' : (r.message || '同步失败，详见下方步骤'));
@@ -560,6 +561,10 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: syncDir === 'merge' ? 0.45 : 1 }}>
                       <input type="checkbox" checked={syncState} onChange={(e) => setSyncState(e.target.checked)} disabled={syncDir === 'merge'} />
                       记忆/会话数据（state/：SQLite 记忆库、社交状态、用量日志等）
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: syncDir === 'merge' ? 0.45 : 1 }}>
+                      <input type="checkbox" checked={syncConfig} onChange={(e) => setSyncConfig(e.target.checked)} disabled={syncDir === 'merge'} />
+                      只同步 config.json（桥的配置：模型/名单/社交参数；不含代码与数据）
                     </label>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <input type="checkbox" checked={syncStickers} onChange={(e) => setSyncStickers(e.target.checked)} />
