@@ -29,6 +29,11 @@ export const TUNABLE_SPECS = [
   { key: 'sendLinearStep', path: ['social', 'send', 'linearStepMs'], type: 'dur', min: 100, max: 2000, label: '发送线性步进', desc: '连续发送时每条消息递增的间隔步长(默认 350ms):第2条约350、第3条约700,以此类推直到封顶' },
   { key: 'sendLinearCap', path: ['social', 'send', 'linearCapMs'], type: 'dur', min: 500, max: 10000, label: '发送线性封顶', desc: '线性间隔的最大值(默认 4000ms),超过后不再递增;也作为长文兜底下限的天花板' },
   { key: 'sendLinearBase', path: ['social', 'send', 'linearBaseMs'], type: 'dur', min: 0, max: 2000, label: '发送线性底延迟', desc: '每条线性间隔额外加的基础值(默认 0=首条不延迟,唤醒/首轮秒级即时);>0 时整体平移加 base' },
+  // —— 【2026-09-15 主人要求】线性延迟改成"按单个字的速度"：perChar 模式（默认）+ 主人可口头调 ——
+  { key: 'sendLinearMode', path: ['social', 'send', 'linearMode'], type: 'str', label: '打字节奏模式', desc: 'perChar=按每个字的打字时间算间隔(默认,长句等得久、短句快);count=旧的"连发第几条×步长"' },
+  { key: 'sendPerCharMs', path: ['social', 'send', 'linearPerCharMs'], type: 'dur', min: 30, max: 2000, label: '每个字的打字时间', desc: 'perChar 模式下每个字算多少毫秒(默认 150)。调大=打字更慢更从容,调小=更快(最小 30)' },
+  { key: 'sendLinearMin', path: ['social', 'send', 'linearMinMs'], type: 'dur', min: 0, max: 5000, label: '两条气泡最小间隔', desc: 'perChar 模式下无论多短的气泡，两条之间至少间隔这么久(默认 250ms)，避免贴脸连发' },
+  { key: 'sendLinearJitter', path: ['social', 'send', 'linearJitterRatio'], type: 'float', min: 0, max: 0.9, label: '打字速度抖动', desc: '每条打字时间的随机浮动比例(默认 0.25=±25%)，真人不会每条都一样快' },
   // —— 模型相关（改完会同步给隔离 DSH 的 agent-default-model，见 applyTunable）——
   { key: 'modelProvider', path: ['dsh', 'provider'], type: 'str', modelGroup: true, label: '模型服务商', desc: 'deepseek-official=DeepSeek 官方（默认）；xiaomi-token-plan-cn=小米 MiMo；空=自动探测用 DSH 端默认' },
   { key: 'model', path: ['dsh', 'model'], type: 'str', modelGroup: true, label: '主模型', desc: '如 deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro / mimo-v2.5；留空=DSH 默认' },
@@ -83,6 +88,13 @@ export function applyTunable(spec, raw) {
   } else if (spec.type === 'str') {
     v = String(raw ?? '').trim();
     if (spec.modelGroup && spec.key === 'reasoningEffort' && v === 'auto') v = '';
+    // 打字节奏模式：主人用自然语言说什么都认（"按字/按字数" 与 "按条/计数" 两个方向）
+    if (spec.key === 'sendLinearMode') {
+      const low = v.toLowerCase();
+      if (/^(perchar|per-char|char|字|按字|按字数|字数|每个字)$/.test(low)) v = 'perChar';
+      else if (/^(count|n|条|条数|按条|计数|连发数)$/.test(low)) v = 'count';
+      else if (low !== 'count') v = 'perChar';
+    }
   }
   writeCfgPath(spec.path, v);
   try { fs.writeFileSync(path.join(ROOT, 'config.json'), JSON.stringify(cfgObj, null, 2)); } catch (e) { log('[tunable] 配置落盘失败:', e?.message ?? e); }

@@ -53,8 +53,8 @@ export function sendToQQ(key, msg) {
       // （只有静默超过 linearResetMs 才归零），于是热聊时 n 早早顶到 cap，**每条回复的第一条气泡
       // 也要先干等最多 1.5 秒**——实测 245 次 qq_send_message 调用**全部是单条调用**，
       // 也就是说那 1.5 秒纯属白等（NapCat 自身 RTT 实测只有 18ms）。
-      // 改成首条 0 → 模型一决定回，气泡立刻出；第 2 条起仍按线性节拍，分条节奏不变。
-      const pace = isFirst ? 0 : nextSendPaceMs(key);
+      // 改成首条 0 → 模型一决定回，气泡立刻出；第 2 条起按"这条自己打完要多久"等（perChar 模式）。
+      const pace = isFirst ? 0 : nextSendPaceMs(key, part.length);
       if (pace != null && pace > 0) await sleep(pace);
       try {
         if (kind === 'private') await withTimeout(botRef.sendPrivateMessage(Number(id), qqTextSeg(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
@@ -98,9 +98,9 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
     if (msg === '') continue;
     const isLast = i === messages.length - 1;
     enqueueSend(async () => {
-      // 发送线性节拍：pace=null=线性关闭 → 保留旧条间节奏；否则按会话连续计数线性等（条间/跨回合统一）
-      // 【2026-09-12 加速】首条不等节拍，理由与 sendMessages 处相同（那 1.5s 对单条调用纯属白等）。
-      const pace = i === 0 ? 0 : nextSendPaceMs(key);
+      // 发送线性节拍：pace=null=线性关闭 → 保留旧条间节奏；否则：
+      // perChar 模式下间隔 = 这条气泡自己打完要多久 = 字数 × 每字毫秒（首条仍 0=秒回）。
+      const pace = i === 0 ? 0 : nextSendPaceMs(key, msg.length);
       if (pace != null && pace > 0) await sleep(pace);
       try {
         if (kind === 'private') await withTimeout(botRef.sendPrivateMessage(Number(id), qqTextSeg(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
@@ -427,8 +427,9 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
       //   · 245 次**全部是单条调用**（没有一次是"一次调多条"）→ 那 1.5 秒对当前行为**纯属白等**；
       //   · 中位 0.59s / 平均 1.21s / p90 2.55s，而 NapCat 自身 HTTP RTT 实测只有 **18ms**，
       //     全量日志里"发送失败/自动重试"**各 0 次** → 这段耗时就是桥自己 sleep 出来的。
-      // 改成首条 = 0：模型一决定回，气泡立刻出；第 2 条起仍走线性节拍，**分条节奏完全不变**。
-      const pace = i === 0 ? 0 : nextSendPaceMs(key);
+      // 改成首条 = 0：模型一决定回，气泡立刻出；第 2 条起按"这条气泡自己打完要多久"等
+      // （perChar 模式：字数 × linearPerCharMs，见 send-chain.js 顶部说明）。
+      const pace = i === 0 ? 0 : nextSendPaceMs(key, String(msg || '').length);
       if (pace != null && pace > 0) await sleep(pace);
       try {
         const sendData = await onebotSend(kind, id, msg, useReply, useAt, img);

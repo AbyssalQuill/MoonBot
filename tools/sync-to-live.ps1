@@ -67,7 +67,8 @@ foreach ($rel in $bridgeDirs) {
 # the server kept running whatever copy it already had -- found 2026-09-15 when server-side preset
 # refresh silently stayed dead because the new env export never reached the host.
 $bridgeRootFiles = @('start-bridge.sh')
-Write-Host '=== 1b) bridge root files (deploy scripts) ==='foreach ($rel in $bridgeRootFiles) {
+Write-Host '=== 1b) bridge root files (deploy scripts) ==='
+foreach ($rel in $bridgeRootFiles) {
   $from = Join-Path $srcBridge $rel
   if (-not (Test-Path $from)) { Write-Host ("  SKIP (not in source): " + $rel); continue }
   foreach ($d in $bridgeDests) {
@@ -97,7 +98,8 @@ foreach ($d in $bridgeDests) {
   if ($n -gt 0) { Write-Host ("  removed " + $n + " dev-only file(s) from " + $toolsDir) }
 }
 
-Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='$srcServer = Join-Path $srcMgr 'server'
+Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='
+$srcServer = Join-Path $srcMgr 'server'
 foreach ($d in $mgrDests) {
   $dstServer = Join-Path $d 'server'
   if (-not (Test-Path $dstServer)) { Write-Host ("  SKIP (no server dir): " + $d); continue }
