@@ -687,27 +687,79 @@ const clampHrs = (v: any): number => {
 }
 
 /* ================================================================== */
-/* 用量统计：独立 60s 自动刷新（只刷新本区块数据），纯内联 SVG 绘图       */
+/* 用量统计：本机 + 服务端**两边都取**，再显示「本机 / 服务端 / 合计」三块  */
 /* ================================================================== */
+/** 一条"用量来源"摘要：本机桥 / 服务端桥 / 合计 */
+interface UsageSource { rep: any | null; reason: string; server?: { name: string; host: string } | null; }
+
+/** 某个报告里的"今日已用"（与下面 todayUsed 同一套口径：优先 billedTotal，其次四项相加） */
+function todayUsedOf(rep: any): number {
+  if (!isObj(rep)) return 0;
+  const t = isObj(rep.today) ? rep.today : {};
+  const billed = num(t.billedTotal) || (num(t.prompt) + num(t.completion) + num(t.cacheRead) + num(t.cacheWrite));
+  return billed > 0 ? billed : num(t.total);
+}
+
+function UsageSourceCard({ title, src, badge, highlight }: { title: string; src: UsageSource; badge?: string; highlight?: boolean }) {
+  const used = todayUsedOf(src.rep);
+  const t = isObj(src.rep?.today) ? src.rep.today : {};
+  const ok = !!src.rep;
+  return (
+    <div className={`lrn-stat ${highlight ? 'lrn-stat-azure' : ''}`}>
+      <div className="lrn-stat-t">
+        {title}
+        {badge && <span className={`badge ${badge === '服务端' ? 'badge-remote' : 'badge-local'}`} style={{ marginLeft: 6 }}>{badge}</span>}
+      </div>
+      <div className="lrn-stat-v">{ok ? fmtFull(used) : '—'}</div>
+      <div className="lrn-stat-s">
+        {ok
+          ? (used === 0
+            ? '今日暂无记录'
+            : `未命中 ${fmtFull(num(t.prompt))} · 命中 ${fmtFull(num(t.cacheRead))} · 输出 ${fmtFull(num(t.completion))}`)
+          : (src.reason || '未取到数据')}
+        {ok && src.server ? <><br />{src.server.name}（{src.server.host}）</> : null}
+      </div>
+    </div>
+  );
+}
+
 function UsagePanel() {
   const [report, setReport] = useState<any>(null);
+  const [split, setSplit] = useState<{ local: any | null; remote: any | null; total: any | null; localReason: string; remoteReason: string; remoteServer: any } | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState('');
   const [live, setLive] = useState<'sse' | 'poll'>('poll');
   const inflight = useRef(false);
+  const lastReload = useRef(0);
 
   const load = async () => {
     if (inflight.current) return;
     inflight.current = true;
     if (!report) setLoading(true);
     try {
-      const r = await getTokenReport();
+      const r: any = await getTokenReport();
       const e = firstErr(r);
       if (e) { setErr(e); return; }
-      // 桥侧回包是 { ok, report:{...} }：直接 setReport(r) 会让 report.dates 恒为 undefined，
-      // 曲线与卡片整块空掉。这里显式取出 report（兼容直接返回报告对象的旧桥）。
-      setReport(isObj((r as any)?.report) ? (r as any).report : r); setErr('');
+      // 【2026-09-14】后端现在回 { local, remote, total, remoteReason, ... }：
+      //   · local  = 本机桥那份（永远取，SSH 模式下也保留）；
+      //   · remote = 服务端桥那份（没连服务器/服务端桥没跑时 null + remoteReason 一行原因）；
+      //   · total  = 两份合并的合计 —— 曲线/分时图仍然按合计画。
+      const total = isObj(r?.total) ? r.total : (isObj(r?.report) ? r.report : null);
+      const next = {
+        local: isObj(r?.local) ? r.local : null,
+        remote: isObj(r?.remote) ? r.remote : null,
+        total,
+        localReason: String(r?.localReason || ''),
+        remoteReason: String(r?.remoteReason || ''),
+        remoteServer: isObj(r?.remoteServer) ? r.remoteServer : null,
+      };
+      setSplit(next);
+      if (!total) {
+        setErr([next.localReason, next.remoteReason].filter(Boolean).join('；') || '两侧桥都没有取到用量数据');
+        return;
+      }
+      setReport(total); setErr('');
       setUpdatedAt(bjClock(Date.now()));
     } catch (e2: any) {
       setErr(String(e2?.message ?? e2));
@@ -730,7 +782,13 @@ function UsagePanel() {
       try { payload = JSON.parse(data); } catch { return; }
       const rep = isObj(payload?.report) ? payload.report : isObj(payload?.result?.report) ? payload.result.report : null;
       if (!rep) return;
-      setReport(rep); setErr(''); setUpdatedAt(bjClock(Date.now()));
+      // SSE 只推**单侧**桥的原始报告，而面板显示的是"本机 + 服务端 + 合计"三段：
+      // 直接 setReport(rep) 会把合计覆盖成单侧数据（服务端那份会被抹掉）。
+      // 所以这里改成"节流地整段重取"（最多每 15 秒一次），数据仍然新鲜，三段也不会互相覆盖。
+      const now = Date.now();
+      if (now - lastReload.current < 15000) return;
+      lastReload.current = now;
+      load();
     };
 
     try {
@@ -762,7 +820,7 @@ function UsagePanel() {
         <div className="card-title"><BarChart3 size={17} /> Token 用量统计</div>
         <div className="lrn-error">
           <AlertTriangle size={15} />
-          <div style={{ flex: 1 }}>{err}<div className="lrn-error-detail">用量接口来自桥侧新版本（/api/token-report）；桥过旧或未连接时无法统计。</div></div>
+          <div style={{ flex: 1 }}>{err}<div className="lrn-error-detail">用量来自桥侧 /api/token-report：本机桥与服务端桥都取不到时无法统计（服务端桥没跑时会单独给出原因）。</div></div>
           <button className="btn btn-sm btn-danger" onClick={load}><RefreshCw size={13} /> 重试</button>
         </div>
       </div>
@@ -806,7 +864,7 @@ function UsagePanel() {
       <div className="card-title" style={{ justifyContent: 'space-between' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><TrendingUp size={17} /> Token 用量统计</span>
         <span className="page-actions" style={{ gap: 8 }}>
-          <span className="lrn-updated">{live === 'sse' ? '实时推流（SSE）' : '每 60 秒自动刷新（SSE 不可用）'}{updatedAt ? ` · ${updatedAt}` : ''}</span>
+          <span className="lrn-updated">{live === 'sse' ? '实时推流（SSE）· 本机 + 服务端合并' : '每 60 秒自动刷新（SSE 不可用）'}{updatedAt ? ` · ${updatedAt}` : ''}</span>
           <button className="btn btn-sm" disabled={loading} onClick={load}>
             {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
           </button>
@@ -814,6 +872,16 @@ function UsagePanel() {
       </div>
 
       {note && <div className="lrn-note lrn-note-soft">{note}</div>}
+
+      {/* 【2026-09-14 主人要求】用量**两边都不漏**：本机一份、服务端一份、再加合计，三块分开显示。
+          服务端取不到时这里给出原因（例如"服务端桥未运行"），本机那份照常显示。 */}
+      {split && (
+        <div className="lrn-stat-row">
+          <UsageSourceCard title="本机" badge="本机" src={{ rep: split.local, reason: split.localReason }} />
+          <UsageSourceCard title="服务端" badge="服务端" src={{ rep: split.remote, reason: split.remoteReason, server: split.remoteServer }} />
+          <UsageSourceCard title="合计（本机 + 服务端）" src={{ rep: split.total, reason: '两侧都没有数据' }} highlight />
+        </div>
+      )}
 
       {/* 顶部三张数字卡 */}
       <div className="lrn-stat-row">

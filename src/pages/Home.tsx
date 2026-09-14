@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { instanceAction, startAllInstances } from '../api';
+import { instanceAction, startAllInstances, remoteStackById, sshServiceAction } from '../api';
 import type { ManagerState, LocalInstance } from '../stores/types';
 import { Settings, Loader2, Rocket, BookOpen, X, RotateCw, Square } from 'lucide-react';
 
@@ -106,10 +106,39 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
   const actStop = (id: SvcId) => doAction(id, 'stop');
   const actRestart = (id: SvcId) => doAction(id, 'restart');
 
-  /** 一键启动整套：NapCat → DSH → 桥（NapCat 首次需扫码 QQ）；后端会**逐步等到真正就绪**再走下一步 */
+  /* 【2026-09-14 主人要求】连上服务器后，这三张卡就是**服务器那套**：
+   *   · 状态看服务端（"服务端运行中/未运行"）；
+   *   · 按钮直接操作服务端（systemctl / docker / 桥进程），不再去起本机进程；
+   *   · "打开"打开的是**服务端**的界面（经隧道），不是本机那份。
+   *  没连服务器时，一切保持原样（本机实例）。 */
+  const remoteId = state?.connected && state.activeServer ? state.activeServer.id : null;
+  const remoteCompOf = (id: SvcId): 'dsh' | 'napcat' | 'bridge' =>
+    (id === 'napcat-local' ? 'napcat' : id === 'dsh-isolated' ? 'dsh' : 'bridge');
+  const remoteSvcIdOf = (id: SvcId): string =>
+    (id === 'napcat-local' ? 'srv-napcat-webui' : id === 'dsh-isolated' ? 'srv-dsh-web' : 'srv-bridge');
+  const remoteServiceOf = (id: SvcId) => (state?.services ?? []).find((s) => s.id === remoteSvcIdOf(id));
+
+  const doRemoteAction = async (id: SvcId, action: 'start' | 'stop' | 'restart') => {
+    if (!remoteId) return;
+    setBusy(id); setActing(`${id}:${action}`); setMsg(null);
+    try {
+      const r = await sshServiceAction(remoteId, remoteCompOf(id), action);
+      const label = action === 'start' ? '启动' : action === 'stop' ? '停止' : '重启';
+      setMsg(`${label}服务端 ${remoteCompOf(id)}：${r.message || (r.ok ? '已下发' : '未成功')}`);
+    } catch { setMsg('操作服务端失败：无法连接后端'); }
+    finally { setBusy(null); setActing(null); onRefresh(); }
+  };
+
+  /** 一键启动整套：连上服务器时走服务端整套（DSH → NapCat → 桥），否则还是本机那一套 */
   const actAll = async () => {
     setAllBusy(true); setMsg(null);
     try {
+      if (remoteId && state?.activeServer) {
+        const r = await remoteStackById(remoteId, 'start');
+        const lines = (r.steps ?? []).map((s) => `${s.ok ? '✓' : '✗'} ${s.step}：${String(s.msg || '').split('\n')[0]}`).join('\n');
+        setMsg(`${r.success ? '服务端整套启动成功' : '服务端整套启动未完成'}\n${lines}`);
+        return;
+      }
       const r = await startAllInstances();
       const lines = (r.steps ?? []).map((s) => {
         const secs = s.elapsedMs ? `${(s.elapsedMs / 1000).toFixed(1)}s` : '';
@@ -127,6 +156,17 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
   ];
 
   const sshConn = state?.connected;
+
+  /** 服务端某个组件的运行状态：连上服务器且已拿到远程状态时返回 boolean；拿不到就返回 null
+   *（null = 还是按本机那套文案显示，界面上不会突然空掉）。 */
+  const serverUpOf = (id: SvcId): boolean | null => {
+    const rs: any = (state as any)?.remoteStatus;
+    if (!sshConn || !rs) return null;
+    if (id === 'dsh-isolated') return rs.dsh ? !!rs.dsh.running : null;
+    if (id === 'napcat-local') return rs.napcat ? !!rs.napcat.running : null;
+    if (id === 'bridge-local') return rs.bridge ? !!rs.bridge.running : null;
+    return null;
+  };
 
   return (
     <div className="launcher">
@@ -153,22 +193,49 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
         </div>
       )}
 
+      {/* 【2026-09-14 主人问"连上服务器就算跑起来了吗"】服务器那套是常驻的（systemd/docker），
+          连上就能用、不用再点一次启动；只有当服务端整套都没在跑时才提示一句，免得看着三张
+          「服务端未运行」的卡不知道该干什么。 */}
+      {sshConn && (() => {
+        const rs: any = (state as any)?.remoteStatus;
+        if (!rs) return null;
+        const ups = [rs.dsh?.running, rs.napcat?.running, rs.bridge?.running].filter((x) => x !== undefined);
+        if (!ups.length || ups.some(Boolean)) return null;
+        return (
+          <div className="notice-bar" style={{ maxWidth: 720, margin: '0 auto 12px', textAlign: 'left' }}>
+            ⚠️ 已连上服务器，但服务端整套都没在跑（DSH / NapCat / 桥）。点下面「一键启动整套」，或卡片上的「启动服务端」。
+          </div>
+        );
+      })()}
+
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
         <button className="btn btn-primary" style={{ padding: '8px 26px', fontSize: 15, borderRadius: 12 }} disabled={allBusy} onClick={actAll} data-genui-primary-action>
           {allBusy ? <Loader2 size={16} className="spin" style={{ verticalAlign: -2, marginRight: 8 }} /> : <Rocket size={16} style={{ verticalAlign: -2, marginRight: 8 }} />}
-          {allBusy ? '正在一键启动整套…' : '一键启动整套（NapCat → DSH → 桥）'}
+          {allBusy ? '正在一键启动整套…' : (sshConn ? '一键启动整套（服务端）' : '一键启动整套（NapCat → DSH → 桥）')}
         </button>
       </div>
 
       <div className="tiles grid2x2">
         {svcs.map((t) => {
           const i = inst(t.id);
-          const phase = phaseOf(i);
-          // QQ-Bridge「打开」直接进配置页（管理端已并入主界面 BridgeConfig，不再打开旧控制台）
+          const remoteUp = sshConn ? serverUpOf(t.id) : null;
+          const isRemote = remoteUp !== null && !!remoteId;
+          // 连上服务器时：状态取服务端、按钮操作服务端、打开的是服务端界面；否则完全按本机老逻辑。
+          const phase: Phase = isRemote ? (remoteUp ? 'running' : 'idle') : phaseOf(i);
+          const startAct = () => (isRemote ? doRemoteAction(t.id, 'start') : act(t.id));
+          const stopAct = () => (isRemote ? doRemoteAction(t.id, 'stop') : actStop(t.id));
+          const restartAct = () => (isRemote ? doRemoteAction(t.id, 'restart') : actRestart(t.id));
+          // QQ-Bridge「打开」直接进配置页（连上服务器时那一页读写的就是服务端配置）
           const handleOpen = () => {
-            if (t.id === 'bridge-local') onOpenConfig('bridge-local');
-            else if (i?.url) onOpenWeb(i.url, t.openTitle);
+            if (t.id === 'bridge-local') { onOpenConfig('bridge-local'); return; }
+            if (isRemote) {
+              const svc = remoteServiceOf(t.id);            // 服务端 DSH / NapCat 界面（经隧道）
+              if (svc?.url) onOpenWeb(svc.url, t.openTitle);
+              return;
+            }
+            if (i?.url) onOpenWeb(i.url, t.openTitle);
           };
+          void restartAct;
           return (
             <div className="big-tile" key={t.id}>
               <div className="big-tile-head">
@@ -189,27 +256,28 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
                     <button className="btn btn-primary btn-block" onClick={handleOpen}>打开</button>
                     <button
                       className="icon-btn"
-                      title="重启"
+                      title={isRemote ? '重启服务端' : '重启'}
                       disabled={busy === t.id}
-                      onClick={() => actRestart(t.id)}
+                      onClick={restartAct}
                     >{acting === `${t.id}:restart` ? <Loader2 size={16} className="spin" /> : <RotateCw size={16} />}</button>
                     <button
                       className="icon-btn"
                       title={t.id === 'bridge-local' ? '终止' : '停止'}
                       disabled={busy === t.id}
-                      onClick={() => actStop(t.id)}
+                      onClick={stopAct}
                     >{acting === `${t.id}:stop` ? <Loader2 size={16} className="spin" /> : <Square size={15} />}</button>
                   </>
                 ) : (
-                  <button className="btn btn-primary btn-block" disabled={busy === t.id} onClick={() => act(t.id)}>
-                    {busy === t.id ? <><Loader2 size={16} className="spin" /> 启动中…</> : phase === 'failed' ? '重试启动' : '启动'}
+                  <button className="btn btn-primary btn-block" disabled={busy === t.id} onClick={startAct}>
+                    {busy === t.id ? <><Loader2 size={16} className="spin" /> {isRemote ? '下发中…' : '启动中…'}</> : phase === 'failed' ? '重试启动' : (isRemote ? '启动服务端' : '启动')}
                   </button>
                 )}
                 <button className="icon-btn" title="配置" onClick={() => onOpenConfig(t.id)}><Settings size={17} /></button>
               </div>
               <div className="big-foot" title={phase === 'failed' ? (i?.error || '') : (i?.note || '')}>
-                <span className={`status-dot ${dotClass(phase)}`} />
-                <span>{footText(i, phase)}</span>
+                {isRemote
+                  ? <><span className={`status-dot ${remoteUp ? 'online' : 'offline'}`} /><span>{remoteUp ? '服务端运行中' : '服务端未运行'}</span></>
+                  : <><span className={`status-dot ${dotClass(phase)}`} /><span>{footText(i, phase)}</span></>}
               </div>
             </div>
           );
@@ -256,10 +324,13 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
               </TutorialSection>
               <TutorialSection title="③ SSH 远程服务器怎么配">
                 <ol>
-                  <li>首页点 <b>SSH 配置</b> 卡 → 「添加服务器」填：名称、主机 IP、端口、用户名（如 <code>root</code>）、密码或密钥。</li>
-                  <li>连接成功后会自动开隧道：NapCat 6099→13000、DSH 3080→13080、Bridge 3100→13100，学习与用量页会自动切到远端那套。</li>
-                  <li>想用服务器跑整套而本机只当控制台：在 SSH 配置里连上服务器后，把本机三个实例停掉即可，学习/画像页会走远端。</li>
-                  <li>每台服务器行还有「同步」（把本地桥代码推上去/拉下来）和「清整套」（删除远端整套并备份）按钮，详见 SSH 页说明。</li>
+                  <li>首页点 <b>SSH 配置</b> 卡 → 「添加服务器」填：名称、主机 IP、端口、用户名（如 <code>root</code>）、密码或密钥，然后点「测试」再点「连接」。</li>
+                  <li><b>连上之后，首页那三张卡就代表服务器那套</b>：状态行显示 <b>服务端运行中 / 服务端未运行</b>，「启动 / 重启 / 停止」直接操作服务器（DSH 走 <code>systemctl dsh-web</code>、NapCat 走 <code>docker</code>、桥走它自己的启动脚本），「一键启动整套」也是拉起服务器上的整套。没连服务器时，这些按钮还是操作本机。</li>
+                  <li><b>打开界面</b>：NapCat / DeepSeek Harness 卡点「打开」会经隧道打开<b>服务器上</b>的界面（自动带上该机的访问令牌），可在应用内直接看。隧道映射：NapCat WebUI 6099→13000、NapCat HTTP 3000→13001、DSH 3080→13080、桥控制台 3100→13100（桥控制台有安全响应头，只能「新窗口打开」）。</li>
+                  <li><b>改服务器上的桥配置</b>：连上服务器时，功能配置页读写的就是服务器 <code>/root/qq-bridge/config.json</code>（页首有醒目横幅）。保存 = 先备份 <code>config.json.bak-时间戳</code> → 原子替换 → 回读比对关键字段，桥按 mtime 热加载，所以<b>不用重启桥就生效</b>；人设与发言规则也能一起写到服务端。</li>
+                  <li><b>用量按两边分开算</b>：「学习与用量」页会同时给出 <b>本机 / 服务端 / 合计</b>；服务器没连上时只显示本机那份，并写明原因。</li>
+                  <li><b>关于失败与冷却</b>：连续测失败会短暂冷却（<b>连不上/超时类：20 秒 → 40 秒 → 60 秒</b>；<b>凭据类只停 10 秒</b>），提示里会写清"这几回到底报什么错"，并给一个「仍然重试一次」按钮可以跳过冷却。<b>但别狂点测试</b>：服务器上的 fail2ban 只认认证失败次数，点多了会把本机 IP 整机封掉（那时正确密码也连不上，表现为连接超时）——真被封了就在服务器上跑 <code>fail2ban-client set sshd unbanip &lt;本机IP&gt;</code>。</li>
+                  <li>每台服务器行还有「同步」（把本地桥代码推到服务器）和「清整套」（删除远端整套并备份）按钮。</li>
                 </ol>
               </TutorialSection>
               <TutorialSection title="④ 常用设置入口">

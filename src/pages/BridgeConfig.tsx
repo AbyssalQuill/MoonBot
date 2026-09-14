@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, getBridgeConfig, saveBridgeConfig, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, type CharacterEntry, type ConfigProfile } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
-import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check } from 'lucide-react';
+import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle } from 'lucide-react';
 import NumInput from '../components/NumInput';
 
-interface Props { onBack: () => void; onRefresh: () => void; onOpenLearning: () => void; onOpenPortrait: () => void; }
+/** remote：连上服务器时把「服务端」那套传进来（配置读写服务端 /root/qq-bridge），null = 编辑本机 */
+interface Props { onBack: () => void; onRefresh: () => void; onOpenLearning: () => void; onOpenPortrait: () => void; remote?: { id: string; name: string; host: string } | null; }
 
 /* 【2026-09-12】隔离 DSH 里**实际生效**的模型段（settings.yaml 的 agent-default-model）。
  * 管理端保存模型配置时写的就是它；这里读回来只为两件事：
@@ -269,10 +270,30 @@ function setIn(o: any, p: string, v: any) { const ks = p.split('.'); const last 
 function setVal(current: any, path: string, value: any) { const n = JSON.parse(JSON.stringify(current ?? {})); setIn(n, path, value); return n; }
 
 const isObj = (v: any) => v && typeof v === 'object' && !Array.isArray(v);
+
+/** 把后端说明文字里的 **粗体** 与 `行内代码` 渲染成界面元素（与新手文档同一观感，
+ *  免得把 `/root/qq-bridge/config.json` 这种路径当普通文字混在句子里）。 */
+function RichText({ text }: { text: string }) {
+  const parts = String(text ?? '').split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (p.startsWith('**') && p.endsWith('**') && p.length > 4) return <b key={i}>{p.slice(2, -2)}</b>;
+        if (p.startsWith('`') && p.endsWith('`') && p.length > 2) return <code key={i}>{p.slice(1, -1)}</code>;
+        return <span key={i}>{p}</span>;
+      })}
+    </>
+  );
+}
 const isArr = (v: any) => Array.isArray(v);
 
-export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpenPortrait }: Props) {
+export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpenPortrait, remote }: Props) {
   const [tab, setTab] = useState<'common' | 'tools' | 'persona' | 'json' | 'profiles'>('common');
+  /* 【2026-09-14 主人要求】SSH 模式下这一页读写的是**服务端** /root/qq-bridge/config.json：
+   *  · target 记录本页当前编辑的是哪一套（local / remote）—— 横幅必须一眼看见，别让人以为在改本机；
+   *  · remoteMeta 存服务端路径/说明/写入校验结果，供横幅与保存提示使用。 */
+  const [target, setTarget] = useState<'local' | 'remote'>('local');
+  const [remoteMeta, setRemoteMeta] = useState<{ dir?: string; path?: string; notes?: string[]; message?: string }>({});
   const [cfg, setCfg] = useState<any>(null);
   const [persona, setPersona] = useState('');
   const [speechRules, setSpeechRules] = useState('');
@@ -306,8 +327,19 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   useEffect(() => { load(); }, []);
 
   const load = async () => {
-    const r = await getBridgeConfig();
+    // 连上服务器 → 读**服务端** /root/qq-bridge/config.json（经已有 SSH 连接，不新建连接）
+    const r: any = remote
+      ? await getRemoteBridgeConfig(remote.id)
+      : await getBridgeConfig();
     const c = r.config || {};
+    if (remote) {
+      setTarget('remote');
+      setRemoteMeta({ dir: r.dir, path: r.path, notes: r.notes, message: r.ok ? '' : (r.message || '读取服务端配置失败') });
+      if (!r.ok) { setMsg('读取服务端配置失败：' + (r.message || '未知原因')); }
+    } else {
+      setTarget('local');
+      setRemoteMeta({});
+    }
     // 保证模型区“识图模型 / API Key”输入框总是可见（留空即默认）
     if (!c.dsh) c.dsh = {};
     if (c.dsh.apiKey === undefined) c.dsh.apiKey = '';
@@ -326,6 +358,24 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
     setSpeechRules(r.speechRules || '');
     setPersonaHasFile(!!r.personaHasFile);
     setSpeechHasFile(!!r.speechHasFile);
+  };
+
+  /** 保存通路：local → 本机 /api/bridge/config（原行为不变）；remote → /api/ssh/bridge-config（服务端）。
+   *  服务端那条会「临时文件 → 备份 config.json.bak-<时间戳> → mv 原子替换 → 回读比对关键字段」，
+   *  返回值里的 verified / mismatched 会原样展示，失败绝不谎报"已保存"。 */
+  const writeBridge = async (body: Record<string, any>): Promise<any> => {
+    if (target === 'remote' && remote) return await saveRemoteBridgeConfig({ ...body, serverId: remote.id });
+    return await saveBridgeConfig(body);
+  };
+
+  /** 把服务端保存结果翻译成一句人话（成功/失败/校验不通过三种都说清楚） */
+  const remoteResultText = (r: any): string => {
+    if (!r) return '';
+    if (r.ok && r.verified !== false) {
+      const bak = r.backup ? `，原文件已备份为 ${r.backup}` : '';
+      return `${r.message || '已保存到服务端'}${bak}`;
+    }
+    return `服务端保存未通过：${r.message || (r.mismatched?.length ? '关键字段回读不一致：' + r.mismatched.join('、') : '未知原因')}`;
   };
 
   /** 方案列表：只在切到「方案」页签时拉一次（不需要每次进页面都请求） */
@@ -357,13 +407,15 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   const applyProfile = async (p: ConfigProfile) => {
     setProfBusy(true); setProfMsg(null);
     try {
-      const r = await saveBridgeConfig({ config: p.config });
-      const eff = (r as any)?.dshChanged
-        ? ((r as any)?.modelSynced ? '已保存 · 模型配置已同步到隔离 DSH，约 15 秒后生效' : `已保存，但模型配置未写入 DSH：${(r as any)?.modelSyncMessage || '未知原因'}`)
-        : '已保存';
+      const r = await writeBridge({ config: p.config });
+      const eff = target === 'remote'
+        ? remoteResultText(r)
+        : ((r as any)?.dshChanged
+          ? ((r as any)?.modelSynced ? '已保存 · 模型配置已同步到隔离 DSH，约 15 秒后生效' : `已保存，但模型配置未写入 DSH：${(r as any)?.modelSyncMessage || '未知原因'}`)
+          : '已保存');
       await load();
-      setProfMsgKind('ok');
-      setProfMsg(`已套用方案「${p.name}」· ${eff}`);
+      setProfMsgKind((target === 'remote' && r?.ok === false) ? 'warn' : 'ok');
+      setProfMsg(`已套用方案「${p.name}」到${target === 'remote' ? '服务端' : '本机'} · ${eff}`);
     } catch (e: any) { setProfMsgKind('warn'); setProfMsg('套用失败：' + (e?.message || '')); }
     finally { setProfBusy(false); }
   };
@@ -418,10 +470,11 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       // 模型段（dsh）保存后由管理端写入隔离 DSH 的 settings.yaml 并重启它；这里必须把
       // 同步结果**如实**显示出来 —— 以前无论同步成功与否都只说"已保存"，用户以为改的模型生效了，
       // 实际 DSH 还在用旧模型（"管理端改的模型配置无法默认到 DSH 里"的直接成因之一）。
-      const r = await api<{ dshChanged?: boolean; modelSynced?: boolean; modelSyncMessage?: string }>(
-        '/bridge/config', { method: 'POST', body: JSON.stringify(body) },
-      );
-      if (r?.dshChanged) {
+      // 服务端模式：写的是服务器上的 config.json（桥按 mtime 热加载），返回里带回读比对结果。
+      const r = await writeBridge(body);
+      if (target === 'remote') {
+        setMsg(remoteResultText(r));
+      } else if (r?.dshChanged) {
         setMsg(r.modelSynced
           ? '已保存 · 模型配置已同步到隔离 DSH，约 15 秒后生效'
           : '已保存，但模型配置未写入 DSH：' + (r.modelSyncMessage || '未知原因'));
@@ -436,17 +489,27 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
     setSaving(true); setMsg(null);
     try {
       const body = kind === 'persona' ? { persona } : { speechRules };
-      await saveBridgeConfig(body);
-      setMsg(kind === 'persona' ? '人设已保存到 persona.md' : '发言规则已保存到 speech-rules.md');
+      const r = await writeBridge(body);
+      const where = target === 'remote' ? '服务端' : '本机';
+      setMsg(target === 'remote'
+        ? `${kind === 'persona' ? '人设' : '发言规则'}已保存到${where} ${kind === 'persona' ? 'persona.md' : 'speech-rules.md'} · ${remoteResultText(r)}`
+        : (kind === 'persona' ? '人设已保存到 persona.md' : '发言规则已保存到 speech-rules.md'));
       await load();
     } catch (e: any) { setMsg('保存失败：' + (e?.message || '')); }
     finally { setSaving(false); }
   };
 
-  /** 恢复默认发言规则（写内置英文模板） */
+  /** 恢复默认发言规则（写内置英文模板）。服务端模式下写的是**服务端**的 speech-rules.md。 */
   const resetSpeech = async () => {
     setSaving(true); setMsg(null);
     try {
+      if (target === 'remote') {
+        const r = await writeBridge({ speechReset: true });
+        const st = (r?.steps ?? []).find((x: any) => /恢复默认发言规则/.test(x.step || ''));
+        if (r?.ok && st?.ok) { setMsg('已恢复默认发言规则并写入服务端 speech-rules.md'); await load(); }
+        else setMsg('恢复失败：' + (st?.msg || r?.message || '未知原因'));
+        return;
+      }
       const r = await resetSpeechRules();
       setSpeechRules(r.speechRules || '');
       setSpeechHasFile(!!r.speechHasFile);
@@ -547,6 +610,44 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
       <div className="page-body">
         {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+
+        {/* 【2026-09-14 主人要求】明显的横幅标明"当前编辑的是服务端配置"：
+            没有这条横幅，用户很容易以为在改本机（两套实例并存时这正是最容易踩的坑）。 */}
+        {/* 【2026-09-14 主人要求】横幅配色跟新手文档一致（不再自己写死蓝色），
+            里面的路径/命令一律按行内代码渲染：说明文字干净、技术名词一眼可辨。 */}
+        {target === 'remote' && remote && (
+          <div className="notice-bar server-config-banner" style={{ borderColor: 'var(--nc-primary-400)', display: 'block' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
+              <Server size={15} /> 服务端模式 · 当前编辑的是服务器上的桥配置
+              <span className="badge badge-info">服务端</span>
+            </div>
+            <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.75 }}>
+              服务器：<b>{remote.name}</b>（{remote.host}）
+              {remoteMeta.path ? <> · 文件：<code>{remoteMeta.path}</code></> : null}
+              {remoteMeta.dir ? <>（读取自 <code>{remoteMeta.dir}</code>）</> : null}
+            </div>
+            <div style={{ fontSize: 12.5, marginTop: 4, lineHeight: 1.75 }}>
+              保存时后端会：写临时文件 → 备份 <code>config.json.bak-&lt;时间戳&gt;</code> → <code>mv</code> 原子替换 → 回读比对关键字段；
+              桥按 mtime 热加载，<b>下一条消息即生效</b>，不用重启桥。
+            </div>
+            {remoteMeta.notes?.length ? (
+              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5, lineHeight: 1.75 }}>
+                {remoteMeta.notes.map((n, i) => <li key={i}><RichText text={n} /></li>)}
+              </ul>
+            ) : null}
+          </div>
+        )}
+        {target === 'remote' && remoteMeta.message && (
+          <div className="notice-bar" style={{ borderColor: '#e5484d', background: '#fef2f2', color: '#912018' }}>
+            <AlertTriangle size={14} style={{ verticalAlign: -2 }} /> {remoteMeta.message}
+            <button className="btn btn-sm" style={{ marginLeft: 10 }} onClick={() => load()}>重试读取</button>
+          </div>
+        )}
+        {target === 'local' && remote && (
+          <div className="notice-bar" style={{ fontSize: 12 }}>
+            已连上服务器 <b>{remote.name}</b>，但本页仍在读写<b>本机</b>的 qq-bridge 配置（服务端配置读取失败时会这样回退，避免误写）。
+          </div>
+        )}
 
         <div className="bridge-body">
         <div className="tabs">

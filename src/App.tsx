@@ -63,6 +63,8 @@ export default function App() {
       onRefresh={refresh}
       onOpenLearning={() => setView({ name: 'learning' })}
       onOpenPortrait={() => setView({ name: 'portrait' })}
+      /* 【2026-09-14】连上服务器时，功能配置页读写**服务端** /root/qq-bridge/config.json（页面会显示明显横幅） */
+      remote={state?.connected && state.activeServer ? { id: state.activeServer.id, name: state.activeServer.name, host: state.activeServer.host } : null}
     />
   );
   if (view.name === 'cfg') return <InstanceConfig state={state} instanceId={view.id} onBack={back} onRefresh={refresh} />;
