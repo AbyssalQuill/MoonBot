@@ -14,6 +14,7 @@ import { activeAiTurns } from './session-state.js';
 import { recordAiTurnOutbound } from './turn-guard.js';
 import { resolveArtifactFaceId } from '../lib/qq-face-parse.js';
 import { writeStickerTmpFile } from './sticker.js';
+import { napcatImageFileArg } from '../lib/napcat-file.js';
 
 export const SEND_TIMEOUT_MS = 15000;
 
@@ -181,7 +182,9 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     }
     const buf = fs.readFileSync(imagePath);
     const ext = String(path.extname(imagePath) || '').replace(/^\./, '') || 'img';
-    const napcatFile = writeStickerTmpFile(buf, ext);
+    // 【2026-09-15 修「表情包一张都发不出去」】临时文件路径不能原样交给 NapCat：
+    // 服务器上 NapCat 在 Docker 里，读不到宿主路径 → 必须按配置换成容器路径或 base64。
+    const napcatFile = napcatImageFileArg(writeStickerTmpFile(buf, ext), cfgRef);
     segments.push({ type: 'image', data: { file: napcatFile } });
   }
   if (rawMessage) {
@@ -213,7 +216,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     }
   }
   const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
-  const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+  const buildParams = () => (kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments });
   const httpUrl = String(cfgRef.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
   // 瞬时网络类错误自动重试一次(间隔 2.5s), 降低偶发抖动误报; 持续失败仍如实报错, 不做无限重试。
   //
@@ -237,7 +240,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
           'content-type': 'application/json',
           ...(cfgRef.napcat?.accessToken ? { authorization: `Bearer ${cfgRef.napcat.accessToken}` } : {})
         },
-        body: JSON.stringify(params),
+        body: JSON.stringify(buildParams()),
         signal: AbortSignal.timeout(15000)
       });
       const body = await res.json().catch(() => ({}));
@@ -270,11 +273,115 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
       if (!res && fetchErr) throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}`);
     }
   }
+  // 【2026-09-15 自愈】NapCat 读不到我们给的图片路径时的兜底重发（**只在明确"图没发出去"时**触发）：
+  // 服务器 NapCat 在 Docker 里，宿主路径它读不到 → `文件处理失败: 识别URL失败, uri= /root/...`。
+  // 配置（napcat.imageFileMode/dockerPathMap）配对了就不会走到这里；这里是配置漂移时的保险：
+  // 把 image 段换成 base64:// 再发一次。该错误意味着**这条消息整体没发出去**，重发不会重复。
+  const fileErrRe = /文件处理失败|识别URL失败|ENOENT|no such file/i;
+  if (fileErrRe.test(errText)) {
+    const imgSeg = segments.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
+    if (imgSeg) {
+      try {
+        const buf = fs.readFileSync(imgSeg.data.file);
+        imgSeg.data.file = `base64://${buf.toString('base64')}`;
+        log(`[send] ${kind}:${id} NapCat 读不到路径（${errText.trim().slice(0, 60)}），改用 base64 重发(1/1)`);
+        const again = await attemptSend();
+        res = again.res; body = again.body; fetchErr = again.fetchErr;
+        if (!res && fetchErr) throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}`);
+      } catch (eB64) {
+        log(`[send] ${kind}:${id} base64 兜底重发失败: ${eB64?.message ?? eB64}`);
+      }
+    }
+  }
   if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
     const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
     throw new Error(`OneBot ${action} 失败: ${body.wording || body.errMsg || body.retcode || res.status}${hint}`);
   }
   return body.data;
+}
+
+// ── 智能引用：只引用「本回合真正交给过模型、并且这句话就在答的那条」────────────────
+/** 参与相关度打分的词：英文/数字词（≥3 字符）+ 中文 2-gram */
+export function smartQuoteGrams(text) {
+  const t = String(text || '').toLowerCase();
+  const set = new Set();
+  for (const w of t.match(/[a-z0-9]{3,}/g) || []) set.add(w);
+  const cjk = t.replace(/[^\u4e00-\u9fa5]/g, '');
+  for (let j = 0; j + 2 <= cjk.length; j += 1) set.add(cjk.slice(j, j + 2));
+  return set;
+}
+
+export const SMART_QUOTE_WINDOW_MS = 10 * 60 * 1000;   // 候选消息的最大年龄
+export const SMART_QUOTE_FALLBACK_MS = 120 * 1000;     // 没有本回合投递记录时，只认"刚到的"最新一条
+export const SMART_QUOTE_REUSE_MS = 10 * 60 * 1000;    // 同一条消息多久内不再被自动引用
+const SMART_QUOTE_MAX_CANDIDATES = 12;
+
+/**
+ * 自动智能引用：返回要引用的 messageId（字符串），不引用返回 null。
+ *
+ * 【2026-09-15 修「引用错误 + 看着像重复回复」】旧实现（2026-09-13 版）给"@过我 / 引用过我"的
+ * 消息固定 +3 分，且对消息年龄没有任何约束、同分时保留**更早**的一条。于是只要近 12 条里有一条
+ * 老消息引用了 bot，它就永远压过所有新消息：主人实测 —— 22:52:00 起连续 4 条回复
+ * （"说好了啊" / "那就说定了" / "笑啥" / "私聊发不了表情包呜呜"）**全部引用了同一条 90 秒前的
+ * "等我以后给你接入MC一起玩吧~"**，主人看到的就是"引用错误 + 重复回复"。
+ *
+ * 现在的判据（宁可不引用，也不张冠李戴）：
+ *   ① 候选 = 本回合**真正投递过**的对端消息（`turnSeenUnread` 唤醒正文展示过 ∪ `turnSteeredSeqs`
+ *      steer 注入过）—— 模型只可能回答它见过的东西；
+ *      没有投递记录（主动发起 / 控制台发送）时，只认最近 2 分钟内到的**最新一条**，否则不引用；
+ *   ② 打分只按"和这句话有共同词"（CJK 2-gram / 英文词，每命中 +1，上限 3），同分取更新的一条；
+ *   ③ 最近 10 分钟已经自动引用过的消息不再引用（同一条不会被反复引用）。
+ */
+export function pickSmartQuote(st, bubbleText, opts = {}) {
+  try {
+    const now = Number(opts.now) || Date.now();
+    const windowMs = Number(opts.windowMs) > 0 ? Number(opts.windowMs) : SMART_QUOTE_WINDOW_MS;
+    const fallbackMs = Number(opts.fallbackMs) > 0 ? Number(opts.fallbackMs) : SMART_QUOTE_FALLBACK_MS;
+    const msgs = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+    const peers = msgs
+      .filter((m) => m && !m.isSelf && m.messageId && (now - Number(m.time || 0) < windowMs))
+      .slice(-SMART_QUOTE_MAX_CANDIDATES);
+    if (!peers.length) return null;
+
+    const delivered = new Set(
+      [...(Array.isArray(st?.turnSeenUnread) ? st.turnSeenUnread : []),
+        ...(Array.isArray(st?.turnSteeredSeqs) ? st.turnSteeredSeqs : [])]
+        .map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    );
+    let cands = delivered.size ? peers.filter((m) => delivered.has(Number(m.seq))) : [];
+    if (!cands.length) {
+      const latest = peers[peers.length - 1];
+      if (now - Number(latest.time || 0) > fallbackMs) return null;
+      cands = [latest];
+    }
+
+    const usedRecently = new Set(
+      (Array.isArray(st?.recentQuoteIds) ? st.recentQuoteIds : [])
+        .filter((q) => q && now - Number(q.at || 0) < SMART_QUOTE_REUSE_MS)
+        .map((q) => String(q.id))
+    );
+    const pool = cands.filter((m) => !usedRecently.has(String(m.messageId)));
+    if (!pool.length) return null;
+
+    const mine = smartQuoteGrams(bubbleText);
+    let best = null;
+    let bestScore = -1;
+    for (const m of pool) {
+      let hit = 0;
+      if (mine.size) {
+        const g = smartQuoteGrams(m.tail || m.plain || m.text || '');
+        for (const x of g) { if (mine.has(x)) { hit += 1; if (hit >= 3) break; } }
+      }
+      // >= ：同分保留时间更靠后（更新）的一条 —— 旧实现用 > 会永远挑最早的
+      if (hit >= bestScore) { bestScore = hit; best = m; }
+    }
+    if (!best) return null;
+    if (opts.record !== false && st && typeof st === 'object') {
+      const prev = Array.isArray(st.recentQuoteIds) ? st.recentQuoteIds : [];
+      st.recentQuoteIds = [...prev, { id: String(best.messageId), at: now }].slice(-30);
+    }
+    return String(best.messageId);
+  } catch { return null; }
 }
 
 export function sendMessages(key, messages, delays, replyToMessageId, atUserId = null, images = []) {
@@ -289,50 +396,9 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
   // 【2026-09-12 加速】这一次调用 = 一次新的"连发批"：清掉前几轮攒下的连续发送计数，
   // 让批内节奏从 0 / step / 2×step 起算（配合下面"首条不等节拍"，第一条气泡零延迟出）。
   resetSendPace(key);
-  // 自动智能引用：挑「与这句话最相关」的那条消息，而不是死板地引用最新一条。
-  // 【2026-09-13 主人要求】原来要求"引用的那条必须还是对话里最新一条别人发的消息"，结果是：
-  //   · 群里 @ 我之后又有别人插了一句 → 引用被静默摘掉（用户看到"引用失败"）；
-  //   · 明明在回答 A 的那句话，却因为 B 更靠后就不引用 A，回复看起来"没对上"；
-  //   · 私聊压根不引用（旧逻辑只对群聊生效）。
-  // 现在改成按相关性打分（打分在**真正发送那一刻**做，天然免疫排队/节拍延迟）：
-  //   @ 我 / 引用过我        +3
-  //   与这条回复有共同词     每命中一个 +1（CJK 2-gram 与英文词，最多 +3）
-  //   是最近一条别人发的      +1（同分时偏新）
-  //   满分 ≥2 才引用；谁都不相关就不引用 —— 宁可不引，也不张冠李戴。群聊 / 私聊一视同仁。
-  const pickSmartQuoteFor = (k, bubbleText) => {
-    try {
-      const stQ = getSocialState(k);
-      const nowQ = Date.now();
-      const msgs = (Array.isArray(stQ.recentMessages) ? stQ.recentMessages : [])
-        .filter((mm) => mm && !mm.isSelf && mm.messageId && (nowQ - Number(mm.time || 0) < 600000))
-        .slice(-12);
-      if (!msgs.length) return null;
-      const gramsOf = (s) => {
-        const t = String(s || '').toLowerCase();
-        const set = new Set();
-        for (const w of t.match(/[a-z0-9]{3,}/g) || []) set.add(w);
-        const cjk = t.replace(/[^\u4e00-\u9fa5]/g, '');
-        for (let j = 0; j + 2 <= cjk.length; j += 1) set.add(cjk.slice(j, j + 2));
-        return set;
-      };
-      const mine = gramsOf(bubbleText);
-      const newest = msgs[msgs.length - 1];
-      let best = null; let bestScore = 0;
-      for (const mm of msgs) {
-        let s = 0;
-        if (mm.atSelf || mm.quoteTargetIsSelf) s += 3;
-        if (mm === newest) s += 1;
-        if (mine.size) {
-          const g = gramsOf(mm.tail || mm.plain || mm.text || '');
-          let hit = 0;
-          for (const x of g) { if (mine.has(x)) { hit += 1; if (hit >= 3) break; } }
-          s += hit;
-        }
-        if (s > bestScore) { bestScore = s; best = mm; }
-      }
-      return bestScore >= 2 ? String(best.messageId) : null;
-    } catch { return null; }
-  };
+  // 自动智能引用：候选 = 本回合真正投递过的那批消息，打分只按"共同词"，同分取更新的一条。
+  // 规则与踩坑经过见本文件上方 pickSmartQuote 的注释（【2026-09-15 修引用错误 / 重复回复观感】）。
+  const pickSmartQuoteFor = (k, bubbleText) => pickSmartQuote(getSocialState(k), bubbleText);
   const sent = [];
   const failed = [];
   const total = Math.max(messages.length, images.length);

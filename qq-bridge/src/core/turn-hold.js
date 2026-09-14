@@ -35,7 +35,7 @@
 import { log } from '../lib/log.js';
 import { getSocialState, saveSocialState } from './social-state.js';
 import { reverse, TurnStartAt, collectors, holdActiveKeys } from './session-state.js';
-import { steerIntoRunningTurn, markSteerCycleStart } from './wake-send.js';
+import { steerIntoRunningTurn, markSteerCycleStart, collectMidTurnBatch } from './wake-send.js';
 import { touchTurnGuardsByKey } from './turn-guard.js';
 
 const POLL_MS = 200;
@@ -48,6 +48,35 @@ const activeHolds = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 「这个会话是否由回合保持托管」= turn-hold 的灰度判据（wake-send.js 里那道 steer 闸门用的是同一套）。
+ *  提出来是因为它现在有**两个**调用点：回合钩子（handleTurnHold）与步边界发车（flushStepBatch）。
+ *  ⚠️ wake-send.js 里还有一份等价的内联判据（holdEligible）；改这里时记得同步，别让两处漂移。 */
+function isHoldManaged(key, t) {
+  const k = String(key || '');
+  if (!k || t?.enabled !== true) return false;
+  const allow = Array.isArray(t.keys) ? t.keys.map(String).filter(Boolean) : [];
+  if (allow.length && !allow.includes(k)) return false;
+  if (t.privateOnly !== false && !k.startsWith('private:')) return false;
+  return true;
+}
+
+/** 本回合"来回次数"记账（保持循环与步边界发车共用一份，避免两处计数漂移让 maxExchanges 失效）。
+ *  turn 号变了 = 新回合 → 计数从头开始（与 handleTurnHold/holdLoop 开头那次重置同义）。 */
+function noteExchange(key, st, turn) {
+  const turnNo = Number(turn) || 0;
+  if (turnNo && Number(st._holdTurn) !== turnNo) {
+    st._holdTurn = turnNo;
+    st._holdExchanges = 0;
+    st._holdStartedAt = Date.now();
+  }
+  st._holdStartedAt = Number(st._holdStartedAt) || Date.now();
+  const exchanges = (Number(st._holdExchanges) || 0) + 1;
+  st._holdExchanges = exchanges;
+  st.rotateTurns = (Number(st.rotateTurns) || 0) + 1;
+  saveSocialState();
+  return exchanges;
 }
 
 /**
@@ -66,9 +95,12 @@ export async function handleTurnHold({ sessionId, turn, cfg, shouldAbort }) {
   const key = reverse.get(sid) || null;
   if (!key) return { close: true, reason: 'no-key' };
 
-  const allow = Array.isArray(t.keys) ? t.keys.map(String).filter(Boolean) : [];
-  if (allow.length && !allow.includes(key)) return { close: true, reason: 'not-allowlisted' };
-  if (t.privateOnly !== false && !key.startsWith('private:')) return { close: true, reason: 'not-private' };
+  if (!isHoldManaged(key, t)) {
+    const allow = Array.isArray(t.keys) ? t.keys.map(String).filter(Boolean) : [];
+    if (allow.length && !allow.includes(key)) return { close: true, reason: 'not-allowlisted' };
+    if (t.privateOnly !== false && !key.startsWith('private:')) return { close: true, reason: 'not-private' };
+    return { close: true, reason: 'not-eligible' };
+  }
 
   const st = getSocialState(key);
   if (!st) return { close: true, reason: 'no-state' };
@@ -83,7 +115,8 @@ export async function handleTurnHold({ sessionId, turn, cfg, shouldAbort }) {
   // 【2026-09-12 一次连发只注入一次】这个钩子被调用 = **上一个模型步刚刚结束**（回合正准备关），
   // 也就是"模型步周期"的边界。在这里开一个新的注入周期：本周期内直到下一次钩子回来，
   // 只允许注入一次 [Mid-turn]（详见 wake-send.js 的 STEER_CYCLE_* 注释）。
-  markSteerCycleStart(key);
+  // 【2026-09-15 合并注入】顺带把"步边界时刻"记进 wake-send（合并注入的防饥饿兜底要用它）。
+  markSteerCycleStart(key, 'turn-stopping 钩子');
   try {
     return await holdLoop({ key, sid, st, turn, t, shouldAbort });
   } finally {
@@ -112,6 +145,7 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
   let baseline = Number(st.lastUnreadSeq) || 0;
   let lastActivity = now();
   let lastRenew = 0;
+  let notLandedLogged = false;   // "报已交付但没落地"只喊一次，避免 200ms 轮询刷屏
   const budgetEnd = now() + requestBudgetMs;
 
   const finish = (reason) => {
@@ -138,9 +172,16 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
       return { close: false, reason: 'keep-holding', again: true, exchanges };
     }
 
-    const seq = Number(st.lastUnreadSeq) || 0;
-    if (seq > baseline) {
-      log(`[hold] ${key} 检测到新消息（baselineSeq=${baseline} → seq=${seq}），尝试 steer…`);
+    // 【2026-09-15 合并注入】触发判据从"钩子开始之后又来新消息"（`lastUnreadSeq > baseline`）改成
+    // **"还有没交给模型的消息"**（`collectMidTurnBatch`）。为什么必须改：
+    // 合并注入把消息**攒在 unread 里**、不即时投（wake-send.js 的"turn-hold 托管"分支），而它们
+    // **在钩子开始之前就到了** —— 用旧判据（baseline 是钩子开始时刻的 lastUnreadSeq）一条都看不见，
+    // 保持循环只会干等到预算用完，消息反而被卡住（正是主人抱怨的"等下一次"）。
+    // 判据共用 wake-send.js 的 collectMidTurnBatch，和即时注入那条路**同一份规则**，不会漂移。
+    const batch = collectMidTurnBatch(st);
+    if (batch.length) {
+      const topSeq = batch.reduce((mx, m) => Math.max(mx, Number(m?.seq) || 0), 0);
+      log(`[hold] ${key} 检测到 ${batch.length} 条待交付消息（baselineSeq=${baseline} → 待交付最新 seq=${topSeq}），尝试 steer…`);
       let ok = false;
       let errText = '';
       try {
@@ -153,30 +194,41 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
         // "没塞成"≠"消息没进去"：busy 分支与保持循环会同时看到同一条消息，谁先到谁塞；
         // 而且有些消息在**本轮唤醒正文里就已经展示过**（turnSeenUnread），不必再注入。
         // 实测 21:50:23 就是这样：保持循环报 steer-failed，但消息其实已经进了本回合。
+        // ⚠️【2026-09-15 合并注入】触发判据换成 collectMidTurnBatch 之后，`batch` 里的行**按定义**
+        // 都还没进过 turnSteeredSeqs/turnSeenUnread，所以这个分支实际上已经很难命中 —— 保留它是
+        // 防御性的：万一出现别的竞态（例如两处并发交付），也绝不能把"已经给过"误判成 steer-failed
+        // 而去关回合（那会把回合连同消息一起丢掉，退回补发轮）。
         const givenSeqs = new Set([
           ...(Array.isArray(st.turnSteeredSeqs) ? st.turnSteeredSeqs : []),
           ...(Array.isArray(st.turnSeenUnread) ? st.turnSeenUnread : []),
         ].map(Number));
-        const handled = (Array.isArray(st.unread) ? st.unread : []).some(
-          (m) => Number(m.seq) > baseline && givenSeqs.has(Number(m.seq))
-        );
+        const handled = batch.some((m) => givenSeqs.has(Number(m?.seq)));
         if (handled) {
-          exchanges += 1;
-          st._holdExchanges = exchanges;
-          st.rotateTurns = (Number(st.rotateTurns) || 0) + 1;
-          saveSocialState();
+          exchanges = noteExchange(key, st, turnNo);
           log(`[hold] ${key} 保持循环这次没塞成，但那批已在本回合给过它（唤醒展示或即时注入，记为本回合第 ${1 + exchanges} 次来回，回合继续）`);
           return { close: false, reason: 'already-steered', exchanges };
         }
         return finish(errText ? 'steer-threw' : 'steer-failed');
       }
-      exchanges += 1;
-      st._holdExchanges = exchanges;
-      st.rotateTurns = (Number(st.rotateTurns) || 0) + 1;
-      saveSocialState();
+      // 【2026-09-15 合并注入·硬化】`ok === true` 有三种含义（真塞进去了 / 本回合已经给过它 / 被周期闸攒住），
+      // 其中"被周期闸攒住"**什么都没投出去**。此时若照旧返回 close:false，DSH 会看到 next-step 为空而
+      // **直接把回合关掉**（dsh-agent-loop:571），表现成"保持悄悄结束了"，消息改走 25s 看门狗 ——
+      // 正是这个项目吃过四次的那类"静默失败"。所以记这一笔之前**必须验证真的投出去了**：
+      // 判据就是"这批 seq 现在已不在待交付批里"（进了 turnSteeredSeqs/turnSeenUnread 或被别的路径交付）。
+      // 没落地就继续持有 + 重试（循环本身受 budget/idle/max 约束，不会空转），绝不谎报成功。
+      const notLanded = collectMidTurnBatch(st);
+      if (notLanded.length) {
+        if (!notLandedLogged) {
+          notLandedLogged = true;
+          log(`[hold] ${key} steer 报"已交付"但仍有 ${notLanded.length} 条没落地（多半是被周期闸攒住/并发交付）→ 继续持有并重试，不谎报成功`);
+        }
+        await sleep(POLL_MS);
+        continue;
+      }
+      exchanges = noteExchange(key, st, turnNo);
       baseline = Number(st.lastUnreadSeq) || 0;
       lastActivity = now();
-      log(`[hold] ${key} 回合保持：新消息已在本回合内（刚注入 / 本回合已展示，本回合来回 ${1 + exchanges}/${maxExchanges}，rotateTurns=${st.rotateTurns}）`);
+      log(`[hold] ${key} 回合保持：这 ${batch.length} 条已合成一个 [Mid-turn] 注入本回合（本回合来回 ${1 + exchanges}/${maxExchanges}，rotateTurns=${st.rotateTurns}）`);
       // 一次钩子只塞一批：立刻返回，插件随即返回，DSH 重新检查 next-step 发现非空 → 继续跑下一步。
       return { close: false, reason: 'steered', exchanges };
     }
@@ -187,4 +239,62 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
     }
     await sleep(POLL_MS);
   }
+}
+
+/**
+ * 【2026-09-15 合并注入】"步边界发车"的第二个入口（第一个是上面的保持循环）。
+ * mux.js 每收到一条会话事件 `step/end`（dsh-agent-loop/lib/index.js:558 在**每个模型步末尾** append）
+ * 就调一次这个函数 —— 把这一步里攒下的消息**合成一个** [Mid-turn] 块注入。
+ *
+ * 为什么光有保持循环不够：保持循环活在 `agent/turn-stopping` 钩子里，而那个钩子**只在"这一步可能就是
+ * 最后一步"时才会被 await**（dsh-agent-loop/lib/index.js:564：`if (turnEnds && this.inbox.nextStep.length === 0)`）。
+ * 模型连调几个工具的那种步（turnEnds 为空）根本走不到钩子 —— 只靠保持循环的话，这类步里到达的消息
+ * 要等到整个回复跑完（回合收尾）才被投出去。而 `step/end` **每一步都有**，在这里发车：
+ *   · 送达时刻与"消息一到就即时注入"完全一样（claim 发生在下一个 step 的开端，step/end 正好在它之前）；
+ *   · 却仍然只产生**一个** [Mid-turn] 块（这一步里攒下的消息全在这一个块里）。
+ * 不满足条件时**静默返回 false**：这个函数每一步都会被调一次，没攒下消息是绝大多数情况，不能打日志刷屏。
+ *
+ * @returns {Promise<boolean>} 是否真的把一批消息投了出去
+ */
+export async function flushStepBatch({ key, sid, turn, cfg } = {}) {
+  const k = String(key || '');
+  const sidText = String(sid || '');
+  if (!k || !sidText) return false;
+  const t = cfg?.social?.turnHold ?? {};
+  // 只对"保持托管"的会话起作用：非保持会话压根不会攒（wake-send.js 的托管分支只对 holdEligible 生效），
+  // 这里再挡一道，避免别处误调把消息投成两个块。
+  if (!isHoldManaged(k, t)) return false;
+  const st = getSocialState(k);
+  if (!st) return false;
+  const batch = collectMidTurnBatch(st);
+  if (!batch.length) return false;                       // 这一步没攒下消息 → 什么都不做（每步都调，不能刷日志）
+  if (!TurnStartAt.has(sidText) && !collectors.has(sidText)) {
+    log(`[hold] ${k} 步边界发车跳过：回合已经不在跑（TurnStartAt/collectors 都没了），这 ${batch.length} 条留给投递看门狗/下一轮唤醒`);
+    return false;
+  }
+  log(`[hold] ${k} 步边界发车（step/end）：把这 ${batch.length} 条合成一个 [Mid-turn] 注入（不是半路一条一条塞）…`);
+  let ok = false;
+  let errText = '';
+  try {
+    // noCollect=true：步边界已经是最优的合并点，再等"对方停止输入"只会把这一批拖到下一个步边界。
+    ok = await steerIntoRunningTurn(k, 'stepEnd', { force: true, noCollect: true });
+  } catch (error) {
+    errText = String(error?.message ?? error);
+  }
+  log(`[hold] ${k} 步边界 steer 结果：${ok === true ? '成功' : '未成功'}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+  if (ok !== true) {
+    // 没塞成不是灾难：消息仍在 unread 里（没标"已给"），wake-send.js 的兜底判据下次会放行即时注入，
+    // 投递看门狗 25s 也会兜。这里只保证**绝不静默**。
+    log(`[hold] ${k} 步边界发车未成功：这 ${batch.length} 条留在未读（未标已给），等下一次注入/看门狗兜底`);
+    return false;
+  }
+  // 同 holdLoop 的硬化：`true` 也可能是"被周期闸攒住"，那就什么都没投出去 —— 不能记成一次来回。
+  const notLanded = collectMidTurnBatch(st);
+  if (notLanded.length) {
+    log(`[hold] ${k} 步边界发车报"已交付"但仍有 ${notLanded.length} 条没落地（多半是被周期闸攒住）→ 不记这一次来回，留给下一次步边界/看门狗（不谎报成功）`);
+    return false;
+  }
+  const exchanges = noteExchange(k, st, turn);
+  log(`[hold] ${k} 步边界合并注入完成：本回合第 ${1 + exchanges}/${Math.max(1, Math.round(Number(t.maxExchanges) || 24))} 次来回，rotateTurns=${st.rotateTurns}`);
+  return true;
 }
