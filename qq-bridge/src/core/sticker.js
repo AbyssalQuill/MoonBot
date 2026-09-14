@@ -21,6 +21,7 @@ import { log } from '../lib/log.js';
 import { enqueueSend } from './send-chain.js';
 import { getSocialState } from './social-state.js';
 import { fetchOneBotImage, fetchFaceMedia } from './media-pipe.js';
+import { napcatImageFileArg, resolveStickerTmpDir, rewriteToContainerPath } from '../lib/napcat-file.js';
 
 export let stickerEntries = loadStickerStore(STICKER_FILE);
 export let stickerSyncedAt = 0; // 上次从 NapCat 拉取收藏表情的时间戳（毫秒）
@@ -28,6 +29,23 @@ let stickerCfg = null;
 let botRef = null;
 /** NapCat 是否支持 add_custom_face（收藏表情扩展动作）：探测一次后缓存 */
 let collectFaceSupported = true;
+/** 「找不到表情 → 强制全量同步」的冷却时间戳（见 forceResyncForLookup） */
+let lastLookupResyncAt = 0;
+
+/**
+ * 「查不到这个表情 id → 强制全量同步一次再查」的节流版。
+ * 【2026-09-15】实测模型并列调用 3 个表情工具、每个都"找不到"就各触发一次强制全量同步
+ * → 1 秒内 4 次 fetch_custom_face，白打 NapCat 4 次。30s 内已经强制同步过就直接用现有库。
+ * 只用于**查找失败后的兜底重查**；收藏流程（collectSticker2）必须拿到最新库，不走这里。
+ */
+async function forceResyncForLookup() {
+  const FORCE_LOOKUP_COOLDOWN_MS = 30000;
+  if (stickerSyncedAt && Date.now() - lastLookupResyncAt < FORCE_LOOKUP_COOLDOWN_MS) {
+    return { entries: stickerEntries, syncedAt: stickerSyncedAt, fromCache: true };
+  }
+  lastLookupResyncAt = Date.now();
+  return syncStickerLibrary(true);
+}
 
 /** 本地图库收藏（add_custom_face 不可用时的降级）：把图片字节存入 qq-bridge/stickers-upload 并写入本地库。
  *  返回 manual 条目（url=local://绝对路径），模型可用 qq_send_sticker 直接发；无字节或写入失败返回 null。 */
@@ -188,8 +206,8 @@ export async function getStickerImageData(stickerId) {
   const synced = await syncStickerLibrary(false);
   const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
   if (!entry) {
-    // 本地没有时，尝试强制刷新一次再找（收藏可能在会话过程中新增）
-    const forced = await syncStickerLibrary(true);
+    // 本地没有时，尝试强制刷新一次再找（收藏可能在会话过程中新增；30s 冷却防并列工具调用轰炸 NapCat）
+    const forced = await forceResyncForLookup();
     const entry2 = findSticker(forced?.entries ?? stickerEntries, stickerId);
     if (!entry2) throw new Error(`找不到表情 ${stickerId}，请先用 qq_list_stickers 获取有效 id`);
     return entry2;
@@ -203,7 +221,7 @@ export async function sendSticker2(key, stickerRef, options = {}) {
   let synced = await syncStickerLibrary(false);
   let entry = synced ? findSticker(synced?.entries ?? stickerEntries, stickerRef) : null;
   if (!entry) {
-    synced = await syncStickerLibrary(true);
+    synced = await forceResyncForLookup();
     entry = synced ? findSticker(synced?.entries ?? stickerEntries, stickerRef) : null;
   }
   if (!entry) throw new Error(`找不到表情 ${stickerRef}，请先用 qq_list_stickers 获取有效 id`);
@@ -233,7 +251,7 @@ export async function sendSticker2(key, stickerRef, options = {}) {
   // picElement.picSubType；QQ 图片 subType=1 表示“表情”上传通道，收端按表情泡泡渲染而非普通大图
   // （此前漏传 → 默认 0=普通图片，用户看到的是“大图”）。
   if (url.startsWith('local://')) {
-    segments.push({ type: 'image', data: { file: url.slice('local://'.length), sub_type: 1 } });
+    segments.push({ type: 'image', data: { file: napcatImageFileArg(url.slice('local://'.length), stickerCfg), sub_type: 1 } });
   } else {
     try {
       await validateFetchUrl(url);
@@ -255,7 +273,8 @@ export async function sendSticker2(key, stickerRef, options = {}) {
       log(`[sticker] 收藏表情原图下载失败 ${entry.id}（将改用 URL 直发兜底）: ${eImg?.message ?? eImg}`);
     }
     if (imgBuf && imgBuf.length > 0) {
-      const localFile = writeStickerTmpFile(imgBuf, imgMime);
+      // 【2026-09-15 修「表情包发不出去」】同样不能把宿主临时路径原样交给 NapCat（容器读不到）。
+      const localFile = napcatImageFileArg(writeStickerTmpFile(imgBuf, imgMime), stickerCfg);
       segments.push({ type: 'image', data: { file: localFile, sub_type: 1 } });
     } else {
       segments.push({ type: 'image', data: { file: url, sub_type: 1 } });
@@ -276,16 +295,35 @@ export async function sendSticker2(key, stickerRef, options = {}) {
     try {
       // 真人发表情前通常会有短暂停顿（已缩短，避免发图太慢）。
       await sleep(randInt(300, 700));
-      const res = await fetch(`${httpUrl}/${action}`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(stickerCfg.napcat?.accessToken ? { authorization: `Bearer ${stickerCfg.napcat.accessToken}` } : {})
-        },
-        body: JSON.stringify(params),
-        signal: AbortSignal.timeout(15000)
-      });
-      const body = await res.json().catch(() => ({}));
+      const post = async () => {
+        const r = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(stickerCfg.napcat?.accessToken ? { authorization: `Bearer ${stickerCfg.napcat.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(15000)
+        });
+        const b = await r.json().catch(() => ({}));
+        return { r, b };
+      };
+      let { r: res, b: body } = await post();
+      // 【2026-09-15 自愈】NapCat 读不到图片路径（服务器容器读不到宿主路径）→ 换 base64 重发一次。
+      // 这个错误意味着整条消息没发出去，重发不会重复；配置配对时不会走到这里。
+      const errText0 = `${body?.errMsg ?? ''} ${body?.wording ?? ''} ${body?.retcode ?? ''}`;
+      if ((!res.ok || body.status !== 'ok' || body.retcode !== 0) && /文件处理失败|识别URL失败|ENOENT|no such file/i.test(errText0)) {
+        const imgSeg = segments.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
+        if (imgSeg) {
+          try {
+            imgSeg.data.file = `base64://${fs.readFileSync(imgSeg.data.file).toString('base64')}`;
+            log(`[sticker] NapCat 读不到表情图片路径（${errText0.trim().slice(0, 60)}），改用 base64 重发(1/1)`);
+            ({ r: res, b: body } = await post());
+          } catch (eB64) {
+            log(`[sticker] base64 兜底重发失败: ${eB64?.message ?? eB64}`);
+          }
+        }
+      }
       if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
         const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
         throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
@@ -376,7 +414,12 @@ export function writeStickerTmpFile(buffer, extHint) {
   // 本机部署（Windows/裸机）：bridge 与 NapCat 同机，临时文件写项目内目录即可，
   // add_custom_face 直接用返回的绝对路径读取。曾误用服务器 Docker 挂载路径
   // （/root/napcat/... ↔ /app/napcat/...），本机不存在 → ENOENT 收藏失败。
-  const hostDir = path.join(path.dirname(STICKER_FILE), '..', 'state', 'sticker-tmp');
+  //
+  // 【2026-09-15】反过来也踩过：把这个"本机路径"版本同步到服务器后，NapCat 在 Docker 里
+  // 读不到宿主路径，连表情都发不出去。所以落盘目录改为可配置：
+  //   napcat.tmpDir 指向 **NapCat 容器的宿主挂载目录**（服务器：/root/napcat/config/moonbot-tmp）
+  // 即可让两边都成立；发送侧再由 napcatImageFileArg 按 dockerPathMap 换成容器内路径。
+  const hostDir = resolveStickerTmpDir(stickerCfg, path.join(path.dirname(STICKER_FILE), '..', 'state', 'sticker-tmp'));
   fs.mkdirSync(hostDir, { recursive: true });
   // 简单清理 30 分钟前的旧文件，避免堆积。
   try {
@@ -463,7 +506,9 @@ export async function collectSticker2(key, messageRef, remark) {
     }
   }
   if (!tmpFile) throw new Error('无法获取该表情的图片源');
-  file = tmpFile;
+  // 【2026-09-15】add_custom_face 只接受**本地文件路径**（传 base64 会 ENAMETOOLONG），
+  // 所以这里只做"宿主路径 → 容器路径"映射（服务器 NapCat 在 Docker 里，宿主路径它读不到）。
+  file = rewriteToContainerPath(tmpFile, stickerCfg) || tmpFile;
   const maxRemarkChars = Math.max(1, Number(stickerCfg.social?.sticker?.collect?.maxRemarkChars) || 20);
   const cleanRemark = String(remark ?? '').trim().slice(0, maxRemarkChars);
   // NapCat 的 add_custom_face 只保证“添加成功”，响应不保证返回 emoji_id（实测 retcode=0 但 data 无该字段），

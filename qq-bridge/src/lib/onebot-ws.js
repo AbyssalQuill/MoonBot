@@ -63,10 +63,40 @@ export class OneBotWsClient extends EventEmitter {
   }
 
   /** 连接：首次成功 open 前挂起；NapCat 完全不可达（closed before open）则 reject（对齐旧启动语义） */
-  connect() {
+  connect(timeoutMs = Math.max(CONNECT_TIMEOUT_MS * 2, 20000)) {
+    /* 【2026-09-14 修「启动Bot 后 3100 永远不通」】
+     * 现场：服务器上 NapCat 容器起着、但**还没扫码登录**，它的 OneBot WS 端口在听、却不会完成 upgrade。
+     * 于是 ws 卡在 readyState=0：`_openOnce` 里那句 `ws.close(4000,'connect timeout')` 对 CONNECTING 的
+     * socket 是**空操作**（WHATWG 语义下也不保证触发 onclose），既没有 open 也没有 close →
+     * 这个 Promise 永远不 settle → bridge.js 的 `await connectNapcat(120000)` 卡死 →
+     * `startConsoleServer()` 永远到不了 → 表现就是「整套启动成功、3100 死活不监听、点开白屏」。
+     * 现在给 connect() 自己上一道硬超时：到点必定 reject（NAPCAT_CONN），
+     * 让 bridge.js 那套"预算内重试 + 后台每 15s 重连"的正常逻辑跑起来（NapCat 登录后自动接上）。
+     */
     return new Promise((resolve, reject) => {
-      this._openResolve = resolve;
-      this._openReject = reject;
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this._openResolve = null;
+        this._openReject = null;
+        try { this._ws?.close(4001, 'connect timeout'); } catch { /* ignore */ }
+        const e = new Error('NapCatConnectionError: NapCat WebSocket 握手超时（未完成 upgrade）');
+        e.code = 'NAPCAT_CONN';
+        reject(e);
+      }, timeoutMs);
+      this._openResolve = (v) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      this._openReject = (e) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(e);
+      };
       this._openOnce().catch((e) => this._emitError(e));
     });
   }

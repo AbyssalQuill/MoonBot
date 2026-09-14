@@ -218,6 +218,19 @@ export function buildWakePrompt(key, reason) {
   const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
   const statusBits = [`${(st.unread || []).length} unread`];
   if (key.startsWith('private:') && st.peerTypingUntil && Date.now() < st.peerTypingUntil) statusBits.push('peer typing');
+  // 【2026-09-15 语境】把"正在等你的那条"点名出来：私聊只有一个人说话，未读里最新的一条就是
+  // 这一步该答的。以前只有一行 `N unread` + 下面的 [Unread] 列表，模型偶尔会去接更早的话题
+  // （线上实测：连续几条回复都在回同一句老话）。这一行只多几十字符，却把"该答谁"钉死。
+  if (key.startsWith('private:')) {
+    const waiting = [...(Array.isArray(st.unread) ? st.unread : [])].reverse().find((m) => m && !m.isSelf);
+    if (waiting) {
+      const who = waiting.isOwner ? 'owner' : (waiting.sender || 'peer');
+      const id = waiting.messageId ? `(id:${waiting.messageId})` : '';
+      const body = String(waiting.plain || waiting.text || '').replace(/\s+/g, ' ').slice(0, 60);
+      const nUnread = (st.unread || []).filter((m) => m && !m.isSelf).length;
+      statusBits.push(`waiting on ${who}${id}: ${body}${nUnread > 1 ? ` (+${nUnread - 1} earlier unanswered)` : ''}`);
+    }
+  }
   if (lastMsg) statusBits.push(`last from ${String(lastMsg.sender || 'unknown')}(${lastMsg.userId || '?'})[${fmtBeijing(Number(lastMsg.time) || 0)}]: ${String(lastMsg.text || lastMsg.plain || '').slice(0, 20)}`);
   if (lastAiMin != null) statusBits.push(`said ${lastAiMin}min ago`);
   const statusLine = `[Now] ${fmtBeijing(Date.now())} (Beijing)\n[Status] ${statusBits.join('; ')}\n\n`;
@@ -319,14 +332,107 @@ const STEER_COLLECT_MAX_MS = 3000;   // 对方一直在打字时最多等这么�
 const STEER_CYCLE_MS = 5000;         // 周期闸时长：turn-hold 会话（有人接管后续批次）用这个
 const STEER_CYCLE_SHORT_MS = 1500;   // 非保持会话的周期闸：只挡"几乎是同时"的那批，避免把答复拖到看门狗
 const steerCycleAt = new Map();      // key -> 本周期已注入的时间戳
-/** 新周期开始（turn-hold 钩子每次被调用时调用一次）：清掉"本周期已注入"标记。 */
-export function markSteerCycleStart(key) { if (key) steerCycleAt.delete(key); }
+// 【2026-09-15 合并注入（一个模型步 = 一个 [Mid-turn] 块）】见下面 STEER_PENDING_MAX_MS 处的机理说明。
+const pendingSteerSince = new Map(); // key -> ts：最早一条"攒着还没投"的消息（记账 + 防饥饿兜底）
+const stepBoundaryAt = new Map();    // key -> ts：最近一次观测到的"模型步边界"（mux 的 step/end / turn-hold 钩子）
+/** 新的一步开始（模型步边界）：清掉"本周期已注入"闸门，并记下边界时刻。
+ *  调用点：mux.js 收到 `step/end`（模型的每一步末尾）、turn-hold.js 的 agent/turn-stopping 钩子、
+ *  以及 turn 边界（turn/start）。这些**都是真实的步/回合边界**，不是拍脑袋的计时窗口。
+ *  只在"真的改变了什么"时打日志：正常每一步都会调它，无脑打会刷屏。 */
+export function markSteerCycleStart(key, why = 'hook') {
+  if (!key) return;
+  const sealed = steerCycleAt.get(key);
+  const pending = pendingSteerSince.has(key);
+  steerCycleAt.delete(key);
+  stepBoundaryAt.set(key, Date.now());
+  if (stepBoundaryAt.size > 200) {
+    for (const [k, t] of stepBoundaryAt) if (Date.now() - t > 3600000) stepBoundaryAt.delete(k);
+  }
+  if (sealed || pending) {
+    log(`[steer] ${key} 模型步边界（${why}）→ 注入闸门复位（解除封口=${!!sealed}，还有待发批次=${pending}）`);
+  }
+}
 let steerSeq = 0;                 // 串行化：同一时刻只允许一个 steer 请求在飞
 const steerInFlight = new Map();  // key -> true
 const lastSteerAt = new Map();    // key -> ts
 // 【2026-09-11 tun-hold】即时注入模式下，遇到"上一次注入还在飞"时**排队等**多久（而不是直接失败）。
 // 一次注入通常几十~几百毫秒就落地；直接放弃会把刚到的消息退回补发轮，等于即时注入白做。
 const STEER_INFLIGHT_WAIT_MS = 3000;
+// ── 【2026-09-15 合并注入：一个模型步 = 一个 [Mid-turn] 块】────────────────────────
+// 主人反馈（原话）："我相隔极端时间的消息好像 dsh 的思考里不会同时获取到，然后两条不是两个注入吗
+// 它会等第一个注入处理完到第二个注入再处理下一条，我倒是希望它能省去第二次注入然后思考过程中还能获取到消息"。
+//
+// 机理（逐行读过 DSH 源码，不是推测）：
+//   · 每一次 steer 都是 inbox 里**独立的一条 next-step 消息**：`steer(i){ this.send(i,'next-step',true) }`
+//     （dsh-agent-loop/lib/index.js:399-401）。
+//   · 而 `inbox.claim()` 在**下一个 step 的开端**把 next-step **一次全取走**
+//     （dsh-agent/lib/index.js:56-61：先 `mutate('next-step',0,this.nextStep.length,[],false)`，再按
+//      target 补取一条 next-turn）——由 dsh-agent-loop/lib/index.js:534 的 preStep 在每步开头调用。
+//     ⇒ 同一个 step 里注入 N 次，模型在**同一次思考**里就看到 **N 个独立的 [Mid-turn] 块**，
+//       只能一块一块顺序处理：这正是主人看到的"两条消息、两个注入、等第一条处理完才轮到第二条"。
+//   · 关键推论：**同一个 step 边界本来就只能带走一批**。所以"把这一步里到达的消息攒起来、在步边界
+//     一次性注入"，**送达时刻与"消息一到就立刻注入"完全相同**（都是下一个 step 开端），
+//     但模型只看到一个块、只发一条气泡 —— 白拿的合并，不花任何额外延迟。
+// 因此对"回合保持（turn-hold）托管"的会话：
+//   · 非保持循环发起的即时注入（busy 分支 / scheduleWake 的 steer）**一律不投**，只记账；
+//   · 由**步边界**统一发车：turn-hold.js 的保持循环（在 agent/turn-stopping 钩子里），
+//     或 mux.js 观测到 `step/end` 后调用的 turn-hold.js:flushStepBatch()；
+//   · 绝不"等下一轮"：步边界就是这一步的末尾（几十秒级），消息全程留在 unread 里
+//     （不标"已给"、写进 _steerDeferredSeqs 防 mark_read 吞掉），投递看门狗 25s 兜底。
+// 非保持会话（群聊 / turn-hold 关）**行为保持原样**：那里没有"步边界注入器"，攒着只会把答复拖到看门狗。
+const STEER_PENDING_MAX_MS = 90000;  // 攒这么久还没等到任何步边界（事件流异常/保持插件没起来）→ 兜底即时注入，绝不静默卡住
+/**
+ * 「这一步该带走的 [Mid-turn] 批」= `st.unread` 里**还没交给模型**的那些行。
+ * 判据与改动前 `steerIntoRunningTurn()` 内部那份过滤**逐字一致**（不是新语义，只是同一条规则提出来给
+ * 保持循环 / 合并注入共用 —— 两份实现迟早会漂移）：
+ *   · 不在 `turnSteeredSeqs`：本回合已经 steer 注入过；
+ *   · 不在 `turnSeenUnread`：本回合唤醒正文里已经展示过。
+ * 两个集合都在回合结束时被 mux 清零，所以不会跨回合误挡。
+ */
+export function collectMidTurnBatch(st, limit = STEER_MAX_UNREAD) {
+  if (!st) return [];
+  const alreadySteered = new Set((Array.isArray(st.turnSteeredSeqs) ? st.turnSteeredSeqs : []).map(Number));
+  const alreadyShown = new Set((Array.isArray(st.turnSeenUnread) ? st.turnSeenUnread : []).map(Number));
+  return (Array.isArray(st.unread) ? st.unread.slice(-limit) : []).filter((m) => {
+    const seq = Number(m?.seq);
+    if (!Number.isFinite(seq)) return true;   // 没有 seq 的老行：保守放行（宁可多投一次，也不静默丢）
+    if (alreadySteered.has(seq)) return false;
+    if (alreadyShown.has(seq)) return false;
+    return true;
+  });
+}
+/**
+ * 一批消息"先攒着不投"的记账（合并注入用）。两件事，缺一不可：
+ *   ① `_steerDeferredSeqs`：告诉 mark_read"这几条还在等下一次注入，别清"
+ *      （console-server.js:1604 的防吞兜底就查这个集合）；
+ *   ② `pendingSteerSince`：最早一条的等待起点（日志 + 防饥饿兜底要它）。
+ * 调用方**必须自己再打一行日志** —— 这个功能吃过四次"静默失败"的亏，
+ * 任何"这批先不投"的决定都必须在桥日志里留下痕迹（见下面两个调用点的措辞）。
+ * @returns {number} 这批最早一条已经等了多久（ms）
+ */
+function deferSteerBatch(st, key, batch) {
+  if (!pendingSteerSince.has(key)) pendingSteerSince.set(key, Date.now());
+  const waitedMs = Date.now() - (Number(pendingSteerSince.get(key)) || Date.now());
+  try {
+    const seqs = batch.map((m) => Number(m?.seq)).filter((n) => Number.isFinite(n) && n > 0);
+    if (seqs.length) {
+      const prev = Array.isArray(st._steerDeferredSeqs) ? st._steerDeferredSeqs : [];
+      st._steerDeferredSeqs = [...new Set([...prev, ...seqs])].slice(-50);
+    }
+  } catch (_) { /* 记账失败不影响主流程，但调用方那行日志仍会打 */ }
+  return waitedMs;
+}
+/**
+ * 回合边界（`turn/end`）收尾：把"攒着待发"的记账清干净。
+ * 回合都没了，攒的批次不再属于任何模型步；消息**留在 unread 里**（没标已给），由回合结束的补发逻辑
+ * 与投递看门狗接管 —— 这里只清记账 + 留一行日志（一批消息跨过回合边界还没投出去是异常，必须看得见）。
+ */
+export function clearSteerPending(key, why = 'turn/end') {
+  if (!key) return;
+  if (pendingSteerSince.delete(key)) {
+    log(`[steer] ${key} 回合边界（${why}）时仍有"攒着未投"的批次 → 记账已收（消息仍在未读，交给补发/看门狗）`);
+  }
+}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -441,12 +547,8 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   // 两者都在回合结束时清零（mux.js），所以不会跨回合误挡。
   const alreadySteered = new Set((Array.isArray(st.turnSteeredSeqs) ? st.turnSteeredSeqs : []).map(Number));
   const alreadyShown = new Set((Array.isArray(st.turnSeenUnread) ? st.turnSeenUnread : []).map(Number));
-  const unread = unreadAll.filter((m) => {
-    const seq = Number(m.seq);
-    if (alreadySteered.has(seq)) return false;
-    if (alreadyShown.has(seq)) return false;
-    return true;
-  });
+  // 过滤规则统一走 collectMidTurnBatch()（两份实现迟早漂移）；上面两个 Set 保留只为下面那行日志。
+  const unread = collectMidTurnBatch(st);
   if (!unread.length) {
     // 【2026-09-12 修「同一条内容被回两遍」】这里**必须返回 true，不能返回 false**。
     // 语义是"这批消息**已经在模型手里了**"（本回合的唤醒正文展示过，或刚被 steer 注入过）——
@@ -464,6 +566,31 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     log(`[steer] ${key}：这 ${unreadAll.length} 条本回合**已经给过它了**（唤醒已展示 ${alreadyShown.size} 条 / 已注入 ${alreadySteered.size} 条）—— 无需再投，按「已交付」返回 true（防重复投递 → 防重复回复）`);
     return true;
   }
+  // ③ 【2026-09-15 合并注入】保持（turn-hold）托管的会话：**不在这里即时注入**。
+  //    理由与不变量见文件顶部 STEER_PENDING_MAX_MS 那段：同一个 step 里注入 N 次 = 模型在同一次思考里
+  //    看到 N 个 [Mid-turn] 块、一块一块顺序处理（主人报的正是这个）；而"攒到步边界一次带走"的
+  //    送达时刻**与之完全相同**（都是下一个 step 开端），却只产生一个块、一条气泡。
+  //    这里只记账 + 返回 true（= "不用你再投一遍"），真正的发车交给两个步边界注入器：
+  //      · turn-hold.js 的保持循环（agent/turn-stopping 钩子 = 回合准备关闭的步边界）；
+  //      · turn-hold.js:flushStepBatch()（mux 观测到 `step/end` = 模型每一步的末尾）。
+  //    ⚠️ 只有**保持托管**的会话走这条路：非保持会话没有步边界注入器，攒着只会把答复拖到投递看门狗，
+  //       所以那边保持原行为（即时注入 + 时间周期闸）不动。
+  if (!forced && holdEligible) {
+    // 防饥饿兜底（两道，任一成立就不再攒）：
+    //   · 已经跨过一个步边界还没被投出去（说明步边界注入器没生效）→ 立刻自己投；
+    //   · 攒的时间超过 STEER_PENDING_MAX_MS（事件流/插件整体失效）→ 立刻自己投。
+    // 两者都不成立 = 仍在同一个模型步之内 → 继续攒（这正是合并注入要的效果）。
+    const boundaryAt = Number(stepBoundaryAt.get(key)) || 0;
+    const sinceAt = Number(pendingSteerSince.get(key)) || 0;
+    const missedBoundary = boundaryAt > 0 && sinceAt > 0 && boundaryAt > sinceAt;
+    const waitedMs = sinceAt > 0 ? Date.now() - sinceAt : 0;
+    if (!missedBoundary && waitedMs < STEER_PENDING_MAX_MS) {
+      const heldMs = deferSteerBatch(st, key, unread);
+      log(`[steer] ${key} 合并注入：这 ${unread.length} 条**不在半路单独注入**，攒到本步边界（step/end 或 turn-hold 钩子）一次带走（turn-hold 托管，最早一条已等 ${heldMs}ms）`);
+      return true;
+    }
+    log(`[steer] ${key} 兜底即时注入：这批攒了 ${waitedMs}ms 仍未被步边界带走（错过步边界=${missedBoundary}，上限 ${STEER_PENDING_MAX_MS}ms）→ 本次直接投，绝不静默卡住`);
+  }
   // ② 周期闸：本周期（= 上一个模型步）已经注入过一次了 —— 主人明确要求"两条消息只保留第一次注入"。
   //    返回 true 而不是 false：语义是"**不用你再投了**"（调用方若拿到 false 会落回完整唤醒流程 → 又是一次注入）。
   //    这批消息**不标已给**（不进 turnSteeredSeqs / 不推 lastDeliveredSeq），所以：
@@ -476,20 +603,19 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     const agoMs = Date.now() - cycAt;
     // 记下"被推迟交付"的 seq：mark_read 在**没有展示水位**时会全清 unread，那会把这批一起吞掉
     // （§2026-09-11 20:03:46 同类）。记在这里 = 告诉 mark_read"这几条别动，它们还在等下一个周期"。
-    try {
-      const seqs = unread.map((m) => Number(m.seq)).filter((n) => Number.isFinite(n) && n > 0);
-      if (seqs.length) {
-        const prev = Array.isArray(st._steerDeferredSeqs) ? st._steerDeferredSeqs : [];
-        st._steerDeferredSeqs = [...new Set([...prev, ...seqs])].slice(-50);
-      }
-    } catch (_) { /* 记账失败不影响主流程 */ }
+    deferSteerBatch(st, key, unread);
     log(`[steer] ${key} 本周期已注入过（${agoMs}ms 前，窗口 ${cycleWindow}ms，保持中=${holdActiveKeys.has(key)}）→ 这 ${unread.length} 条不再注入，留在未读等下一个周期（一次连发只注入一次）`);
     return true;
   }
   // ① 收集窗：等一下再发车，把"连发两条"合并成同一次注入（主人报的正是这个：第二条被留到下一次唤醒）。
   //    等待期间可能又来新消息 —— 所以等完**重算**候选，新消息自然并入同一条 [Mid-turn]。
   let unreadFinal = unread;
-  {
+  const skipCollect = opts?.noCollect === true;
+  if (skipCollect) {
+    // 【2026-09-15 合并注入】步边界发车（turn-hold.js:flushStepBatch）专用：那一批已经攒了**一整步**，
+    // 再等"对方停止输入"只会把这批拖过最近的 step 边界，白多一步推理。直接发车。
+    log(`[steer] ${key} 步边界注入：跳过收集窗（整步的批次已是最优合并，再等只会错过最近的 step 边界）`);
+  } else {
     const collectStart = Date.now();
     for (;;) {
       const newestAt = (Array.isArray(st.unread) ? st.unread : [])
@@ -506,10 +632,8 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     }
     const waitedMs = Date.now() - collectStart;
     if (waitedMs >= 150) {
-      unreadFinal = (Array.isArray(st.unread) ? st.unread.slice(-STEER_MAX_UNREAD) : []).filter((m) => {
-        const seq = Number(m.seq);
-        return Number.isFinite(seq) && !alreadySteered.has(seq) && !alreadyShown.has(seq);
-      });
+      // 等完**重算**候选：等待期间新到的消息自然并入同一条 [Mid-turn]（判据仍走 collectMidTurnBatch，一份规则）。
+      unreadFinal = collectMidTurnBatch(st);
       if (unreadFinal.length > unread.length) {
         log(`[steer] ${key} 收集窗等了 ${waitedMs}ms，把连发的 ${unreadFinal.length} 条合并进同一次注入（原本只有 ${unread.length} 条）`);
       }
@@ -564,6 +688,19 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
         // 同步推进"已交给模型"的水位线（steer 也是一次投递）
         for (const n of seqs) st.lastDeliveredSeq = Math.max(Number(st.lastDeliveredSeq) || 0, Number(n) || 0);
       } catch (_) {}
+      // 【2026-09-15 合并注入】这一批已经投出去了 → 收掉"攒着"的记账：
+      //   · `pendingSteerSince`：本步这一批到此结束，下一次攒从之后到达的新消息重新计时；
+      //   · `_steerDeferredSeqs`：**只留还没投出去的**。留着的会被 mark_read 当成"还在等下一次注入"
+      //     保护起来（console-server.js:1604），已投出去的若继续留着 = 它们永远清不掉 →
+      //     下一轮又被当新未读展示 → 重复回复。
+      pendingSteerSince.delete(key);
+      try {
+        const done = new Set(unreadToSend.map((m) => Number(m.seq)).filter((n) => Number.isFinite(n) && n > 0));
+        const prevDeferred = Array.isArray(st._steerDeferredSeqs) ? st._steerDeferredSeqs : [];
+        const left = prevDeferred.map(Number).filter((n) => !done.has(n));
+        if (left.length !== prevDeferred.length) st._steerDeferredSeqs = left;
+      } catch (_) {}
+      log(`[steer] ${key} 合并注入：本块 ${unreadToSend.length} 条（这一步攒下的消息全在这一个 [Mid-turn] 里，seq=${unreadToSend.map((m) => Number(m.seq)).join(',')}）`);
       return true;
     }
     log(`[steer] ${key} 被拒：${res?.result?.error?.message ?? res?.result?.error?.code ?? '未知'}（退回排队补发）`);
@@ -784,7 +921,9 @@ export async function sendWakePrompt(key, reason) {
       log(`[steer] ${key} 即时注入抛出异常：${error?.message ?? error}（退回正常唤醒流程）`);
     }
     if (steeredNow) {
-      log(`[default] 会话繁忙：新消息已在在途回合里（刚塞进去 / 本回合已经给过它）${key}（${reason}），不另起一轮、不暂存、不补发`);
+      // 【2026-09-15 合并注入】"true" 现在有三种含义，措辞里都要能看出来，否则排查时分不清：
+      //   ① 刚塞进去；② 本回合已经给过它；③ 保持托管 → 已攒进本步这一批，等步边界一次注入（[steer] 那一行会说明）。
+      log(`[default] 会话繁忙：新消息已在在途回合里（刚塞进去 / 本回合已经给过它 / 已攒进本步批次等步边界合并注入）${key}（${reason}），不另起一轮、不暂存、不补发`);
       return;
     }
     log(`[default] ${key} 会话繁忙且即时注入未成功 → 走正常唤醒流程（steer 投递，不会再卡 next-turn）`);

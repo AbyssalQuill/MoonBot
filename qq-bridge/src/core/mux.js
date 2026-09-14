@@ -175,6 +175,12 @@ import {
   warmGroupName, getGroupDisplayName, formatGroupListLine, warmGroupInfo,
   getCachedGroupInfo, formatGroupInfoLine, initGroupCacheCore, setGroupCacheBot,
 } from './group-cache.js';
+// 【2026-09-15 合并注入】步边界 = 模型每一步的末尾（`step/end`）：
+//   · markSteerCycleStart / clearSteerPending：复位"本周期已注入"闸门、收掉跨回合的攒批记账；
+//   · flushStepBatch：把这一步里攒下的消息**合成一个** [Mid-turn] 块注入（理由见 turn-hold.js 的注释）。
+// mux → turn-hold → wake-send 是单向的（这两个模块都不 import mux），不会形成循环依赖。
+import { markSteerCycleStart, clearSteerPending } from './wake-send.js';
+import { flushStepBatch } from './turn-hold.js';
 
 // 运行期注入：main 持有同一 cfg/api/bot 实例
 let cfgRef = null;
@@ -677,6 +683,8 @@ export async function pumpMux() {
             sendToolSucceededSessions.delete(frame.sessionId);
             pendingSendToolCalls.delete(frame.sessionId);
             TurnStartAt.set(frame.sessionId, Date.now());
+            // 【2026-09-15 合并注入】回合边界同样是注入周期边界：新回合的第一步就是一个全新的周期。
+            markSteerCycleStart(key, 'turn/start');
             armTurnTotalTimer(frame.sessionId); // 回合总时长兜底：防模型无限重复输出卡死
             activeAiTurns.add(key);          // 循环复读监测：标记本会话处于 AI 回合
             pendingTurnOutbound.delete(key); // 清空上一回合残留的发送文本
@@ -741,6 +749,24 @@ export async function pumpMux() {
               }
             }
             touchTurnTotalTimer(frame.sessionId); // 工具结果到达：回合仍活跃
+          }
+          // 【2026-09-15 合并注入】模型**步边界**（dsh-agent-loop/lib/index.js:558 每个模型步末尾 append）：
+          //   ① 复位"本周期已注入"闸门 —— 注入闸门从此以**真实步边界**为准，而不是一个拍脑袋的计时窗口
+          //      （旧实现只在 turn-stopping 钩子里复位，而那个钩子在"模型正在调工具"的步里有条件不执行）；
+          //   ② 把这一步里攒下的消息**合成一个** [Mid-turn] 块注入（turn-hold.js:flushStepBatch）。
+          // 为什么必须在这里发车：保持循环只活在 agent/turn-stopping 钩子里，而那个钩子只在
+          // `turnEnds && nextStep.length === 0` 时才被 await（dsh-agent-loop:564）—— 模型连调几个工具的
+          // 那种步走不到钩子，只靠保持循环就会把消息拖到整个回复跑完。`step/end` 每一步都有，且正好在
+          // **下一个 step 的 claim 之前**，所以在这里注入与"消息一到就投"送达时刻完全一致。
+          // 必须 void + catch：这里不能阻塞事件流处理，更不能静默失败（本功能吃过四次静默失败的亏）。
+          if (frame.event.type === 'step/end') {
+            markSteerCycleStart(key, 'step/end');
+            void flushStepBatch({ key, sid: frame.sessionId, turn: frame.event.data?.turn, cfg: cfgRef })
+              .catch((error) => log(`[hold] ${key} 步边界合并注入异常：${error?.message ?? error}`));
+          }
+          // 回合结束：攒批记账收尾（消息留在 unread 里，由补发/看门狗接管，绝不在这里吞掉）。
+          if (frame.event.type === 'turn/end') {
+            clearSteerPending(key, 'turn/end');
           }
           // 任何会话事件都视为“回合还活着”：重置活动感知看门狗（turn/end 会随后清理计时器）
           armTurnWatchdog(frame.sessionId);

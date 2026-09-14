@@ -7,12 +7,14 @@
 //   allow.groups / allow.private，否则拒绝 —— agent 只能往被允许的地方发消息。
 // - 所有调用走 OneBot HTTP API（httpUrl + accessToken）。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
+import { napcatImageFileArg } from './lib/napcat-file.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -251,6 +253,59 @@ async function authorizeRead(key, token) {
 }
 
 const server = new McpServer({ name: 'napcat-safe', version: '0.1.0' });
+
+/* 【2026-09-15 省额度】重复失败短路：同一个工具 + 完全相同的参数，如果刚刚（90s 内）已经失败过，
+ * 就不再真的执行一次，直接把上次的失败原因回给它，并明确叫它别用同样的参数重试。
+ *
+ * 为什么值得单独做一层：线上实测（2026-09-14 22:52-22:53 的私聊）模型一次并列调了 3 个
+ * qq_send_sticker（同一个 stickerId 连失败 3 次），下一步又同样地重试 —— 每一次失败都要付
+ * **一整个模型步**的上下文重发（该会话实测 ≈34k tokens/步），3 次重试≈10 万 tokens 白花。
+ * 这一层把重复失败挡在桥内：相同参数第二次进来直接短路，模型不会再为同一件失败的事反复烧额度。
+ *
+ * 只对**确定性错误**生效（找不到表情 / 参数非法 / 文件处理失败 …）；
+ * 超时、网络、限频这类"再试一次可能就好了"的错误不记，免得挡住合理的重试。 */
+const recentFailures = new Map();          // key -> { at, text }
+const FAIL_MEMO_MS = 90_000;
+const TRANSIENT_RE = /超时|timeout|timed out|ECONN|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|网络|频率|限频|429|50[0-4]|fetch failed/i;
+const failureKey = (name, args) => {
+  try { return `${name}|${JSON.stringify(args ?? {})}`; } catch { return String(name); }
+};
+const pruneFailures = () => {
+  if (recentFailures.size < 200) return;
+  const now = Date.now();
+  for (const [k, v] of recentFailures) if (now - v.at > FAIL_MEMO_MS) recentFailures.delete(k);
+};
+{
+  const rawTool = server.tool.bind(server);
+  server.tool = (name, ...rest) => {
+    const i = rest.map((x) => typeof x === 'function').lastIndexOf(true);
+    if (i >= 0) {
+      const handler = rest[i];
+      rest[i] = async (...args) => {
+        const key = failureKey(name, args[0]);
+        const memo = recentFailures.get(key);
+        if (memo && Date.now() - memo.at < FAIL_MEMO_MS) {
+          console.error(`[napcat-safe] 重复失败短路：${name}`);
+          return {
+            content: [{ type: 'text', text: `这个调用刚刚已经失败过，失败原因：${memo.text}\n不要用完全相同的参数再试一次（那只会白烧一次上下文）。换个参数、换个工具，或者这次先不做 —— 下一条消息进来时再处理。` }],
+            isError: true
+          };
+        }
+        const res = await handler(...args);
+        try {
+          if (res && res.isError) {
+            const text = String(res.content?.[0]?.text ?? '').replace(/\s+/g, ' ').slice(0, 200);
+            if (!TRANSIENT_RE.test(text)) { recentFailures.set(key, { at: Date.now(), text }); pruneFailures(); }
+          } else if (res) {
+            recentFailures.delete(key);
+          }
+        } catch { /* 记账失败不影响工具结果 */ }
+        return res;
+      };
+    }
+    return rawTool(name, ...rest);
+  };
+}
 
 // ── 工具 schema 精简（2026-09-12）：token 账单上最大的一刀 ────────────────────────────
 // 实测（QQ 主会话的 request/header）：tools **72,692 字符 ≈ 22.7k tokens**、system 13.1k 字符 ≈ 3.3k，
@@ -1613,13 +1668,18 @@ registerTool(
       if (!row) return { content: [{ type: 'text', text: `找不到表情 ${file}，请先用 qq_whale_meme_search 搜索` }], isError: true };
       const filePath = root + '/' + row.path;
       if (!fs.existsSync(filePath)) return { content: [{ type: 'text', text: '图片文件不存在' }], isError: true };
-      // NapCat 需读本机可见路径：先复制到本机可写临时目录再发送（服务器 Docker 曾用 /app/napcat 挂载路径，本机直接传绝对路径即可）。
+      // NapCat 需读它**自己能读到**的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
+      // 宿主挂载目录），再用 napcatImageFileArg 按 dockerPathMap 换成容器内路径 / base64。
+      // 【2026-09-15】此前直接把宿主绝对路径交给 NapCat，服务器（Docker）报
+      // 「文件处理失败: 识别URL失败」→ 主人看到的是"表情包一张都发不出去"。
       const tmpDir = path.join(ROOT, 'state', 'sticker-tmp');
-      fs.mkdirSync(tmpDir, { recursive: true });
+      const cfgMeme = getConfig();
+      const wantTmpDir = String(cfgMeme?.napcat?.tmpDir ?? '').trim() || tmpDir;
+      fs.mkdirSync(wantTmpDir, { recursive: true });
       const tmpName = `${Date.now()}-whale-${path.basename(row.path || 'meme.webp')}`;
-      const tmpPath = path.join(tmpDir, tmpName);
+      const tmpPath = path.join(wantTmpDir, tmpName);
       fs.copyFileSync(filePath, tmpPath);
-      const napcatPath = tmpPath;
+      const napcatPath = napcatImageFileArg(tmpPath, cfgMeme);
       const [kind, id] = key.split(':');
       const hasQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
       // 带引用时统一走桥的发送端点：它用 resolveReplyTarget 把「本地 seq」和「真实 QQ message id」
@@ -1629,7 +1689,7 @@ registerTool(
       if (hasQuote) {
         const data = await agentApi('/api/social/send-message', {
           method: 'POST',
-          body: JSON.stringify({ key, messages: [], images: [filePath], replyToMessageId }),
+          body: JSON.stringify({ key, messages: [], images: [tmpPath], replyToMessageId }),
           headers: { 'x-agent-token': token },
           timeoutMs: 120000
         });
@@ -1647,7 +1707,19 @@ registerTool(
         body: JSON.stringify({ key, token, tool: kind === 'private' ? 'sendPrivate' : 'sendGroup' }),
         timeoutMs: 15000
       });
-      const data = await onebot(action, params);
+      let data;
+      try {
+        data = await onebot(action, params);
+      } catch (eSend) {
+        // 【2026-09-15 自愈】NapCat 读不到图片路径（Docker 容器读不到宿主路径）→ 换 base64 重发一次。
+        // 该错误 = 整条消息没发出去，重发不会重复（服务器实测报「文件处理失败: 识别URL失败」）。
+        const em = String(eSend?.message ?? eSend);
+        if (!/文件处理失败|识别URL失败|ENOENT|no such file/i.test(em)) throw eSend;
+        const imgSeg = msg.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
+        if (!imgSeg) throw eSend;
+        imgSeg.data.file = `base64://${fs.readFileSync(tmpPath).toString('base64')}`;
+        data = await onebot(action, params);
+      }
       const messageId = data?.data?.message_id ?? data?.message_id ?? null;
       // 登记到桥接会话：让 AI 记住自己发过这张表情、可被 qq_withdraw_message 撤回（含 (id:xxx) 展示）
       try {
@@ -2455,5 +2527,853 @@ registerTool(
   }
 );
 
+// ── 角色库（角色包）只读工具组（2026-09-14 新增）：qq_character_list / qq_character_read / qq_character_pack / qq_character_search ──
+// 为什么需要：管理器「角色库导入」只把**一张**角色卡写进 qq-bridge/persona.md，再由
+// core/wake-send.js::buildRuntimeOverrideBlock 作为 [PERSONA] 整段注入 —— 于是角色库里
+// **其它角色卡的提示词根本不会被注入**：模型既不知道库里还有什么，也读不到别的卡。
+// 这组工具让模型自己按需去读本机那份角色库（纯只读，不写任何人设文件、不发任何 QQ 消息）。
+//
+// ⚠️ 真实结构（本机实测，别当成"一堆 .md"）：**一个角色 = 一个子目录 = 一个"角色包"**，例如
+//   characters/arihara-nanami/{SKILL.md, ULTIMATE_ROLEPLAY_PROMPT.md, personality.md, profile.md,
+//     interaction.md, relations.md, memory.md, conflicts.md, manifest.json, sources/wiki.md}
+//   characters/ATRI_MAIN_PROMPT.md                      ← 库根下**散装**的卡片文件（列出时标 (loose file)）
+//   本机规模：21 个角色包 + 1 个散装文件 = 211 个文件（含每包的 manifest.json）。
+//   所以：list 列的是**包**；read 读包里的**一份**（默认 SKILL.md）；pack 一次把核心几份拼回来。
+//
+// 目录：config.json → social.charactersDir（见 config.example.json；空/缺失 → DEFAULT_CHARACTERS_DIR）。
+// 开关：config.json → social.tools.characterCards（!== false 即注册；默认开。理由：纯只读、只碰本机文件、
+//       有大小上限与防穿越，关掉只会让"读不到其它角色卡"这个原问题复现；写法与 sendRich/musicSearch 同类）。
+//
+// 安全边界（全部落在下面的纯函数里，工具只是薄壳）：
+//   1) 只认 .md / .txt / .json（.json 只有 manifest.json 这类元信息）；
+//   2) 拒绝绝对路径/盘符/UNC、`.`、`..`、NUL、Windows 非法文件名字符；
+//      `character` 只允许**单段**（包名或散装文件名），包内 file 最多 CHARACTER_PACK_MAX_FILE_DEPTH 层；
+//   3) 每个真实路径都做 realpath **库根包含性**校验：符号链接/junction 指到库外一律当"不存在"；
+//   4) 单文件 > CHARACTER_MAX_FILE_BYTES 直接不读；read 默认截断到 32KB、pack 封顶 24KB，超了如实说明；
+//   5) 正文只出现在工具返回值里 —— 这段代码不新增任何含正文的日志（console.* 只打路径/计数）。
+const DEFAULT_CHARACTERS_DIR = path.join(os.homedir(), 'Downloads', 'characters', 'characters');
+const CHARACTER_EXTS = new Set(['.md', '.txt', '.json']);
+const CHARACTER_SCAN_MAX_DEPTH = 3;                  // 库根(0) → 角色包(1) → 包内一层(2) → 包内两层(3)，覆盖 <包>/sources/wiki.md
+const CHARACTER_PACK_MAX_FILE_DEPTH = 2;             // 包内允许的最大层数：sources/wiki.md = 1 层
+const CHARACTER_SCAN_MAX_FILES = 2000;               // 扫描上限，防止误把整盘当库时卡住
+const CHARACTER_MAX_FILE_BYTES = 2 * 1024 * 1024;    // 单文件硬上限：超过这个大小不读
+const CHARACTER_MANIFEST_MAX_BYTES = 256 * 1024;     // manifest.json 超过这个大小就不解析（只当元信息）
+const CHARACTER_READ_DEFAULT_BYTES = 32 * 1024;      // qq_character_read 默认上限 = 32KB
+const CHARACTER_READ_MAX_BYTES = 128 * 1024;         // 模型显式放宽的上限 = 128KB
+const CHARACTER_PACK_DEFAULT_BYTES = 24 * 1024;      // qq_character_pack 默认封顶 = 24KB
+const CHARACTER_PACK_MAX_BYTES = 128 * 1024;         // qq_character_pack 显式放宽的上限
+const CHARACTER_LIST_DEFAULT_LIMIT = 100;
+const CHARACTER_LIST_MAX_LIMIT = 500;
+const CHARACTER_SEARCH_DEFAULT_LIMIT = 10;
+const CHARACTER_SEARCH_MAX_LIMIT = 50;
+const CHARACTER_SEARCH_MAX_SNIPPETS = 3;
+const CHARACTER_SNIPPET_MAX_CHARS = 200;
+const CHARACTER_TITLE_MAX_CHARS = 80;
+const CHARACTER_TITLE_HEAD_BYTES = 4096;
+const CHARACTER_SUMMARY_MAX_CHARS = 120;
+// qq_character_pack 的正文顺序：主人点名的"核心几份"在前，memory/conflicts 次之，主提示词与其余在后
+const CHARACTER_FILE_ORDER = [
+  /^skill\.md$/i, /^personality\./i, /^profile\./i, /^interaction\./i, /^relations\./i,
+  /^memory\./i, /^conflicts\./i, /^ultimate_roleplay_prompt/i, /^main_prompt/i
+];
+// qq_character_read(character) 不传 file 时的默认阅读顺序：SKILL.md → manifest.json → 终极扮演提示词 → personality
+const CHARACTER_DEFAULT_FILE_ORDER = [/^skill\.md$/i, /^manifest\.json$/i, /^ultimate_roleplay_prompt/i, /^personality\./i];
+
+/** 角色库根目录：config.json → social.charactersDir，空/缺失时回落默认值 */
+function resolveCharactersDir(config) {
+  let raw = '';
+  try {
+    const c = config ?? getConfig();
+    if (typeof c?.social?.charactersDir === 'string') raw = c.social.charactersDir.trim();
+  } catch { raw = ''; }
+  if (!raw) return DEFAULT_CHARACTERS_DIR;
+  try { return path.resolve(raw); } catch { return DEFAULT_CHARACTERS_DIR; }
+}
+
+function characterExtOf(name) {
+  return path.extname(String(name ?? '')).toLowerCase();
+}
+
+/**
+ * 把「角色名 / 相对路径」归一化成库内相对段。
+ * 绝对路径、盘符、UNC、`.`、`..`、NUL、非法文件名字符、层级过深都在这里被拒（ok:false + 原因）。
+ */
+function normalizeCharacterRel(name) {
+  const raw = String(name ?? '').trim();
+  if (!raw) return { ok: false, error: 'name is empty' };
+  if (raw.length > 400) return { ok: false, error: 'name is too long (max 400 chars)' };
+  if (raw.includes('\u0000')) return { ok: false, error: 'name contains a NUL character' };
+  if (/^[a-zA-Z]:/.test(raw) || raw.startsWith('\\') || raw.startsWith('/')) {
+    return { ok: false, error: 'absolute paths (drive letter / UNC / leading separator) are not allowed - pass a name relative to the character library' };
+  }
+  const segs = raw.split(/[\\/]+/).filter((s) => s.length > 0);
+  if (!segs.length) return { ok: false, error: 'name has no path segment' };
+  for (const s of segs) {
+    if (s === '.' || s === '..') return { ok: false, error: 'parent-directory traversal ("." / "..") is not allowed' };
+    if (s.includes(':')) return { ok: false, error: 'drive letters / NTFS alternate data streams are not allowed' };
+    if (/[*?"<>|]/.test(s)) return { ok: false, error: `name contains a character that is invalid in a file name: ${s}` };
+  }
+  // 「角色」= 一个子目录（角色包）：character 只允许单段，包内 file 最多 CHARACTER_PACK_MAX_FILE_DEPTH 层
+  if (segs.length > CHARACTER_PACK_MAX_FILE_DEPTH + 1) {
+    return { ok: false, error: `too deep: at most ${CHARACTER_PACK_MAX_FILE_DEPTH} level(s) below a character pack (${CHARACTER_PACK_MAX_FILE_DEPTH + 1} path segment(s))` };
+  }
+  return { ok: true, segs, rel: segs.join('/') };
+}
+
+/** 解析成库内文件绝对路径（只做名字层校验；真实路径包含性由 containedRealPath 负责） */
+function resolveCharacterPath(rootDir, name) {
+  const root = path.resolve(String(rootDir ?? ''));
+  const norm = normalizeCharacterRel(name);
+  if (!norm.ok) return { ok: false, error: norm.error };
+  if (!CHARACTER_EXTS.has(characterExtOf(norm.rel))) {
+    return { ok: false, error: `only .md / .txt / .json character-pack files can be read (got "${norm.rel}")` };
+  }
+  return { ok: true, rel: norm.rel, abs: path.join(root, ...norm.segs) };
+}
+
+/** real 是否落在 rootReal 之内（大小写按平台语义；符号链接已由调用方的 realpath 解开） */
+function isInsideDir(rootReal, real) {
+  const rel = path.relative(String(rootReal ?? ''), String(real ?? ''));
+  if (!rel || path.isAbsolute(rel)) return false;
+  return rel.split(/[\\/]+/)[0] !== '..';
+}
+
+/**
+ * realpath + 包含性校验。返回 { ok:true, abs, rootReal } 或 { ok:false, error }。
+ * 库目录不存在 / 目标不存在 / 符号链接（junction）指到库外 —— 全部走 ok:false，调用方不抛异常。
+ */
+function containedRealPath(rootDir, targetAbs) {
+  let rootReal;
+  try { rootReal = fs.realpathSync(path.resolve(String(rootDir ?? ''))); }
+  catch { return { ok: false, error: 'character library directory does not exist' }; }
+  let real;
+  try { real = fs.realpathSync(targetAbs); } catch { return { ok: false, error: 'not found' }; }
+  if (!isInsideDir(rootReal, real)) {
+    return { ok: false, error: 'resolved path is outside the character library (symlink/junction escape?)' };
+  }
+  return { ok: true, abs: real, rootReal };
+}
+
+/** 打开角色库根：{ ok:true, dir, rootReal } 或 { ok:false, dir, reason }（目录不在也**不抛异常**） */
+function openCharactersRoot(rootDir) {
+  const dir = path.resolve(String(rootDir ?? ''));
+  let real;
+  try { real = fs.realpathSync(dir); } catch { return { ok: false, dir, reason: 'directory-not-found' }; }
+  let st;
+  try { st = fs.statSync(real); } catch { return { ok: false, dir, reason: 'directory-not-found' }; }
+  if (!st.isDirectory()) return { ok: false, dir, reason: 'not-a-directory' };
+  return { ok: true, dir, rootReal: real };
+}
+
+/** 条目探测（跟随符号链接）：坏链 / 逃逸到库外 / 读不到 → null，调用方当"没有这个条目" */
+function inspectVfsEntry(rootReal, abs) {
+  let real;
+  try { real = fs.realpathSync(abs); } catch { return null; }
+  if (!isInsideDir(rootReal, real)) return null;
+  try { return { abs: real, st: fs.statSync(real) }; } catch { return null; }
+}
+
+/** 扫描库内全部 .md/.txt（最多 CHARACTER_SCAN_MAX_DEPTH 层、最多 CHARACTER_SCAN_MAX_FILES 个） */
+function scanCharacterFiles(rootDir, opts = {}) {
+  const maxDepth = Number.isFinite(opts.maxDepth) ? Math.max(0, Math.floor(opts.maxDepth)) : CHARACTER_SCAN_MAX_DEPTH;
+  const maxFiles = Number.isFinite(opts.maxFiles) ? Math.max(1, Math.floor(opts.maxFiles)) : CHARACTER_SCAN_MAX_FILES;
+  const opened = openCharactersRoot(rootDir);
+  if (!opened.ok) return { ok: false, dir: opened.dir, reason: opened.reason, files: [], truncated: false };
+  const files = [];
+  let truncated = false;
+  const walk = (dirAbs, depth, prefix) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dirAbs, { withFileTypes: true }); } catch { return; }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of entries) {
+      if (truncated) return;
+      if (e.name.startsWith('.')) continue;                     // 隐藏项（.git / .DS_Store 之类）不算角色卡
+      const abs = path.join(dirAbs, e.name);
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      const info = inspectVfsEntry(opened.rootReal, abs);        // 跟随符号链接 + 包含性校验
+      if (!info) continue;
+      if (info.st.isDirectory()) {
+        if (depth < maxDepth) walk(info.abs, depth + 1, rel);
+        continue;
+      }
+      if (!info.st.isFile()) continue;
+      if (!CHARACTER_EXTS.has(characterExtOf(e.name))) continue;
+      if (info.st.size <= 0) continue;
+      files.push({ rel, abs: info.abs, size: info.st.size, mtimeMs: info.st.mtimeMs });
+      if (files.length >= maxFiles) { truncated = true; return; }
+    }
+  };
+  walk(opened.rootReal, 0, '');
+  return { ok: true, dir: opened.dir, rootReal: opened.rootReal, files, truncated };
+}
+
+function clampReadBytes(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return CHARACTER_READ_DEFAULT_BYTES;
+  return Math.min(Math.max(Math.floor(n), 1024), CHARACTER_READ_MAX_BYTES);
+}
+
+function clampLimit(v, def, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(Math.max(Math.floor(n), 1), max);
+}
+
+/** 卡片标题：跳过 YAML front matter，取第一个 Markdown 标题；没有标题就用 front matter 的 name */
+function cardTitle(abs) {
+  try {
+    const fd = fs.openSync(abs, 'r');
+    let head = '';
+    try {
+      const buf = Buffer.alloc(CHARACTER_TITLE_HEAD_BYTES);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      head = buf.subarray(0, n).toString('utf8').replace(/^\uFEFF/, '');
+    } finally { fs.closeSync(fd); }
+    let body = head;
+    let fmName = '';
+    const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(head);
+    if (fm) {
+      const m = /^\s*name\s*:\s*["']?([^"'\r\n]+)/m.exec(fm[1]);
+      if (m) fmName = m[1].trim();
+      body = head.slice(fm[0].length);
+    }
+    const h = /^\s{0,3}#{1,6}\s+(.+?)\s*$/m.exec(body);
+    const title = (h ? h[1] : '').replace(/[#*`>]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const finalTitle = title || fmName;
+    return finalTitle ? finalTitle.slice(0, CHARACTER_TITLE_MAX_CHARS) : '';
+  } catch { return ''; }
+}
+
+function formatCardMtime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return 'unknown';
+  return new Date(n).toISOString().replace('T', ' ').slice(0, 16);
+}
+
+/** 读单个卡片文件：按字节上限截断，返回真实截断情况（不抛异常） */
+function readCardFileBytes(abs, rel, maxBytes) {
+  const limit = clampReadBytes(maxBytes);
+  let st;
+  try { st = fs.statSync(abs); } catch { return { ok: false, rel, reason: 'not-found' }; }
+  if (!st.isFile()) return { ok: false, rel, reason: 'not-a-file' };
+  if (st.size > CHARACTER_MAX_FILE_BYTES) {
+    return {
+      ok: false, rel, reason: 'too-large', size: st.size,
+      error: `file is ${st.size} B, over the ${CHARACTER_MAX_FILE_BYTES} B per-file limit - refused, not read`
+    };
+  }
+  let buf;
+  try { buf = fs.readFileSync(abs); } catch (error) {
+    return { ok: false, rel, reason: 'read-failed', error: error?.message ?? String(error) };
+  }
+  const truncated = buf.length > limit;
+  let text = (truncated ? buf.subarray(0, limit) : buf).toString('utf8');
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  // 切在多字节字符中间时丢掉残留替换符（真实库是中文卡，必须保证不产生乱码尾巴）
+  if (truncated && text.endsWith('\uFFFD')) text = text.slice(0, -1);
+  return {
+    ok: true, rel, size: buf.length, bytes: Buffer.byteLength(text, 'utf8'),
+    truncated, limitBytes: limit, title: cardTitle(abs), mtimeMs: st.mtimeMs, text
+  };
+}
+
+/** 角色包内文件的排序：按 CHARACTER_FILE_ORDER 的核心顺序 → 同名新版本在前 → 其余按名（manifest.json 排最后且不进 pack 正文） */
+function orderCardFiles(files) {
+  const baseOf = (rel) => String(rel).split('/').pop().toLowerCase();
+  const scoreOf = (rel) => {
+    const base = baseOf(rel);
+    for (let i = 0; i < CHARACTER_FILE_ORDER.length; i++) if (CHARACTER_FILE_ORDER[i].test(base)) return i;
+    return CHARACTER_FILE_ORDER.length;
+  };
+  const versionOf = (rel) => {
+    const m = /v(\d+(?:\.\d+)?)/i.exec(baseOf(rel));
+    return m ? Number(m[1]) : 0;
+  };
+  return [...files].sort((a, b) => {
+    const sa = scoreOf(a.rel); const sb = scoreOf(b.rel);
+    if (sa !== sb) return sa - sb;
+    const va = versionOf(a.rel); const vb = versionOf(b.rel);
+    if (va !== vb) return vb - va;
+    return a.rel.localeCompare(b.rel);
+  });
+}
+
+/** qq_character_pack 的字节上限：默认 24KB，可放宽到 CHARACTER_PACK_MAX_BYTES */
+function clampPackBytes(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return CHARACTER_PACK_DEFAULT_BYTES;
+  return Math.min(Math.max(Math.floor(n), 2048), CHARACTER_PACK_MAX_BYTES);
+}
+
+function truncateText(s, max) {
+  const t = String(s ?? '').trim();
+  return t.length > max ? `${t.slice(0, max)}...` : t;
+}
+
+/** 读角色包 manifest.json 的名字/简介/版本（只当元信息）：读不到/坏了都返回 { ok:false }，从不抛异常 */
+function readPackManifest(packDir) {
+  const p = path.join(String(packDir ?? ''), 'manifest.json');
+  let st;
+  try { st = fs.statSync(p); } catch { return { ok: false, reason: 'missing' }; }
+  if (!st.isFile() || st.size <= 0 || st.size > CHARACTER_MANIFEST_MAX_BYTES) return { ok: false, reason: 'unusable' };
+  let obj;
+  try { obj = JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch { return { ok: false, reason: 'bad-json' }; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, reason: 'bad-shape' };
+  const first = (keys) => {
+    for (const k of keys) {
+      const v = obj[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+      if (typeof v === 'number') return String(v);
+      if (Array.isArray(v) && v.length) {
+        const parts = v.filter((x) => typeof x === 'string' && x.trim());
+        if (parts.length) return parts.join(', ');
+      }
+    }
+    return '';
+  };
+  const name = first(['name', 'displayName', 'display_name', 'title', 'slug']);
+  const version = first(['version', 'version_release']);
+  const description = first(['description', 'summary', 'desc', 'intro', 'tagline', 'bio', '简介']);
+  const extras = first(['game', 'kit', 'dimensions', 'tags', 'dimensions_count']);
+  return { ok: true, name, version, description, extras, summary: description || extras };
+}
+
+/** 角色包默认阅读的那一份：优先包**顶层**的 SKILL.md → manifest.json → ULTIMATE_ROLEPLAY_PROMPT*(新版本在前) → personality.md */
+function pickDefaultPackFile(files) {
+  const list = Array.isArray(files) ? files.filter((f) => f && typeof f.rel === 'string') : [];
+  if (!list.length) return null;
+  const top = list.filter((f) => !f.rel.includes('/'));
+  const pool = top.length ? top : list;
+  for (const re of CHARACTER_DEFAULT_FILE_ORDER) {
+    const hit = pool.filter((f) => re.test(f.rel.split('/').pop()));
+    if (hit.length === 1) return hit[0];
+    if (hit.length > 1) return orderCardFiles(hit)[0];
+  }
+  return orderCardFiles(pool)[0];
+}
+
+/** 表头里的 manifest 一行（名字/版本/简介） */
+function formatVersion(v) {
+  const t = String(v ?? '').trim();
+  if (!t) return '';
+  return /^v/i.test(t) ? t : `v${t}`;          // manifest 里版本有写 "2.0" 也有写 "V2.0"，统一成 vX
+}
+
+function manifestLine(m) {
+  if (!m || !m.ok) return 'Manifest: (none)';
+  const bits = [m.name || '(unnamed)'];
+  if (m.version) bits.push(formatVersion(m.version));
+  const summary = truncateText(m.summary, CHARACTER_SUMMARY_MAX_CHARS);
+  return `Manifest: ${bits.join(' ')}${summary ? ` - ${summary}` : ''}`;
+}
+
+/** 列角色包（一个子目录 = 一个角色包）+ 库根下散装的卡片文件；目录不存在 → ok:false + reason（不抛异常） */
+function listCharacterPacks(rootDir, opts = {}) {
+  const limit = clampLimit(opts.limit, CHARACTER_LIST_DEFAULT_LIMIT, CHARACTER_LIST_MAX_LIMIT);
+  const scan = scanCharacterFiles(rootDir);
+  if (!scan.ok) return { ok: false, dir: scan.dir, reason: scan.reason, limit, total: 0, packs: [], loose: [] };
+  const byPack = new Map();
+  const loose = [];
+  for (const f of scan.files) {
+    const slash = f.rel.indexOf('/');
+    if (slash < 0) {                                            // 库根下散装的文件（如 ATRI_MAIN_PROMPT.md）
+      loose.push({ name: f.rel, size: f.size, mtimeMs: f.mtimeMs, title: cardTitle(f.abs) });
+      continue;
+    }
+    const name = f.rel.slice(0, slash);
+    if (!byPack.has(name)) byPack.set(name, { name, files: [], totalBytes: 0, mtimeMs: 0 });
+    const pack = byPack.get(name);
+    pack.files.push({ rel: f.rel.slice(slash + 1), abs: f.abs, size: f.size, mtimeMs: f.mtimeMs });
+    pack.totalBytes += f.size;
+    if (f.mtimeMs > pack.mtimeMs) pack.mtimeMs = f.mtimeMs;
+  }
+  const all = [...byPack.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const packs = all.slice(0, limit).map((p) => {
+    const main = pickDefaultPackFile(p.files);
+    return {
+      name: p.name, fileCount: p.files.length, totalBytes: p.totalBytes, mtimeMs: p.mtimeMs,
+      mainFile: main ? main.rel : '', hasManifest: p.files.some((f) => /^manifest\.json$/i.test(f.rel)),
+      manifest: readPackManifest(path.join(scan.rootReal, p.name))
+    };
+  });
+  return {
+    ok: true, dir: scan.dir, limit, packs, total: all.length, totalPacks: all.length,
+    totalFiles: scan.files.length, loose, scanTruncated: scan.truncated
+  };
+}
+
+/** 列某个角色包里的文件（qq_character_read 的 file 参数索引）；name 给了散装文件或无此包都会说清楚 */
+function listPackFiles(rootDir, character) {
+  const opened = openCharactersRoot(rootDir);
+  if (!opened.ok) return { ok: false, dir: opened.dir, reason: opened.reason };
+  const norm = normalizeCharacterRel(character);
+  if (!norm.ok || norm.rel.includes('/')) {
+    return {
+      ok: false, dir: opened.dir, character: String(character ?? ''), reason: 'rejected',
+      error: norm.ok ? 'character must be a single pack name (or a loose file name), not a path' : norm.error
+    };
+  }
+  const target = path.join(opened.rootReal, norm.rel);
+  const info = inspectVfsEntry(opened.rootReal, target);
+  if (!info) {
+    let exists = false;
+    try { fs.lstatSync(target); exists = true; } catch { exists = false; }
+    return {
+      ok: false, dir: opened.dir, character: norm.rel, reason: exists ? 'rejected' : 'not-found',
+      error: exists
+        ? 'path exists but resolves outside the character library (symlink/junction escape) - refused'
+        : `no character pack or card file named "${norm.rel}" in the character library`
+    };
+  }
+  if (!info.st.isDirectory()) {
+    return {
+      ok: false, dir: opened.dir, character: norm.rel, reason: 'not-a-pack',
+      error: `"${norm.rel}" is a loose card file at the library root, not a character pack - read it with qq_character_read`
+    };
+  }
+  const scan = scanCharacterFiles(info.abs, { maxDepth: CHARACTER_PACK_MAX_FILE_DEPTH });
+  const files = orderCardFiles(scan.files).map((f) => ({ rel: f.rel, size: f.size, mtimeMs: f.mtimeMs, title: cardTitle(f.abs) }));
+  return {
+    ok: true, dir: opened.dir, character: norm.rel, files, totalBytes: files.reduce((s, f) => s + f.size, 0),
+    manifest: readPackManifest(info.abs), mainFile: (pickDefaultPackFile(scan.files) || {}).rel || ''
+  };
+}
+
+/** 把 character（单段：角色包名或库根下散装文件名）解析成库内真实条目；不合法/不存在/逃逸都 ok:false（不抛异常） */
+function resolveCharacterEntry(opened, character) {
+  const norm = normalizeCharacterRel(character);
+  if (!norm.ok || norm.rel.includes('/')) {
+    return {
+      ok: false, name: String(character ?? ''), reason: 'rejected',
+      error: norm.ok
+        ? 'character must be a single pack name (or a loose file name at the library root), not a path - use the file parameter for files inside a pack'
+        : norm.error
+    };
+  }
+  const target = path.join(opened.rootReal, norm.rel);
+  const info = inspectVfsEntry(opened.rootReal, target);
+  if (!info) {
+    let exists = false;
+    try { fs.lstatSync(target); exists = true; } catch { exists = false; }
+    return {
+      ok: false, name: norm.rel, reason: exists ? 'rejected' : 'not-found',
+      error: exists
+        ? 'path exists but resolves outside the character library (symlink/junction escape) - refused'
+        : `no character pack or card file named "${norm.rel}" in the character library`
+    };
+  }
+  return { ok: true, name: norm.rel, abs: info.abs, st: info.st, isDir: info.st.isDirectory() };
+}
+
+/**
+ * 读角色包里**一份**文件（或库根下散装的一张卡）。
+ * character = 角色包名 / 散装文件名；file 省略时按 SKILL.md → manifest.json → ULTIMATE_ROLEPLAY_PROMPT* → personality.md 挑一份。
+ * 包内允许最多 CHARACTER_PACK_MAX_FILE_DEPTH 层（sources/wiki.md = 1 层）。内容按 maxBytes（默认 32KB，上限 128KB）截断并如实回报。
+ */
+function readCharacterFile(rootDir, character, file, opts = {}) {
+  const opened = openCharactersRoot(rootDir);
+  if (!opened.ok) return { ok: false, dir: opened.dir, reason: opened.reason };
+  const ent = resolveCharacterEntry(opened, character);
+  if (!ent.ok) return { ok: false, dir: opened.dir, character: ent.name, reason: ent.reason, error: ent.error };
+  const limit = clampReadBytes(opts.maxBytes);
+  const hasFileArg = file !== undefined && file !== null && String(file).trim() !== '';
+  if (!ent.isDir) {                                            // 库根下散装的文件
+    if (!CHARACTER_EXTS.has(characterExtOf(ent.name))) {
+      return { ok: false, dir: opened.dir, character: ent.name, reason: 'rejected', error: `only .md / .txt / .json files can be read (got "${ent.name}")` };
+    }
+    const r = readCardFileBytes(ent.abs, ent.name, limit);
+    if (!r.ok) return { ok: false, dir: opened.dir, character: ent.name, reason: r.reason, error: r.error ?? r.reason, size: r.size };
+    return {
+      ok: true, kind: 'loose-file', dir: opened.dir, character: ent.name, file: ent.name, fileIgnored: hasFileArg,
+      manifest: { ok: false, reason: 'n/a' }, files: [ent.name], packFileCount: 1, packTotalBytes: r.size,
+      parts: [r], includedCount: 1, totalBytes: r.bytes, totalSize: r.size, notIncluded: [],
+      truncated: r.truncated, limitBytes: limit
+    };
+  }
+  const scan = scanCharacterFiles(ent.abs, { maxDepth: CHARACTER_PACK_MAX_FILE_DEPTH });
+  const packFiles = scan.files;
+  const manifest = readPackManifest(ent.abs);
+  if (!packFiles.length) {
+    return { ok: false, dir: opened.dir, character: ent.name, reason: 'empty-pack', error: 'this character pack contains no readable .md / .txt / .json file' };
+  }
+  let chosen = null;
+  if (hasFileArg) {
+    const nf = normalizeCharacterRel(file);
+    if (!nf.ok) return { ok: false, dir: opened.dir, character: ent.name, reason: 'rejected', error: nf.error, files: packFiles.map((f) => f.rel) };
+    if (!CHARACTER_EXTS.has(characterExtOf(nf.rel))) {
+      return { ok: false, dir: opened.dir, character: ent.name, reason: 'rejected', error: `only .md / .txt / .json files can be read (got "${nf.rel}")`, files: packFiles.map((f) => f.rel) };
+    }
+    const want = nf.rel.toLowerCase();
+    chosen = packFiles.find((f) => f.rel.toLowerCase() === want) || null;
+    if (!chosen) {
+      return { ok: false, dir: opened.dir, character: ent.name, reason: 'not-in-pack', error: `"${nf.rel}" is not in character pack "${ent.name}"`, files: packFiles.map((f) => f.rel) };
+    }
+  } else {
+    chosen = pickDefaultPackFile(packFiles);
+    if (!chosen) return { ok: false, dir: opened.dir, character: ent.name, reason: 'empty-pack', error: 'no readable file in this pack' };
+  }
+  const r = readCardFileBytes(chosen.abs, `${ent.name}/${chosen.rel}`, limit);
+  if (!r.ok) {
+    return { ok: false, dir: opened.dir, character: ent.name, reason: r.reason, error: r.error ?? r.reason, size: r.size, files: packFiles.map((f) => f.rel) };
+  }
+  return {
+    ok: true, kind: 'pack-file', dir: opened.dir, character: ent.name, file: chosen.rel, defaultFile: !hasFileArg,
+    manifest, files: packFiles.map((f) => f.rel), packFileCount: packFiles.length,
+    packTotalBytes: packFiles.reduce((s, f) => s + f.size, 0), parts: [r], includedCount: 1,
+    totalBytes: r.bytes, totalSize: r.size, notIncluded: [], truncated: r.truncated, limitBytes: limit
+  };
+}
+
+/**
+ * 一次读回某个角色包的**核心几份**并拼起来（"扮演/参考这个角色"最有用的一次调用）：
+ * SKILL.md → personality.md → profile.md → interaction.md → relations.md → memory.md → conflicts.md
+ * → ULTIMATE_ROLEPLAY_PROMPT* → 其余；总长默认封顶 CHARACTER_PACK_DEFAULT_BYTES（24KB），
+ * 超了如实说明截断在哪一份、还剩哪些没装下。manifest.json 只当元信息（进表头），不进正文。
+ */
+function readCharacterPack(rootDir, character, opts = {}) {
+  const opened = openCharactersRoot(rootDir);
+  if (!opened.ok) return { ok: false, dir: opened.dir, reason: opened.reason };
+  const ent = resolveCharacterEntry(opened, character);
+  if (!ent.ok) return { ok: false, dir: opened.dir, character: ent.name, reason: ent.reason, error: ent.error };
+  if (!ent.isDir) {
+    return {
+      ok: false, dir: opened.dir, character: ent.name, reason: 'not-a-pack',
+      error: `"${ent.name}" is a loose card file at the library root, not a character pack - use qq_character_read for it`
+    };
+  }
+  const scan = scanCharacterFiles(ent.abs, { maxDepth: CHARACTER_PACK_MAX_FILE_DEPTH });
+  const manifest = readPackManifest(ent.abs);
+  const body = scan.files.filter((f) => !/^manifest\.json$/i.test(f.rel.split('/').pop()));
+  if (!body.length) {
+    return { ok: false, dir: opened.dir, character: ent.name, reason: 'empty-pack', error: 'this character pack has no readable body file (only manifest.json?)' };
+  }
+  const ordered = orderCardFiles(body);
+  const limit = clampPackBytes(opts.maxBytes);
+  const parts = [];
+  let totalBytes = 0;
+  for (const f of ordered) {
+    const remaining = limit - totalBytes;
+    if (remaining < 512) break;                                // 剩得太少就不塞半个文件进去
+    const r = readCardFileBytes(f.abs, `${ent.name}/${f.rel}`, remaining);
+    if (!r.ok) continue;
+    parts.push({ rel: r.rel, size: r.size, bytes: r.bytes, truncated: r.truncated, title: r.title, mtimeMs: r.mtimeMs, text: r.text });
+    totalBytes += r.bytes;
+    if (r.truncated) break;
+  }
+  const included = new Set(parts.map((p) => p.rel));
+  const notIncluded = ordered.filter((f) => !included.has(`${ent.name}/${f.rel}`)).map((f) => f.rel);
+  const cut = parts.find((p) => p.truncated);
+  return {
+    ok: true, kind: 'pack', dir: opened.dir, character: ent.name, manifest,
+    parts, files: ordered.map((f) => f.rel), fileCount: scan.files.length, bodyFileCount: ordered.length,
+    includedCount: parts.length, skippedManifest: scan.files.length - ordered.length,
+    totalBytes, totalSize: ordered.reduce((s, f) => s + f.size, 0),
+    packTotalBytes: scan.files.reduce((s, f) => s + f.size, 0),
+    cutIn: cut ? cut.rel : '', notIncluded, limitBytes: limit,
+    truncated: notIncluded.length > 0 || parts.some((p) => p.truncated)
+  };
+}
+
+/**
+ * 在角色卡正文里搜关键词：空格分词 = AND（同一张卡里都要出现），返回命中的卡 + 短片段（不返回全文）。
+ * 目录不存在 → ok:false + reason（空结果，不抛异常）。
+ */
+function searchCharacterCards(rootDir, query, opts = {}) {
+  const q = String(query ?? '').trim();
+  const dir = path.resolve(String(rootDir ?? ''));
+  if (!q) return { ok: false, dir, reason: 'empty-query', hits: [], scanned: 0, total: 0 };
+  const tokens = q.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
+  const limit = clampLimit(opts.limit, CHARACTER_SEARCH_DEFAULT_LIMIT, CHARACTER_SEARCH_MAX_LIMIT);
+  const scan = scanCharacterFiles(rootDir);
+  if (!scan.ok) return { ok: false, dir: scan.dir, reason: scan.reason, hits: [], scanned: 0, total: 0 };
+  const hits = [];
+  let scanned = 0;
+  for (const f of scan.files) {
+    scanned++;
+    const nameMatch = tokens.some((t) => f.rel.toLowerCase().includes(t));
+    let text = '';
+    if (f.size <= CHARACTER_MAX_FILE_BYTES) {
+      try { text = fs.readFileSync(f.abs, 'utf8'); } catch { text = ''; }
+    }
+    const lower = text.toLowerCase();
+    const contentMatch = text.length > 0 && tokens.every((t) => lower.includes(t));
+    if (!contentMatch && !nameMatch) continue;
+    let matchCount = 0;
+    const snippets = [];
+    if (contentMatch) {
+      const lines = text.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!tokens.some((t) => line.toLowerCase().includes(t))) continue;
+        matchCount++;
+        if (snippets.length < CHARACTER_SEARCH_MAX_SNIPPETS) {
+          const trimmed = line.trim();
+          snippets.push(`L${i + 1}: ${trimmed.length > CHARACTER_SNIPPET_MAX_CHARS ? `${trimmed.slice(0, CHARACTER_SNIPPET_MAX_CHARS)}...` : trimmed}`);
+        }
+      }
+    }
+    hits.push({
+      rel: f.rel, title: cardTitle(f.abs), size: f.size, mtimeMs: f.mtimeMs,
+      nameMatch, matchCount, snippets
+    });
+  }
+  hits.sort((a, b) => (Number(b.nameMatch) - Number(a.nameMatch)) || (b.matchCount - a.matchCount) || a.rel.localeCompare(b.rel));
+  return { ok: true, dir: scan.dir, query: q, scanned, total: hits.length, limit, hits: hits.slice(0, limit) };
+}
+
+// ── 四个工具真正返回的文本（工具只做薄壳；tests/character-library.test.js 调的就是这几个函数）──
+
+/** 库目录不可用 / 目标不在时的统一说明（不抛异常，只把原因和修法说清楚） */
+function characterUnavailableText(r, fallbackDir) {
+  const dir = (r && r.dir) || fallbackDir;
+  const why = r?.reason === 'directory-not-found'
+    ? 'the directory does not exist on this machine'
+    : `unusable (${r?.reason ?? 'unknown'})`;
+  return [
+    `Character library unavailable: ${dir}`,
+    `Reason: ${why} - 0 pack(s)/file(s) returned.`,
+    `Fix: set "social.charactersDir" in qq-bridge/config.json to your character library path (default: ${DEFAULT_CHARACTERS_DIR}).`,
+    'This is not an error in the conversation - just tell the owner the character library directory is missing.'
+  ].join('\n');
+}
+
+function characterListText(limit, character, dirOverride) {
+  const dir = dirOverride ? path.resolve(String(dirOverride)) : resolveCharactersDir();
+  if (character !== undefined && character !== null && String(character).trim() !== '') {
+    const r = listPackFiles(dir, character);
+    if (!r.ok) {
+      if (r.reason === 'not-a-pack') {
+        return [
+          `"${String(character)}" is a loose card file at the library root, not a character pack - read it with qq_character_read(character="${String(character)}").`,
+          `Library: ${r.dir}`,
+          'Call qq_character_list without the character parameter to see all packs.'
+        ].join('\n');
+      }
+      if (r.reason === 'directory-not-found') return characterUnavailableText(r, dir);
+      return [
+        `Cannot list character pack "${String(character)}": ${r.error ?? r.reason}`,
+        `Library: ${r.dir}`,
+        'Call qq_character_list without the character parameter to see all packs.'
+      ].join('\n');
+    }
+    const lines = [];
+    lines.push(`Character pack: ${r.character}/ (${r.files.length} file(s), ${r.totalBytes} B on disk)`);
+    lines.push(`Library: ${r.dir}`);
+    lines.push(manifestLine(r.manifest));
+    if (r.mainFile) lines.push(`Default file of qq_character_read(character="${r.character}"): ${r.mainFile}`);
+    for (const f of r.files) {
+      lines.push(`${r.character}/${f.rel} | ${f.title || '(no title)'} | ${f.size} B | ${formatCardMtime(f.mtimeMs)}`);
+    }
+    lines.push(`Read one with qq_character_read(character="${r.character}", file="<one of the paths above>"), or the core docs at once with qq_character_pack(character="${r.character}").`);
+    return lines.join('\n');
+  }
+  const r = listCharacterPacks(dir, { limit });
+  if (!r.ok) return characterUnavailableText(r, dir);
+  const lines = [];
+  lines.push(`Character library: ${r.dir}`);
+  lines.push(`${r.totalPacks} character pack(s) (one folder = one character), ${r.totalFiles} file(s) on disk, ${r.loose.length} loose file(s) at the library root${r.scanTruncated ? `, scan stopped at ${CHARACTER_SCAN_MAX_FILES} files` : ''}`);
+  lines.push(`Showing ${r.packs.length} of ${r.totalPacks} pack(s) (limit ${r.limit}; raise limit up to ${CHARACTER_LIST_MAX_LIMIT})`);
+  for (const p of r.packs) {
+    const mName = p.manifest?.ok ? `${p.manifest.name || '(unnamed)'}${p.manifest.version ? ` ${formatVersion(p.manifest.version)}` : ''}` : '(no manifest.json)';
+    const mSummary = p.manifest?.ok ? truncateText(p.manifest.summary, CHARACTER_SUMMARY_MAX_CHARS) : '';
+    lines.push(`${p.name}/ | ${p.fileCount} file(s) | ${p.totalBytes} B | ${formatCardMtime(p.mtimeMs)} | default file: ${p.mainFile || '(none)'} | manifest: ${mName}${mSummary ? ` - ${mSummary}` : ''}`);
+  }
+  for (const f of r.loose) {
+    lines.push(`${f.name} | ${f.title || '(no title)'} | ${f.size} B | ${formatCardMtime(f.mtimeMs)} | (loose file)`);
+  }
+  lines.push('A character = one pack folder. Play/reference one with qq_character_pack(character="<pack name>"); read a single file with qq_character_read; list one pack\'s files with qq_character_list(character="<pack name>"). Only the card imported into persona.md is injected into your prompt automatically - every other pack is not.');
+  return lines.join('\n');
+}
+
+function characterReadText(character, file, maxBytes, dirOverride) {
+  const dir = dirOverride ? path.resolve(String(dirOverride)) : resolveCharactersDir();
+  const r = readCharacterFile(dir, character, file, { maxBytes });
+  if (!r.ok) {
+    if (r.reason === 'directory-not-found') return characterUnavailableText(r, dir);
+    const lines = [`Cannot read character file: ${r.error ?? r.reason}`, `Library: ${r.dir} - 0 bytes read.`];
+    if (Array.isArray(r.files) && r.files.length) lines.push(`Files in this pack: ${r.files.join(', ')}`);
+    else lines.push('Use qq_character_list to see the pack names, or qq_character_list(character="<pack>") for one pack\'s files.');
+    return lines.join('\n');
+  }
+  const lines = [];
+  lines.push(r.kind === 'loose-file'
+    ? `Character file (loose file at the library root): ${r.character}`
+    : `Character pack file: ${r.character}/${r.file}${r.defaultFile ? ' (default file of this pack)' : ''}`);
+  lines.push(`Library: ${r.dir} | pack: ${r.packFileCount} file(s), ${r.packTotalBytes} B`);
+  lines.push(manifestLine(r.manifest));
+  if (r.fileIgnored) lines.push('Note: the "file" argument was ignored because "character" is a loose card file.');
+  lines.push(`Returned: ${r.totalBytes} B of ${r.totalSize} B (limit ${r.limitBytes} B)`);
+  if (r.truncated) {
+    lines.push(`TRUNCATED at ${r.limitBytes} B (${Math.round(r.limitBytes / 1024)} KB): this file is larger than what is returned here.`);
+    lines.push(`To read more: call again with maxBytes up to ${CHARACTER_READ_MAX_BYTES}${r.kind === 'pack-file' ? `, or get the core docs with qq_character_pack(character="${r.character}")` : ''}.`);
+  }
+  lines.push('');
+  for (const p of r.parts) {
+    lines.push(`===== FILE: ${p.rel} (${p.size} B${p.truncated ? `, truncated to ${p.bytes} B` : ''}) =====`);
+    lines.push(p.text);
+  }
+  lines.push('');
+  lines.push('Local reference only: this is the owner\'s private character pack. Do not paste a whole pack into QQ chat and do not reveal the library path to chat peers.');
+  return lines.join('\n');
+}
+
+function characterPackText(character, maxBytes, dirOverride) {
+  const dir = dirOverride ? path.resolve(String(dirOverride)) : resolveCharactersDir();
+  const r = readCharacterPack(dir, character, { maxBytes });
+  if (!r.ok) {
+    if (r.reason === 'directory-not-found') return characterUnavailableText(r, dir);
+    return [
+      `Cannot read character pack: ${r.error ?? r.reason}`,
+      `Library: ${r.dir} - 0 bytes read.`,
+      'Use qq_character_list to see the pack names (a character = one pack folder).'
+    ].join('\n');
+  }
+  const lines = [];
+  lines.push(`Character pack: ${r.character}/ (${r.fileCount} file(s), ${r.packTotalBytes} B on disk${r.skippedManifest ? `, ${r.skippedManifest} manifest.json kept out of the body` : ''})`);
+  lines.push(`Library: ${r.dir}`);
+  lines.push(manifestLine(r.manifest));
+  lines.push(`Returned: ${r.totalBytes} B of ${r.totalSize} B body text (${r.includedCount}/${r.bodyFileCount} file(s); cap ${r.limitBytes} B)`);
+  if (r.truncated) {
+    lines.push(`TRUNCATED at ${r.limitBytes} B (${Math.round(r.limitBytes / 1024)} KB)${r.cutIn ? ` - cut off inside ${r.cutIn}` : ''}: this pack is larger than what is returned here.`);
+    if (r.notIncluded.length) lines.push(`Files not included (${r.notIncluded.length}): ${r.notIncluded.join(', ')}`);
+    lines.push(`To read the rest: qq_character_read(character="${r.character}", file="<name>") one file at a time, or raise maxBytes up to ${CHARACTER_PACK_MAX_BYTES}.`);
+  }
+  lines.push('');
+  for (const p of r.parts) {
+    lines.push(`===== FILE: ${p.rel} (${p.size} B${p.truncated ? `, truncated to ${p.bytes} B` : ''}) =====`);
+    lines.push(p.text);
+  }
+  lines.push('');
+  lines.push('Local reference only: this is the owner\'s private character pack. Do not paste a whole pack into QQ chat and do not reveal the library path to chat peers.');
+  return lines.join('\n');
+}
+
+function characterSearchText(query, limit, dirOverride) {
+  const dir = dirOverride ? path.resolve(String(dirOverride)) : resolveCharactersDir();
+  if (!String(query ?? '').trim()) {
+    return `Search keyword is empty - pass what to look for inside the character packs (e.g. "猫娘" or "傲娇"), then call again. Library: ${dir}`;
+  }
+  const r = searchCharacterCards(dir, query, { limit });
+  if (!r.ok) return characterUnavailableText(r, dir);
+  const lines = [];
+  const packsHit = new Set(r.hits.filter((h) => h.rel.includes('/')).map((h) => h.rel.split('/')[0])).size;
+  lines.push(`Search "${r.query}" in ${r.dir}: ${r.total} matching file(s) in ${packsHit} character pack(s), ${r.scanned} file(s) scanned (space-separated words are ANDed)`);
+  if (!r.total) {
+    lines.push('Nothing matched. Try a shorter keyword, or list the packs with qq_character_list.');
+    return lines.join('\n');
+  }
+  if (r.total > r.hits.length) lines.push(`Showing ${r.hits.length} of ${r.total} (limit ${r.limit}; raise limit up to ${CHARACTER_SEARCH_MAX_LIMIT})`);
+  for (const h of r.hits) {
+    const slash = h.rel.indexOf('/');
+    const where = slash < 0 ? `${h.rel} (loose file)` : `${h.rel.slice(0, slash)} -> ${h.rel.slice(slash + 1)}`;
+    lines.push(`${where} | ${h.title || '(no title)'} | ${h.size} B | ${h.matchCount} matching line(s)${h.nameMatch ? ' | file name matched' : ''}`);
+    for (const s of h.snippets) lines.push(`  ${s}`);
+  }
+  lines.push('Snippets only - use qq_character_read(character, file) for one file or qq_character_pack(character) for a whole pack; never paste character card content into QQ chat.');
+  return lines.join('\n');
+}
+
+if (cfg.social?.tools?.characterCards !== false) {
+  registerTool(
+    'qq_character_list',
+    'List the character packs (roleplay personas) in the owner\'s local character library (read-only). One pack = one folder (e.g. atri/ with SKILL.md, ULTIMATE_ROLEPLAY_PROMPT.md, personality.md, profile.md, interaction.md, relations.md, memory.md, conflicts.md, manifest.json, sources/wiki.md); each row shows pack name, file count, total size, modified time, and the name/summary from its manifest.json. Loose card files sitting at the library root are listed too and marked "(loose file)". Use when the owner says "看看角色库有什么 / 有哪些角色 / which characters do you have", before switching or roleplaying a character, or to get the pack name for qq_character_pack. Pass character="<pack name>" to list the files inside one pack - that is how you find the file= value for qq_character_read. Only the one card imported into persona.md is injected into your prompt; every other pack is NOT, so this is how you find one.',
+    {
+      limit: z.number().optional().describe('Max packs to list, default 100, max 500'),
+      character: z.string().optional().describe('Optional pack name (e.g. "atri"): list the files inside that pack instead of all packs')
+    },
+    async ({ limit, character }) => {
+      try {
+        return { content: [{ type: 'text', text: characterListText(limit, character) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to list character packs: ${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_character_read',
+    'Read ONE file out of a character pack (or a loose card file at the library root) in the owner\'s local character library (read-only). Pass character="<pack name from qq_character_list>" plus file="<path inside the pack, e.g. SKILL.md, personality.md, sources/wiki.md>"; with file omitted it returns the pack\'s SKILL.md (fallback order: manifest.json -> ULTIMATE_ROLEPLAY_PROMPT.md -> personality.md). Use when the owner says "把某个角色的 SKILL 读出来 / 换成 XX 角色 / 扮演 XX / 参考某张角色卡", or when you need one exact file\'s wording before roleplaying - for a whole character in one call use qq_character_pack instead. Content is capped at 32KB (raise maxBytes, hard cap 131072) and truncation is reported honestly. Local reference only: do not paste a whole pack into QQ chat.',
+    {
+      character: z.string().describe('Character pack name (a folder, e.g. "atri") or a loose card file name at the library root (e.g. "ATRI_MAIN_PROMPT.md")'),
+      file: z.string().optional().describe('File inside the pack, relative to it (e.g. "SKILL.md", "personality.md", "sources/wiki.md"); omitted = that pack\'s default file'),
+      maxBytes: z.number().optional().describe('Byte cap for this read, default 32768 (32KB), max 131072 (128KB)')
+    },
+    async ({ character, file, maxBytes }) => {
+      try {
+        return { content: [{ type: 'text', text: characterReadText(character, file, maxBytes) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to read character file: ${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_character_pack',
+    'Return one entire character pack in a single call (read-only): the pack\'s core documents concatenated in order SKILL.md -> personality.md -> profile.md -> interaction.md -> relations.md -> memory.md -> conflicts.md -> ULTIMATE_ROLEPLAY_PROMPT*, with the manifest.json name/summary in the header. Use this FIRST when the owner says "换成 XX 角色 / 扮演 XX / 参考某个角色卡 / let us roleplay X" - it is the most useful single call for getting into a character. Capped at 24KB by default (raise maxBytes, hard cap 131072); when it truncates it says exactly which file was cut and what was left out, and you can pull the rest with qq_character_read. Local reference only: do not paste a whole pack into QQ chat.',
+    {
+      character: z.string().describe('Character pack name (a folder, e.g. "atri"); see qq_character_list'),
+      maxBytes: z.number().optional().describe('Byte cap for the concatenated text, default 24576 (24KB), max 131072 (128KB)')
+    },
+    async ({ character, maxBytes }) => {
+      try {
+        return { content: [{ type: 'text', text: characterPackText(character, maxBytes) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to read character pack: ${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_character_search',
+    'Search the owner\'s local character library (read-only, packs) for a keyword or phrase and get the matching files with short line snippets (never full text). Space-separated words are ANDed. Use when the owner asks which character has some trait, setting or catchphrase (e.g. "哪个角色的设定里有猫娘"), or to locate the right pack/file before qq_character_pack / qq_character_read. Do not paste character card content into QQ chat.',
+    {
+      query: z.string().describe('Keyword or phrase to find inside the packs (e.g. "猫娘", "傲娇", a character name); space-separated words must all appear'),
+      limit: z.number().optional().describe('Max files to return, default 10, max 50')
+    },
+    async ({ query, limit }) => {
+      try {
+        return { content: [{ type: 'text', text: characterSearchText(query, limit) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `Failed to search character packs: ${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// 供 tests/character-library.test.js 直接 import 调用（纯逻辑，不依赖 MCP 传输层）
+export {
+  DEFAULT_CHARACTERS_DIR,
+  CHARACTER_EXTS,
+  CHARACTER_READ_DEFAULT_BYTES,
+  CHARACTER_READ_MAX_BYTES,
+  CHARACTER_PACK_DEFAULT_BYTES,
+  CHARACTER_PACK_MAX_BYTES,
+  CHARACTER_PACK_MAX_FILE_DEPTH,
+  resolveCharactersDir,
+  normalizeCharacterRel,
+  resolveCharacterPath,
+  isInsideDir,
+  containedRealPath,
+  openCharactersRoot,
+  scanCharacterFiles,
+  readCardFileBytes,
+  orderCardFiles,
+  pickDefaultPackFile,
+  readPackManifest,
+  listCharacterPacks,
+  listPackFiles,
+  readCharacterFile,
+  readCharacterPack,
+  searchCharacterCards,
+  characterListText,
+  characterReadText,
+  characterPackText,
+  characterSearchText
+};
+
 // 启动 MCP stdio server（修复: 缺少 connect 导致进程静默退出）
-await server.connect(new StdioServerTransport());
+// QQB_MCP_NO_LISTEN=1 时只加载模块、不连 stdio：给 tests/character-library.test.js 直接用纯函数。
+// DSH spawn 时不设这个变量，启动行为与改动前完全一致。
+if (process.env.QQB_MCP_NO_LISTEN !== '1') {
+  await server.connect(new StdioServerTransport());
+}
