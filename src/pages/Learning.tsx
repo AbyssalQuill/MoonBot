@@ -534,7 +534,23 @@ const clampHrs = (v: any): number => {
                             {it.samples > 0 && <span>样本 {it.samples} 条</span>}
                           </div>
                           {!open && it.preview && <div className="lrn-status-preview">{it.preview}</div>}
-                          {open && (
+                          {open && (() => {
+                            /* 【2026-09-14 主人反馈】展开卡片要能看到**完整**资料：
+                             *   ① 旧版只显示 profiles 表里几个被截过的短字段（性格 200 字、备注 200~300 字），
+                             *      加上两段几乎一样的"备注/人格摘要"，看着既重复又像没说完；
+                             *   ② 现在优先显示**成文画像**（桥端合成的一整段介绍），结构化字段只在没有成文画像时
+                             *      才退化成列表显示，避免同一件事讲两遍；
+                             *   ③ 数据层（/api/learning/profile）已经不再截断，这里也不做任何 clamp。 */
+                            const lib = d?.library ?? null;
+                            const intro = String(lib?.profile || pf?.personality || d?.personaSummary || '').trim();
+                            const summaryText = String(d?.personaSummary || '').trim();
+                            const styleBits = lib?.style
+                              ? [lib.style.sentenceLength, lib.style.toneWords, lib.style.rhetoricalQuestions].filter(Boolean).join('；')
+                              : '';
+                            const phraseText = (lib?.catchphrases ?? [])
+                              .map((c: any) => (c?.context ? `${c.phrase}（${c.context}）` : c?.phrase))
+                              .filter(Boolean).join('；');
+                            return (
                             <div className="lrn-status-detail">
                               {profBusy === it.uid && <div className="lrn-dk">正在读取完整资料…</div>}
                               {profErr[it.uid] && <div className="lrn-dk">读取失败：{profErr[it.uid]}</div>}
@@ -549,16 +565,43 @@ const clampHrs = (v: any): number => {
                               {num(d?.lastSeen) > 0 && <div><span className="lrn-dk">最近活跃</span>{bjClock(num(d.lastSeen))}</div>}
                               {pf?.name && <div><span className="lrn-dk">通讯录昵称</span>{pf.name}</div>}
                               {pf?.birthday && <div><span className="lrn-dk">生日</span>{pf.birthday}</div>}
-                              {pf?.personality && <div><span className="lrn-dk">性格</span>{pf.personality}</div>}
-                              {pf?.likes && <div><span className="lrn-dk">喜好</span>{pf.likes}</div>}
-                              {pf?.dislikes && <div><span className="lrn-dk">不喜欢</span>{pf.dislikes}</div>}
-                              {pf?.notes && <div><span className="lrn-dk">备注</span>{pf.notes}</div>}
-                              {d?.personaSummary && <div><span className="lrn-dk">人格摘要</span>{d.personaSummary}</div>}
-                              {!profBusy && !profErr[it.uid] && !pf && !d?.personaSummary && (
+
+                              {intro ? (
+                                <div className="lrn-wide">
+                                  <span className="lrn-dk">完整介绍</span>
+                                  <p className="lrn-prose">{intro}</p>
+                                </div>
+                              ) : null}
+
+                              {/* 没有成文画像（老档案）时，退化成字段列表，保证信息不丢 */}
+                              {!intro && lib?.personality && <div className="lrn-wide"><span className="lrn-dk">性格</span><p className="lrn-prose">{lib.personality}</p></div>}
+                              {!intro && !lib && pf?.personality && <div className="lrn-wide"><span className="lrn-dk">性格</span><p className="lrn-prose">{pf.personality}</p></div>}
+
+                              {lib?.addressTerms && <div className="lrn-wide"><span className="lrn-dk">称呼方式</span>{lib.addressTerms}</div>}
+                              {styleBits && <div className="lrn-wide"><span className="lrn-dk">说话风格</span>{styleBits}</div>}
+                              {lib?.style?.examples?.length ? (
+                                <div className="lrn-wide"><span className="lrn-dk">原句样例</span>{lib.style.examples.join(' / ')}</div>
+                              ) : null}
+                              {lib?.chatHabits && <div className="lrn-wide"><span className="lrn-dk">聊天习惯</span>{lib.chatHabits}</div>}
+                              {lib?.emojiHabits && <div className="lrn-wide"><span className="lrn-dk">表情习惯</span>{lib.emojiHabits}</div>}
+                              {phraseText && <div className="lrn-wide"><span className="lrn-dk">口头禅</span>{phraseText}</div>}
+                              {lib?.topics?.length ? <div className="lrn-wide"><span className="lrn-dk">常聊话题</span>{lib.topics.join('；')}</div> : null}
+                              {lib?.taboos?.length ? <div className="lrn-wide"><span className="lrn-dk">要注意</span>{lib.taboos.join('；')}</div> : null}
+                              {lib?.relationshipAdvice && <div className="lrn-wide"><span className="lrn-dk">相处建议</span>{lib.relationshipAdvice}</div>}
+
+                              {pf?.likes && <div className="lrn-wide"><span className="lrn-dk">喜好</span>{pf.likes}</div>}
+                              {pf?.dislikes && <div className="lrn-wide"><span className="lrn-dk">不喜欢</span>{pf.dislikes}</div>}
+                              {pf?.notes && <div className="lrn-wide"><span className="lrn-dk">备注</span>{pf.notes}</div>}
+                              {/* 人格摘要与成文画像内容相同就不再重复显示一遍 */}
+                              {summaryText && summaryText !== intro && (
+                                <div className="lrn-wide"><span className="lrn-dk">人格摘要</span><p className="lrn-prose">{summaryText}</p></div>
+                              )}
+                              {!profBusy && !profErr[it.uid] && !intro && !pf && !summaryText && (
                                 <div className="lrn-dk">这个人在记忆库里还没有档案（只有上面的学习状态）。</div>
                               )}
                             </div>
-                          )}
+                            );
+                          })()}
                         </div>
                       </div>
                     );

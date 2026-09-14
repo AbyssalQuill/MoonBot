@@ -21,8 +21,9 @@ import { STATE_DIR } from '../lib/paths.js';
 import { readJsonSafe, atomicWriteJson } from '../lib/json-fs.js';
 import { dshReady } from './dsh-session.js';
 import { learnerSessions, learnerWaiters, learnerCollectors, markPersistentLearner, unmarkPersistentLearner, isLearnerSessionGone } from './slang.js';
-import { initMemoryDb, getProfile, setProfileField, profileDisplayName } from './memory.js';
+import { initMemoryDb, setProfileField, profileDisplayName } from './memory.js';
 import { ensureLearningToken } from './learning-token.js';
+import { composePersonaProfile } from './persona-text.js';
 
 // ── 模块内文件常量（不外扩 paths.js，避免动共享文件）──────────────────────────
 export const PERSONA_SESSION_FILE = path.join(STATE_DIR, 'persona-agent.json');
@@ -36,7 +37,7 @@ const SAMPLE_RANDOM_CAP = 200;     // 全窗口随机补抽条数（去重后受
 const SAMPLE_PER_CONV_CAP = 60;    // 每个会话（conv_key）最多保留条数
 const SAMPLE_TEXT_CAP = 120;       // 每条样本截断字符数
 const PERSONA_TURN_TIMEOUT_MS = 300000; // 等待 learner turn 的超时（与黑话学习对齐：大块 prompt 的 turn 会更慢）
-const PERSONALITY_MAX = 400;       // personality 落 profiles 前的长度上限
+const PERSONALITY_MAX = 1200;      // 单个性格字段的长度上限（原 400 会把性格写一半就断，成文介绍要更长）
 const AUTO_WINDOW_DEFAULT_MS = 30 * 86400000; // 自动间隔学习缺省拉取窗口（30 天，与手工默认一致）
 const PERSONA_AUTO_TICK_MS = 60 * 1000;        // 自动间隔检查周期（与北京时间无关，纯 Date.now 判断）
 const PERSONA_FAIL_BACKOFF_MS = 30 * 60 * 1000; // 整批失败后的重试间隔（水位不推进时的兜底节奏）
@@ -332,7 +333,7 @@ HOW TO DELIVER THE RESULT (important - this replaces printing JSON):
 
 The payload JSON object (keys exactly as written; values in Simplified Chinese 中文):
 {
-  "nickname": "能推断出的常用昵称，否则省略",
+  "nickname": "能推断出的常用昵称，只写名字本身（可含「/」分隔的多个叫法），不要写成句子、不要出现「被熟人称为」这类半句，推断不出就省略",
   "addressTerms": "ta 怎么称呼别人 / 希望被怎么称呼，配 1-2 个短例",
   "catchphrases": [{"phrase": "口头禅/惯用语", "context": "什么时候会说"}],
   "emojiHabits": "表情/emoji 使用习惯，否则省略",
@@ -375,10 +376,10 @@ export function normalizePersona(raw) {
     emojiHabits: str(raw.emojiHabits).slice(0, 200),
     style: null,
     personality: '',
-    chatHabits: str(raw.chatHabits).slice(0, 300),
+    chatHabits: str(raw.chatHabits).slice(0, 400),
     topics: strArr(raw.topics, 10),
     taboos: strArr(raw.taboos, 10),
-    relationshipAdvice: str(raw.relationshipAdvice).slice(0, 400)
+    relationshipAdvice: str(raw.relationshipAdvice).slice(0, 600)
   };
   if (Array.isArray(raw.catchphrases)) {
     for (const c of raw.catchphrases.slice(0, 20)) {
@@ -430,36 +431,28 @@ export function parsePersonaJson(text) {
 }
 
 // ── 结果落库（三处）────────────────────────────────────────────────────────
-function summarizePersonaChinese(parsed, sampleCount) {
-  const parts = [];
-  if (parsed.nickname) parts.push(`昵称:${parsed.nickname}`);
-  if (parsed.personality) parts.push(`性格:${parsed.personality}`);
-  if (parsed.style?.sentenceLength) parts.push(`风格:${parsed.style.sentenceLength}`);
-  if (parsed.chatHabits) parts.push(`聊天习惯:${parsed.chatHabits}`);
-  if (parsed.topics.length) parts.push(`话题:${parsed.topics.slice(0, 3).join('/')}`);
-  if (parsed.taboos.length) parts.push(`忌讳:${parsed.taboos.slice(0, 3).join('/')}`);
-  if (parsed.relationshipAdvice) parts.push(`相处建议:${parsed.relationshipAdvice}`);
-  const head = parts.join('；');
-  return `样本 ${sampleCount} 条，${head}`.slice(0, 300);
+/** 成文画像（逻辑在 persona-text.js）：一段完整的中文介绍 —— 不出现 `昵称:`/`性格:` 这类字段名、
+ *  不重复说同一件事、超长也只在句末标点处收尾（旧版 `slice(0,300)` 会把话切成 "深夜（" 这种半句）。 */
+export function buildPersonaProfileText(parsed) {
+  return composePersonaProfile(parsed);
 }
 
 export function persistPersonaResult(uid, parsed, sampleCount) {
   const now = Date.now();
-  const summary = summarizePersonaChinese(parsed, sampleCount);
-  // a) profiles 表：只写 personality 与 notes（notes 带「人格学习:」前缀追加/前置，原内容保留；不动 name/likes/dislikes/birthday）
+  const profileText = buildPersonaProfileText(parsed);
+  const summary = profileText || `样本 ${sampleCount} 条（本轮没有解析出可用字段，旧档案保留）`;
+  // a) profiles 表：**画像写进 personality，绝不碰 notes**。
+  //    【2026-09-14 主人反馈】旧版把 `人格学习:${摘要}` 追加进 notes，于是：
+  //      ① 每学一次就往「备注」里堆一段，两轮下来备注里全是几乎一样的文字；
+  //      ② notes 是**主人自己的备注**字段，被学习结果挤满并显示成「备注」，读起来莫名其妙。
+  //    现在分工干净：人格画像 → personality（提示词里以 Personality: 注入，界面显示完整介绍）；
+  //    notes 只属于主人，代码不再写它。
   try {
-    if (parsed.personality) setProfileField(uid, 'personality', parsed.personality);
-    const old = getProfile(uid);
-    const oldNotes = String(old?.notes ?? '').trim();
-    const newNotes = `人格学习:${summary}`;
-    // 先保证学习结论不被截掉：空间足够则旧备注在前，不足则结论在前、旧备注收尾截断
-    const combined = oldNotes ? `${oldNotes}\n${newNotes}` : newNotes;
-    const packed = combined.length <= 500 ? combined : `${newNotes}\n${oldNotes}`;
-    setProfileField(uid, 'notes', packed);
+    if (profileText) setProfileField(uid, 'personality', profileText);
   } catch (error) {
     log(`人格学习写 profiles 失败 ${uid}:`, error?.message ?? error);
   }
-  // b) state/persona-library.json（模块内维护）
+  // b) state/persona-library.json（模块内维护）：结构化字段照存，额外存一份成文画像供界面直接显示
   const prev = personaLibrary[uid] || {};
   personaLibrary[uid] = {
     nickname: parsed.nickname || prev.nickname || '',
@@ -472,18 +465,20 @@ export function persistPersonaResult(uid, parsed, sampleCount) {
     topics: parsed.topics.length ? parsed.topics : (prev.topics || []),
     taboos: parsed.taboos.length ? parsed.taboos : (prev.taboos || []),
     relationshipAdvice: parsed.relationshipAdvice || prev.relationshipAdvice || '',
+    profile: profileText || prev.profile || '',
     samples: sampleCount,
     learnedAtMs: now,
     source: 'ai'
   };
   savePersonaLibrary();
-  // c) memory_entries category='persona'：先删同 uid 旧摘要再插一条当前摘要（防无限膨胀）
+  // c) memory_entries category='persona'：先删同 uid 旧摘要再插一条当前摘要（防无限膨胀）。
+  //    不再 slice(0,500)：那会把成文介绍从中间切断，界面上的「人格摘要」就成了半句话。
   try {
     const db = initMemoryDb();
     if (db) {
       db.prepare("DELETE FROM memory_entries WHERE uid = ? AND category = 'persona'").run(String(uid));
       db.prepare("INSERT INTO memory_entries (uid, category, content, created_at) VALUES (?, 'persona', ?, ?)")
-        .run(String(uid), summary.slice(0, 500), now);
+        .run(String(uid), summary, now);
     }
   } catch (error) {
     log(`人格学习写 memory_entries 失败 ${uid}:`, error?.message ?? error);

@@ -104,7 +104,10 @@ export function setProfileField(uid, field, value) {
   if (!db || !uid) return null;
   const allowed = new Set(['name', 'personality', 'likes', 'dislikes', 'birthday', 'notes']);
   if (!allowed.has(field)) throw new Error(`档案字段只能是：${[...allowed].join('/')}`);
-  const clean = String(value ?? '').trim().slice(0, 500);
+  // 长度上限分字段：personality/notes 要装得下**一整段人格画像**（成文介绍上千字，
+  // 旧的统一 500 会把介绍从中间切掉，界面和提示词里都只剩半句）；其它短字段保持 500。
+  const cap = (field === 'personality' || field === 'notes') ? 4000 : 500;
+  const clean = String(value ?? '').trim().slice(0, cap);
   try {
     db.prepare(`INSERT INTO profiles (uid, ${field}, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(uid) DO UPDATE SET ${field} = excluded.${field}, updated_at = excluded.updated_at`)
