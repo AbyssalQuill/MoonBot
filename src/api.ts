@@ -254,3 +254,8 @@ export const syncBridge = (server: Record<string, unknown>, direction: 'to-serve
 /** 彻底删除远端整套(桥+DSH+NapCat+代理), 目录移到回收目录备份 */
 export const removeServerStack = (server: Record<string, unknown>) =>
   api<SyncStepsResp>('/ssh/remove-stack', { method: 'POST', body: JSON.stringify({ server, confirm: 'remove-stack' }) });
+
+/** 远端整套的启停（服务器卡片上的「启动Bot / 终止Bot」）。
+ *  启动顺序 DSH → NapCat → 桥；终止反序（先断桥，免得它连着一个已经消失的 NapCat）。 */
+export const remoteStack = (server: Record<string, unknown>, action: 'start' | 'stop') =>
+  api<SyncStepsResp>('/ssh/stack', { method: 'POST', body: JSON.stringify({ server, action }) });
