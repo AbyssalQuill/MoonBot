@@ -253,8 +253,28 @@ export class OneBotWsClient extends EventEmitter {
   raw(action, params) { return this._raw(action, params); }
   api(action, params) { return this._raw(action, params); }
   request(action, params) { return this._raw(action, params); } // 兼容 sticker 同步等旧调用
-  sendGroupMessage(groupId, message) { return this.api('send_group_msg', { group_id: Number(groupId), message }); }
-  sendPrivateMessage(userId, message) { return this.api('send_private_msg', { user_id: Number(userId), message }); }
+  /* 【2026-09-14 主人反馈"发消息报 无法获取用户信息"】
+   * NapCat 刚登录那一小段时间（好友列表/UID 映射还没同步完）会给发送动作回 "无法获取用户信息"，
+   * 这种错误**明确代表没发出去**，等一下再发就能成功。原来直接抛给调用方 → 模型只看到"发送失败"，
+   * 那条回复就永久丢了（用户视角是"机器人不理我"）。这里对**这一类瞬时错误**做两次短重试。
+   * 只重试"确认未送达"的错误：超时（响应超时）**不重试**，因为那种情况可能其实已经发出去了，
+   * 重试会变成双发。 */
+  sendGroupMessage(groupId, message) { return this._sendWithWarmupRetry('send_group_msg', { group_id: Number(groupId), message }); }
+  sendPrivateMessage(userId, message) { return this._sendWithWarmupRetry('send_private_msg', { user_id: Number(userId), message }); }
+  async _sendWithWarmupRetry(action, params) {
+    const delays = [500, 2000];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this._raw(action, params);
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        const transient = /无法获取用户信息|请检查是否已是好友|好友列表|user.?info|not ?found/i.test(message);
+        if (!transient || attempt >= delays.length) throw error;
+        console.log(`[onebot-ws] ${action} 第 ${attempt + 1} 次失败（${message}），${delays[attempt]}ms 后重试`);
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+    }
+  }
   sendGroupForwardMessage(groupId, messages) { return this.api('send_group_forward_msg', { group_id: Number(groupId), messages }); }
   sendPrivateForwardMessage(userId, messages) { return this.api('send_private_forward_msg', { user_id: Number(userId), messages }); }
   deleteFriend(userId, extra = {}) { return this.api('delete_friend', { user_id: Number(userId), ...(extra?.block ? { block: true } : {}) }); }
