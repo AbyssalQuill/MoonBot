@@ -3122,7 +3122,10 @@ function memoryTopWords(entries, cap) {
     .slice(0, clampInt(cap, 1, 30, 18));
 }
 
-/** 读取 state/persona-library.json（若存在），取某 uid 的档案摘要（截断、只留展示字段） */
+/** 读取 state/persona-library.json（若存在），返回某 uid 的**完整**人格档案。
+ *  【2026-09-14 主人反馈】旧版这里把 personality 截到 200、chatHabits/relationshipAdvice 截到 120、
+ *  topics 只留 5 条 —— 界面展开卡片看到的永远是半句话，主人以为"学习没学全"。
+ *  现在原样返回（含成文画像 profile 字段），界面要折叠自己折叠，数据层不再提前砍。 */
 function personaLibraryEntry(uid) {
   try {
     const f = join(findBridgeDir(), 'state', 'persona-library.json');
@@ -3130,12 +3133,31 @@ function personaLibraryEntry(uid) {
     const lib = JSON.parse(readFileSync(f, 'utf-8'));
     const it = isObj(lib) ? lib[String(uid)] : null;
     if (!it || typeof it !== 'object') return null;
+    const strArr = (v) => (Array.isArray(v) ? v.map((x) => String(x ?? '')).filter(Boolean) : []);
+    const catchphrases = Array.isArray(it.catchphrases)
+      ? it.catchphrases.map((c) => (isObj(c) ? { phrase: String(c.phrase ?? ''), context: String(c.context ?? '') } : { phrase: String(c ?? ''), context: '' }))
+        .filter((c) => c.phrase)
+      : [];
+    const style = isObj(it.style)
+      ? {
+        sentenceLength: String(it.style.sentenceLength ?? ''),
+        rhetoricalQuestions: String(it.style.rhetoricalQuestions ?? ''),
+        toneWords: String(it.style.toneWords ?? ''),
+        examples: strArr(it.style.examples),
+      }
+      : null;
     return {
-      nickname: String(it.nickname ?? '').slice(0, 60) || null,
-      personality: String(it.personality ?? '').slice(0, 200) || null,
-      chatHabits: String(it.chatHabits ?? '').slice(0, 120) || null,
-      relationshipAdvice: String(it.relationshipAdvice ?? '').slice(0, 120) || null,
-      topics: Array.isArray(it.topics) ? it.topics.slice(0, 5).map(String) : [],
+      nickname: String(it.nickname ?? '') || null,
+      addressTerms: String(it.addressTerms ?? ''),
+      profile: String(it.profile ?? '') || null,
+      personality: String(it.personality ?? '') || null,
+      chatHabits: String(it.chatHabits ?? ''),
+      emojiHabits: String(it.emojiHabits ?? ''),
+      relationshipAdvice: String(it.relationshipAdvice ?? ''),
+      style,
+      catchphrases,
+      topics: strArr(it.topics),
+      taboos: strArr(it.taboos),
       samples: Number(it.samples) || 0,
       learnedAtMs: Number(it.learnedAtMs) || 0,
     };
@@ -3214,6 +3236,9 @@ app.get('/api/learning/profile', async (req, res) => {
       } : null,
       personaSummary: persona ? String(persona.content ?? '') : '',
       personaAt: Number(persona?.created_at) || 0,
+      // 结构化人格档案（昵称/称呼/风格/口头禅/话题/忌讳/相处建议 + 成文画像），原样返回不做截断，
+      // 界面展开卡片据此显示完整介绍。旧版这里不带 library，界面只有 profiles 表里那几行短字段。
+      library: personaLibraryEntry(uid),
       msgCount: Number(stat?.c) || 0,
       lastSeen: Number(stat?.last) || 0,
       memoryCount: Number(mc?.c) || 0,
