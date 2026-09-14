@@ -275,14 +275,95 @@ const pruneFailures = () => {
   const now = Date.now();
   for (const [k, v] of recentFailures) if (now - v.at > FAIL_MEMO_MS) recentFailures.delete(k);
 };
+/* 【2026-09-15 修「缺 key/token 直接 -32602」】模型偶尔漏传 key/token（正文里 [Token] 行离得远、
+ * 或者它把参数名写成了别的），而全部会话级工具的 zod schema 把两者声明成**必填** —— 于是请求在
+ * **进任何处理器之前**就被 MCP SDK 以 `-32602 Invalid input: expected string, received undefined at key`
+ * 打回：模型拿不到任何可执行提示，答不上人，还白烧一整个模型步（线上该会话实测 ≈34k tokens/步）。
+ *
+ * 现在两层兜底：
+ *   ① schema 里把 key/token 放宽成 optional（描述照旧，模型仍会正常传）；
+ *   ② 处理器入口把缺的补上：传了 key 就按 key 取该会话的 agent token；只缺 key 就问桥
+ *      "当前唯一在途回合"是哪个会话（/api/social/current-turn，本机可信通道）；
+ *   ③ 实在补不上，回一句**能照着做**的提示，而不是一句 JSON schema 校验失败。
+ */
+let sessionFallback = null;                    // { key, token, at }
+const SESSION_FALLBACK_TTL_MS = 5000;
+async function resolveMissingSession(wantKey) {
+  const now = Date.now();
+  if (!wantKey && sessionFallback && now - sessionFallback.at < SESSION_FALLBACK_TTL_MS) return sessionFallback;
+  try {
+    const tok = readConsoleToken();
+    const res = await fetch(`${agentApiBase()}/api/social/current-turn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(tok ? { 'x-console-token': tok } : {}) },
+      body: JSON.stringify(wantKey ? { key: wantKey } : {}),
+      signal: AbortSignal.timeout(8000)
+    });
+    const body = await res.json().catch(() => null);
+    if (res.ok && body?.ok) {
+      const hit = { key: String(body.key ?? ''), token: String(body.token ?? ''), at: now, source: String(body.source ?? '') };
+      if (!wantKey) sessionFallback = hit;
+      return hit;
+    }
+    return { error: String(body?.reason || body?.error || `HTTP ${res.status}`) };
+  } catch (e) {
+    return { error: e?.message ?? String(e) };
+  }
+}
+const MISSING_ARG_HINT = '缺 key/token：唤醒正文第一行就是 `[Token] <值>`，key 用 group:<群号> 或 private:<QQ>；'
+  + '两者照常传就行。如果这一轮确实没有在途会话可推断，就先别发，下一条消息进来时再处理。';
+
 {
   const rawTool = server.tool.bind(server);
   server.tool = (name, ...rest) => {
+    // ① 放宽 key/token 的必填（只在原本就是必填时才动，且不动描述）
+    let hasKeyField = false;
+    let hasTokenField = false;
+    try {
+      const shapeIdx = rest.findIndex((x) => x && typeof x === 'object' && !Array.isArray(x)
+        && typeof x !== 'function'
+        && Object.values(x).some((v) => v && typeof v === 'object' && typeof v.optional === 'function'));
+      if (shapeIdx >= 0) {
+        const shape = rest[shapeIdx];
+        hasKeyField = !!shape.key;
+        hasTokenField = !!shape.token;
+        const relaxed = { ...shape };
+        for (const field of ['key', 'token']) {
+          const t = relaxed[field];
+          if (t && typeof t.optional === 'function' && typeof t.isOptional === 'function' && !t.isOptional()) {
+            relaxed[field] = t.optional();
+          }
+        }
+        rest[shapeIdx] = relaxed;
+      }
+    } catch { /* 放宽失败就维持原样（最坏情况退回 -32602，与改动前一致） */ }
+
     const i = rest.map((x) => typeof x === 'function').lastIndexOf(true);
     if (i >= 0) {
       const handler = rest[i];
       rest[i] = async (...args) => {
-        const key = failureKey(name, args[0]);
+        // ② 补齐缺的 key/token
+        const callArgs = (args[0] && typeof args[0] === 'object') ? args[0] : {};
+        const missingKey = (hasKeyField || hasTokenField) && (callArgs.key === undefined || callArgs.key === null || callArgs.key === '');
+        const missingToken = (hasKeyField || hasTokenField) && (callArgs.token === undefined || callArgs.token === null || callArgs.token === '');
+        if (hasKeyField || hasTokenField) {
+          if (missingKey || missingToken) {
+            const got = await resolveMissingSession(missingKey ? '' : String(callArgs.key));
+            if (got && !got.error) {
+              if (missingKey && got.key) callArgs.key = got.key;
+              if (missingToken && got.token) callArgs.token = got.token;
+              console.error(`[napcat-safe] ${name} 缺 ${[missingKey ? 'key' : '', missingToken ? 'token' : ''].filter(Boolean).join('/')}，已按会话补齐（${got.source || 'fallback'}）: ${callArgs.key}`);
+            } else {
+              console.error(`[napcat-safe] ${name} 缺 key/token 且无法推断：${got?.error ?? 'unknown'}`);
+              return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
+            }
+          }
+          if (!callArgs.key || !callArgs.token) {
+            return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
+          }
+        }
+        // ③ 重复失败短路（见上方常量说明）
+        const key = failureKey(name, callArgs);
         const memo = recentFailures.get(key);
         if (memo && Date.now() - memo.at < FAIL_MEMO_MS) {
           console.error(`[napcat-safe] 重复失败短路：${name}`);
