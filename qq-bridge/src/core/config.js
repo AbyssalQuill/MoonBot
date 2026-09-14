@@ -119,15 +119,15 @@ export function loadConfig() {
       send: {
         burstEnabled: true,
         burstMaxMessages: 8,
-        // —— 节奏：线性节拍是唯一在用、且可在管理器「功能配置」里调的机制 ——
-        // delay(n) = min(linearCapMs, linearBaseMs + n*linearStepMs)，n = 同会话已连续投递数。
-        // linearBaseMs=0 → 首条即时（秒回）；linearEnabled=false 才回落到下面 gap* 的拟人兜底。
+        // —— 打字节拍：只保留"按字数"一种（2026-09-15 主人定稿）——
+        // 批内首条秒回；第 2 条起 = 本条字数 × linearPerCharMs，±linearJitterRatio 抖动，
+        // 夹在 [linearMinMs, linearCapMs]。linearEnabled=false = 完全不延迟。
         linearEnabled: true,
-        linearBaseMs: 0,
-        linearStepMs: 350,
+        linearPerCharMs: 150,
+        linearMinMs: 250,
         linearCapMs: 4000,
+        linearJitterRatio: 0.25,
         linearResetMs: 60000,
-        // 兜底节奏（仅线性节拍关闭时使用）：显式 0 就是 0，没配才是 3500/140。
         longGapProbability: 0.25,
         longGapMinMs: 8000,
         longGapMaxMs: 18000,
@@ -135,10 +135,7 @@ export function loadConfig() {
         maxSendPerHour: 60,
         maxMessageChars: 500,
         maxGapMs: 15000,
-        gapBaseMs: 3500,
-        gapPerCharMs: 140,
-        gapJitterRatio: 0.3,
-        recommendedHint: 'Normal chat: 1-4 bubbles per reply, 3.5-8s between bubbles like typing; pause 10-18s occasionally like thinking; never spam a wall of messages.',
+        recommendedHint: 'Normal chat: 1-4 bubbles per reply, 1.2-4 s between bubbles like typing; occasionally (25%) pause 8-20 s like thinking; never spam.',
       },
       wait: {
         defaultMs: 30000,

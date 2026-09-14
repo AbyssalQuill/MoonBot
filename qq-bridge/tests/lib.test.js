@@ -82,6 +82,8 @@ assert.equal(convertExampleSpacesToComma('你好 / ok'), '你好 / ok'); // 斜�
 // send-gaps（发送节奏纯函数）
 // 2026-09-11 重整后：下限不再来自配置，而是硬性的 MIN_GAP_MS=100
 // （原先由 burstIntervalMinMs 提供的 1800ms 下限已删除，改成 0 也能真的接近即时）。
+// 2026-09-15 主人定稿：节奏只留"按字数"一种，byLength 与 core/send-chain.js 用同一组参数
+// （linearPerCharMs / linearMinMs / linearCapMs / linearJitterRatio），旧的 gapBaseMs/gapPerCharMs 已删除。
 assert.equal(MIN_GAP_MS, 100);
 assert.equal(clampGap(50, {}), 100);             // 低于硬下限 → 夹到 MIN_GAP_MS
 assert.equal(clampGap(20000, {}), 10000);        // 高于上限 → 夹到 10000
@@ -92,11 +94,15 @@ assert.deepEqual(computeGaps(['a'], 'auto', 0, null, {}), []);                  
 const fixed = computeGaps(['a', 'b', 'c'], 'fixed', 1000, null, {});
 assert.equal(fixed.length, 2);
 assert.ok(fixed.every((d) => d === 1000));
-const byLen = computeGaps(['hello', 'x'], 'byLength', 0, null, { gapJitterRatio: 0 }); // 0 是 falsy → 仍走默认抖动 0.3（迁移源行为）
+// byLength：上一条 5 个字 × 150ms/字 = 750ms，夹在缺省 [250, 4000] 内；抖动关掉后是确定值
+const byLen = computeGaps(['hello', 'x'], 'byLength', 0, null, { linearJitterRatio: 0 });
 assert.equal(byLen.length, 1);
-assert.ok(byLen[0] >= 4200 * 0.7 && byLen[0] <= 4200 * 1.3, `byLength 抖动越界: ${byLen[0]}`);
-// 显式把底与每字增量都配成 0 → 退到硬下限，实现“秒回”
-const instant = computeGaps(['a', 'b'], 'byLength', 0, null, { gapBaseMs: 0, gapPerCharMs: 0, gapJitterRatio: 0 });
+assert.equal(byLen[0], 750);
+// 抖动开着时落在 ±25% 内（默认值 0.25）
+const byLenJit = computeGaps(['hello', 'x'], 'byLength', 0, null, {});
+assert.ok(byLenJit[0] >= 562 && byLenJit[0] <= 938, `byLength 抖动越界: ${byLenJit[0]}`);
+// 每字时间配 0（或极小）→ 退到硬下限，实现“秒回”
+const instant = computeGaps(['a', 'b'], 'byLength', 0, null, { linearPerCharMs: 0, linearMinMs: 0, linearJitterRatio: 0 });
 assert.deepEqual(instant, [100]);
 
 // loop-guard（复读签名归一化 + 防循环重复判定）

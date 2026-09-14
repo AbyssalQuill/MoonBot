@@ -1,25 +1,21 @@
-// default发送节奏纯函数
+// 发送节奏兜底函数（**只有 linearEnabled=false 时才走到 computeGaps**）
 //
-// 【2026-09-11 重整】节奏统一以「线性节拍」为准（social.send.linear*，默认开启）：
-//   同会话连续投递 delay(n) = min(linearCapMs, linearBaseMs + n*linearStepMs)
-//   首条 n=0 → linearBaseMs（默认 0 = 秒回，不延迟）
-// 本文件的 computeGaps 只在线性节拍**关闭**时才被 sendMessages 使用，属兜底路径。
-//
-// 已去掉 `burstIntervalMinMs` / `burstIntervalMaxMs`：
-//   它们原本是 clampGap 的下限来源（1800ms），导致"gapBaseMs/gapPerCharMs 都配 0 = 秒回"
-//   永远无法生效（0 被夹到 1800）。现在下限改成不来自配置的硬性 MIN_GAP_MS，
-//   显式配 0 就真的接近即时，同时保留一个极小下限防止被 QQ 判为刷屏。
+// 【2026-09-15 主人定稿：节奏只留"按字数"一种】
+//   · 唯一权威实现在 core/send-chain.js 的 nextSendPaceMs：
+//     批内首条秒回，第 2 条起 = 字数 × linearPerCharMs（夹在 [linearMinMs, linearCapMs]，带抖动）。
+//   · 本文件的 byLength 分支现在直接复用同一组参数（linearPerCharMs / linearMinMs / linearCapMs /
+//     linearJitterRatio），不再有自己那套 gapBaseMs/gapPerCharMs/gapJitterRatio —— 两套参数必然打架。
+//   · fixed / auto 是**按调用显式指定间隔**的路径（qq_send_message 的 gapMode 参数），与线性节拍无关，保留。
 import { randInt } from './rand.js';
 
 /** 硬性最小间隔（纯安全下限，不来自配置）。 */
 export const MIN_GAP_MS = 100;
-/** 线性节拍关闭时的兜底间隔范围（原 burstIntervalMinMs/MaxMs 的默认值内联于此）。 */
+/** 未显式指定时的兜底间隔范围。 */
 const FALLBACK_GAP_MIN_MS = 1000;
 const FALLBACK_GAP_MAX_MS = 3000;
 
 /**
  * 读数值配置：**显式配置的 0 就是 0**，只有真正没配（undefined/null/空串/非数字）才用默认值。
- * （原来用 `Number(x) || 默认值`，把配置里的 0 当成"没配"。）
  */
 const numCfg = (v, d) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
 
@@ -42,16 +38,16 @@ export function computeGaps(messages, gapMode, gapMs, gaps, sendCfg) {
       for (let i = 0; i < messages.length - 1; i++) delays.push(g);
     }
   } else if (mode === 'byLength') {
-    // 显式 0 就按 0 算 → 接近即时（只受 MIN_GAP_MS 限）；没配则用 3500/140 的拟人默认。
-    const base = Math.max(0, numCfg(sendCfg?.gapBaseMs, 3500));
-    const perChar = Math.max(0, numCfg(sendCfg?.gapPerCharMs, 140));
-    const jitter = Math.min(1, Math.max(0, numCfg(sendCfg?.gapJitterRatio, 0.3)));
+    // 与 nextSendPaceMs 同一组参数：上一条字数 × 每字毫秒，±抖动，夹在 [下限, 上限]
+    const perChar = Math.max(0, numCfg(sendCfg?.linearPerCharMs, 150));
+    const minMs = Math.max(0, numCfg(sendCfg?.linearMinMs, 250));
+    const capMs = Math.max(0, numCfg(sendCfg?.linearCapMs, 4000));
+    const jitter = Math.min(0.9, Math.max(0, numCfg(sendCfg?.linearJitterRatio, 0.25)));
     for (let i = 0; i < messages.length - 1; i++) {
       const chars = Math.max(1, String(messages[i] || '').length);
-      // 线性底 + 每字递增，再叠加随机抖动：真人打字的停顿忽快忽慢，不是均匀的
-      let g = base + chars * perChar;
-      if (jitter > 0) g = g * (1 - jitter + Math.random() * jitter * 2);
-      delays.push(clampGap(g, sendCfg));
+      const factor = jitter > 0 ? (1 - jitter + Math.random() * jitter * 2) : 1;
+      const typing = Math.round(chars * perChar * factor);
+      delays.push(clampGap(Math.max(Math.min(minMs, capMs), Math.min(capMs, typing)), sendCfg));
     }
   } else {
     // auto：随机间隔（保留长停顿的概率分支）
