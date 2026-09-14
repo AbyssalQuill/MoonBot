@@ -67,14 +67,34 @@ foreach ($rel in $bridgeDirs) {
 # the server kept running whatever copy it already had -- found 2026-09-15 when server-side preset
 # refresh silently stayed dead because the new env export never reached the host.
 $bridgeRootFiles = @('start-bridge.sh')
-Write-Host '=== 1b) bridge root files (deploy scripts) ==='
-foreach ($rel in $bridgeRootFiles) {
+Write-Host '=== 1b) bridge root files (deploy scripts) ==='foreach ($rel in $bridgeRootFiles) {
   $from = Join-Path $srcBridge $rel
   if (-not (Test-Path $from)) { Write-Host ("  SKIP (not in source): " + $rel); continue }
   foreach ($d in $bridgeDests) {
     Copy-Item $from (Join-Path $d $rel) -Force
     Write-Host ("  " + $rel + " -> " + $d + "  md5=" + (Hash8 (Join-Path $d $rel)))
   }
+}
+
+# Dev-only leftovers that must never reach an installer payload. They are gitignored in the repo (they
+# carry the owner's QQ / group ids / bot QQ), but copying tools/ wholesale brought them back into
+# full\\app / runtime-full / win-unpacked -- found 2026-09-15 by scanning a built payload before packing.
+$devOnlyToolFiles = @(
+  'tool-text-worklist*.json', 'tooltext-*.json', 'top-tool-text*.txt', 'manifest-*.json',
+  '*.before-compress.js', 'wl-group-*.json'
+)
+Write-Host '=== 1c) strip dev-only files from payload tools/ ==='
+foreach ($d in $bridgeDests) {
+  $toolsDir = Join-Path $d 'tools'
+  if (-not (Test-Path $toolsDir)) { continue }
+  $n = 0
+  foreach ($pat in $devOnlyToolFiles) {
+    Get-ChildItem -Path $toolsDir -Filter $pat -File -ErrorAction SilentlyContinue | ForEach-Object {
+      Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+      $n++
+    }
+  }
+  if ($n -gt 0) { Write-Host ("  removed " + $n + " dev-only file(s) from " + $toolsDir) }
 }
 
 Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='$srcServer = Join-Path $srcMgr 'server'
