@@ -28,9 +28,18 @@ export function defaultIsolatedDshHome() {
   return path.resolve(REPO_ROOT, '..', '.runtime', 'dsh-isolated-home');
 }
 
-/** 是否属于“桌面端 DSH home”（默认禁止写入） */
+/** 是否属于“桌面端 DSH home”（默认禁止写入）
+ *
+ * 【2026-09-15 修「服务器上改了 preset 却永远不生效」】原来在**任何**平台上都把 `~/.dsh` 当作桌面端
+ * home 拒绝写入。Windows 上这是对的（桌面端 GUI 和隔离实例是两个 home，不能乱写桌面那份）；
+ * 但 Linux 服务器上 DSH 的 home **就是** `/root/.dsh`（systemd 起 dsh-web、没有桌面端），于是
+ * `resolveDshTarget()` 判定"refusedDesktop"直接 return —— 桥每次重启都不再刷新 preset，
+ * 实测服务器上 `.agent-presets/default/agent.cordis.yml` 一直停在部署那一刻的旧哈希，
+ * 提示词改动（[TOOLS]/唤醒协议/角色卡豁免）**一个字都没进模型**。
+ * 现在只在 Windows 上做这层保护；非 Windows 平台 `~/.dsh` 是正常安装目标。 */
 export function isDesktopDshHome(dir) {
   if (!dir) return false;
+  if (process.platform !== 'win32') return false;
   const a = path.resolve(dir).toLowerCase();
   const desk = path.resolve(DESKTOP_DSH_HOME).toLowerCase();
   const homeD = path.resolve(HOME_DSH).toLowerCase();

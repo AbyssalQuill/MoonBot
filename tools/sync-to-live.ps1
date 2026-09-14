@@ -62,8 +62,22 @@ foreach ($rel in $bridgeDirs) {
   }
 }
 
-Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='
-$srcServer = Join-Path $srcMgr 'server'
+# Root-level bridge files that the deploy path needs on the target host. start-bridge.sh was NOT in any
+# copy list (neither here nor in the server sync), so a fresh install shipped no start script at all and
+# the server kept running whatever copy it already had -- found 2026-09-15 when server-side preset
+# refresh silently stayed dead because the new env export never reached the host.
+$bridgeRootFiles = @('start-bridge.sh')
+Write-Host '=== 1b) bridge root files (deploy scripts) ==='
+foreach ($rel in $bridgeRootFiles) {
+  $from = Join-Path $srcBridge $rel
+  if (-not (Test-Path $from)) { Write-Host ("  SKIP (not in source): " + $rel); continue }
+  foreach ($d in $bridgeDests) {
+    Copy-Item $from (Join-Path $d $rel) -Force
+    Write-Host ("  " + $rel + " -> " + $d + "  md5=" + (Hash8 (Join-Path $d $rel)))
+  }
+}
+
+Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='$srcServer = Join-Path $srcMgr 'server'
 foreach ($d in $mgrDests) {
   $dstServer = Join-Path $d 'server'
   if (-not (Test-Path $dstServer)) { Write-Host ("  SKIP (no server dir): " + $d); continue }
