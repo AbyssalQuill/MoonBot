@@ -90,9 +90,13 @@ export function sendChainInFlight() { return inFlight; }
 // 非文本投递（表情/图/戳一戳等，各自独立 enqueueSend）不经过本计数，不计入、也不受线性约束。
 const LINEAR_DEFAULTS = {
   enabled: true,        // social.send.linearEnabled
-  baseMs: 0,            // social.send.linearBaseMs（0=首条不延迟）
-  stepMs: 350,          // social.send.linearStepMs
-  capMs: 4000,          // social.send.linearCapMs
+  mode: 'perChar',      // social.send.linearMode：perChar(按字速度，默认) | count(旧的计数递增)
+  baseMs: 0,            // social.send.linearBaseMs（0=首条不延迟）——count 模式用；perChar 模式下只有当"字数算不出来"时的兜底
+  stepMs: 350,          // social.send.linearStepMs —— count 模式用
+  capMs: 4000,          // social.send.linearCapMs（两种模式共用的上限）
+  minMs: 250,           // social.send.linearMinMs（perChar 模式的下限：太短的气泡也别贴脸连发）
+  perCharMs: 150,       // social.send.linearPerCharMs（**每个字**的打字时间，perChar 模式的主参数）
+  jitterRatio: 0.25,    // social.send.linearJitterRatio（打字速度的随机抖动；未配时回落到 gapJitterRatio）
   resetMs: 60000,       // social.send.linearResetMs（可配，默认 60s，未挂可调项）
   gapPerCharMs: 140,    // 旧按字长节奏（send-gaps byLength 同款默认），只取 60% 作长文兜底下限
   gapJitterRatio: 0.3   // 旧节奏抖动系数：下限 = ×(1-jitter)
@@ -130,6 +134,11 @@ function linearCfgNow() {
     if (user.stepMs === undefined && user.linearStepMs !== undefined) merged.stepMs = user.linearStepMs;
     if (user.capMs === undefined && user.linearCapMs !== undefined) merged.capMs = user.linearCapMs;
     if (user.resetMs === undefined && user.linearResetMs !== undefined) merged.resetMs = user.linearResetMs;
+    // 【2026-09-15 线性延迟改成"按单个字的速度"】新增三个键，同样做别名映射（配置里写 linear* 优先）。
+    if (user.mode === undefined && user.linearMode !== undefined) merged.mode = String(user.linearMode);
+    if (user.perCharMs === undefined && user.linearPerCharMs !== undefined) merged.perCharMs = user.linearPerCharMs;
+    if (user.minMs === undefined && user.linearMinMs !== undefined) merged.minMs = user.linearMinMs;
+    if (user.jitterRatio === undefined && user.linearJitterRatio !== undefined) merged.jitterRatio = user.linearJitterRatio;
   }
   return merged;
 }
@@ -160,14 +169,45 @@ export function resetSendPace(key) {
 }
 
 /** 每条投递任务执行前调用：返回本条应等待的毫秒数（≥0，首条通常为 0/base）。
- *  无 key（全局默认链）或线性关闭 → 返回 null，调用方保持旧节奏。 */
-export function nextSendPaceMs(key) {  if (key == null || String(key) === '') return null;
+ *  无 key（全局默认链）或线性关闭 → 返回 null，调用方保持旧节奏。
+ *
+ *  【2026-09-15 主人要求「线性延迟改成按单个字的速度」→ 新增 perChar 模式，并成为默认】
+ *  两种模式（social.send.linearMode）：
+ *   · `perChar`（默认）：**批内第 2 条起**，间隔 = 这条气泡自己打完要多久 = 字数 × 每字毫秒
+ *     （linearPerCharMs，默认 150ms/字），再乘 ±(1±jitter) 的抖动，最后夹在 [linearMinMs, linearCapMs]。
+ *     批内第 1 条仍然是 0（秒回，主人明确要过"模型一决定回，气泡立刻出"）。
+ *     为什么这么改：旧 `count` 模式的间隔只跟"连发第几条"有关、跟字数完全无关 ——
+ *     一条 2 字的气泡和 40 个字的长句都等同样的 600/1200/1500ms；主人实测的感觉就是
+ *     "节奏很假、长句反而秒出"。按字速度算才是真人的样子。
+ *   · `count`（旧行为，保留可切回）：delay = min(cap, base + n*step)，n=批内已成功投递数。
+ */
+export function nextSendPaceMs(key, textLen) {
+  if (key == null || String(key) === '') return null;
   const cfg = linearCfgNow();
   if (cfg.enabled === false) return null;
   const base = Math.max(0, Number(cfg.baseMs) || 0);
   const step = Math.max(0, Number(cfg.stepMs) || 0);
   const cap = Math.max(0, Number(cfg.capMs) || 0);
   const rec = linearEntry(key);
+  const mode = String(cfg.mode || 'perChar').toLowerCase() === 'count' ? 'count' : 'perChar';
+
+  if (mode === 'perChar') {
+    const perChar = Math.max(0, Number(cfg.perCharMs) || 0);
+    const minMs = Math.max(0, Number(cfg.minMs) || 0);
+    // 批内第一条：即时（沿用"首条不等节拍"）
+    if (rec.n <= 0) return Math.min(cap, base);
+    const explicitLen = Number(textLen);
+    const len = Number.isFinite(explicitLen) && explicitLen > 0 ? Math.round(explicitLen) : rec.lastLen;
+    if (!(perChar > 0) || !(len > 0)) return Math.min(cap, base);
+    const rawJitter = Number(cfg.jitterRatio);
+    const jitter = Number.isFinite(rawJitter) ? Math.min(0.9, Math.max(0, rawJitter)) : Math.min(0.9, Math.max(0, Number(cfg.gapJitterRatio) || 0));
+    const factor = jitter > 0 ? (1 - jitter + Math.random() * jitter * 2) : 1;
+    const typing = Math.round(len * perChar * factor);
+    // clamp(打字时间, 下限, 上限)；下限超过上限时以上限为准（与旧语义一致：cap 是硬上限）
+    return Math.max(Math.min(minMs, cap), Math.min(cap, typing));
+  }
+
+  // ── count 模式（旧行为，一字不改）────────────────────────────────
   // 线性主节拍：delay = min(cap, base + n*step)，首条 n=0 → base
   const pace = step > 0 ? Math.min(cap, base + rec.n * step) : Math.min(cap, base);
   // 旧按字长节奏下限的 60% 作长文兜底（线性为主：短消息不掺旧节奏，长消息保留一点打字下限）。
