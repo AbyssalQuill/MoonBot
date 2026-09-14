@@ -50,7 +50,14 @@ tsconfig.tsbuildinfo
 /docs/
 /手动同步与SSH说明.md
 /本地运行指引.md
-/qq-bridge/docs/HANDOFF.md
+/qq-bridge/docs/HANDOFF*.md
+# 交接文档一律本机专用（含服务器 IP/端口/运维步骤）：HANDOFF.md、HANDOFF-2026-09-14.md 等都别进公开仓库
+/qq-bridge/docs/CTX.md
+/qq-bridge/docs/PROJECT_GUIDE.md
+/qq-bridge/docs/DSH_SETUP.md
+/qq-bridge/docs/ANALYSIS.md
+/qq-bridge/docs/REFACTOR.md
+/qq-bridge/docs/*.txt
 
 # ---- 一次性开发中间产物（文本压缩工作单 / 前后清单 / 改前备份副本）----
 /qq-bridge/tools/tool-text-worklist*.json
