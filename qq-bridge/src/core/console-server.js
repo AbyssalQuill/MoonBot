@@ -3646,6 +3646,33 @@ export function startConsoleServer() {
         });
         return;
       }
+      /* 【2026-09-15 修「qq_send_message: Invalid input: expected string, received undefined at key/token」】
+       * 模型偶尔漏传 key/token（正文 [Token] 行离得太远、或它把参数名写错），而 MCP 工具的 zod schema
+       * 把两者声明成必填 → 请求在**进处理器之前**就被 SDK 以 -32602 打回，模型拿不到任何有用的提示，
+       * 白烧一整个模型步（线上实测该会话 ≈34k tokens/步）还答不上人。
+       * 这个端点让工具侧能把缺的参数补回来（MCP 侧用 x-console-token 鉴权，等价于本机可信）：
+       *   · 传了 key → 回该会话的 agent token（模型只忘了 token 的情况）；
+       *   · 没传 key → 回"当前唯一在途回合"的会话（模型只忘了 key 的情况）；
+       *   · 在途回合不止一个/一个都没有 → 明确回 ambiguous / no-active-turn，工具侧给可执行的提示。 */
+      if (req.method === 'POST' && url.pathname === '/api/social/current-turn') {
+        const body = await readBody();
+        const wantKey = String(body.key ?? '').trim();
+        if (wantKey) {
+          const st = social.conversations.get(wantKey);
+          if (!st) { sendJson({ ok: false, reason: 'unknown-key', error: `没有这个会话：${wantKey}` }, 404); return; }
+          sendJson({ ok: true, key: wantKey, token: String(st.agentToken ?? ''), source: 'key' });
+          return;
+        }
+        const active = [...activeAiTurns];
+        if (active.length === 1) {
+          const k = active[0];
+          const st = social.conversations.get(k);
+          sendJson({ ok: true, key: k, token: String(st?.agentToken ?? ''), source: 'active-turn' });
+          return;
+        }
+        sendJson({ ok: false, reason: active.length ? 'ambiguous' : 'no-active-turn', active }, 409);
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/api/social/check-send') {
         const body = await readBody();
         const key = String(body.key ?? '').trim();
