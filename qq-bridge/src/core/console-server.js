@@ -1194,8 +1194,8 @@ export function startConsoleServer() {
         // send：数值归一化
         if (body.send && typeof body.send === 'object') {
           merged.send = { ...(current.send ?? {}), ...body.send };
-          // burstIntervalMinMs/MaxMs 已废弃；线性节拍（linear*）是唯一在用且可在管理器里调的节奏组。
-          for (const k of ['burstMaxMessages', 'longGapProbability', 'longGapMinMs', 'longGapMaxMs', 'maxSendPerMinute', 'maxSendPerHour', 'maxMessageChars', 'maxGapMs', 'gapBaseMs', 'gapPerCharMs', 'linearBaseMs', 'linearStepMs', 'linearCapMs', 'linearResetMs']) {
+          // burstIntervalMinMs/MaxMs 已废弃；打字节拍只有"按字数"一组（linear*），见 send-chain.js。
+          for (const k of ['burstMaxMessages', 'longGapProbability', 'longGapMinMs', 'longGapMaxMs', 'maxSendPerMinute', 'maxSendPerHour', 'maxMessageChars', 'maxGapMs', 'linearPerCharMs', 'linearMinMs', 'linearCapMs', 'linearJitterRatio', 'linearResetMs']) {
             if (merged.send[k] !== undefined) {
               const n = Number(merged.send[k]);
               merged.send[k] = Number.isFinite(n) ? n : current.send?.[k] ?? 0;
@@ -1204,8 +1204,13 @@ export function startConsoleServer() {
             }
           }
           if (merged.send.longGapProbability !== undefined) merged.send.longGapProbability = Math.min(1, Math.max(0, Number(merged.send.longGapProbability) || 0));
-          if (merged.send.burstEnabled !== undefined) merged.send.burstEnabled = merged.send.burstEnabled === true;
-          if (merged.send.linearEnabled !== undefined) merged.send.linearEnabled = merged.send.linearEnabled === true;
+          // 【2026-09-15 修「按字数节拍被静默关掉」】原来是 `=== true`：管理器/前端的布尔值一旦是
+          // 字符串 "true"（表单/JSON 往返很常见），就会**被当成 false 写回去** —— 实测服务端配置就这样
+          // 变成 linearEnabled:false，打字节拍整个失效，而界面上看起来只是"保存了一下配置"。
+          // 现在按真值字符串宽松解析（true/on/1/开 = 开）。
+          const asBool = (v) => (v === true || v === 1 || /^(true|on|1|yes|开|打开)$/i.test(String(v ?? '').trim()));
+          if (merged.send.burstEnabled !== undefined) merged.send.burstEnabled = asBool(merged.send.burstEnabled);
+          if (merged.send.linearEnabled !== undefined) merged.send.linearEnabled = asBool(merged.send.linearEnabled);
           if (merged.send.recommendedHint !== undefined) merged.send.recommendedHint = String(merged.send.recommendedHint ?? '');
         }
         // wait：数值归一化

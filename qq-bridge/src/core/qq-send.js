@@ -71,9 +71,8 @@ export function sendToQQ(key, msg) {
 // 有概率使用长间隔（错落感）；最后一条后不再 sleep。
 export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
   const [kind, id] = key.split(':');
-  // 拟人停顿参数来源（social.send）。此前下方直接引用未声明的 socialCfg → 一旦走「线性节拍关闭」
-  // 分支（pace=null 且非最后一条）就抛 ReferenceError，被发送链吞掉 → 条间间隔全部失效、连发。
-  const socialCfg = (typeof socialCfgOrMin === 'object' && socialCfgOrMin !== null) ? socialCfgOrMin : null;
+  // 节奏统一走 send-chain.js 的「按字数」打字节拍（social.send.linear*）；
+  // 这里的 min/max/longGap* 只服务于"显式传入固定间隔"的老调用方（本函数当前无调用方，保留兼容）。
   let min, max, longProb = 0, longMin = 0, longMax = 0;
   if (typeof socialCfgOrMin === 'object' && socialCfgOrMin !== null) {
     const cfg = socialCfgOrMin;
@@ -96,10 +95,8 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
     let msg = strippedOne;
     if (msg === '' && sweptOne.removed === 0 && String(messages[i] ?? '').trim() !== '') msg = redactKnownTokensOnly(messages[i]);
     if (msg === '') continue;
-    const isLast = i === messages.length - 1;
     enqueueSend(async () => {
-      // 发送线性节拍：pace=null=线性关闭 → 保留旧条间节奏；否则：
-      // perChar 模式下间隔 = 这条气泡自己打完要多久 = 字数 × 每字毫秒（首条仍 0=秒回）。
+      // 打字节拍：批内首条秒回；第 2 条起间隔 = 这条气泡字数 × linearPerCharMs（见 send-chain.js）
       const pace = i === 0 ? 0 : nextSendPaceMs(key, msg.length);
       if (pace != null && pace > 0) await sleep(pace);
       try {
@@ -108,23 +105,9 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
         sent.push(msg);
         if (pace != null) markSendDelivered(key, msg.length);
       } catch (error) { log(`QQ 发送失败 (${key}):`, error?.message ?? error); if (error?.stack) log('[send-stack]', error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | ')); }
-      if (pace == null && !isLast) {
-        // 按字数线性延迟 + 随机抖动：base + 每字递增，再乘抖动系数，模拟真人打字忽快忽慢的停顿
-        // 显式配置的 0 就是 0（2026-09-11 修）：原用 `Number(x) || 默认值`，导致下面注释承诺的
-        // "gapBaseMs/gapPerCharMs 都配 0 = 秒回"永远不成立（0 被当成没配 → 3500/140）。
-        const numCfg = (v, d) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
-        const baseMs = Math.max(0, numCfg(socialCfg?.gapBaseMs, 3500));
-        const perCharMs = Math.max(0, numCfg(socialCfg?.gapPerCharMs, 140));
-        const jitterRatio = Math.min(1, Math.max(0, numCfg(socialCfg?.gapJitterRatio, 0.3)));
-        const chars = Math.max(1, String(msg || '').length);
-        let delay = baseMs + chars * perCharMs;
-        if (jitterRatio > 0) delay = delay * (1 - jitterRatio + Math.random() * jitterRatio * 2);
-        // 秒回开关：gapBaseMs/gapPerCharMs 都配 0 → 视为关闭拟人停顿，多气泡也基本连发(下限 250ms)；
-        // 否则保留原 ≥1.8s 的真人节奏下限
-        const instant = baseMs <= 0 && perCharMs <= 0;
-        delay = Math.min(15000, Math.max(instant ? 250 : 1800, Math.round(delay)));
-        await sleep(delay);
-      }
+      // 【2026-09-15 清理】这里原本还有一段"线性关闭时按 gapBaseMs+字数×gapPerCharMs 兜底"的旧节奏。
+      // 主人定稿只留"按字数"一种节拍（send-chain.js），两套并存只会互相打架 —— 已删除。
+      // 现在 pace==null 就等于"不做打字延迟"（linearEnabled=false 的语义），要节奏就调 linearPerCharMs。
     }, key);
   }
   return currentSendChain(key).then(() => sent);
