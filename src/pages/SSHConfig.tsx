@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack } from '../api';
+import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack, remoteStack } from '../api';
 import type { SSHServer, ManagerState } from '../stores/types';
-import { ArrowLeft, Plus, Trash2, Loader2, PlugZap, Plug, TestTube2, Server, Settings, Save, Rocket, X, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Loader2, PlugZap, Plug, TestTube2, Server, Settings, Save, Rocket, X, RefreshCw, Play, Square } from 'lucide-react';
 import NumInput from '../components/NumInput';
 
 /* 远程端口默认值（与 server/index.js tunnelMapFor 一致） */
@@ -40,6 +40,8 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
   const [msg, setMsg] = useState<string | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  // 「启动Bot / 终止Bot」：正在执行的按钮 id（形如 `<serverId>:start`），用于禁用按钮 + 转圈
+  const [stackBusy, setStackBusy] = useState<string | null>(null);
   const [syncLog, setSyncLog] = useState<string[] | null>(null);
   // 同步面板：direction = to-server|to-local|merge; opts 勾选哪些内容
   const [syncFor, setSyncFor] = useState<SSHServer | null>(null);
@@ -249,6 +251,21 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
       setMsg(r.success ? '已移除整套' : (r.message || '移除失败，详见下方步骤'));
     } catch (e) { setMsg(`移除失败：${(e as Error).message}`); }
     finally { setRemovingId(null); }
+  };
+
+  /* 远端整套启停（服务器卡片上的「启动Bot / 终止Bot」）
+   * 启动：DSH → NapCat 容器 → 桥；终止：桥 → NapCat → DSH（反序，免得桥一直在连一个已经消失的 NapCat）。
+   * 幂等，重复点无副作用；步骤结果复用同步日志那张卡显示。 */
+  const stackCtl = async (s: SSHServer, action: 'start' | 'stop') => {
+    setStackBusy(`${s.id}:${action}`);
+    setSyncLog(null);
+    try {
+      const r = await remoteStack({ ...s }, action);
+      if (r.steps?.length) setSyncLog(r.steps.map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + x.msg : ''}`));
+      const verb = action === 'start' ? '启动' : '终止';
+      setMsg(r.success ? `${verb}完成：${s.name}` : `${verb}失败：${r.message || '见下方步骤'}`);
+    } catch (e) { setMsg(`请求失败：${(e as Error).message}`); }
+    finally { setStackBusy(null); }
   };
 
   const startEdit = (s: SSHServer) => {
@@ -496,6 +513,12 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
                       <button className="btn btn-sm" title="克隆整套(DSH+桥+NapCat 登录态)到这台新服务器" onClick={() => openDeploy(s)}><Rocket size={12} /> 部署</button>
                       <button className="btn btn-sm" title="同步代码/记忆/表情包到这台服务器(或拉回本地)" onClick={() => openSync(s)} disabled={syncingId === s.id}>
                         {syncingId === s.id ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />} 同步
+                      </button>
+                      <button className="btn btn-sm" title="在服务器上启动整套（DSH → NapCat → 桥）；已在跑的服务会跳过，桥已存在则不动它" disabled={!!stackBusy} onClick={() => stackCtl(s, 'start')}>
+                        {stackBusy === `${s.id}:start` ? <Loader2 size={12} className="spin" /> : <Play size={12} />} 启动Bot
+                      </button>
+                      <button className="btn btn-sm btn-danger" title="在服务器上停止整套（桥 → NapCat → DSH）" disabled={!!stackBusy} onClick={() => stackCtl(s, 'stop')}>
+                        {stackBusy === `${s.id}:stop` ? <Loader2 size={12} className="spin" /> : <Square size={12} />} 终止Bot
                       </button>
                       <button className="btn btn-sm btn-danger" title="删除这台服务器上的整套(桥+DSH+NapCat, 移动备份)" onClick={() => removeStack(s)} disabled={removingId === s.id}>
                         {removingId === s.id ? <Loader2 size={12} className="spin" /> : <Trash2 size={12} />} 清整套

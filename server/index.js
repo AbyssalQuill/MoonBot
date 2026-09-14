@@ -1696,8 +1696,87 @@ const TRANSFER_IDLE_MS = Math.max(30000, Number(process.env.QBM_TRANSFER_IDLE_MS
 const TRANSFER_MAX_MS = Math.max(600000, Number(process.env.QBM_TRANSFER_MAX_MS) || 3600000);
 const fmtMb = (n) => `${(Number(n) / 1048576).toFixed(1)} MB`;
 
-/** 本地文件流 → 远端 stdin(远端命令从 stdin 收, 如 cat > /root/xxx.tar.gz) */
-function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDLE_MS, maxTotalMs = TRANSFER_MAX_MS) {
+/** 用 SFTP(fastPut) 上传一个文件。
+ *  【2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」】
+ *  实测把 12 MB 的桥包用 `cat > 远端文件` 走 stdin 管道，尾部会丢一段（远端 gzip 直接报 unexpected end of file），
+ *  而同一个包在本地 `tar tzf` 完好（270 个条目）——问题在"流式 stdin + EOF"这条路，不在打包。
+ *  SFTP 是真正的文件传输（有确认、有返回值），比往 channel stdin 里灌字节稳得多。 */
+function sftpPutFile(conn, localPath, remotePath, timeoutMs = 30 * 60 * 1000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error('SFTP 上传超时')); } }, timeoutMs);
+    try {
+      conn.sftp((err, sftp) => {
+        if (err) { if (!settled) { settled = true; clearTimeout(timer); reject(err); } return; }
+        sftp.fastPut(localPath, remotePath, (err2) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          try { sftp.end(); } catch {}
+          if (err2) reject(err2); else resolve();
+        });
+      });
+    } catch (e) { if (!settled) { settled = true; clearTimeout(timer); reject(e); } }
+  });
+}
+
+/** 本地文件 → 远端路径：优先 SFTP，失败退回 stdin 管道；两条路都**按远端字节数复核**。
+ *  传不全就抛错 —— 绝不把截断的包交给解包步骤（那正是这次部署失败的现场）。 */
+async function uploadFileVerified(conn, localPath, remotePath) {
+  let total = 0;
+  try { total = statSync(localPath).size; } catch {}
+  let viaSftp = true;
+  try {
+    await sftpPutFile(conn, localPath, remotePath);
+  } catch (e) {
+    viaSftp = false;
+    try { mlog(`[upload] SFTP 不可用（${e?.message ?? e}），退回 stdin 管道：${remotePath}`); } catch { /* ignore */ }
+    await pipeLocalFileToRemote(conn, localPath, `cat > ${remotePath}`, undefined, undefined, { remotePath });
+  }
+  const got = await remoteFileSize(conn, remotePath);
+  if (got >= 0 && got !== total) {
+    throw new Error(`上传不完整：远端 ${got} / 本地 ${total} 字节（${viaSftp ? 'SFTP' : 'stdin 管道'}）`);
+  }
+  return { ok: true, bytes: total, via: viaSftp ? 'sftp' : 'pipe', remotePath };
+}
+
+/** deploy.js 的上传接口（它按 (conn, localPath, remoteCmd, idleMs, maxTotalMs, opts) 调用）。 */
+const uploadLocalFileToRemote = async (conn, localPath, remoteCmd, _idleMs, _maxTotalMs, opts = {}) => {
+  const remotePath = String(opts?.remotePath || '').trim()
+    || String(remoteCmd ?? '').replace(/^\s*cat\s*>\s*/, '').trim();
+  if (!remotePath) return pipeLocalFileToRemote(conn, localPath, remoteCmd, _idleMs, _maxTotalMs, opts);
+  return uploadFileVerified(conn, localPath, remotePath);
+};
+
+/** 远端文件字节数：传输完成后**复核**用（拿不到返回 -1）。
+ *  【2026-09-14 修「部署传输 bridge 失败：gzip: stdin: unexpected end of file / tar: Child returned status 1」】
+ *  那次的真相是：本地 13.4 MB 的包**只传了一部分**就返回了成功，远端 `cat >` 正常退出（exit 0），
+ *  紧跟着的 `tar xzf` 才读到截断的 gzip。所以"传完了"必须用远端字节数证明，不能只看本地读完了。 */
+function remoteFileSize(conn, remotePath, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let out = '';
+    let st = null;
+    const timer = setTimeout(() => { try { st?.close?.(); } catch {} resolve(-1); }, timeoutMs);
+    try {
+      conn.exec(`stat -c %s ${remotePath} 2>/dev/null || echo 0`, (err, stream) => {
+        if (err) { clearTimeout(timer); return resolve(-1); }
+        st = stream;
+        stream.on('data', (d) => (out += d.toString()));
+        stream.stderr.on('data', () => {});
+        stream.on('close', () => {
+          clearTimeout(timer);
+          const n = Number(String(out).trim().split(/\s+/).pop());
+          resolve(Number.isFinite(n) ? n : -1);
+        });
+      });
+    } catch { clearTimeout(timer); resolve(-1); }
+  });
+}
+
+/** 本地文件流 → 远端 stdin(远端命令从 stdin 收, 如 cat > /root/xxx.tar.gz)
+ *  opts.remotePath 给了就**逐字节复核**远端文件大小，不匹配即判失败（绝不把截断的包交给解包步骤）。
+ *  opts.verifyOnly 为真时只做复核（重试前复用已传文件）。 */
+function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDLE_MS, maxTotalMs = TRANSFER_MAX_MS, opts = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let idleTimer = null;
@@ -1705,24 +1784,30 @@ function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDL
     let sent = 0;
     let allSent = false;
     let total = 0;
+    let errOut = '';
+    const remotePath = String(opts.remotePath || '');
     try { total = statSync(localPath).size; } catch {}
     const graceMs = 30000;
 
-    const armGrace = () => {
-      // 文件已全部发出：只再等一小段让通道自然关闭；等不到就按成功返回。
-      if (hardTimer) clearTimeout(hardTimer);
-      hardTimer = setTimeout(() => {
-        if (total > 0 && sent >= total) done(() => resolve());
-        else done(() => reject(new Error(`上传未完成：已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}`)));
-      }, graceMs);
-    };
     const done = (fn) => {
       if (settled) return;
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
       if (hardTimer) clearTimeout(hardTimer);
-      try { rs.destroy(); } catch {}
       fn();
+    };
+
+    /** 收尾：远端字节数对上才算成功。 */
+    const finish = async (why) => {
+      if (settled) return;
+      if (remotePath) {
+        const got = await remoteFileSize(conn, remotePath);
+        if (got >= 0 && got !== total) {
+          try { rs.destroy(); } catch {}
+          return done(() => reject(new Error(`上传不完整：远端只有 ${fmtMb(got)} / 本地 ${fmtMb(total)}（${why}）——已判失败，重试一次`)));
+        }
+      }
+      done(() => resolve());
     };
 
     const rs = createReadStream(localPath);
@@ -1734,25 +1819,33 @@ function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDL
         `上传超时：${idleMs / 1000} 秒没有进展（已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}）—— 链路太慢或已中断，可加大 QBM_TRANSFER_IDLE_MS 或换网络后重试`
       ))), idleMs);
     });
-    // 【2026-09-13 修「传完了却判超时」】实测：13.3 MB 的桥包在 300 秒固定超时之前**整份**已写进远端文件
-    // （远端 qq-bridge.tar.gz 字节数与本地一致），但 SSH 通道的 close 事件迟迟不来，于是被判超时、部署失败。
-    // 现在：文件全部发完后只再等 graceMs，等不到就按成功返回 —— 数据确实发出去了；
-    // 真有截断的话，紧跟着的解包步骤会以非 0 退出码报出来，不会静默成功。
-    rs.on('end', () => { allSent = true; if (idleTimer) clearTimeout(idleTimer); armGrace(); });
+    /* 本地读完 ≠ 远端收全。
+     * 【2026-09-14】旧版这里 30 秒后**直接按成功返回**（"数据确实发出去了"），结果出现了
+     * "上传成功 → 解包 gzip: unexpected end of file"：文件只到了一部分。现在改成：
+     * 本地读完后再等 graceMs 让远端收尾，超时就**用远端字节数复核**，对不上就报错。 */
+    rs.on('end', () => {
+      allSent = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      hardTimer = setTimeout(() => { void finish('本地已读完但远端迟迟未收尾'); }, graceMs);
+    });
     conn.exec(remoteCmd, (err, stream) => {
       if (err) return done(() => reject(err));
-      let errOut = '';
       idleTimer = setTimeout(() => done(() => reject(new Error(
         `上传超时：${idleMs / 1000} 秒没有进展（已传 0 B / 共 ${fmtMb(total)}）`
       ))), idleMs);
-      if (allSent) armGrace();
-      else hardTimer = setTimeout(() => done(() => reject(new Error(
-        `上传超时：总时长超过 ${Math.round(maxTotalMs / 60000)} 分钟（已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}）`
-      ))), maxTotalMs);
+      if (allSent) {
+        if (idleTimer) clearTimeout(idleTimer);
+        hardTimer = setTimeout(() => { void finish('本地已读完但远端迟迟未收尾'); }, graceMs);
+      } else {
+        hardTimer = setTimeout(() => done(() => reject(new Error(
+          `上传超时：总时长超过 ${Math.round(maxTotalMs / 60000)} 分钟（已传 ${fmtMb(sent)} / 共 ${fmtMb(total)}）`
+        ))), maxTotalMs);
+      }
       stream.stderr.on('data', (d) => (errOut += d.toString()));
       stream.on('close', (code) => {
-        if (code !== 0) done(() => reject(new Error(errOut.trim() || `远端 exit ${code}`)));
-        else done(() => resolve());
+        if (code !== 0) return done(() => reject(new Error(errOut.trim() || `远端 exit ${code}`)));
+        void finish('远端命令已正常退出');
       });
       rs.pipe(stream.stdin, { end: true });
     });
@@ -1853,7 +1946,7 @@ app.post('/api/ssh/sync', async (req, res) => {
           const pkg = packLocalBridge(false);
           if (!pkg.ok) return res.json({ success: false, steps: [...steps, { step: '本地打包桥代码', ok: false, msg: pkg.error }] });
           steps.push({ step: '本地打包桥代码', ok: true, msg: pkg.path });
-          await pipeLocalFileToRemote(conn, pkg.path, 'cat > /root/qq-bridge-sync.tar.gz');
+          await uploadFileVerified(conn, pkg.path, '/root/qq-bridge-sync.tar.gz');
           steps.push({ step: '上传桥代码', ok: true, msg: '/root/qq-bridge-sync.tar.gz' });
           const bak = await sshExecCapture(conn, 'if [ -f /root/qq-bridge/config.json ]; then cp /root/qq-bridge/config.json /root/qq-bridge/config.json.bak-sync && echo backed-up; else echo no-config; fi', 20000);
           steps.push({ step: '备份远端 config.json', ok: bak.ok, msg: bak.ok ? (bak.out.includes('backed-up') ? '已备份为 config.json.bak-sync' : '远端无 config.json, 跳过') : bak.error });
@@ -1872,7 +1965,7 @@ app.post('/api/ssh/sync', async (req, res) => {
           } else {
             try {
               const localBytes = readFileSync(localCfg).length;
-              await pipeLocalFileToRemote(conn, localCfg, 'cat > /root/qq-bridge/config.json');
+              await uploadFileVerified(conn, localCfg, '/root/qq-bridge/config.json');
               const sz = await sshExecCapture(conn, 'wc -c < /root/qq-bridge/config.json', 20000);
               const remoteBytes = Number(String(sz.out || '').trim().split(/\s+/)[0]) || 0;
               steps.push({
@@ -1896,7 +1989,7 @@ app.post('/api/ssh/sync', async (req, res) => {
             const pS = spawnSync('tar', ['-czf', sTar, '-C', bridgeDir, 'state'], { encoding: 'utf8', timeout: 300000, windowsHide: true });
             steps.push({ step: '打包本地 state', ok: pS.status === 0, msg: pS.status === 0 ? '已打包' : String(pS.stderr || '打包失败') });
             if (pS.status === 0) {
-              await pipeLocalFileToRemote(conn, sTar, 'cat > /root/qq-bridge-state-sync.tar.gz');
+              await uploadFileVerified(conn, sTar, '/root/qq-bridge-state-sync.tar.gz');
               const apply = await sshExecCapture(conn, remoteSwapBash('state', '/root/qq-bridge-state-sync.tar.gz'), 300000);
               steps.push({ step: '远端 state 替换为本地', ok: apply.ok && String(apply.out || '').includes('OK'), msg: String(apply.out || apply.error || '') });
             }
@@ -1917,7 +2010,7 @@ app.post('/api/ssh/sync', async (req, res) => {
             const pSt = spawnSync('tar', args, { encoding: 'utf8', timeout: 300000, windowsHide: true });
             steps.push({ step: '打包本地表情包', ok: pSt.status === 0, msg: pSt.status === 0 ? '已打包' : String(pSt.stderr || '打包失败') });
             if (pSt.status === 0) {
-              await pipeLocalFileToRemote(conn, sTar, 'cat > /root/qq-bridge-stickers.tar.gz');
+              await uploadFileVerified(conn, sTar, '/root/qq-bridge-stickers.tar.gz');
               const apply = await sshExecCapture(conn, remoteSwapBash('stickers-upload', '/root/qq-bridge-stickers.tar.gz'), 300000);
               steps.push({ step: '远端表情包替换为本地', ok: apply.ok && String(apply.out || '').includes('OK'), msg: String(apply.out || apply.error || '') });
             }
@@ -2090,7 +2183,7 @@ app.post('/api/ssh/sync', async (req, res) => {
         const pM = spawnSync('tar', ['-czf', upTar, '-C', bridgeDir, 'state'], { encoding: 'utf8', timeout: 300000, windowsHide: true });
         steps.push({ step: '打包合并结果', ok: pM.status === 0, msg: upTar });
         if (pM.status === 0) {
-          await pipeLocalFileToRemote(conn, upTar, 'cat > /root/qq-bridge-merged.tar.gz');
+          await uploadFileVerified(conn, upTar, '/root/qq-bridge-merged.tar.gz');
           const rmOld = await sshExecCapture(conn, remoteSwapBash('state', '/root/qq-bridge-merged.tar.gz'), 300000);
           steps.push({ step: '远端 state 替换为合并结果', ok: rmOld.ok && String(rmOld.out || '').includes('OK'), msg: String(rmOld.out || rmOld.error || '') });
         }
@@ -2136,7 +2229,7 @@ app.post('/api/ssh/sync', async (req, res) => {
                     const pStk = spawnSync('tar', ['-czf', upStk, '-C', bridgeDir, 'stickers-upload'], { encoding: 'utf8', timeout: 300000, windowsHide: true });
                     steps.push({ step: '打包合并后表情包', ok: pStk.status === 0, msg: upStk });
                     if (pStk.status === 0) {
-                      await pipeLocalFileToRemote(conn, upStk, 'cat > /root/qq-bridge-stickers-merged.tar.gz');
+                      await uploadFileVerified(conn, upStk, '/root/qq-bridge-stickers-merged.tar.gz');
                       const rmRStk = await sshExecCapture(conn, remoteSwapBash('stickers-upload', '/root/qq-bridge-stickers-merged.tar.gz'), 300000);
                       steps.push({ step: '远端表情包替换为合并结果', ok: rmRStk.ok && String(rmRStk.out || '').includes('OK'), msg: String(rmRStk.out || rmRStk.error || '') });
                     }
@@ -2188,6 +2281,45 @@ app.post('/api/ssh/remove-stack', async (req, res) => {
     const mv = await sshExecCapture(conn, "ts=$(date +%Y%m%d-%H%M%S); dest=/root/qq-bridge-removed-$ts; mkdir -p \"$dest\"; moved=''; for d in /root/qq-bridge /root/.dsh /root/napcat /root/dsh-polyfill; do [ -e \"$d\" ] && { mv \"$d\" \"$dest/\" && moved=\"$moved $d\"; }; done; if [ -n \"$moved\" ]; then echo \"moved:$moved -> $dest\"; else echo NOTHING-MOVED; fi", 300000);
     steps.push({ step: '移动目录到回收目录', ok: mv.ok, msg: mv.ok ? (mv.out || '已执行') : mv.error });
     res.json({ success: steps.length > 0 && steps.every((x) => x.ok), steps });
+  } catch (e) {
+    res.json({ success: false, message: e.message, steps });
+  } finally {
+    try { conn?.end(); } catch {}
+  }
+});
+
+/* 远端整套启停：服务器卡片上的「启动Bot / 终止Bot」。
+ * 顺序有依赖，所以分步跑并逐步回报：启动 DSH → NapCat → 桥；终止 桥 → NapCat → DSH。
+ * 幂等：已经启动/已经停止都算成功（重复点只是重跑一遍），只有命令真的失败才 ok:false。 */
+app.post('/api/ssh/stack', async (req, res) => {
+  const body = req.body ?? {};
+  const action = String(body.action ?? '').toLowerCase();
+  if (action !== 'start' && action !== 'stop') return res.status(400).json({ success: false, message: 'action 只能是 start / stop' });
+  const server = body.server;
+  if (!server || !server.host) return res.status(400).json({ success: false, message: '缺少服务器配置(server.host)' });
+  const steps = [];
+  let conn = null;
+  const startPlan = [
+    ['启动 DSH (dsh-web / dsh-polyfill)', 'systemctl start dsh-web dsh-polyfill 2>&1; sleep 3; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$(systemctl is-active dsh-polyfill 2>/dev/null)"', 120000],
+    ['启动 NapCat 容器', 'docker start napcat 2>&1; sleep 6; docker ps --filter name=napcat --format "{{.Names}} {{.Status}} {{.Ports}}"', 120000],
+    ['启动 QQ 桥', "if pgrep -f 'node src/bridge[.]js' >/dev/null; then echo already-running; else cd /root/qq-bridge && rm -f state/bridge.lock && setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null & sleep 6; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING; fi", 90000],
+    ['端口自检', "ss -lntp 2>/dev/null | grep -E ':(3080|3100|3000|3001|6099)' || echo '未发现监听端口（可能还在启动）'", 30000],
+  ];
+  const stopPlan = [
+    ['停止 QQ 桥', "pkill -f 'node src/bridge[.]js' 2>/dev/null; pkill -f 'start-bridge[.]sh' 2>/dev/null; sleep 2; pgrep -f 'node src/bridge[.]js' >/dev/null && echo still-running || echo stopped", 60000],
+    ['停止 NapCat 容器', 'docker stop napcat 2>&1 || true', 120000],
+    ['停止 DSH', 'systemctl stop dsh-web dsh-polyfill 2>&1; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$(systemctl is-active dsh-polyfill 2>/dev/null)"', 60000],
+  ];
+  const plan = action === 'start' ? startPlan : stopPlan;
+  try {
+    conn = await connectOne(server);
+    steps.push({ step: '连接服务器', ok: true, msg: `已连接 ${server.username || ''}@${server.host}` });
+    for (const [stepName, cmd, timeout] of plan) {
+      const r = await sshExecCapture(conn, cmd, timeout);
+      steps.push({ step: stepName, ok: r.ok, msg: r.ok ? (r.out || '已执行') : r.error });
+      if (!r.ok) break;
+    }
+    res.json({ success: steps.every((x) => x.ok), action, steps });
   } catch (e) {
     res.json({ success: false, message: e.message, steps });
   } finally {
@@ -3553,7 +3685,7 @@ app.post('/api/ssh/deploy/start', (req, res) => {
       return res.status(400).json({ success: false, message: `本机缺少可复刻的数据：${missing.join('、')}。请先在本机把整套跑起来再试。` });
     }
     mlog(`[deploy] 从本机复刻 → ${target.name}：bridge=${local.paths.bridgeDir} dsh=${local.paths.dshHome} napcatCfg=${local.paths.napcatConfigDir || '(无)'} meme=${local.paths.memeDir || '(无)'} dshVer=${local.dshVersion || '默认'}`);
-    opts = { ...opts, localSource: true, localPaths: local.paths, dshVersion: local.dshVersion, uploadFile: pipeLocalFileToRemote };
+    opts = { ...opts, localSource: true, localPaths: local.paths, dshVersion: local.dshVersion, uploadFile: uploadLocalFileToRemote };
   } else {
     source = resolveServer(req.body?.source, cfg);
     if (!source) return res.status(400).json({ success: false, message: '缺少有效的源服务器(或选择「本机」作为源)' });

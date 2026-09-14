@@ -662,9 +662,26 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       await step(`传输 ${item.name}`, async () => {
         if (isLocal) {
           await runCmd(dstConn, `mkdir -p ${stageDir}`, 20000);
-          await opts.uploadFile(dstConn, packed.path, `cat > ${stageDir}/${item.stage}`);
-          const deep = await runCmd(dstConn, item.dstFile, 900000);
-          if (!deep.ok) throw new Error(deep.err || deep.out || '解包失败');
+          const remoteFile = `${stageDir}/${item.stage}`;
+          /* 传 + 解包作为一个整体重试一次。
+           * 【2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」】
+           * 那次是上传**只传了一部分**却回了成功，远端 cat 正常退出，直到解包才炸。
+           * 现在 uploadFile 会用远端字节数复核（传不全直接报错），这里再补一次重试：慢链路偶发截断
+           * 不该让整场部署重来（前面已经装好的环境、拉过的镜像都要重跑）。 */
+          let lastErr = null;
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            try {
+              await opts.uploadFile(dstConn, packed.path, `cat > ${remoteFile}`, undefined, undefined, { remotePath: remoteFile });
+              const deep = await runCmd(dstConn, item.dstFile, 900000);
+              if (!deep.ok) throw new Error(deep.err || deep.out || '解包失败');
+              lastErr = null;
+              break;
+            } catch (e) {
+              lastErr = e;
+              taskLine(task, `  ✗ 传输/解包失败（${e?.message ?? e}），重试一次…`);
+            }
+          }
+          if (lastErr) throw lastErr;
         } else {
           await streamPipe(
             srcConn, `cat ${stageDir}/${item.stage}`,
