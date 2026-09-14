@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getLearningGraph, getOwnerProfile, getPersonMessages, getPortraitCfg, savePortraitCfg, getLearningGroups, getRelations, saveRelation } from '../api';
+import { getLearningGraph, getOwnerProfile, getPersonMessages, getPersonProfile, getPortraitCfg, savePortraitCfg, getLearningGroups, getRelations, saveRelation } from '../api';
 import type { PersonMsg, PortraitCfg, GroupInfo } from '../api';
 import { NetCanvas, REL_CAT_COLOR, type EdgeClick } from './NetCanvas';
 import type { GraphData, GraphNode, GraphLink, OwnerProfileResp } from '../api';
@@ -358,6 +358,15 @@ export default function GroupPortrait({ onBack }: Props) {
   const [relSaving, setRelSaving] = useState(false);
   const [relayout, setRelayout] = useState(0);
 
+  /* 【2026-09-14 主人反馈】聚焦弹层原来只有一行「还没有整理过的档案：多聊几次或对 ta 做「人格学习」会充实起来」——
+   * 哪怕这个人**早就被学习过**也照说不误（因为弹层只看图谱接口那几个被截断的短字段）。
+   * 现在改成和「学习」页「人格学习状态」同一套说法：已学习/无档案 + 最近学习 + 近30天发言 + 记忆条目，
+   * 数据按需直读桥的 memory.db（/api/learning/profile，不截断）；长文折叠 + 内滚，不把弹窗拉长。 */
+  const [profData, setProfData] = useState<Record<string, any>>({});
+  const [profBusy, setProfBusy] = useState('');
+  const [profErr, setProfErr] = useState<Record<string, string>>({});
+  const [profOpen, setProfOpen] = useState(false);
+
   const loadAll = async () => {
     setLoading(true); setErr('');
     try {
@@ -370,6 +379,34 @@ export default function GroupPortrait({ onBack }: Props) {
   };
   useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   useEffect(() => { setMsgs(null); setMsgsOpen(false); setMsgsErr(''); setRelSel(null); }, [focus?.uid]);
+  // 聚焦某人时按需取「完整档案」（与 Learning.tsx 同一套解包口径；已取过的不重复请求）
+  useEffect(() => {
+    setProfOpen(false);
+    const uid = focus?.uid;
+    if (!uid || profData[uid] !== undefined) return;
+    let alive = true;
+    setProfBusy(uid);
+    getPersonProfile(uid)
+      .then((r: any) => {
+        if (!alive) return;
+        if (r && r.ok === false) {
+          setProfErr((m) => ({ ...m, [uid]: String(r?.error || '读取失败') }));
+          setProfData((m) => ({ ...m, [uid]: null }));
+        } else {
+          const d = (r?.profile !== undefined ? r : (r?.result ?? r)) ?? null;
+          setProfErr((m) => { const n = { ...m }; delete n[uid]; return n; });
+          setProfData((m) => ({ ...m, [uid]: d }));
+        }
+      })
+      .catch((e2: any) => {
+        if (!alive) return;
+        setProfErr((m) => ({ ...m, [uid]: String(e2?.message ?? e2) }));
+        setProfData((m) => ({ ...m, [uid]: null }));
+      })
+      .finally(() => { if (alive) setProfBusy(''); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.uid]);
   useEffect(() => {
     getLearningGroups().then((g) => { if (g?.ok && Array.isArray(g.groups)) setGroupsList(g.groups); }).catch(() => {});
     getPortraitCfg().then((c) => { if (c) setPCfg(c); }).catch(() => {});
@@ -663,17 +700,54 @@ export default function GroupPortrait({ onBack }: Props) {
                     ))}
                   </div>
                 )}
-                {!focus.birthday && !cleanField(focus.personality) && !cleanField(focus.likes) && !focus.personaSummary && tagsOf(focus).length === 0 && (
-                  <div style={{ color: C.textMuted, fontSize: 13, marginBottom: 10 }}>还没有整理过的档案：多聊几次或对 ta 做「人格学习」会充实起来</div>
-                )}
+                {/* 学习档案：说法与「学习」页的「人格学习状态」一致（已学习/无档案 · 最近学习 · 近30天发言 · 记忆条目）；
+                    完整介绍折叠 + 内滚（app.css 的 .pv-intro），多长的档案也不会把弹窗拉长 */}
+                {(() => {
+                  const uid = focus.uid;
+                  const d = profData[uid] ?? null;
+                  const busy = profBusy === uid;
+                  const fErr = profErr[uid] || '';
+                  const lib = d?.library ?? null;
+                  const pf = d?.profile ?? null;
+                  // 取不到库时退回图谱里那份（截断过的）摘要，别让已有信息凭空消失
+                  const intro = String(lib?.profile || pf?.personality || d?.personaSummary || '').trim()
+                    || (fErr ? String(focus.personaSummary || '').trim() : '');
+                  const learnedAt = Number(d?.personaAt || pf?.updatedAt || 0) || 0;
+                  const n30 = Number(d?.msgCount || 0) || 0;
+                  const memN = Number(d?.memoryCount || 0) || 0;
+                  const has = !!(intro || pf || lib) || learnedAt > 0;
+                  return (
+                    <div className="pv-prof">
+                      <div className="pv-prof-head">
+                        <span className={`pv-badge${has ? ' is-on' : ''}`}>{has ? '已学习' : '无档案'}</span>
+                        <span className="pv-meta">{learnedAt > 0 ? `最近学习 ${fmtTime(learnedAt)}` : '尚未学习'}</span>
+                        {n30 > 0 && <span className="pv-meta">近 30 天发言 <b>{n30}</b> 条</span>}
+                        {memN > 0 && <span className="pv-meta">记忆条目 <b>{memN}</b> 条</span>}
+                        {intro && (
+                          <button className="btn btn-sm pv-prof-toggle" onClick={() => setProfOpen((o) => !o)}>
+                            {profOpen ? '收起档案 ▾' : '展开档案 ▸'}
+                          </button>
+                        )}
+                      </div>
+                      {busy && <div className="pv-note"><Loader2 size={12} className="spin" /> 正在读取档案…</div>}
+                      {!busy && fErr && <div className="pv-note">档案读取失败：{fErr}</div>}
+                      {!busy && !fErr && !has && (
+                        <div className="pv-note">记忆库里还没有 ta 的档案：多聊几次，或到「学习」页点一次「人格立即学习」，这里就会像「人格学习状态」那样显示已学习、最近学习时间和样本数。</div>
+                      )}
+                      {intro && (
+                        <div className={`pv-intro${profOpen ? ' is-open' : ''}`}>
+                          <p className="pv-prose">{intro}</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 {focus.birthday && <InfoRow k="生日" v={String(focus.birthday)} />}
                 {cleanField(focus.personality) && <InfoRow k="性格特征" v={cleanField(focus.personality)} />}
                 {cleanField(focus.likes) && <InfoRow k="爱好" v={cleanField(focus.likes)} />}
-                {focus.personaSummary && !INSTR_RE.test(String(focus.personaSummary)) && (
-                  <div style={{ fontSize: 13, lineHeight: 1.7, color: C.text, background: softOf(focus.kind), borderRadius: 12, padding: '10px 12px', marginTop: 6 }}>{trunc(String(focus.personaSummary), 260)}</div>
-                )}
+                {/* 完整介绍已在上面「学习档案」块里显示（且不截断），这里不再重复一遍 personaSummary */}
+                {/* 「近 30 天发言」已在上面学习档案块里（与 /api/learning/profile 同一口径），这里不再说第二遍 */}
                 <div style={{ display: 'flex', gap: 20, marginTop: 12, fontSize: 12.5, color: C.textMuted }}>
-                  <span>近30天发言 <b style={{ color: C.text }}>{focus.msgCount ?? 0}</b></span>
                   <span>最近活跃 {focus.lastSeen ? fmtTime(focus.lastSeen) : '—'}</span>
                 </div>
 

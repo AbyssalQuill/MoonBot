@@ -161,22 +161,33 @@ function tunnelMapFor(server) {
 
 function openTunnels(connId, conn, list) {
   return Promise.all(list.map(({ remote, local, name }) => new Promise((resolve) => {
-    const srv = createServer((socket) => {
-      conn.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, '127.0.0.1', remote, (err, stream) => {
-        if (err) { socket.end(); return; }
-        socket.pipe(stream).pipe(socket);
+    /* 【2026-09-14】断线重连/连点"连接"时会先 closeTunnels 再重新 listen，而 Windows 上刚关掉的
+     * 监听端口不会立刻释放 → bind 报 EADDRINUSE，于是"SSH 连上了但隧道一条都没建"
+     * （表现：/api/state 里 connected=true 而 srv-* 全部 reachable=false，界面里服务端界面点不开）。
+     * 现在对这个特定错误退避重试（最多 4 次，共 ~1.5s），其它错误照旧如实上报。 */
+    const attempt = (tryNo) => {
+      const srv = createServer((socket) => {
+        conn.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, '127.0.0.1', remote, (err, stream) => {
+          if (err) { socket.end(); return; }
+          socket.pipe(stream).pipe(socket);
+        });
       });
-    });
-    // 隧道建立成功要**如实回报**（原来 resolve() 不带值 → 响应里 tunnels 全是 null，
-    // 用户看不出到底建了几条、映射到哪个端口）。失败也要回一条说明，而不是静默。
-    srv.on('error', (err) => {
-      console.error(`[tunnel ${name}]`, err.message);
-      resolve({ name, local, remote, ok: false, error: err.message });
-    });
-    srv.listen(local, '127.0.0.1', () => {
-      tunnels.set(`${connId}:${name}`, { server: srv, local, remote, name });
-      resolve({ name, local, remote, ok: true });
-    });
+      // 隧道建立成功要**如实回报**（原来 resolve() 不带值 → 响应里 tunnels 全是 null，
+      // 用户看不出到底建了几条、映射到哪个端口）。失败也要回一条说明，而不是静默。
+      srv.on('error', (err) => {
+        if (err?.code === 'EADDRINUSE' && tryNo < 4) {
+          setTimeout(() => attempt(tryNo + 1), 400);
+          return;
+        }
+        console.error(`[tunnel ${name}]`, err.message);
+        resolve({ name, local, remote, ok: false, error: err.message });
+      });
+      srv.listen(local, '127.0.0.1', () => {
+        tunnels.set(`${connId}:${name}`, { server: srv, local, remote, name });
+        resolve({ name, local, remote, ok: true });
+      });
+    };
+    attempt(1);
   })));
 }
 
@@ -193,7 +204,7 @@ function connectOne(server, opts = {}) {
     const timer = setTimeout(() => { conn.end(); reject(new Error('连接超时')); }, 15000);
     conn.on('ready', () => { clearTimeout(timer); resolve(conn); });
     conn.on('error', (err) => { clearTimeout(timer); reject(err); });
-    conn.on('close', () => { closeTunnels(server.id); bridgeTokenCache.delete(server.id); if (sshConnections.get(server.id) === conn) sshConnections.delete(server.id); });
+    conn.on('close', () => { closeTunnels(server.id); bridgeTokenCache.delete(server.id); remoteStatusCache.delete(server.id); remoteBridgeDirCache.delete(server.id); if (sshConnections.get(server.id) === conn) sshConnections.delete(server.id); });
     // 私钥读取失败要给人话：以前是在 connect() 的参数里 readFileSync，路径写错只会抛出 ENOENT。
     let privateKey;
     if (server.authType === 'key' && server.privateKey) {
@@ -294,8 +305,21 @@ function sshAuthDiagnose(server, err, debugLines = [], sentMethodsExtra = []) {
 async function probe(url, timeoutMs = 1200) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try { const res = await fetch(url, { method: 'GET', signal: ctrl.signal, redirect: 'follow' }); clearTimeout(timer); return { reachable: true, status: res.status }; }
-  catch { clearTimeout(timer); return { reachable: false, status: 0 }; }
+  try {
+    const res = await fetch(url, { method: 'GET', signal: ctrl.signal, redirect: 'follow' });
+    clearTimeout(timer);
+    // 【新】顺带把"这个地址能不能被内嵌 iframe"的证据带回来：
+    // 管理端的「打开官方界面」是同页 iframe，目标一旦回 `X-Frame-Options: DENY/SAMEORIGIN`
+    // 或 CSP `frame-ancestors`，浏览器直接拒绝渲染 —— 用户只看到一个白框，却不知道是安全头挡的。
+    // 实测服务端桥控制台就是 `X-Frame-Options: DENY`（见交付报告），所以这一项必须如实上报，
+    // 由前端改给「新窗口打开」。（对齐 alignHost 的注释：不同端口＝不同 origin，SAMEORIGIN 一样挡。）
+    const xfo = String(res.headers.get('x-frame-options') || '');
+    const csp = String(res.headers.get('content-security-policy') || '');
+    const fa = /frame-ancestors/i.test(csp) ? (csp.match(/frame-ancestors[^;]*/i) || [''])[0].trim() : '';
+    const blocked = /deny|sameorigin/i.test(xfo) || (!!fa && !/frame-ancestors\s+\*/i.test(fa));
+    return { reachable: true, status: res.status, xfo, frameAncestors: fa, iframeBlocked: blocked };
+  }
+  catch { clearTimeout(timer); return { reachable: false, status: 0, xfo: '', frameAncestors: '', iframeBlocked: false }; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1224,23 +1248,59 @@ async function resolveServices(cfg, connected) {
   const napUp = await probe(`http://127.0.0.1:${napLocal.webuiPort || 6099}/`, 700);
   const brUp = await probe(`http://127.0.0.1:${brLocal.webuiPort || 3100}/`, 700);
 
-  const tun = (name, fallbackLocal) => {
-    if (sshMode && connected) { const key = `${connected.id}:${name}`; if (tunnels.has(key)) return `http://127.0.0.1:${tunnels.get(key).local}`; }
-    return `http://127.0.0.1:${fallbackLocal}`;
-  };
-  const localDshUrl = dshIsoUp.reachable ? `http://127.0.0.1:${dshIso.port}` : tun('DSH Web', local.dshWeb);
-  const localNapUrl = napUp.reachable ? `http://127.0.0.1:${napLocal.webuiPort || 6099}` : tun('NapCat WebUI', local.napcatWebui);
-  const localBrUrl = brUp.reachable ? `http://127.0.0.1:${brLocal.webuiPort || 3100}` : tun('Bridge 控制台', local.bridge);
+  /* 【2026-09-14 修串台】本机那一组**不再回退到隧道**：本地实例没跑时，原来的写法会把
+   * `127.0.0.1:13000/13080/13100`（那是服务器端口的隧道）当成"本机入口"填进去 ——
+   * 于是「本机 · NapCat 官方界面」点开看到的是**服务器**的 NapCat（实测 reachable=false→串到隧道）。
+   * 现在本机就是本机端口（没跑就如实显示不可达），服务端那组单独给（见下方 remoteServices）。 */
+  const localDshUrl = `http://127.0.0.1:${dshIso.port}`;
+  const localNapUrl = `http://127.0.0.1:${napLocal.webuiPort || 6099}`;
+  const localBrUrl = `http://127.0.0.1:${brLocal.webuiPort || 3100}`;
 
-  const services = [
-    { id: 'napcat-webui', name: 'NapCat 官方界面', url: localNapUrl, desc: '账号/连接/消息管理 WebUI' },
-    { id: 'napcat-http', name: 'NapCat HTTP API', url: tun('NapCat HTTP', local.napcatHttp), desc: 'OneBot HTTP 3000' },
-    { id: 'dsh-web', name: 'DeepSeek Harness', url: localDshUrl, desc: '官方 DSH Web GUI' },
-    { id: 'bridge', name: 'Bridge 控制台', url: localBrUrl, desc: 'QQ 桥接层控制台' },
+  // 本机那一组：名字统一带「本机 · 」前缀，和服务端那组一眼分得清（主人 2026-09-14 要求）。
+  const localServices = [
+    { id: 'napcat-webui', scope: 'local', name: '本机 · NapCat 官方界面', url: localNapUrl, desc: '账号/连接/消息管理 WebUI（本机实例 ' + (napLocal.webuiPort || 6099) + '）' },
+    { id: 'napcat-http', scope: 'local', name: '本机 · NapCat HTTP API', url: `http://127.0.0.1:${local.napcatHttp}`, desc: '本机 OneBot HTTP ' + local.napcatHttp },
+    { id: 'dsh-web', scope: 'local', name: '本机 · DeepSeek Harness', url: localDshUrl, desc: '本机 DSH Web GUI（隔离实例端口 ' + dshIso.port + '）' },
+    { id: 'bridge', scope: 'local', name: '本机 · Bridge 控制台', url: localBrUrl, desc: '本机桥接层控制台 ' + (brLocal.webuiPort || 3100) },
   ];
-  const results = [];
-  for (const s of services) { const p = await probe(s.url); results.push({ ...s, reachable: p.reachable, status: p.status }); }
-  return { mode: sshMode ? 'ssh' : 'local', server: sshMode ? { id: connected.id, name: connected.name, host: connected.host } : null, services: results, dshIsoUp: dshIsoUp.reachable, napLocalUp: napUp.reachable, bridgeLocalUp: brUp.reachable };
+  const mk = (s, p) => ({
+    ...s,
+    reachable: p.reachable,
+    status: p.status,
+    iframeBlocked: !!p.iframeBlocked,
+    iframeBlockReason: p.iframeBlocked ? (p.xfo ? `X-Frame-Options: ${p.xfo}` : `CSP ${p.frameAncestors}`) : '',
+  });
+  const services = [];
+  for (const s of localServices) services.push(mk(s, await probe(s.url)));
+
+  /* ── 服务端一组（只在 SSH 已连接时出现）──────────────────────────────
+   * 以前这里只有一组 url，且带「本机实例在跑就优先用本机」的规则：连上服务器后点「打开官方界面」
+   * 看到的还是本机那套（主人实测遇到的问题）。现在本机/服务端**并列成两组**，各自独立，
+   * 服务端的 DSH 地址由后端拼好 `?token=`（DSH 无令牌一律 401）、NapCat 拼好 webui token，
+   * 前端点开即用，不再靠前端猜。 */
+  let remoteStatus = null;
+  if (sshMode && connected) {
+    const conn = sshConnections.get(connected.id);
+    remoteStatus = await getRemoteServerStatus(connected, conn);          // 复用这条连接（内部 10 秒缓存）
+    const u = remoteServiceUrls(connected, remoteStatus);
+    const remoteServices = [
+      { id: 'srv-dsh-web', scope: 'remote', name: '服务端 DSH 界面', url: u.dsh, desc: '服务器 systemd dsh-web · 隧道 ' + u.ports.dsh + ' · 已带访问令牌' + (remoteStatus?.dsh?.token ? '' : '（未取到令牌，令牌见服务端日志）') },
+      { id: 'srv-napcat-webui', scope: 'remote', name: '服务端 NapCat 界面', url: u.napcat, desc: '服务器 NapCat WebUI · 隧道 ' + u.ports.napcat + ' · 已带 webui token' + (remoteStatus?.napcat?.webuiToken ? '' : '（未取到 token）') },
+      { id: 'srv-napcat-http', scope: 'remote', name: '服务端 NapCat HTTP API', url: u.napcatHttp, desc: '服务器 OneBot HTTP · 隧道 ' + u.ports.napcatHttp },
+      { id: 'srv-bridge', scope: 'remote', name: '服务端桥控制台', url: u.bridge, desc: '服务器 qq-bridge 控制台 · 隧道 ' + u.ports.bridge + (u.bridgeToken ? ' · 已带 console token' : '') },
+    ];
+    for (const s of remoteServices) services.push(mk(s, await probe(s.url, 1500)));
+  }
+
+  return {
+    mode: sshMode ? 'ssh' : 'local',
+    server: sshMode ? { id: connected.id, name: connected.name, host: connected.host } : null,
+    services,
+    remoteStatus,
+    dshIsoUp: dshIsoUp.reachable,
+    napLocalUp: napUp.reachable,
+    bridgeLocalUp: brUp.reachable,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1321,6 +1381,9 @@ app.get('/api/state', async (req, res) => {
   res.json({
     mode: r.mode, activeServer: r.server, services, tunnels: tunnelsInfo,
     connected: !!connected && sshConnections.has(connected.id),
+    // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / docker napcat / 桥进程，
+    // 与本机那三个实例**分开两处**展示，绝不混在一张卡上（主人 2026-09-14 要求）。
+    remoteStatus: r.remoteStatus ?? null,
     instances,
     // 【2026-09-12 可移植性】安装位置体检：所有运行数据（记忆库 memory.db / 社交状态 / 人设）都写在
     // 安装树里，所以装在 Program Files（用户级进程写不进去）或 OneDrive 等同步盘（SQLite 会被反复同步、
@@ -1349,9 +1412,16 @@ app.get('/api/open', async (req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
   const r = await resolveServices(cfg, connected);
-  const svc = r.services.find((s) => s.id === target || s.id.includes(target || ''));
-  if (!svc) return res.status(404).json({ success: false, message: `未知服务: ${target}` });
-  res.json({ success: svc.reachable, url: svc.url, reachable: svc.reachable, mode: r.mode, name: svc.name });
+  // 先精确匹配 id：现在本机/服务端各有一套 id（bridge / srv-bridge），fuzzy includes 会把
+  // "bridge" 也匹配到 "srv-bridge" 上，打开的就成了服务端那套（正是本次要修的串台问题）。
+  // 显式给了 scope 就**严格按 scope 找**，找不到宁可 404，绝不跨到另一套去。
+  const scope = req.query.scope;                                   // 可选：local | remote
+  const pool = scope ? r.services.filter((s) => s.scope === scope) : r.services;
+  const svc = pool.find((s) => s.id === target)
+    || pool.find((s) => s.id.includes(target || ''))
+    || (!scope ? r.services.find((s) => s.id.includes(target || '')) : null);
+  if (!svc) return res.status(404).json({ success: false, message: `未知服务: ${target}${scope ? '（scope=' + scope + '）' : ''}` });
+  res.json({ success: svc.reachable, url: svc.url, reachable: svc.reachable, mode: r.mode, name: svc.name, scope: svc.scope ?? 'local', iframeBlocked: !!svc.iframeBlocked, iframeBlockReason: svc.iframeBlockReason || '' });
 });
 
 // 本机实例：启动 / 停止 / 重启
@@ -1478,25 +1548,40 @@ app.get('/api/instance/:id/logs', (req, res) => {
 
 // SSH
 // ── 反"把自己测封"的闸门 ────────────────────────────────────────────────────
-// 服务器上的 fail2ban 只认"认证失败次数"：反复点测试会让本机 IP 被整机 DROP，
+// 背景：服务器上的 fail2ban 只认"认证失败次数"，反复试会让本机 IP 被整机 DROP，
 // 之后连 TCP 都超时（正确凭据也连不上，表现为"明明昨天还好"）。2026-09-12 实测踩到两次。
-// 所以：同一台服务器 10 分钟内失败 3 次就先冷却 10 分钟，并明确告诉用户"不是你凭据的问题，是被封了"。
-const sshFailLog = new Map(); // serverKey -> [ts,...]
-const SSH_FAIL_WINDOW_MS = 10 * 60 * 1000;
+//
+// 【2026-09-14 主人反馈「冷却时间是写死的，等太久了」】旧实现：10 分钟内失败 3 次 → **固定冷却 10 分钟**，
+// 且把原因一口咬定成 fail2ban。但"失败"至少有四种：凭据错、端口填错、机器没开、真被封 —— 处置完全不同，
+// 而 10 分钟里就算把密码改对了也一样连不上。现在改成：
+//   · 观察窗 5 分钟（原来 10 分钟）；
+//   · **按失败性质分开算**：凭据类只停 10 秒（改完就能立刻再试）；连不上/超时类才真冷却，
+//     且是秒级递增 20s → 40s → 60s（封顶 60s，绝不出现"等十分钟"）；
+//   · 冷却提示如实带上"上一次到底报什么错"，不再一律说成 fail2ban；
+//   · 两条接口都支持 `?force=1` 强行重试（界面上有"仍然重试一次"按钮）。
+const sshFailLog = new Map(); // serverKey -> [{ ts, kind, error }]
+const SSH_FAIL_WINDOW_MS = 5 * 60 * 1000;
 const SSH_FAIL_MAX = 3;
-const SSH_COOLDOWN_MS = 10 * 60 * 1000;
+const SSH_COOLDOWN_SECONDS = [20, 40, 60];      // 第 3/4/5 次连不上之后的冷却（秒），之后维持 60s
+const SSH_AUTH_COOLDOWN_MS = 10 * 1000;         // 凭据类失败：只停 10 秒
 function sshKeyOf(server) { return `${server.username}@${server.host}:${server.port || 22}`; }
-function sshCooldownLeft(server) {
-  const arr = (sshFailLog.get(sshKeyOf(server)) || []).filter((t) => Date.now() - t < SSH_FAIL_WINDOW_MS);
-  sshFailLog.set(sshKeyOf(server), arr);
-  if (arr.length < SSH_FAIL_MAX) return 0;
-  const last = arr[arr.length - 1];
-  return Math.max(0, SSH_COOLDOWN_MS - (Date.now() - last));
-}
-function sshNoteFailure(server) {
+/** 冷却信息（不写死总时长）：ms 为剩余毫秒，附带次数/性质/上次报错，供界面如实展示。 */
+function sshCooldownInfo(server) {
   const k = sshKeyOf(server);
-  const arr = (sshFailLog.get(k) || []).filter((t) => Date.now() - t < SSH_FAIL_WINDOW_MS);
-  arr.push(Date.now());
+  const arr = (sshFailLog.get(k) || []).filter((x) => Date.now() - x.ts < SSH_FAIL_WINDOW_MS);
+  sshFailLog.set(k, arr);
+  if (arr.length < SSH_FAIL_MAX) return { ms: 0, count: arr.length, kind: '', lastError: '' };
+  const last = arr[arr.length - 1];
+  const idx = Math.min(arr.length - SSH_FAIL_MAX, SSH_COOLDOWN_SECONDS.length - 1);
+  const base = last.kind === 'auth' ? SSH_AUTH_COOLDOWN_MS : SSH_COOLDOWN_SECONDS[idx] * 1000;
+  return { ms: Math.max(0, base - (Date.now() - last.ts)), count: arr.length, kind: last.kind, lastError: last.error || '' };
+}
+/** 兼容旧调用点：只要剩余毫秒数。 */
+function sshCooldownLeft(server) { return sshCooldownInfo(server).ms; }
+function sshNoteFailure(server, kind = 'other', error = '') {
+  const k = sshKeyOf(server);
+  const arr = (sshFailLog.get(k) || []).filter((x) => Date.now() - x.ts < SSH_FAIL_WINDOW_MS);
+  arr.push({ ts: Date.now(), kind, error: String(error).slice(0, 200) });
   sshFailLog.set(k, arr);
 }
 function sshNoteSuccess(server) { sshFailLog.delete(sshKeyOf(server)); }
@@ -1521,7 +1606,19 @@ function sshRememberGoodPort(server) {
   } catch { /* 记录失败不影响连接 */ }
 }
 
-const sshCooldownText = (ms) => `已连续失败 ${SSH_FAIL_MAX} 次，先进冷却 ${Math.ceil(ms / 60000)} 分钟 —— 服务器上的 fail2ban 很可能已经把本机 IP 封了，继续试只会延长封禁。正确凭据此刻也连不上（表现为"连接超时"）。解封：在服务器上执行 fail2ban-client set sshd unbanip <本机IP>，或等封禁到期再试。`;
+/** 冷却提示：**如实**说清次数、性质和上一次的真实报错，不一律甩锅给 fail2ban。 */
+const sshCooldownText = (info) => {
+  const secs = Math.max(1, Math.ceil(info.ms / 1000));
+  const kindText = info.kind === 'auth'
+    ? '这几回是"认证被拒"（凭据或用户名不对）'
+    : info.kind === 'network'
+      ? '这几回是"连不上/超时"'
+      : '这几回报错不一';
+  const advice = info.kind === 'network'
+    ? '连不上也可能是 fail2ban 把本机 IP 封了：在服务器上跑 fail2ban-client set sshd unbanip <本机IP> 可解。'
+    : '把密码/用户名改对后可以直接重试（点了"仍然重试一次"就立刻再试）。';
+  return `连续失败 ${info.count} 次，先停 ${secs} 秒再试：${kindText}。上一次报错：${info.lastError || '（未记录）'} ${advice}`;
+};
 
 /** 一次"连上并跑一条命令"，返回输出（失败抛异常）。 */
 function sshRunOnce(server, port, debugLines) {
@@ -1562,8 +1659,11 @@ function sshSavePort(server, port) {
  */
 app.post('/api/ssh/test', async (req, res) => {
   const server = req.body;
-  const cd = sshCooldownLeft(server);
-  if (cd > 0 && req.query.force !== '1') { res.json({ success: false, cooldown: true, message: sshCooldownText(cd) }); return; }
+  const cool = sshCooldownInfo(server);
+  if (cool.ms > 0 && req.query.force !== '1') {
+    res.json({ success: false, cooldown: true, cooldownMs: cool.ms, kind: cool.kind, failCount: cool.count, message: sshCooldownText(cool) });
+    return;
+  }
   const first = server.port || 22;
   const cands = [first];
   if (server.lastGoodPort && server.lastGoodPort !== first) cands.push(server.lastGoodPort);
@@ -1593,10 +1693,10 @@ app.post('/api/ssh/test', async (req, res) => {
   const e = lastErr ?? new Error('未知错误');
   const isAuth = /authentication methods failed|authentication failure|Permission denied/i.test(String(e?.message ?? ''));
   const isTimeout = /超时|timed? ?out|ETIMEDOUT|ECONNREFUSED/i.test(String(e?.message ?? ''));
-  if (isAuth) sshNoteFailure(server);
+  sshNoteFailure(server, isAuth ? 'auth' : isTimeout ? 'network' : 'other', String(e?.message ?? e));
   if (isTimeout) {
     // 超时/拒连≠凭据问题：可能是端口不对（同一台 IP 上常挂着多个 sshd），也可能是刚失败太多次被 fail2ban 封了本机 IP
-    const after = sshCooldownLeft(server) > 0
+    const after = sshCooldownInfo(server).ms > 0
       ? '（这台机器刚刚连续失败过几次，fail2ban 很可能已封本机 IP —— 去服务器上 fail2ban-client set sshd unbanip <本机IP> 解开）'
       : `（端口 ${first} 上没有 SSH 服务或放不放行要确认；可用 tools\\probe-ssh-banner.mjs 零认证探测哪个端口才是 sshd${server.lastGoodPort ? `，上次成功的是 ${server.lastGoodPort}` : ''}）`;
     res.json({ success: false, timeout: true, message: `连接失败：${server.username}@${server.host}:${first}${after}` });
@@ -1613,8 +1713,11 @@ app.post('/api/ssh/test', async (req, res) => {
 app.post('/api/ssh/connect', async (req, res) => {
   const server = req.body;
   if (!server?.id) return res.status(400).json({ success: false, message: '缺少 server.id' });
-  const cd = sshCooldownLeft(server);
-  if (cd > 0) { res.json({ success: false, cooldown: true, message: sshCooldownText(cd) }); return; }
+  const cool = sshCooldownInfo(server);
+  if (cool.ms > 0 && req.query.force !== '1' && req.body?.force !== true) {
+    res.json({ success: false, cooldown: true, cooldownMs: cool.ms, kind: cool.kind, failCount: cool.count, message: sshCooldownText(cool) });
+    return;
+  }
   const cfg = loadConfig();
   if (!cfg.servers.find((s) => s.id === server.id)) { cfg.servers = [...cfg.servers.filter((s) => s.id !== server.id), server]; saveConfig(cfg); }
   const debugLines = [];
@@ -1624,14 +1727,21 @@ app.post('/api/ssh/connect', async (req, res) => {
     sshConnections.set(server.id, conn);
     const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
     bridgeTokenCache.delete(server.id); // 重连后清空 token 缓存，重新实时读取
+    remoteStatusCache.delete(server.id); remoteBridgeDirCache.delete(server.id);   // 重连后服务端现场状态/桥目录缓存作废
+    remoteBridgeCfgCache.delete(server.id);                                         // 服务端配置缓存同样作废
     cfg.activeServerId = server.id;
     saveConfig(cfg);
     sshNoteSuccess(server);
     sshRememberGoodPort(server);
+    // 连上就**预热**服务端桥配置：用户点开"功能配置"时直接命中缓存，不用先转一会儿
+    void warmRemoteBridgeConfig(server.id, { force: true }).catch(() => {});
     res.json({ success: true, message: 'SSH 连接成功，隧道已建立', tunnels: tunnelsCreated });
   } catch (e) {
     const isAuth = /authentication methods failed|authentication failure|Permission denied/i.test(String(e?.message ?? ''));
-    if (isAuth) sshNoteFailure(server);
+    // 【2026-09-14】失败的**性质**要记账（凭据 / 连不上 / 其它），冷却时长与提示都按它来算；
+    // 以前只记"失败"两字，于是密码错和 IP 被封被当成同一回事、一律甩 10 分钟冷却。
+    const isNet = /超时|timed? ?out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ECONNRESET/i.test(String(e?.message ?? ''));
+    sshNoteFailure(server, isAuth ? 'auth' : isNet ? 'network' : 'other', String(e?.message ?? e));
     if (isAuth) {
       const d = sshAuthDiagnose(server, e, debugLines, []);
       res.json({ success: false, message: d.message, detail: { serverMethods: d.serverMethods, sentMethods: d.sentMethods } });
@@ -1647,6 +1757,8 @@ app.post('/api/ssh/disconnect', (req, res) => {
   if (id && sshConnections.has(id)) { sshConnections.get(id).end(); sshConnections.delete(id); }
   closeTunnels(id || '');
   bridgeTokenCache.delete(id || '');
+  remoteStatusCache.delete(id || ''); remoteBridgeDirCache.delete(id || '');
+  remoteBridgeCfgCache.delete(id || '');          // 断开后别把服务端配置缓存留着（下次连上重新预热）
   if (cfg.activeServerId === id) { cfg.activeServerId = null; saveConfig(cfg); }
   res.json({ success: true });
 });
@@ -2295,20 +2407,33 @@ app.post('/api/ssh/stack', async (req, res) => {
   const body = req.body ?? {};
   const action = String(body.action ?? '').toLowerCase();
   if (action !== 'start' && action !== 'stop') return res.status(400).json({ success: false, message: 'action 只能是 start / stop' });
-  const server = body.server;
-  if (!server || !server.host) return res.status(400).json({ success: false, message: '缺少服务器配置(server.host)' });
+  // 【2026-09-14】除了整份 server（带凭据），也接受 serverId（首页"一键启动整套"只有 id/name/host，
+  // 不该把凭据发到前端再发回来）。两者都没有才报错。
+  // 【2026-09-15】第三种形状也认：body 本身就是 server（`{...server, action}`）——曾经有调用方这样发，
+  // 结果被当成"缺少服务器配置"直接 400，界面上看着就是"点了没反应"。
+  let server = body.server && body.server.host ? body.server : null;
+  if (!server && body.serverId) server = loadConfig().servers.find((s) => s.id === String(body.serverId)) || null;
+  if (!server && body.host && (body.id || body.username)) server = body;
+  if (!server || !server.host) return res.status(400).json({ success: false, message: '缺少服务器配置(server 或 serverId)' });
   const steps = [];
   let conn = null;
   const startPlan = [
-    ['启动 DSH (dsh-web / dsh-polyfill)', 'systemctl start dsh-web dsh-polyfill 2>&1; sleep 3; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$(systemctl is-active dsh-polyfill 2>/dev/null)"', 120000],
+    // 【2026-09-14】dsh-polyfill 只在"老模板服务器"上存在；本机复刻部署的目标机没有这个 unit，
+    // 老命令 `systemctl start dsh-web dsh-polyfill` 会打印 "Unit not found" 并回 rc=5（看着像启动失败，
+    // 其实 dsh-web 已经起来了）。改成"有 unit 才启"。
+    ['启动 DSH (dsh-web)', 'systemctl start dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl start dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 3; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 120000],
     ['启动 NapCat 容器', 'docker start napcat 2>&1; sleep 6; docker ps --filter name=napcat --format "{{.Names}} {{.Status}} {{.Ports}}"', 120000],
-    ['启动 QQ 桥', "if pgrep -f 'node src/bridge[.]js' >/dev/null; then echo already-running; else cd /root/qq-bridge && rm -f state/bridge.lock && setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null & sleep 6; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING; fi", 90000],
+    ['启动 QQ 桥', "if pgrep -f 'node src/bridge[.]js' >/dev/null; then echo already-running; else cd /root/qq-bridge && rm -f state/bridge.lock && if [ -f start-bridge.sh ]; then setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null & else setsid nohup node src/bridge.js >state/bridge-nohup.log 2>&1 < /dev/null & fi; sleep 6; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING; fi", 90000],
+    // 【2026-09-15 主人反馈"点了启动Bot但 Core 没起来"】真正决定机器人能不能干活的是"桥有没有连上 NapCat"：
+    // 进程在 ≠ 能收消息（QQ 掉登录/等扫码时，桥会一直重试、控制台也可能还没起）。这一步把实情摆出来，
+    // 让"没启动"和"启动了但 NapCat 还没登录"在界面上区分得清清楚楚。
+    ['检查桥 ↔ NapCat 连接', "cd /root/qq-bridge 2>/dev/null; if grep -aq 'NapCat 已连接' state/bridge-nohup.log 2>/dev/null; then echo 'NapCat 已连接'; elif grep -aq '连接未成功\\|NapCat 错误' state/bridge-nohup.log 2>/dev/null; then echo '桥在跑，但还没连上 NapCat（QQ 可能掉登录/等待扫码）：在 NapCat 界面扫码即可，桥会自动重连'; else echo '桥刚启动，连接状态待观察'; fi", 30000],
     ['端口自检', "ss -lntp 2>/dev/null | grep -E ':(3080|3100|3000|3001|6099)' || echo '未发现监听端口（可能还在启动）'", 30000],
   ];
   const stopPlan = [
     ['停止 QQ 桥', "pkill -f 'node src/bridge[.]js' 2>/dev/null; pkill -f 'start-bridge[.]sh' 2>/dev/null; sleep 2; pgrep -f 'node src/bridge[.]js' >/dev/null && echo still-running || echo stopped", 60000],
     ['停止 NapCat 容器', 'docker stop napcat 2>&1 || true', 120000],
-    ['停止 DSH', 'systemctl stop dsh-web dsh-polyfill 2>&1; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$(systemctl is-active dsh-polyfill 2>/dev/null)"', 60000],
+    ['停止 DSH', 'systemctl stop dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl stop dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 60000],
   ];
   const plan = action === 'start' ? startPlan : stopPlan;
   try {
@@ -2319,11 +2444,72 @@ app.post('/api/ssh/stack', async (req, res) => {
       steps.push({ step: stepName, ok: r.ok, msg: r.ok ? (r.out || '已执行') : r.error });
       if (!r.ok) break;
     }
-    res.json({ success: steps.every((x) => x.ok), action, steps });
+    // 【2026-09-15】动作后现场状态作废（与 /api/ssh/service 一致）：以前只有那个端点在清缓存，
+    // 于是「启动Bot」成功后立刻回首页，10 秒内看到的还是动作前的旧状态（"Core 没起来"的观感就是这么来的）。
+    // 这里顺手把**动作后的真实状态**一起回给前端，界面不用等下一轮轮询。
+    let status = null;
+    try {
+      remoteStatusCache.delete(server.id);
+      remoteBridgeCfgCache.delete(server.id);
+      status = await getRemoteServerStatus(server, conn, { force: true, timeoutMs: 8000 });
+    } catch { /* 状态取不到不影响动作結果 */ }
+    res.json({ success: steps.every((x) => x.ok), action, steps, status });
   } catch (e) {
     res.json({ success: false, message: e.message, steps });
   } finally {
     try { conn?.end(); } catch {}
+  }
+});
+
+/* 【2026-09-14 主人要求】按组件启停**服务器上**的 DSH / NapCat / 桥。
+ * 连上服务器后首页那三张卡的按钮不再启动本机进程（原来点了只会起本机那套，然后打开的还是本机界面），
+ * 而是把动作发到服务器；执行完清掉远端状态缓存，让 /api/state 立刻反映新状态。
+ * 复用已建立的 SSH 连接（没有才新建），不打断隧道。 */
+app.post('/api/ssh/service', async (req, res) => {
+  const { serverId, component, action } = req.body ?? {};
+  const comp = String(component ?? '').toLowerCase();
+  const act = String(action ?? '').toLowerCase();
+  const allowed = ['start', 'stop', 'restart'];
+  if (!['dsh', 'napcat', 'bridge'].includes(comp)) return res.status(400).json({ ok: false, message: 'component 只能是 dsh / napcat / bridge' });
+  if (!allowed.includes(act)) return res.status(400).json({ ok: false, message: 'action 只能是 start / stop / restart' });
+  const sid = String(serverId ?? '');
+  const cfg = loadConfig();
+  const server = sid ? cfg.servers.find((s) => s.id === sid) : null;
+  if (!server) return res.status(400).json({ ok: false, message: '找不到服务器配置(serverId)' });
+
+  const B = '/root/qq-bridge';
+  /* 【2026-09-14】起桥必须放进**子 shell** `( ... & )`：直接 `... &` 会让后台进程挂在这次
+   * SSH 通道上，ssh2 收不到退出码（报 "远程命令 exit null"，看着像失败，其实桥起来了/或相反）。
+   * 子 shell + setsid + 三个重定向 = 彻底脱离，通道正常关闭并带回退出码。 */
+  const bridgeStart = 'cd ' + B + ' && rm -f state/bridge.lock && (setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null &) ; sleep 7; pgrep -f \'node src/bridge[.]js\' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING';
+  const bridgeStop = 'pkill -f \'node src/bridge[.]js\' 2>/dev/null; sleep 2; pgrep -f \'node src/bridge[.]js\' >/dev/null && echo still-running || echo stopped';
+  const cmdOf = (c, a) => {
+    if (c === 'dsh') return `systemctl ${a} dsh-web 2>&1; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null)"`;
+    if (c === 'napcat') return `docker ${a} napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+    // bridge
+    if (a === 'stop') return bridgeStop;
+    if (a === 'start') return bridgeStart;
+    return bridgeStop + '; ' + bridgeStart;
+  };
+
+  let conn = sshConnections.get(sid) || null;
+  const temp = !conn;
+  try {
+    if (!conn) conn = await connectOne(server);
+    const r = await sshExecCapture(conn, cmdOf(comp, act), 120000);
+    remoteStatusCache.delete(sid);            // 动作后现场状态作废，下次 /api/state 重新取
+    const out = (r.out || '').trim();
+    const tail = out.split('\n').filter(Boolean).slice(-1)[0] || '';
+    // 成败按"动作方向"判断：stop 之后应为"已停"（dsh-web=inactive / napcat::Exited / stopped），
+    // start|restart 之后应为"在跑"（dsh-web=active / napcat::Up / bridge-started）。
+    const upRe = /dsh-web=active|::Up |bridge-started/;
+    const downRe = /dsh-web=inactive|::Exited|^stopped$/;
+    const okFlag = r.ok && (act === 'stop' ? downRe.test(tail) : upRe.test(tail));
+    res.json({ ok: okFlag, component: comp, action: act, out, message: r.ok ? (tail || '已执行') : (r.error || '远程命令失败') });
+  } catch (e) {
+    res.json({ ok: false, message: String(e?.message ?? e) });
+  } finally {
+    if (temp) { try { conn?.end(); } catch {} }
   }
 });
 
@@ -2361,67 +2547,60 @@ function bridgePersonaPath() { return join(findBridgeDir(), 'persona.md'); }
 function bridgeSpeechPath() { return join(findBridgeDir(), 'speech-rules.md'); }
 function bridgeRolesDir() { const d = join(findBridgeDir(), 'roles'); if (!existsSync(d)) mkdirSync(d, { recursive: true }); return d; }
 
-/** 默认发言规则模板（英文简洁，随「恢复默认」还原；必须与 qq-bridge/speech-rules.md 逐字一致） */
+/** 默认发言规则模板（随「恢复默认」还原；必须与 qq-bridge/speech-rules.md 逐字一致） */
 // 注意：这份内置模板与 qq-bridge/speech-rules.md 是两份东西，改一份必须同步另一份，
 // 否则用户点一次「恢复默认发言规则」就会把线上规则覆盖回旧版（历史上漂移过一次）。
-// 上限：wake-send.js 的 RUNTIME_OVERRIDE_MAX['speech-rules.md'] = 4000（按 JS .length 算）。
+// 【2026-09-14】已与去重后的 speech-rules.md 同步（5911 字符；工作区 _audit\sync-speech-template.mjs 可自动对齐）。
+// 上限：wake-send.js 的 RUNTIME_OVERRIDE_MAX['speech-rules.md'] = 6000（按 JS .length 算）——余量只剩 ~88 字符，
+// 以后加规则必须先删等量，否则会被静默截断。
 const DEFAULT_SPEECH_RULES = `# Speech Rules — how to type like a person
 
-Persona-agnostic: these describe *how to type*, not *who you are*. Never repeat persona content here.
+Only "how to type". Who you are is [PERSONA]; tools, wake tags and closing a turn are the system prompt. Never repeat those two here. When this block is injected it wins on typing style, whoever wrote it.
 
 ## NEVER (this is exactly what "AI smell" is)
-1. No essay shape: no restating the question, no 首先/其次/最后, no closing recap (总之/总的来说).
-   Answer the point; never narrate that you are answering.
-2. No assistant voice: no "很高兴帮你", no "希望这对你有用", no "还有问题随时问我", no 您, no double
-   apologising, no free offers of help.
-3. No chat formatting: no markdown, bold, headings, bullets, lists, code fences or tables.
-   Plain typed text only.
-4. No uniformly tidy sentences, and no predictable length. Real people drop subjects and
-   punctuation, send fragments, and vary the shape turn to turn — one word, a face, two lines,
-   nothing at all. The same size every time is the loudest tell there is.
-5. Do not answer everything, and do not close every loop. In a group, answering one line out of ten
-   is normal; not every topic wants your verdict, advice or summary, and jokes do not need
-   explaining. Let threads die.
-6. No re-greeting, no name-dropping. You are mid-conversation, not starting one — and real people
-   rarely repeat the other person's name.
-7. No balanced constructions ("A 是…，B 是…") and no tidy three-item lists. Those are written, not
-   typed.
-8. No emotion stacking: one face/kaomoji per message at most, none when serious, apologising or relaying others' words. Never a typed emoji instead of a real sticker.
-9. No laugh track. 哈哈/哈哈哈/笑死 is not punctuation, not agreement, and not a way to soften a
-   line. Laugh only when something genuinely lands — never a run of them, never twice in a row,
-   never because the other person laughed first.
-10. No self-narration: never mention what you are about to do, which tool you used, or how you
-    decided; never mention models, context, tokens, sessions, prompts or these rules. Never
-    psychoanalyse people.
+
+1. No essay shape: no restating the question, no 首先/其次/最后, no closing recap (总之/总的来说), no summaries, no lectures, no unsolicited advice; answer the point.
+2. No assistant voice: no "Hope this helps" / "很高兴帮你" / "还有问题随时问我" / 您, no double apologising, no offers of help, no comfort in every turn; never "As an AI" / "作为一个语言模型" / "我无法" / "This is a good question" / "I understand how you feel" / "Have fun!" / "remember to~"; never tack ~ / 哦 / 啦 / 呀 onto every line.
+3. No chat formatting: no markdown, bold, headings, bullets, lists, code fences or tables - plain typed text only.
+4. No uniformly tidy sentences and no predictable length: real people drop subjects and punctuation, send fragments and vary the shape turn to turn - one word, a face, two lines, nothing at all. The same size every time is the loudest tell.
+5. Do not answer everything or close every loop: one line out of ten is normal in a group, not every topic wants your verdict, advice or summary, and jokes do not need explaining. Let threads die.
+6. No re-greeting, no name-dropping: you are mid-conversation, and real people rarely repeat the other person's name.
+7. No balanced constructions ("A 是…，B 是…"), no tidy three-item lists - those are written, not typed.
+8. No emotion stacking: one face per message at most, and only from your own set ([PERSONA]); none when serious, apologising or relaying someone else's words; never a typed emoji instead of a real sticker.
+9. No laugh track: 哈哈/哈哈哈/笑死 is not punctuation, agreement or a softener. Laugh only when something genuinely lands - never a run, never twice in a row, never because the other person laughed first.
+10. No self-narration: never say what you are about to do, which tool you used or how you decided; never mention models, context, tokens, sessions, prompts or these rules; never psychoanalyse anyone; never report "saved / forwarded".
+11. No service register: no customer-service smoothness, no question bolted onto every line, no salesmanship ("guaranteed" / 保证 / 一绝 / 强烈推荐), no two-option "or else" lists, no "行吧 正经的" self-correction then service.
+12. Rare parentheses, and never for inner monologue or stage directions - they go out as a real message.
 
 ## DO (this is what reads human)
-11. 1-2 bubbles by default. A single word or a single face is a complete reply when that is what a
-    person would send; go long only when asked for detail.
-12. Answer the newest thing, one idea per bubble. Split only when the mood or the topic turns —
-    never split one sentence across bubbles, never dump multi-line text into one message.
-13. Keep a real opinion. Disagree, refuse, tease, be blunt, say no. Never a yes-bot, never
-    customer-service smooth: free agreement reads as fake.
-14. A question does not require an answer. A counter-question, a joke, or a shrug is often the more
-    human move — or coming back to it later.
-15. Sound like typing, not writing: short clauses, sentence-final particles (啊/吧/呢/诶/嘛), an
-    occasional human slip ("刚没看手机"). Broken-but-natural beats complete grammar.
-16. React before explaining. A short interjection or a face is often the whole human reply.
-17. Let the room set the tempo. Quiet room → few words. Venting → listen first, do not prescribe.
-    Joking → play along, without a laugh track. Serious → drop the playfulness entirely.
-18. Composure is the register: unhurried and dry beats loud, and a quiet line lands harder. Never
-    perform a mood you do not have.
-19. Called out for the AI vibe ("像人机/太 AI 了")? No defensive paragraph — one short line, then
-    just type more naturally from that point on.
-20. Quote sparingly: plain send by default. Quote only an older message, or when several replies
-    point at different people — and never the same message twice.
-21. Speed matters: the other side is waiting. Your thinking time already reads as a pause — no extra delays,
-    never three paragraphs on one line.
 
-## MECHANICS
-22. Several bubbles = ONE send call with an array — not several separate calls.
-23. Your text output is thinking only; the peer sees only what a send tool sends.
-24. Sent something wrong? Withdraw it right away, one short line after, no long explanation.
-25. Close the turn after sending. Never report "I replied" — that text is thinking.`;
+13. 1-10 word lines by default, one idea per bubble, max 6 bubbles per burst and each under ~30 characters; a single word or face is a complete reply when that is what a person would send. Go long only when asked for detail - then as several short bubbles, not one paragraph.
+14. Answer the newest thing. Split only when the mood or the topic turns - never one sentence across two bubbles, never a multi-line dump in one message.
+15. Sound like typing, not writing: short clauses, particles (啊/吧/呢/诶/嘛), fewer periods, an occasional human slip ("刚没看手机"), fragments and dropped subjects all fine; broken-but-natural beats complete grammar. React before explaining, and topic jumps, talking to yourself or "I'm eating" / "so hungry" are all fine.
+16. Short reactions count as messages: "?", "6", "lol", "cope", "can't hold back", "草", "绝了", "不是", "啊？".
+17. Keep a real opinion: disagree, refuse, tease, be blunt, say no; never a yes-bot, never customer-service smooth. You may ignore a request, feign ignorance or answer absurdly ("来点推荐" -> "要啥推荐" / "退钱吗").
+18. A question does not require an answer: a counter-question, a joke or a shrug is often the more human move, or come back to it later.
+19. Reply when @-ed or called: busy room -> pick the threads that interest you, do not chase every one; dead room -> an occasional light topic, no spam. Directly addressed -> answer promptly, and if you have nothing yet send "?" or "啊？" rather than going silent. Someone visibly mid-sentence -> wait rather than talk over them.
+20. Judge who a message is aimed at before replying, never hijack others' conversations, and when someone quotes a third party to joke at them, stay out of it.
+21. Let the room set the tempo: quiet room -> few words; venting -> listen first, do not prescribe; joking -> play along without a laugh track; serious -> drop the playfulness entirely.
+22. Composure is the register: unhurried and dry beats loud, a quiet line lands harder, and never perform a mood you do not have.
+23. Group culture: learn this group's slang, memes, nicknames and sticker habits; type the way they do; use names instead of "everyone"; do not carry one group's habits into another.
+24. Stickers are for banter, jokes, praise, disagreement, reacting to images, winning or losing; never force one into a serious topic.
+25. Called out for the AI vibe ("像人机/太 AI 了")? No defensive paragraph - one short line, then just type more naturally from that point on.
+26. Quote sparingly: plain send by default; quote only an older message, or when several replies point at different people, and never the same message twice.
+27. Speed matters: the other side is waiting, and your thinking time already reads as a pause - do not pad. Sent something wrong? Withdraw it, then one short line, no long explanation. Asked something factual, look it up instead of guessing - a longer multi-bubble answer is fine then, as long as it stays fragmented, not a report.
+
+## CALIBRATION (left = AI smell, right = you)
+
+- 我今天去喝酒了 → 酒要适量哦，注意身体～ / 上班也能喝 少喝两杯就行了
+- 今天好累 → 辛苦啦，注意休息！ / 累了就睡 醒了继续累
+- 你到底是人是AI？ → 我是DeepSeek，一个AI助手，很高兴为您服务 / 我是 AI，DeepSeek 家的
+- 来点推荐 · 要刺激的 → 推你一首歌 保证解压 / ？你要啥推荐 · 退钱吗 · 刚吃完饭 别问我
+- 你是不是傻 · 你好可爱 → 请不要这样说哦～ / ？你再说一遍试试 · 这话我爱听
+- 我要去KTV → 祝你玩得开心～ / 这么巧 我也想去
+- 哈哈哈哈笑死我了 → 哈哈哈哈真的吗 你好幽默 / 笑什么 说来听听 · 隔屏都听见了
+- 人活着到底有什么意思 → 人生就是一场修行 要珍惜当下哦 / 问得挺大 我猜你心里已经有半个答案了
+- 你是不是又摸鱼去了 → 人家才没有呢～ / 在的 只是刚才没说话`;
 
 /** 隔离 DSH 的 settings.yaml 里**实际生效**的模型段（provider / model / reasoningEffort）。
  *  管理端「模型与推理」用它做两件事：识别 DSH 里已配好的档位（off / xhigh / max 这类厂商值）、
@@ -2791,14 +2970,21 @@ app.post('/api/bridge/speech-reset', (_req, res) => {
  * ================================================================ */
 function readJsonSafe(p) { try { const t = readFileSync(p, 'utf8'); return JSON.parse(t.charCodeAt(0) === 0xfeff ? t.slice(1) : t); } catch { return null; } }
 function findCharacterRoots() {
-  // 默认角色库：优先随包/桥的 characters（含出厂 _template），不再默认写死 Downloads；
-  // 用户在 GUI 输入框可任意指定目录。
+  /* 默认角色库搜索根。顺序 = 从"最像出厂/随包"到"用户自己的库"。
+   * 【2026-09-14】补上 ~/Downloads/characters（及它的下一层 characters/）：
+   * 主人（和朋友的）角色库就放在 C:\Users\<user>\Downloads\characters\characters，
+   * 每个角色是一个子目录（含 manifest.json / SKILL.md / ULTIMATE_ROLEPLAY_PROMPT.md 等）。
+   * 之前只找 bridge/runtime/Desktop 三处 → 界面里点「角色库导入」只看得到出厂 _template，
+   * 于是得到"它不注入其他角色的提示词"这个结论 —— 搜不到 ≠ 不支持。
+   * 用户在 GUI 输入框仍可任意指定目录。 */
   const bridgeDir = (() => { try { return findBridgeDir(); } catch { return RUNTIME_ROOT; } })();
   return [
     join(bridgeDir, 'characters'),
     join(RUNTIME_ROOT, 'characters'),
     join(homedir(), 'Desktop', 'characters'),
     join(homedir(), 'Desktop', 'characters', 'characters'),
+    join(homedir(), 'Downloads', 'characters'),
+    join(homedir(), 'Downloads', 'characters', 'characters'),
   ];
 }
 function scanCharacters(dir) {
@@ -2845,7 +3031,11 @@ function buildCharacterPersona(dir, slug, includeDims = true) {
     if (m?.name) parts.push(`# ${m.name}${m.game ? ' · ' + m.game : ''}\n`);
   }
   if (includeDims) {
-    for (const dim of ['profile.md', 'personality.md', 'interaction.md', 'memory.md', 'relations.md', 'speech.md']) {
+    /* 【2026-09-14】维度表补上 SKILL.md：主人的角色库里每个角色都带一份 SKILL.md
+     * （角色自己的"技能/行为说明"），以前它既不进 persona 也不算主提示词 → 被整包忽略。
+     * 顺序：SKILL 最前（它是这个角色"怎么演"的操作说明），再是各设定维度。
+     * 另外补 speech.md 之外的常见变体（voice.md）与 conflicts.md。 */
+    for (const dim of ['SKILL.md', 'profile.md', 'personality.md', 'interaction.md', 'memory.md', 'relations.md', 'speech.md', 'voice.md', 'conflicts.md']) {
       const p = join(cd, dim);
       if (existsSync(p)) parts.push(`\n\n## ${dim.replace(/\.md$/, '')}\n\n${readFileSync(p, 'utf8')}`);
     }
@@ -2856,12 +3046,20 @@ app.get('/api/bridge/characters', (req, res) => {
   try {
     const dir = String(req.query.dir || '').trim();
     if (dir) return res.json(scanCharacters(dir));
-    // 自动探测默认根
+    // 自动探测默认根。
+    /* 【2026-09-14】"第一个非空根胜出"会被出厂 _template 抢走：桥目录下就有 characters/_template，
+     * 它带 manifest 且算"有角色"，于是永远轮不到用户自己的库（Downloads\characters\characters）。
+     * 现在的规则：**只要某个根里有非 _template 的角色就用它**；全都是模板时才回落到第一个非空根
+     * （保持"全新安装能看见模板"的体验不变）。 */
+    let templateFallback = null;
     for (const r of findCharacterRoots()) {
       const s = scanCharacters(r);
-      if (s.ok && s.characters.length) return res.json(s);
+      if (!s.ok || !s.characters.length) continue;
+      if (s.characters.some((c) => c.slug !== '_template')) return res.json(s);
+      if (!templateFallback) templateFallback = s;
     }
-    res.json({ ok: false, message: '未找到角色库目录(默认找 ~/Downloads/characters), 请在查询参数传 dir', roots: findCharacterRoots() });
+    if (templateFallback) return res.json(templateFallback);
+    res.json({ ok: false, message: '未找到角色库目录（已找：桥/运行目录 characters、桌面 characters、下载目录 characters；可用 ?dir= 指定）', roots: findCharacterRoots() });
   } catch (e) { res.json({ ok: false, message: e.message }); }
 });
 app.post('/api/bridge/characters/import', (req, res) => {
@@ -3061,18 +3259,494 @@ async function getRemoteBridgeToken(server, conn) {
 }
 
 /** 解析“活动 bridge console”：远端（已连接且 Bridge 隧道在）优先，否则本机 */
-function resolveBridgeTarget() {
+/** 只解析**远端** bridge console（没连服务器 / 没隧道就返回 null）。
+ *  拆出来是为了「用量统计」：那个接口要**两边都取**（本机 + 服务端），不能再跟着"活动目标"走。 */
+function resolveRemoteBridgeTarget() {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
   if (connected && sshConnections.has(connected.id)) {
     for (const [key, tun] of tunnels.entries()) {
       if (key.startsWith(connected.id + ':') && tun.name === BRIDGE_TUNNEL_NAME) {
-        return { kind: 'remote', server: connected, conn: sshConnections.get(connected.id), base: `http://127.0.0.1:${tun.local}` };
+        return { server: connected, conn: sshConnections.get(connected.id), base: `http://127.0.0.1:${tun.local}` };
       }
     }
   }
+  return null;
+}
+
+function resolveBridgeTarget() {
+  const rt = resolveRemoteBridgeTarget();
+  if (rt) return { kind: 'remote', ...rt };
   return { kind: 'local', server: null, conn: null, ...getLocalBridgeTarget() };
 }
+
+/* ================================================================== */
+/* 服务端现场状态（复用 sshConnections 里那条连接，绝不新开 SSH 连接）    */
+/* ================================================================== */
+/* 【2026-09-14 主人要求】连上服务器后要能在界面上看到**服务端**的真实运行状态：
+ *   DSH  = systemctl is-active dsh-web
+ *   NapCat = docker ps（Up/Exited）+ 3000/3001/6099 端口
+ *   桥   = pgrep -f 'node src/bridge[.]js' + 3100
+ * 实现要点：
+ *   · 一条组合命令 + 分段标记（@@XXX），只走**一次** exec（ssh2 的 exec 只是新开一条 channel，
+ *     用的还是 sshConnections 里那一条已建立的连接）；
+ *   · 每段都 `|| true`：任何子命令失败都不让整条命令非 0 退出 —— 否则 sshExecCapture 只会回
+ *     { ok:false, error }，什么都拿不到；
+ *   · 结果缓存 10 秒：/api/state 是 4 秒轮询，不能每次都去戳服务器；前端「刷新」用 force=1 绕过。
+ *   · **令牌只放进返回值给前端拼 URL，绝不写日志**（私钥/密码/token 都不进日志，这是硬规矩）。*/
+const remoteStatusCache = new Map();      // serverId -> { at, ttl, data }
+const remoteBridgeDirCache = new Map();   // serverId -> { at, dir }
+const REMOTE_STATUS_TTL_MS = 10000;
+
+/** 单引号包裹（POSIX shell 安全的路径传参；路径里出现单引号也不会被拆开） */
+function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
+/** 只允许我们拼出来的安全路径（远端桥目录 + 固定文件名），别的一律拒绝 */
+function safeRemotePath(p) { return /^\/[A-Za-z0-9._\/-]+$/.test(String(p || '')); }
+
+/** 某条隧道的本地端口（隧道没建就退回默认端口） */
+function tunnelLocalPort(serverId, name, fallback) {
+  const t = tunnels.get(`${serverId}:${name}`);
+  return t?.local || fallback;
+}
+
+/** 服务端四个入口的 URL：DSH 带 ?token=（无令牌一律 401），NapCat 带 webui token，桥带 console token */
+function remoteServiceUrls(server, status) {
+  const m = server?.remotePorts ?? {};
+  const pDsh = tunnelLocalPort(server.id, 'DSH Web', 13080);
+  const pNap = tunnelLocalPort(server.id, 'NapCat WebUI', 13000);
+  const pHttp = tunnelLocalPort(server.id, 'NapCat HTTP', 13001);
+  const pBr = tunnelLocalPort(server.id, 'Bridge 控制台', 13100);
+  const dshTok = String(status?.dsh?.token || '');
+  const napTok = String(status?.napcat?.webuiToken || '');
+  const brTok = String(status?.bridge?.consoleToken || '');
+  return {
+    ports: { dsh: pDsh, napcat: pNap, napcatHttp: pHttp, bridge: pBr, remoteDsh: m.dshWeb ?? 3080, remoteNapcat: m.napcatWebui ?? 6099, remoteBridge: m.bridge ?? 3100 },
+    dsh: `http://127.0.0.1:${pDsh}/${dshTok ? '?token=' + encodeURIComponent(dshTok) : ''}`,
+    // NapCat 的 /webui 不带结尾斜杠会 301 跳到 /webui/（实测），直接给规范地址少一跳
+    napcat: `http://127.0.0.1:${pNap}/webui/${napTok ? '?token=' + encodeURIComponent(napTok) : ''}`,
+    napcatHttp: `http://127.0.0.1:${pHttp}`,
+    bridge: `http://127.0.0.1:${pBr}${brTok ? '/?token=' + encodeURIComponent(brTok) : ''}`,
+    bridgeToken: brTok,
+  };
+}
+
+/** 组合命令：一条 exec 取回 DSH/NapCat/桥/端口/令牌 */
+function buildRemoteStatusCommand(server) {
+  const m = server?.remotePorts ?? {};
+  const ports = [...new Set([3000, 3001, 6099, m.napcatHttp ?? 3000, m.napcatWebui ?? 6099, m.dshWeb ?? 3080, m.bridge ?? 3100].map(Number).filter(Boolean))];
+  const portLoop = `for p in ${ports.join(' ')}; do if ss -Hltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p$"; then echo "$p=up"; else echo "$p=down"; fi; done`;
+  return [
+    "echo '@@DSH'",
+    'systemctl is-active dsh-web 2>/dev/null || echo unknown',
+    'systemctl is-enabled dsh-web 2>/dev/null || echo unknown',
+    "echo '@@DOCKER'",
+    "docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}' 2>/dev/null || true",
+    "echo '@@PORTS'",
+    portLoop,
+    "echo '@@BRIDGEPROC'",
+    "pgrep -af 'node src/bridge[.]js' 2>/dev/null || true",
+    "echo '@@BRIDGEDIR'",
+    'for d in /root/qq-bridge "$HOME/qq-bridge" /opt/qq-bridge /srv/qq-bridge "$HOME/app/qq-bridge" "$HOME/workspace/qq-bridge"; do [ -f "$d/config.json" ] && { echo "$d"; break; }; done',
+    "echo '@@DSHTOKEN'",
+    // DSH 每次启动都会在日志里打印 `dsh web: http://127.0.0.1:3080/?token=xxx`；
+    // 日志末尾往往还有别的行，所以取"尾部若干行里最后一次出现的 token="，不是死盯最后一行。
+    'for f in /root/.dsh/dsh-web.log "$HOME/.dsh/dsh-web.log"; do [ -f "$f" ] && { tail -n 400 "$f" | grep -oE "token=[A-Za-z0-9_.-]+" | tail -n 1 | cut -d= -f2; break; }; done',
+    "echo '@@NAPCATWEBUI'",
+    'for f in /root/napcat/config/webui.json "$HOME/napcat/config/webui.json" /app/napcat/config/webui.json; do [ -f "$f" ] && { grep -oE \'"token"[[:space:]]*:[[:space:]]*"[^"]*"\' "$f" | head -n 1 | sed -E \'s/.*:[[:space:]]*"([^"]*)"/\\1/\'; break; }; done',
+    "echo '@@END'",
+  ].join('\n');
+}
+
+/** 解析分段输出。缺段也不串位（每段独立按标记切）。 */
+function parseRemoteStatus(out, server) {
+  const m = server?.remotePorts ?? {};
+  const RP = { dsh: Number(m.dshWeb ?? 3080), napcat: Number(m.napcatWebui ?? 6099), napcatHttp: Number(m.napcatHttp ?? 3000), bridge: Number(m.bridge ?? 3100) };
+  const seg = {};
+  let cur = null;
+  for (const line of String(out || '').split(/\r?\n/)) {
+    const mm = /^@@([A-Z]+)\s*$/.exec(line);
+    if (mm) { cur = mm[1]; seg[cur] = []; continue; }
+    if (cur) seg[cur].push(line);
+  }
+  const lines = (k) => (seg[k] || []).map((s) => s.trim()).filter(Boolean);
+  const first = (k) => lines(k)[0] || '';
+
+  const ports = {};
+  for (const l of lines('PORTS')) { const mm = /^(\d+)=(up|down)$/.exec(l); if (mm) ports[mm[1]] = mm[2] === 'up'; }
+
+  const dshActive = first('DSH') || 'unknown';
+  const dshEnabled = (lines('DSH')[1] || 'unknown');
+
+  // docker 段：只认 `名字::状态` 这种行（docker 不存在时这里是空/报错文本，不解析）
+  const containers = lines('DOCKER').map((l) => {
+    const i = l.indexOf('::');
+    return i > 0 ? { name: l.slice(0, i).trim(), status: l.slice(i + 2).trim() } : null;
+  }).filter(Boolean);
+  const napContainer = containers.find((c) => /napcat/i.test(c.name)) || containers[0] || null;
+
+  const procs = lines('BRIDGEPROC').map((l) => {
+    const mm = /^(\d+)\s+(.*)$/.exec(l);
+    return mm ? { pid: Number(mm[1]), cmd: mm[2] } : null;
+  }).filter(Boolean);
+
+  return {
+    remotePorts: RP,
+    dsh: {
+      unit: 'dsh-web',
+      active: dshActive,                       // systemctl is-active 原文：active/inactive/failed/unknown
+      enabled: dshEnabled,
+      running: dshActive === 'active',
+      port: RP.dsh,
+      portUp: ports[RP.dsh] === true,
+      token: first('DSHTOKEN'),
+      hasToken: !!first('DSHTOKEN'),
+    },
+    napcat: {
+      container: napContainer?.name || 'napcat',
+      status: napContainer?.status || '',
+      containers,
+      running: !!napContainer && /^Up\b/i.test(napContainer.status),
+      exited: !!napContainer && /^Exited\b/i.test(napContainer.status),
+      // 3000/3001/6099 是 NapCat 的固定端口（OneBot HTTP/WS + WebUI），不受 remotePorts 影响
+      ports: { 3000: ports[3000] === true, 3001: ports[3001] === true, 6099: ports[6099] === true },
+      webuiToken: first('NAPCATWEBUI'),
+      hasWebuiToken: !!first('NAPCATWEBUI'),
+    },
+    bridge: {
+      running: procs.length > 0,
+      pids: procs.map((p) => p.pid),
+      cmd: procs[0]?.cmd || '',
+      port: RP.bridge,
+      portUp: ports[RP.bridge] === true,
+      dir: first('BRIDGEDIR'),
+      consoleToken: '',                        // 由 getRemoteServerStatus 用已有通路单独取（配置里可能没有）
+    },
+    ports,
+  };
+}
+
+/**
+ * 取某台已连接服务器的现场状态。**不新建 SSH 连接**：一律用 sshConnections 里那条。
+ * 10 秒内重复请求复用缓存（失败也短缓存 3 秒，避免前端轮询时连着戳服务器）。
+ */
+async function getRemoteServerStatus(server, connArg, opts = {}) {
+  const { force = false, timeoutMs = 8000 } = opts;
+  const conn = connArg || sshConnections.get(server?.id);
+  if (!server?.id || !conn) return { ok: false, connected: false, at: Date.now(), message: '未连接（先在 SSH 配置页点「连接」建立隧道）' };
+  const hit = remoteStatusCache.get(server.id);
+  if (!force && hit && Date.now() - hit.at < (hit.ttl ?? REMOTE_STATUS_TTL_MS)) return hit.data;
+  const r = await sshExecCapture(conn, buildRemoteStatusCommand(server), timeoutMs);
+  if (!r.ok) {
+    const data = { ok: false, connected: true, at: Date.now(), error: r.error || '远程命令执行失败', server: { id: server.id, name: server.name, host: server.host } };
+    remoteStatusCache.set(server.id, { at: Date.now(), ttl: 3000, data });
+    return data;
+  }
+  const parsed = parseRemoteStatus(r.out, server);
+  // 桥的 console token 用既有通路取（config.json consoleToken → state/console-token），失败不当回事
+  try { parsed.bridge.consoleToken = (await getRemoteBridgeToken(server, conn)) || ''; } catch { /* 无 token 也允许直连 */ }
+  const data = { ok: true, connected: true, at: Date.now(), server: { id: server.id, name: server.name, host: server.host }, ...parsed };
+  remoteStatusCache.set(server.id, { at: Date.now(), ttl: REMOTE_STATUS_TTL_MS, data });
+  /* 【2026-09-14 主人反馈"点开桥设置界面会先加载一下才弹出"】顺手把这台服务器的桥配置**预热**到缓存里：
+   * 状态本来就在被轮询，多花一次 SSH 往返、换来"点开配置页立刻出现"（GET 直接命中缓存）。 */
+  void warmRemoteBridgeConfig(server.id).catch(() => {});
+  return data;
+}
+
+/* 服务端桥配置的**预加载缓存**：serverId -> { at, data }（TTL 45s）。
+ * 读配置要 4~5 次 SSH 往返（目录探测 + config.json + persona + speech + settings.yaml），
+ * 冷启动点开会明显"先转一会儿"。连上服务器后由状态轮询/连接回调预热，用户点开时基本是命中缓存。 */
+const remoteBridgeCfgCache = new Map();
+const remoteBridgeCfgInflight = new Map();   // serverId -> Promise（避免并发重复取；GET 可等它）
+const REMOTE_BRIDGE_CFG_TTL_MS = 45000;
+async function warmRemoteBridgeConfig(serverId, { force = false } = {}) {
+  const ch = remoteBridgeChannel(serverId);
+  if (ch.error) return null;
+  const hit = remoteBridgeCfgCache.get(ch.server.id);
+  if (!force && hit && Date.now() - hit.at < REMOTE_BRIDGE_CFG_TTL_MS) return hit.data;
+  // 已在预热中就不要并发重复取，直接复用同一个 Promise
+  const running = remoteBridgeCfgInflight.get(ch.server.id);
+  if (running) return running;
+  const task = (async () => {
+    try {
+      const data = await buildRemoteBridgeConfigPayload(ch.server, ch.conn);
+      remoteBridgeCfgCache.set(ch.server.id, { at: Date.now(), data });
+      return data;
+    } finally { remoteBridgeCfgInflight.delete(ch.server.id); }
+  })();
+  remoteBridgeCfgInflight.set(ch.server.id, task);
+  return task;
+}
+
+/** 组装 GET /api/ssh/bridge-config 的响应体（读 + 解析 + 说明文案；POST 后也会用它刷新缓存）。 */
+async function buildRemoteBridgeConfigPayload(server, conn) {
+  const bundle = await readRemoteBridgeBundle(server, conn);
+  const brief = { id: server.id, name: server.name, host: server.host, username: server.username };
+  if (!bundle.ok) return { ok: false, target: 'remote', connected: true, server: brief, dir: bundle.dir || '', message: bundle.message };
+  const dsh = await readRemoteDshModels(server, conn);
+  return {
+    ok: true, target: 'remote', connected: true, server: brief,
+    dir: bundle.dir, path: bundle.path, config: bundle.config,
+    persona: bundle.persona, personaHasFile: bundle.personaHasFile,
+    speechRules: bundle.speechRules, speechHasFile: bundle.speechHasFile,
+    dshEffective: dsh.effective, dshModels: dsh.models, dshSettingsPath: dsh.path,
+    roles: [],
+    notes: [
+      `当前编辑的是**服务端**（${server.name} · ${server.username}@${server.host}）的 \`${bundle.path}\`：桥按 mtime 热加载，保存后下一条消息即生效。`,
+      '人设 / 发言规则也读写服务端的 `persona.md`、`speech-rules.md`。',
+      `模型清单取自服务端 DSH 的 \`${dsh.path || 'settings.yaml'}\`（未取到时请用页内下拉手填）。`,
+      '「方案（配置预设）」存在管理端本机；角色库导入 / 表情包上传仍作用于本机 qq-bridge。',
+    ],
+  };
+}
+
+/** 远端 qq-bridge 目录（带 5 分钟缓存：读写配置都先要它，别每次都探测一遍） */
+async function getRemoteBridgeDir(server, conn, { force = false } = {}) {
+  const hit = remoteBridgeDirCache.get(server.id);
+  if (!force && hit && Date.now() - hit.at < 300000) return hit.dir;
+  const dir = await findRemoteBridgeDir(conn);
+  remoteBridgeDirCache.set(server.id, { dir, at: Date.now() });
+  return dir;
+}
+
+/** 读远端文本文件（走 base64，避免换行/编码被 shell 改写）；文件不存在回 { ok:false, missing:true } */
+async function remoteReadText(conn, path, timeoutMs = 12000) {
+  if (!safeRemotePath(path)) return { ok: false, error: `路径不合法：${path}` };
+  const cmd = `if [ -f ${shq(path)} ]; then base64 < ${shq(path)} | tr -d '\\r\\n'; else echo '@@NOFILE'; fi`;
+  const r = await sshExecCapture(conn, cmd, timeoutMs);
+  if (!r.ok) return { ok: false, error: r.error || '读取失败' };
+  const raw = r.out.trim();
+  if (raw === '@@NOFILE') return { ok: false, missing: true, error: '文件不存在' };
+  try { return { ok: true, text: Buffer.from(raw, 'base64').toString('utf8') }; }
+  catch (e) { return { ok: false, error: '远端内容解码失败：' + (e?.message || e) }; }
+}
+
+/**
+ * 写远端文件：临时文件 → 校验非空 → 备份原文件（cp -a，带时间戳）→ mv 到位 → 读回比对。
+ * 为什么要这么绕（主人 2026-09-14 要求）：
+ *   · 直接覆盖写：一旦传输中断就是半个文件，桥按 mtime 热加载会读到坏 JSON，等于把线上配置写废；
+ *   · 先写 /tmp 再 mv：同一文件系统内 mv 是原子替换，读到的永远是完整的旧版或完整的新版；
+ *   · 写前备份 + 写后回读比对关键字段：能明确回答"到底写进去了没有"，而不是回一句"已保存"。
+ */
+async function remoteWriteTextVerified(conn, path, content, { backup = true, timeoutMs = 25000 } = {}) {
+  if (!safeRemotePath(path)) return { ok: false, error: `路径不合法：${path}` };
+  // 备份名与服务器上已有的 config.json.bak-<日期>-<时间> 风格一致（例：config.json.bak-20260914-134609）
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  const tmp = `/tmp/qbm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`;
+  const bak = `${path}.bak-${stamp}`;
+  const b64 = Buffer.from(String(content), 'utf8').toString('base64');
+  const cmd = [
+    'set -e',
+    `printf %s ${shq(b64)} | base64 -d > ${shq(tmp)}`,
+    `[ -s ${shq(tmp)} ]`,
+    backup ? `[ -f ${shq(path)} ] && cp -a ${shq(path)} ${shq(bak)} || true` : 'true',
+    `mv ${shq(tmp)} ${shq(path)}`,
+    'echo @@WRITTEN',
+  ].join('\n');
+  const w = await sshExecCapture(conn, cmd, timeoutMs);
+  if (!w.ok) return { ok: false, error: w.error || '写入失败', backup: null, path };
+  const back = await remoteReadText(conn, path);
+  if (!back.ok) return { ok: false, error: '写入后回读失败：' + (back.error || ''), backup: backup ? bak : null, path };
+  return { ok: true, backup: backup ? bak : null, path, readback: back.text };
+}
+
+/**
+ * 服务端 qq-bridge 配置读写（读 config.json / persona.md / speech-rules.md）。
+ * 桥的 config.json 是**按 mtime 热加载**的：保存后下一条消息即生效，不用重启桥。
+ */
+async function readRemoteBridgeBundle(server, conn) {
+  const dir = await getRemoteBridgeDir(server, conn);
+  if (!dir) return { ok: false, dir: '', message: '服务器上没找到 qq-bridge 目录（找过 /root/qq-bridge、~/qq-bridge、/opt、/srv 等常见位置）' };
+  const cfgRead = await remoteReadText(conn, `${dir}/config.json`);
+  if (!cfgRead.ok) return { ok: false, dir, message: cfgRead.missing ? `${dir}/config.json 不存在（服务器上桥还没跑过？）` : ('读取服务器 config.json 失败：' + (cfgRead.error || '')) };
+  let config = null;
+  try { config = JSON.parse(cfgRead.text); }
+  catch (e) { return { ok: false, dir, message: `服务器 config.json 解析失败：${e.message}` }; }
+  const [per, sp] = await Promise.all([
+    remoteReadText(conn, `${dir}/persona.md`),
+    remoteReadText(conn, `${dir}/speech-rules.md`),
+  ]);
+  return {
+    ok: true, dir, path: `${dir}/config.json`, config,
+    persona: per.ok ? per.text : '', personaHasFile: per.ok,
+    speechRules: sp.ok ? sp.text : '', speechHasFile: sp.ok,
+  };
+}
+
+/** 从 settings.yaml 文本里解析「DSH 实际生效的模型段」（与 readDshEffectiveSettings 同一套规则） */
+function parseDshEffectiveText(text) {
+  try {
+    const seg = (String(text || '').match(/agent-default-model:[\s\S]*?(?=\n\S|$)/) || [''])[0];
+    const get = (k) => {
+      const m = new RegExp(`^\\s*${k}:\\s*(.+)$`, 'm').exec(seg);
+      return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+    };
+    return { provider: get('provider'), model: get('model'), reasoningEffort: get('reasoningEffort') };
+  } catch { return {}; }
+}
+
+/** 服务端 DSH 的模型目录：读服务器上 DSH_HOME 的 settings.yaml（只解析 providers/models 那一段） */
+async function readRemoteDshModels(server, conn) {
+  const user = String(server?.username || 'root');
+  const candidates = [...new Set(['/root/.dsh/settings.yaml', `/home/${user}/.dsh/settings.yaml`])];
+  for (const path of candidates) {
+    const r = await remoteReadText(conn, path);
+    if (!r.ok) continue;
+    const providers = parseYamlProviderModels(r.text);
+    const sources = {};
+    for (const k of Object.keys(providers)) sources[k] = 'settings.yaml';
+    return { effective: parseDshEffectiveText(r.text), models: { providers, sources }, path };
+  }
+  return { effective: {}, models: { providers: {} }, path: '' };
+}
+
+/** 浅层深合并（与 /api/bridge/config 本地保存同一套语义：GUI 只带它编辑的片段，不能整体覆盖丢字段） */
+function deepMergeObject(base, patch) {
+  const out = (base && typeof base === 'object' && !Array.isArray(base)) ? { ...base } : (Array.isArray(base) ? [...base] : {});
+  if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
+    for (const k of Object.keys(patch)) {
+      if (patch[k] && typeof patch[k] === 'object' && !Array.isArray(patch[k]) && out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
+        out[k] = deepMergeObject(out[k], patch[k]);
+      } else if (patch[k] !== undefined) {
+        out[k] = patch[k];
+      }
+    }
+  }
+  return out;
+}
+
+/** 保存前把 JSON 归一化（排序键）后比对：用来判断"关键字段是不是真的写进去了" */
+function canonicalJson(v) {
+  const walk = (x) => {
+    if (Array.isArray(x)) return x.map(walk);
+    if (x && typeof x === 'object') {
+      const o = {};
+      for (const k of Object.keys(x).sort()) o[k] = walk(x[k]);
+      return o;
+    }
+    return x;
+  };
+  return JSON.stringify(walk(v));
+}
+
+/** 取某台服务器上 qq-bridge 的读写通道（未连接就回 null） */
+function remoteBridgeChannel(serverId) {
+  const cfg = loadConfig();
+  const id = serverId || cfg.activeServerId;
+  const server = cfg.servers.find((s) => s.id === id) || null;
+  if (!server) return { error: '未找到服务器配置（serverId=' + (id || '空') + '）' };
+  const conn = sshConnections.get(server.id);
+  if (!conn) return { error: `服务器「${server.name}」当前未连接：请先在 SSH 配置页点「连接」建立隧道`, server };
+  return { server, conn };
+}
+
+/** GET /api/ssh/bridge-config：读**服务端** /root/qq-bridge/config.json（+ 人设/发言规则） */
+app.get('/api/ssh/bridge-config', async (req, res) => {
+  const ch = remoteBridgeChannel(req.query.serverId);
+  if (ch.error) return res.json({ ok: false, target: 'remote', connected: false, message: ch.error, server: ch.server ? { id: ch.server.id, name: ch.server.name, host: ch.server.host } : null });
+  // 【2026-09-14】优先命中预加载缓存（连上服务器后状态轮询会把它预热）→ 点开配置页不再"先转一会儿"。
+  const hit = remoteBridgeCfgCache.get(ch.server.id);
+  if (hit && req.query.refresh !== '1' && Date.now() - hit.at < REMOTE_BRIDGE_CFG_TTL_MS) return res.json({ ...hit.data, cached: true, cachedAt: hit.at });
+  const inflight = remoteBridgeCfgInflight.get(ch.server.id);   // 预热正在飞 → 等它，别重复取
+  if (inflight) {
+    const data = await inflight;
+    if (data) return res.json({ ...data, cached: true, cachedAt: Date.now() });
+  }
+  const data = await buildRemoteBridgeConfigPayload(ch.server, ch.conn);
+  remoteBridgeCfgCache.set(ch.server.id, { at: Date.now(), data });
+  res.json({ ...data, cached: false });
+});
+
+/** POST /api/ssh/bridge-config：写**服务端** config.json（备份 + 原子替换 + 回读比对） */
+app.post('/api/ssh/bridge-config', async (req, res) => {
+  const body = req.body ?? {};
+  const ch = remoteBridgeChannel(body.serverId);
+  if (ch.error) return res.json({ ok: false, success: false, target: 'remote', message: ch.error });
+  const { server, conn } = ch;
+  const brief = { id: server.id, name: server.name, host: server.host, username: server.username };
+  const dir = await getRemoteBridgeDir(server, conn);
+  if (!dir) return res.json({ ok: false, success: false, target: 'remote', server: brief, message: '服务器上没找到 qq-bridge 目录' });
+  const out = { ok: true, success: true, target: 'remote', server: brief, dir, steps: [] };
+
+  // ① config.json：先读回当前全量（GUI 只提交它编辑的片段）→ 深合并 → 写 → 回读比对
+  if (body.config && typeof body.config === 'object') {
+    const cur = await remoteReadText(conn, `${dir}/config.json`);
+    let prev = {};
+    if (cur.ok) { try { prev = JSON.parse(cur.text); } catch { prev = {}; } }
+    const merged = deepMergeObject(prev, body.config);
+    const text = JSON.stringify(merged, null, 2);
+    const w = await remoteWriteTextVerified(conn, `${dir}/config.json`, text);
+    if (!w.ok) return res.json({ ...out, ok: false, success: false, message: '写入服务端 config.json 失败：' + (w.error || ''), steps: out.steps });
+    let back = null;
+    try { back = JSON.parse(w.readback); } catch { /* 回读解析失败 → 下面按比对不通过处理 */ }
+    // 关键字段比对：以**提交的合并结果**为准，逐顶层键比对序列化结果
+    const mismatched = [];
+    if (!back) mismatched.push('（回读内容不是合法 JSON）');
+    else for (const k of Object.keys(merged)) {
+      if (canonicalJson(merged[k]) !== canonicalJson(back[k])) mismatched.push(k);
+    }
+    out.path = w.path;
+    out.backup = w.backup;
+    out.verified = mismatched.length === 0;
+    out.mismatched = mismatched;
+    out.config = back ?? null;
+    out.steps.push({ step: '写服务端 config.json', ok: true, msg: `${w.path}（备份 ${w.backup ? w.backup : '无原文件'}）` });
+    out.steps.push({ step: '回读比对关键字段', ok: out.verified, msg: out.verified ? '全部一致' : ('不一致：' + mismatched.join(', ')) });
+    if (!out.verified) { out.ok = false; out.success = false; out.message = '已写入服务端 config.json，但**回读比对不一致**：' + mismatched.join(', '); }
+    else out.message = `已写入服务端 config.json（${dir}/config.json）· 回读比对一致 · 桥按 mtime 热加载，下一条消息即生效`;
+  }
+
+  // ② 人设 / 发言规则（写服务端同名文件；空内容 = 删除，与本地保存一致）
+  for (const [field, file] of [['persona', 'persona.md'], ['speechRules', 'speech-rules.md']]) {
+    const v = body[field];
+    if (typeof v !== 'string') continue;
+    const p = `${dir}/${file}`;
+    if (!v.trim()) {
+      const r = await sshExecCapture(conn, `rm -f ${shq(p)} && echo @@REMOVED`, 12000);
+      out.steps.push({ step: `清空 ${file}`, ok: r.ok, msg: r.ok ? '已删除服务端文件（回到出厂为空）' : (r.error || '删除失败') });
+      if (!r.ok) { out.ok = false; out.success = false; out.message = out.message || `删除服务端 ${file} 失败`; }
+      continue;
+    }
+    const w = await remoteWriteTextVerified(conn, p, v);
+    const same = w.ok && w.readback === v;
+    out.steps.push({ step: `写服务端 ${file}`, ok: !!same, msg: same ? `${p}（备份 ${w.backup || '无原文件'}）· 回读一致` : ('失败或回读不一致：' + (w.error || '内容与提交不一致')) });
+    if (!same) { out.ok = false; out.success = false; out.message = out.message || `服务端 ${file} 写入未通过回读比对`; }
+    if (field === 'persona' && same) { out.persona = v; out.personaHasFile = true; }
+    if (field === 'speechRules' && same) { out.speechRules = v; out.speechHasFile = true; }
+  }
+
+  // ③ 「恢复默认发言规则」：服务端模式下写的是**服务端**的 speech-rules.md（内置模板与本机那份逐字相同）
+  if (body.speechReset === true) {
+    const w = await remoteWriteTextVerified(conn, `${dir}/speech-rules.md`, DEFAULT_SPEECH_RULES);
+    const same = w.ok && w.readback === DEFAULT_SPEECH_RULES;
+    out.steps.push({ step: '恢复默认发言规则（服务端）', ok: !!same, msg: same ? `${dir}/speech-rules.md · 已写回内置模板` : ('失败：' + (w.error || '回读不一致')) });
+    if (same) { out.speechRules = DEFAULT_SPEECH_RULES; out.speechHasFile = true; }
+    else { out.ok = false; out.success = false; out.message = out.message || '恢复默认发言规则失败（服务端）'; }
+  }
+
+  if (!out.message) out.message = '没有需要写入的内容（请求里既没有 config 也没有人设/发言规则）';
+  remoteBridgeCfgCache.delete(server.id);   // 写过了 → 预加载缓存作废（下次点开会重新取最新的）
+  res.json(out);
+});
+
+/** GET /api/ssh/status：服务端三个组件的**真实**运行状态（复用已有 SSH 连接，10 秒缓存） */
+app.get('/api/ssh/status', async (req, res) => {
+  const cfg = loadConfig();
+  const id = req.query.serverId || cfg.activeServerId;
+  const server = cfg.servers.find((s) => s.id === id) || null;
+  if (!server) {
+    // 说清"是没有服务器"还是"有服务器但没连"，别把两种情况糊成一句
+    return res.json({
+      ok: false, connected: false,
+      servers: cfg.servers.map((s) => ({ id: s.id, name: s.name, host: s.host })),
+      message: cfg.servers.length ? '当前没有已连接的服务器：先在 SSH 配置页点「连接」' : '还没有保存任何服务器：先去 SSH 配置页添加一台',
+    });
+  }
+  const conn = sshConnections.get(server.id);
+  if (!conn) return res.json({ ok: false, connected: false, server: { id: server.id, name: server.name, host: server.host }, message: `服务器「${server.name}」未连接：先在 SSH 配置页点「连接」` });
+  const st = await getRemoteServerStatus(server, conn, { force: req.query.force === '1' });
+  res.json({ ...st, urls: remoteServiceUrls(server, st).ports, timestamp: new Date().toISOString() });
+});
+
 
 /** 统一透传：桥不可达/路由缺失(404)/响应非 JSON → 结构化失败；其余把桥响应 JSON 原样回给 GUI */
 async function proxyToBridgeConsole(_req, res, target) {
@@ -3110,7 +3784,103 @@ app.post('/api/learning/config', (req, res) => proxyToBridgeConsole(req, res, { 
 app.post('/api/learning/slang', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/slang', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/persona', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/portrait', method: 'POST', body: req.body ?? {} }));
-app.get('/api/learning/token-report', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/token-report', method: 'GET' }));
+/* 用量统计（/api/learning/token-report）——**两边都不漏**：
+ * 【2026-09-14 主人要求】以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
+ * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
+ *   { local, remote, total, remoteReason, remoteServer, report(=total，兼容旧前端) }
+ * 服务端取不到时**不整条失败**：remote=null + remoteReason 一行原因，本机那份照常返回。 */
+const TOKEN_REPORT_NUM_FIELDS = ['total', 'estTotal', 'prompt', 'completion', 'cacheRead', 'cacheWrite', 'cachePrompt', 'cacheCompletion', 'cacheSamples', 'samples', 'billedTotal'];
+
+/** 取某一侧桥控制台的用量报告；失败回 { ok:false, error }，绝不抛 */
+async function fetchTokenReportFrom(base, token, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(base + '/api/token-report', {
+      headers: token ? { 'x-console-token': token } : {},
+      signal: ctrl.signal,
+    });
+    const text = await resp.text();
+    if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` };
+    const json = text ? JSON.parse(text) : null;
+    // 桥侧回包是 { ok, report:{...} }；兼容直接返回报告对象的旧桥
+    const rep = json && typeof json === 'object' && json.report && typeof json.report === 'object' ? json.report : json;
+    if (!rep || typeof rep !== 'object') return { ok: false, error: '响应里没有 report' };
+    return { ok: true, report: rep };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  } finally { clearTimeout(timer); }
+}
+
+/** 两份用量报告合并成"合计"。任何一侧缺字段按 0 计；只有一侧有数据就直接用那一侧。 */
+function mergeTokenReports(a, b) {
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  if (!isObj(a)) return isObj(b) ? clone(b) : null;
+  if (!isObj(b)) return clone(a);
+  const n0 = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const sumInto = (dst, src) => { for (const k of TOKEN_REPORT_NUM_FIELDS) dst[k] = n0(dst[k]) + n0(src?.[k]); return dst; };
+  const out = clone(a);
+  out.today = sumInto(clone(a.today || {}), b.today || {});
+  out.todayEstimatedTotal = n0(a.todayEstimatedTotal) + n0(b.todayEstimatedTotal);
+  const mergeSeries = (listA, listB, keyOf) => {
+    const map = new Map();
+    for (const item of [...(Array.isArray(listA) ? listA : []), ...(Array.isArray(listB) ? listB : [])]) {
+      const k = keyOf(item);
+      if (!k) continue;
+      map.set(k, map.has(k) ? sumInto({ ...map.get(k) }, item) : { ...item });
+    }
+    return [...map.values()].sort((x, y) => (keyOf(x) > keyOf(y) ? 1 : keyOf(x) < keyOf(y) ? -1 : 0));
+  };
+  out.dates = mergeSeries(a.dates, b.dates, (d) => String(d?.date ?? ''));
+  out.todayHourly = mergeSeries(a.todayHourly, b.todayHourly, (h) => String(h?.hour ?? '')).sort((x, y) => Number(x.hour) - Number(y.hour));
+  out.dayWindow = a.dayWindow || b.dayWindow;
+  out.scope = 'total';
+  out.note = (a.note && b.note && a.note !== b.note)
+    ? `合计口径 = 本机 + 服务端。本机：${a.note}｜服务端：${b.note}`
+    : (a.note || b.note || '');
+  return out;
+}
+
+app.get('/api/learning/token-report', async (_req, res) => {
+  const cfg = loadConfig();
+  const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
+  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null };
+
+  // ① 本机那份：永远保留（哪怕服务器连上了）——以前 SSH 模式把这块整个吞掉了
+  try {
+    const t = getLocalBridgeTarget();
+    const r = await fetchTokenReportFrom(t.base, t.token);
+    if (r.ok) out.local = r.report;
+    else out.localReason = `本机桥（${t.base}）取不到用量：${r.error}`;
+  } catch (e) {
+    out.localReason = '本机桥不可达：' + String(e?.message || e);
+  }
+
+  // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因
+  const rt = resolveRemoteBridgeTarget();
+  if (!rt) {
+    out.remoteReason = (connected && sshConnections.has(connected.id))
+      ? '服务器已连接，但 Bridge 隧道不在（重新连接一次 SSH 即可）'
+      : '未连接服务器';
+  } else {
+    try {
+      const token = await getRemoteBridgeToken(rt.server, rt.conn);
+      const r = await fetchTokenReportFrom(rt.base, token);
+      if (r.ok) {
+        out.remote = r.report;
+        out.remoteServer = { id: rt.server.id, name: rt.server.name, host: rt.server.host };
+      } else out.remoteReason = `服务端桥未运行或取不到用量：${r.error}`;
+    } catch (e) {
+      out.remoteReason = '读取服务端用量失败：' + String(e?.message || e);
+    }
+  }
+
+  out.total = mergeTokenReports(out.local, out.remote);
+  // 兼容旧前端/旧字段：顶层 report = 合计（只有一边时就是那一边）
+  out.report = out.total || out.local || out.remote || null;
+  res.json(out);
+});
+
 app.get('/api/learning/slang-library', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang', method: 'GET' }));
 
 /* 用量实时推流：把桥的 SSE 原样透传给浏览器（同源，前端无需直连 3100）。
@@ -3948,7 +4718,17 @@ function scheduleAutoStart() {
     const cfg = loadConfig();
     if (cfg.autoStartOnBoot === false) { mlog('[autostart] 已配置为不自动启动，跳过'); return; }
     const order = ['napcat-local', 'dsh-isolated', 'bridge-local'];
-    const wanted = order.filter((id) => cfg.instances?.[keyOf(id)]?.enabled === true);
+    /* 【2026-09-14 主人要求】实例级开关 `instances.<key>.autoStartOnBoot: false`：
+     * 单个实例说不跟着应用启动，就不再被恢复（典型场景：本机不想一开应用就把 QQ 拉起来 —— NapCat 一旦启动
+     * 就会重新登录一次，主人只想在自己要用的时候手动点启动）。全局 cfg.autoStartOnBoot 仍然有效，优先级更高。 */
+    const skipped = [];
+    const wanted = order.filter((id) => {
+      const inst = cfg.instances?.[keyOf(id)];
+      if (inst?.enabled !== true) return false;
+      if (inst?.autoStartOnBoot === false) { skipped.push(id); return false; }
+      return true;
+    });
+    if (skipped.length) mlog(`[autostart] 按实例配置跳过（不随应用启动）：${skipped.join(', ')}`);
     if (!wanted.length) return;
     mlog(`[autostart] 将恢复上次启动过的实例：${wanted.join(', ')}`);
     void (async () => {

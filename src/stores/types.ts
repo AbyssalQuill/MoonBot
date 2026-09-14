@@ -31,6 +31,26 @@ export interface ServiceInfo {
   url: string;
   reachable: boolean;
   status?: number;
+  /** 【2026-09-14】local = 本机那套；remote = 服务端（经 SSH 隧道）那套。两组并列，绝不互相顶替。 */
+  scope?: 'local' | 'remote';
+  /** 目标回了 X-Frame-Options / CSP frame-ancestors，浏览器会拒绝内嵌 → 前端改给「新窗口打开」 */
+  iframeBlocked?: boolean;
+  iframeBlockReason?: string;
+}
+
+/** 服务端现场状态（GET /api/ssh/status，复用已建立的 SSH 连接取得） */
+export interface RemoteServerStatus {
+  ok: boolean;
+  connected: boolean;
+  at?: number;
+  message?: string;
+  error?: string;
+  server?: { id: string; name: string; host: string };
+  dsh?: { unit: string; active: string; enabled: string; running: boolean; port: number; portUp: boolean; hasToken: boolean };
+  napcat?: { container: string; status: string; running: boolean; exited: boolean; ports: Record<string, boolean>; hasWebuiToken: boolean };
+  bridge?: { running: boolean; pids: number[]; cmd: string; port: number; portUp: boolean; dir: string };
+  remotePorts?: { dsh: number; napcat: number; napcatHttp: number; bridge: number };
+  timestamp?: string;
 }
 
 export interface ManagerState {
@@ -40,6 +60,8 @@ export interface ManagerState {
   tunnels: Tunnel[];
   connected: boolean;
   instances: LocalInstance[];
+  /** 服务端现场状态（连上服务器时才有；本机状态在 instances 里，两者分开两处展示） */
+  remoteStatus?: RemoteServerStatus | null;
   /** 安装位置体检（装在 Program Files / 同步盘等风险位置的提醒；正常安装为空） */
   warnings?: string[];
 }

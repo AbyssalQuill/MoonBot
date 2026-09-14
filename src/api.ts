@@ -1,5 +1,5 @@
 import type {
-  ManagerState, ManagerConfig, OpenResult, InstanceActionResult,
+  ManagerState, ManagerConfig, OpenResult, InstanceActionResult, RemoteServerStatus,
 } from './stores/types';
 
 /** 与后端交互的轻量封装（走 Vite /api 代理，生产同源） */
@@ -107,7 +107,78 @@ export const slangAction = (action: 'learn' | 'stop') =>
   api<BridgeResp>('/learning/slang', { method: 'POST', body: JSON.stringify({ action }) });
 export const personaAction = (action: 'start' | 'stop' | 'status', qq?: string[]) =>
   api<BridgeResp>('/learning/persona', { method: 'POST', body: JSON.stringify(qq?.length ? { action, qq } : { action }) });
-export const getTokenReport = () => api<BridgeResp>('/learning/token-report');
+/** 【2026-09-14】用量统计现在**两边都取**：local=本机桥、remote=服务端桥（null=没取到，看 remoteReason）、
+ *  total=两份合并的合计。report 保留为合计（兼容旧字段）。 */
+export interface TokenReportSide {
+  dates?: Array<Record<string, any>>;
+  todayHourly?: Array<Record<string, any>>;
+  today?: Record<string, number>;
+  todayEstimatedTotal?: number;
+  dayWindow?: Record<string, any>;
+  note?: string;
+  [k: string]: any;
+}
+export interface TokenReportResp {
+  ok: boolean;
+  at?: number;
+  mode?: 'local' | 'ssh';
+  /** 本机桥那份（取不到时 null，原因在 localReason） */
+  local: TokenReportSide | null;
+  /** 服务端桥那份（取不到时 null，原因在 remoteReason） */
+  remote: TokenReportSide | null;
+  /** 两份合并的合计 */
+  total: TokenReportSide | null;
+  localReason?: string;
+  remoteReason?: string;
+  remoteServer?: { id: string; name: string; host: string } | null;
+  /** 兼容：= total（只有一边时就是那一边） */
+  report?: TokenReportSide | null;
+  [k: string]: any;
+}
+
+export const getTokenReport = () => api<TokenReportResp>('/learning/token-report');
+
+/* ================= 服务端（SSH）状态与桥配置：复用已建立的 SSH 连接，不新建连接 ================= */
+/** 服务端三个组件的真实运行状态：DSH=systemd dsh-web、NapCat=docker、桥=node src/bridge.js */
+export const getSshStatus = (serverId?: string, force = false) =>
+  api<RemoteServerStatus>(`/ssh/status?${serverId ? 'serverId=' + encodeURIComponent(serverId) + '&' : ''}${force ? 'force=1' : ''}`);
+
+/** 服务端 qq-bridge 配置（读 /root/qq-bridge/config.json；target=remote 表示这份来自服务器） */
+export interface RemoteBridgeConfigResp {
+  ok: boolean;
+  target?: 'remote';
+  connected?: boolean;
+  message?: string;
+  server?: { id: string; name: string; host: string; username?: string };
+  dir?: string;
+  path?: string;
+  config?: Record<string, any>;
+  persona?: string;
+  personaHasFile?: boolean;
+  speechRules?: string;
+  speechHasFile?: boolean;
+  dshEffective?: { provider?: string; model?: string; reasoningEffort?: string };
+  dshModels?: { providers: Record<string, Array<{ id: string; name?: string; vision?: boolean }>>; sources?: Record<string, string> };
+  dshSettingsPath?: string;
+  roles?: string[];
+  notes?: string[];
+  steps?: Array<{ step: string; ok: boolean; msg?: string }>;
+  verified?: boolean;
+  mismatched?: string[];
+  backup?: string | null;
+}
+export const getRemoteBridgeConfig = (serverId?: string) =>
+  api<RemoteBridgeConfigResp>(`/ssh/bridge-config${serverId ? '?serverId=' + encodeURIComponent(serverId) : ''}`);
+/** 写服务端配置：后端会「临时文件 → 备份 config.json.bak-<时间戳> → mv 原子替换 → 回读比对关键字段」 */
+export const saveRemoteBridgeConfig = (body: Record<string, any>) =>
+  api<RemoteBridgeConfigResp>('/ssh/bridge-config', { method: 'POST', body: JSON.stringify(body) });
+
+/** 【2026-09-14】按组件启停**服务器上**的组件（连上服务器后首页那三张卡的按钮走这条路，
+ *  不再去启动本机进程）。component: dsh / napcat / bridge；action: start / stop / restart。 */
+export const sshServiceAction = (serverId: string, component: 'dsh' | 'napcat' | 'bridge', action: 'start' | 'stop' | 'restart') =>
+  api<{ ok: boolean; component?: string; action?: string; out?: string; message?: string }>(
+    '/ssh/service', { method: 'POST', body: JSON.stringify({ serverId, component, action }) },
+  );
 
 /* ================= 配置方案（把整套 config.json 存成命名方案，随时套用） ================= */
 export interface ConfigProfile {
@@ -246,6 +317,8 @@ export interface SyncStepsResp {
   success: boolean;
   steps?: Array<{ step: string; ok: boolean; msg?: string }>;
   message?: string;
+  /** /ssh/stack 专用：动作**执行完之后**的服务端现场状态（后端已顺手清掉状态缓存） */
+  status?: { ok?: boolean; dsh?: { running?: boolean }; napcat?: { running?: boolean }; bridge?: { running?: boolean }; [k: string]: unknown } | null;
 }
 /** 同步方向: to-server = 本地→远端 /root/qq-bridge; to-local = 远端→本地(覆盖); merge = 两端 state 数据双向合并 */
 export interface SyncFlags { code?: boolean; state?: boolean; stickers?: boolean; config?: boolean }
@@ -259,3 +332,7 @@ export const removeServerStack = (server: Record<string, unknown>) =>
  *  启动顺序 DSH → NapCat → 桥；终止反序（先断桥，免得它连着一个已经消失的 NapCat）。 */
 export const remoteStack = (server: Record<string, unknown>, action: 'start' | 'stop') =>
   api<SyncStepsResp>('/ssh/stack', { method: 'POST', body: JSON.stringify({ server, action }) });
+
+/** 同上，但按 serverId 走（首页只有 id/name/host，不必把凭据发到前端再发回来）。 */
+export const remoteStackById = (serverId: string, action: 'start' | 'stop') =>
+  api<SyncStepsResp>('/ssh/stack', { method: 'POST', body: JSON.stringify({ serverId, action }) });

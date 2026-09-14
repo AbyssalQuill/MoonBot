@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack, remoteStack } from '../api';
+import type { ReactNode } from 'react';
+import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack, remoteStackById } from '../api';
 import type { SSHServer, ManagerState } from '../stores/types';
 import { ArrowLeft, Plus, Trash2, Loader2, PlugZap, Plug, TestTube2, Server, Settings, Save, Rocket, X, RefreshCw, Play, Square } from 'lucide-react';
 import NumInput from '../components/NumInput';
@@ -35,6 +36,17 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [testOut, setTestOut] = useState<string | null>(null);
+  /** 【2026-09-14】刚被冷却拦下的那台（用于显示"仍然重试一次"）；冷却时长由后端按失败性质算，不写死。 */
+  const [coolServer, setCoolServer] = useState<SSHServer | null>(null);
+  /** 【2026-09-14 主人要求】确认弹窗改成**应用内主题弹窗**，不再用系统 confirm()。 */
+  const [confirmBox, setConfirmBox] = useState<{ title: string; body: ReactNode; okText?: string; danger?: boolean; onOk: () => void | Promise<void> } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const askConfirm = (opts: { title: string; body: ReactNode; okText?: string; danger?: boolean; onOk: () => void | Promise<void> }) => setConfirmBox(opts);
+  const runConfirm = async () => {
+    if (!confirmBox) return;
+    setConfirmBusy(true);
+    try { await confirmBox.onOk(); } finally { setConfirmBusy(false); setConfirmBox(null); }
+  };
   const [testOk, setTestOk] = useState<boolean | null>(null);
   const [testedServer, setTestedServer] = useState<SSHServer | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -172,14 +184,24 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
   };
 
   const del = async (s: SSHServer) => {
-    if (!confirm(`删除服务器「${s.name}」？`)) return;
-    await persist(servers.filter((x) => x.id !== s.id));
-    if (selectedId === s.id) setSelectedId(null);
+    /* 【2026-09-14 主人要求】不再用系统 confirm()，改成应用内主题弹窗（同 .help-overlay 那套）。 */
+    askConfirm({
+      title: `删除服务器「${s.name}」`,
+      body: <>只是从管理端列表里移除这台服务器的配置（<code>{s.username}@{s.host}:{s.port}</code>）。<br />
+        服务器上的桥 / DSH / NapCat <b>不受影响</b>；要连服务端一起清掉请用同行的「清整套」。</>,
+      okText: '删除',
+      danger: true,
+      onOk: async () => {
+        await persist(servers.filter((x) => x.id !== s.id));
+        if (selectedId === s.id) setSelectedId(null);
+      },
+    });
   };
 
-  const connect = async (s: SSHServer) => {
+  const connect = async (s: SSHServer, force = false) => {
     try {
-      const r = await api<any>('/ssh/connect', { method: 'POST', body: JSON.stringify(s) });
+      const r = await api<any>(`/ssh/connect${force ? '?force=1' : ''}`, { method: 'POST', body: JSON.stringify(s) });
+      setCoolServer(r?.cooldown ? s : null);
       setMsg(r.success ? `已连接 ${s.name}` : `连接失败：${r.message}`);
     } catch { setMsg('连接失败'); }
     setSelectedId(s.id);
@@ -192,12 +214,13 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
     onRefresh();
   };
 
-  const test = async (s: SSHServer) => {
+  const test = async (s: SSHServer, force = false) => {
     setTesting(s.id);
     setTestOk(null);
     setTestedServer(s);
     try {
-      const r = await api<any>('/ssh/test', { method: 'POST', body: JSON.stringify(s) });
+      const r = await api<any>(`/ssh/test${force ? '?force=1' : ''}`, { method: 'POST', body: JSON.stringify(s) });
+      setCoolServer(r?.cooldown ? s : null);
       // 认证失败时后端会带 detail（服务器允许哪些方式 / 本次发了哪些），这里如实展示：
       // 原来只有 ssh2 那句 "All configured authentication methods failed"，用户完全不知道该改什么。
       const d = r?.detail;
@@ -242,30 +265,65 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
 
   // ===== 删除整套(移动备份, 不可撤回) =====
   const removeStack = async (s: SSHServer) => {
-    if (!confirm(`确认删除服务器「${s.name}」上的整套(桥 /root/qq-bridge、DSH /root/.dsh、NapCat /root/napcat、代理 /root/dsh-polyfill)？将停服务并移动到 /root/qq-bridge-removed-<时间戳>/ 备份, 不会删除 QQ 登录卷。此操作不可撤回, 确定继续?`)) return;
-    setRemovingId(s.id);
-    setSyncLog(null);
-    try {
-      const r = await removeServerStack({ ...s });
-      if (r.steps?.length) setSyncLog(r.steps.map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + x.msg : ''}`));
-      setMsg(r.success ? '已移除整套' : (r.message || '移除失败，详见下方步骤'));
-    } catch (e) { setMsg(`移除失败：${(e as Error).message}`); }
-    finally { setRemovingId(null); }
+    askConfirm({
+      title: `清空服务器「${s.name}」上的整套`,
+      body: <>将停止服务，并把 <code>/root/qq-bridge</code>、<code>/root/.dsh</code>、<code>/root/napcat</code> 整体移动到
+        <code> /root/qq-bridge-removed-&lt;时间戳&gt;/</code> 备份（可自行取回）。<br />
+        <b>QQ 登录卷不会被删除</b>，但此操作不可撤回。</>,
+      okText: '确认清空',
+      danger: true,
+      onOk: async () => {
+        setRemovingId(s.id);
+        setSyncLog(null);
+        try {
+          const r = await removeServerStack({ ...s });
+          if (r.steps?.length) setSyncLog(r.steps.map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + x.msg : ''}`));
+          setMsg(r.success ? '已移除整套' : (r.message || '移除失败，详见下方步骤'));
+        } catch (e) { setMsg(`移除失败：${(e as Error).message}`); }
+        finally { setRemovingId(null); }
+      },
+    });
   };
 
   /* 远端整套启停（服务器卡片上的「启动Bot / 终止Bot」）
    * 启动：DSH → NapCat 容器 → 桥；终止：桥 → NapCat → DSH（反序，免得桥一直在连一个已经消失的 NapCat）。
-   * 幂等，重复点无副作用；步骤结果复用同步日志那张卡显示。 */
+   * 幂等，重复点无副作用；步骤结果复用同步日志那张卡显示。
+   *
+   * 【2026-09-15 主人反馈"点了启动Bot，回到主页 Core 没起来"】两个坑都在这里：
+   *  ① 原来走 remoteStack({...s}) —— 把整份带凭据的 server 发回后端；首页那条路（remoteStackById）只发 id。
+   *     现在统一走 remoteStackById，和后端"SSH 配置页只管配置、动作按 id 走"的做法一致；
+   *  ② 原来动作完不刷新全局状态，也不等在页面上把结果说清楚，主人回首页看到的还是**动作前的旧状态**。
+   *     现在：做完立刻 onRefresh()（后端也已把这次动作后的真实状态一并返回并清掉状态缓存），
+   *     并且把每一步（含"桥有没有连上 NapCat"）留在本页，不再需要靠"回首页看灯"来判断。
+   * 失败原因也直接拼进提示里，不再只显示一句"失败"。 */
   const stackCtl = async (s: SSHServer, action: 'start' | 'stop') => {
     setStackBusy(`${s.id}:${action}`);
     setSyncLog(null);
+    const verb = action === 'start' ? '启动' : '终止';
     try {
-      const r = await remoteStack({ ...s }, action);
-      if (r.steps?.length) setSyncLog(r.steps.map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + x.msg : ''}`));
-      const verb = action === 'start' ? '启动' : '终止';
-      setMsg(r.success ? `${verb}完成：${s.name}` : `${verb}失败：${r.message || '见下方步骤'}`);
-    } catch (e) { setMsg(`请求失败：${(e as Error).message}`); }
-    finally { setStackBusy(null); }
+      const r = await remoteStackById(s.id, action);
+      const lines = (r.steps ?? []).map((x) => `${x.ok ? '✓' : '✗'} ${x.step}${x.msg ? ' — ' + String(x.msg).split('\n').filter(Boolean).join(' / ') : ''}`);
+      if (lines.length) setSyncLog(lines);
+      // 服务端组件状态：动作后后端会一起返回（拿不到就退回"下一步轮询"）
+      const st: any = (r as any)?.status;
+      if (st?.ok) {
+        const bits = [
+          `DSH ${st.dsh?.running ? '运行中' : '未运行'}`,
+          `NapCat ${st.napcat?.running ? '运行中' : '未运行'}`,
+          `桥 ${st.bridge?.running ? '运行中' : '未运行'}`
+        ];
+        setSyncLog((prev) => [...(prev ?? []), `— 服务端状态：${bits.join(' · ')}`]);
+      }
+      const bad = (r.steps ?? []).find((x) => !x.ok);
+      setMsg(r.success
+        ? `已${verb}：${s.name}${action === 'start' ? '（桥没连上 NapCat 时，去 NapCat 界面扫码即可，桥会自动重连）' : ''}`
+        : `${verb}未完成：${bad ? bad.step + ' — ' + String(bad.msg || '').split('\n')[0] : (r.message || '见下方步骤')}`);
+    } catch (e) { setMsg(`${verb}失败：${(e as Error).message}`); }
+    finally {
+      setStackBusy(null);
+      // 让首页那张卡立刻反映这次动作（后端已作废状态缓存，这里只是催前端重新拉一次）
+      try { onRefresh(); } catch { /* 忽略 */ }
+    }
   };
 
   const startEdit = (s: SSHServer) => {
@@ -490,8 +548,8 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
                 const connected = state?.connected && state.activeServer?.id === s.id;
                 return (
                   <div
-                    key={s.id}
                     className="card server-row"
+                    key={s.id}
                     onClick={() => setSelectedId(s.id)}
                     style={active ? { borderColor: 'var(--nc-primary-400)', boxShadow: 'var(--nc-shadow-s)' } : undefined}
                   >
@@ -541,6 +599,14 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
                   测试结果 {testOk === true ? '· 连接成功' : testOk === false ? '· 连接失败' : ''}
                 </div>
                 <code style={{ whiteSpace: 'pre-wrap', display: 'block' }}>{testOut}</code>
+                {/* 【2026-09-14】冷却不再写死 10 分钟（见后端 sshCooldownInfo）；这里再给一个"我就要现在重试"的出口，
+                    免得用户改完密码还得干等。 */}
+                {coolServer && (
+                  <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <button className="btn btn-sm" disabled={!!testing} onClick={() => test(coolServer, true)}>仍然重试一次</button>
+                    <span style={{ fontSize: 12, opacity: 0.7 }}>冷却只是防"把自己 IP 试封"，了解原因后可以跳过。</span>
+                  </div>
+                )}
                 {testOk === false && testedServer && testedServer.lastGoodPort && testedServer.lastGoodPort !== testedServer.port && (
                   <div style={{ marginTop: 8, fontSize: 12, color: '#b54708' }}>
                     端口提示：这台服务器**上次成功用的是 {testedServer.lastGoodPort}**，这次填的是 {testedServer.port}。
@@ -616,6 +682,29 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
           </>
         )}
       </div>
+
+      {/* 【2026-09-14】应用内确认弹窗：配色/圆角/按钮都走主题，不再弹系统 confirm() */}
+      {confirmBox && (
+        <div className="help-overlay" style={{ zIndex: 140 }} onClick={() => { if (!confirmBusy) setConfirmBox(null); }}>
+          <div className="help-panel" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+            <div className="help-head">
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
+                {confirmBox.danger ? <Trash2 size={16} /> : <Server size={16} />} {confirmBox.title}
+              </span>
+              <button className="icon-btn" disabled={confirmBusy} onClick={() => setConfirmBox(null)}><X size={16} /></button>
+            </div>
+            <div style={{ padding: '12px 16px 4px', fontSize: 13.5, lineHeight: 1.8, color: 'var(--nc-foreground-700)' }}>
+              {confirmBox.body}
+            </div>
+            <div className="help-foot" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn btn-sm" disabled={confirmBusy} onClick={() => setConfirmBox(null)}>取消</button>
+              <button className={confirmBox.danger ? 'btn btn-sm btn-danger' : 'btn btn-sm btn-primary'} disabled={confirmBusy} onClick={runConfirm}>
+                {confirmBusy ? <><Loader2 size={13} className="spin" /> 处理中…</> : (confirmBox.okText || '确定')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -467,6 +467,153 @@ export function packLocalStage(task, item, outDir) {
 }
 
 /**
+ * 目标机 DSH 自愈脚本（2026-09-14）。
+ *
+ * 【为什么需要】"从本机复刻"会把开发机（Windows）上这套 DSH home 原样打到 Linux 上，
+ * 于是四处 Windows 残留跟着过去，症状是 `systemctl status dsh-web` 一直
+ * `Scheduled restart job, restart counter is at N`、3080 不监听、进程 92ms 就退：
+ *   ① `/root/.dsh/profiles/web/package.json` 里插件依赖仍是 `link:C:/Users/...`
+ *      → `Error: dsh: cannot resolve profile bundle "qq-mode-console"`；
+ *   ② 打包时排除了 `profiles/node_modules`（见 buildLocalStagePlan 的 excludes），
+ *      目标机没人重建插件链接 → 同一条报错（插件是 settings 命名空间与 MCP 的宿主，缺了 DSH 起不来）；
+ *   ③ `.credentials.yaml` 权限被 tar 带成 666 → DSH 硬校验拒绝启动
+ *      （`readable beyond its owner (mode 666)`）；
+ *   ④ `cordis.patch.yml` 里三个 MCP 的 command 仍是 `D:\...\qbm-node.exe`（Linux 上不存在），
+ *      DSH 能起来但模型侧一个工具都没有。
+ * 这里全部就地修好，幂等、可重复执行；对正常（Linux→Linux）复刻是无害空转。
+ */
+function buildTargetDshHealScript() {
+  const healJs = [
+    "const fs = require('fs');",
+    "const BS = String.fromCharCode(92);",
+    "const prof = process.env.PROF_DIR;",
+    "const SRC = process.env.BRIDGE_SRC;",
+    "const NODE_BIN = process.env.NODE_BIN || '/usr/bin/node';",
+    "const pkgFile = prof + '/package.json';",
+    "try {",
+    "  const j = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));",
+    "  j.dependencies = j.dependencies || {};",
+    "  const fixed = [];",
+    "  for (const name of Object.keys(j.dependencies)) {",
+    "    const v = String(j.dependencies[name] || '');",
+    "    if (!v.startsWith('link:')) continue;",
+    "    const target = v.slice(5);",
+    "    if (!/^[A-Za-z]:/.test(target)) continue;",
+    "    j.dependencies[name] = 'link:/root/.dsh/plugins/' + name;",
+    "    fixed.push(name);",
+    "  }",
+    "  fs.writeFileSync(pkgFile, JSON.stringify(j, null, 2) + String.fromCharCode(10));",
+    "  console.log('profile-deps-win-links-fixed=' + (fixed.length ? fixed.join(',') : '0'));",
+    "} catch (e) { console.log('profile-package-skip: ' + e.message); }",
+    "const patch = prof + '/cordis.patch.yml';",
+    "try {",
+    "  let t = fs.readFileSync(patch, 'utf8');",
+    "  let hit = 0;",
+    "  t = t.replace(/'[A-Za-z]:[^']*'/g, (m) => {",
+    "    hit += 1;",
+    "    const inner = m.slice(1, -1);",
+    "    const base = inner.split(BS).pop();",
+    "    if (/\\.js$/.test(base)) return \"'\" + SRC + '/' + base + \"'\";",
+    "    return \"'\" + NODE_BIN + \"'\";",
+    "  });",
+    "  fs.writeFileSync(patch, t, 'utf8');",
+    "  console.log('cordis-win-paths-fixed=' + hit);",
+    "} catch (e) { console.log('cordis-patch-skip: ' + e.message); }",
+    "/* NapCat 的 OneBot WebSocket 服务端在 Docker 里必须绑 0.0.0.0：本机那份是 127.0.0.1（本机 NapCat 与桥同机，",
+    "   这是对的），但容器里绑 127.0.0.1 只监听容器 loopback —— 宿主机的桥经 docker-proxy 永远连不上，",
+    "   症状是桥每 15s 刷 `NapCat 错误` 但一条消息也收不到（容器内 /proc/net/tcp 显示 0100007F:0BB9）。 */",
+    "try {",
+    "  const dir = '/root/napcat/config';",
+    "  for (const f of fs.readdirSync(dir).filter((n) => /^onebot11.*\\.json$/.test(n))) {",
+    "    const p = dir + '/' + f;",
+    "    const c = JSON.parse(fs.readFileSync(p, 'utf8'));",
+    "    let hit = 0;",
+    "    for (const w of (c?.network?.websocketServers || [])) {",
+    "      if (w.host === '127.0.0.1') { w.host = '0.0.0.0'; hit += 1; }",
+    "    }",
+    "    if (hit) { fs.writeFileSync(p, JSON.stringify(c, null, 2)); console.log('napcat-ws-bind-fixed=' + f); }",
+    "  }",
+    "} catch (e) { console.log('napcat-config-skip: ' + e.message); }",
+    "/* 桥给的图片路径必须能在 NapCat 容器里读到：服务器 NapCat 在 Docker 里，桥交宿主路径时它报",
+    "   `文件处理失败: 识别URL失败, uri= /root/qq-bridge/state/sticker-tmp/...` —— 2026-09-14 实测",
+    "   「表情包一张都发不出去」。这里把桥配成：临时图落到 NapCat 容器挂载的宿主目录，发送时按",
+    "   dockerPathMap 换成容器内路径（等同容器里的本地路径，gif 动图照常播）。 */",
+    "try {",
+    "  const cf = '/root/qq-bridge/config.json';",
+    "  const c = JSON.parse(fs.readFileSync(cf, 'utf8'));",
+    "  c.napcat = c.napcat || {};",
+    "  const wantMap = [{ host: '/root/napcat/config', container: '/app/napcat/config' }];",
+    "  let hit = 0;",
+    "  if (c.napcat.imageFileMode !== 'auto') { c.napcat.imageFileMode = 'auto'; hit += 1; }",
+    "  if (c.napcat.tmpDir !== '/root/napcat/config/moonbot-tmp') { c.napcat.tmpDir = '/root/napcat/config/moonbot-tmp'; hit += 1; }",
+    "  if (JSON.stringify(c.napcat.dockerPathMap || null) !== JSON.stringify(wantMap)) { c.napcat.dockerPathMap = wantMap; hit += 1; }",
+    "  if (hit) { fs.writeFileSync(cf, JSON.stringify(c, null, 2)); console.log('bridge-napcat-filemode-fixed=' + hit); }",
+    "  fs.mkdirSync('/root/napcat/config/moonbot-tmp', { recursive: true });",
+    "} catch (e) { console.log('bridge-config-filemode-skip: ' + e.message); }",
+    "/* 本机复刻会把整棵 DSH 会话树 + 桥的「会话映射/seq 水位」一起带过来，而那些会话 header 里 cwd 是 D:\\...，",
+    "   在 Linux 上过不了 DSH 的校验（stored session is corrupt: session header cwd must be an absolute path）→",
+    "   桥对每个会话 session/follow / selectModel 全失败，机器人一条消息也回不了。挪走让目标机重建。 */",
+    "try {",
+    "  const sdir = '/root/.dsh/sessions';",
+    "  const ts2 = Date.now();",
+    "  let moved = 0;",
+    "  /* ⚠️ 必须**移出 sessions 树**，不能原地改名！DSH 会校验「会话目录名 == 会话头里记录的 cwd」，",
+    "     原地加后缀会让它判定 `corrupt session log: header id ... and cwd identify ...` 并**整个 DSH 起不来**",
+    "     （2026-09-14 实测：改名后 dsh-web 直接崩溃循环，日志里那条 corrupt session log 就是它）。 */",
+    "  const outDir = '/root/dsh-residue-' + ts2;",
+    "  fs.mkdirSync(outDir, { recursive: true });",
+    "  for (const n of fs.readdirSync(sdir)) {",
+    "    if (!/^--[A-Za-z]-/.test(n)) continue;",
+    "    fs.renameSync(sdir + '/' + n, outDir + '/' + n);",
+    "    moved += 1;",
+    "  }",
+    "  console.log('session-workspaces-moved=' + moved + ' -> ' + outDir);",
+    "} catch (e) { console.log('session-tree-skip: ' + e.message); }",
+    "try {",
+    "  const st = '/root/qq-bridge/state';",
+    "  let moved = 0;",
+    "  for (const f of ['sessions.json', 'dsh-seq.json']) {",
+    "    if (fs.existsSync(st + '/' + f)) { fs.renameSync(st + '/' + f, st + '/_win-residue-' + f); moved += 1; }",
+    "  }",
+    "  console.log('bridge-session-state-moved=' + moved);",
+    "} catch (e) { console.log('bridge-state-skip: ' + e.message); }",
+    "/* 用量流水也是随包带过来的：state/token-usage.jsonl 里全是本机的历史。",
+    "   留着的话服务端「用量」会把本机的账算到服务端头上（管理器两边相加就重复计了）。挪走，服务端从零记。 */",
+    "try {",
+    "  const mf = '/root/qq-bridge/state/token-usage.jsonl';",
+    "  if (fs.existsSync(mf)) { fs.renameSync(mf, mf + '.copied-from-local'); console.log('token-meter-copied-history-moved=1'); }",
+    "} catch (e) { console.log('token-meter-skip: ' + e.message); }",
+  ].join('\n');
+  return [
+    'set -u',
+    'PROF=/root/.dsh/profiles/web',
+    'BR=/root/qq-bridge',
+    '[ -d "$PROF" ] || { echo "no-dsh-profile"; exit 0; }',
+    'mkdir -p /root/.dsh/profiles/node_modules',
+    'links=0',
+    'for p in $(ls "$BR/plugins" 2>/dev/null || true); do',
+    '  [ -d "$BR/plugins/$p" ] || continue',
+    '  if [ ! -L "/root/.dsh/plugins/$p" ]; then',
+    '    [ -e "/root/.dsh/plugins/$p" ] && mv "/root/.dsh/plugins/$p" "/root/.dsh/plugins/$p.bak-$(date +%Y%m%d-%H%M%S)"',
+    '    ln -sfn "$BR/plugins/$p" "/root/.dsh/plugins/$p"',
+    '  fi',
+    '  ln -sfn "$BR/plugins/$p" "/root/.dsh/profiles/node_modules/$p"',
+    '  links=$((links+1))',
+    'done',
+    'echo "plugin-links=$links"',
+    'if [ -f /root/.dsh/.credentials.yaml ]; then chmod 600 /root/.dsh/.credentials.yaml; echo "credentials-mode=$(stat -c %a /root/.dsh/.credentials.yaml)"; fi',
+    'for d in /root/whale-fanart-001 /root/meme/whale-fanart-001 /root/dsh-meme/whale-fanart-001; do',
+    '  if [ -d "$d" ]; then mkdir -p /root/.dsh/meme-packs; ln -sfn "$d" "/root/.dsh/meme-packs/$(basename "$d")"; echo "meme-link=$d"; break; fi',
+    'done',
+    "cat > /tmp/qbm-heal-dsh.js <<'HEALEOF'",
+    healJs,
+    'HEALEOF',
+    'export PROF_DIR="$PROF" BRIDGE_SRC="$BR/src" NODE_BIN="$(command -v node || echo /usr/bin/node)"',
+    'node /tmp/qbm-heal-dsh.js; rm -f /tmp/qbm-heal-dsh.js',
+  ].join('\n');
+}
+
+/**
  * 连接目标机：先按填的端口，不通且配置里记着"上次成功的端口"时再用那个端口试一次。
  * （同一台 IP 上可能挂着多个 sshd —— 2026-09-12 实测 22 与 50470 就是两台，
  *   填错端口的表现和"密码错"一模一样，这条兜底能让用户少踩一次。）
@@ -738,6 +885,13 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       taskLine(task, `  ${(r.out || '').trim().split('\n').slice(-1)[0] || '已指向 3080'}`);
     });
 
+    // 4f. 目标机 DSH 自愈：本机(Win)复刻带过去的 Windows 残留会让 dsh-web 起即退（见 buildTargetDshHealScript）
+    if (isLocal) await step('修正目标机 DSH 的 Windows 残留(插件链接/凭据权限/MCP 路径)', async () => {
+      const r = await runCmd(dstConn, buildTargetDshHealScript(), 180000);
+      if (!r.ok) throw new Error(r.err || r.out || 'DSH 自愈脚本执行失败');
+      taskLine(task, (r.out || '').trim().split('\n').filter(Boolean).map((l) => `  ${l}`).join('\n'));
+    });
+
     /* 5. 目标机装配: systemd / napcat 容器与卷 / 启动 */
     // 5a. systemd unit：模板源是从源机读；本机源没有 systemd unit → 现场生成（DSH Web + 不再需要 polyfill）
     await step('同步 systemd 服务定义', async () => {
@@ -755,6 +909,12 @@ export async function runDeploy(taskId, source, target, opts = {}) {
           `ExecStart=${dshBinPath} --profile web --port 3080 --no-open --trusted-host 127.0.0.1:3080`,
           'Restart=always',
           'RestartSec=3',
+          // 【2026-09-14】把 DSH 的启动日志落到文件：桥要用里面的 `?token=` 换鉴权 cookie
+          // （qq-bridge/src/dsh-client.js 的 readLatestToken，路径由 DSH_ISOLATED_LOG_FILE 指定）。
+          // 只进 journald 的话桥读不到 token，表现就是每 3 秒刷 `remote.mux WebSocket 连接失败`、
+          // 3080 明明活着却永远连不上。
+          'StandardOutput=append:/root/.dsh/dsh-web.log',
+          'StandardError=append:/root/.dsh/dsh-web.log',
           '',
           '[Install]',
           'WantedBy=multi-user.target',
@@ -799,13 +959,29 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     });
 
     // 5c. 启动系统服务 + 容器 + 桥
-    await step('启动 DSH Web 与 polyfill', async () => {
-      const r = await runCmd(dstConn, `systemctl enable --now dsh-polyfill 2>&1; systemctl enable --now dsh-web 2>&1; sleep 5; systemctl is-active dsh-web dsh-polyfill`, 60000);
+    // 【2026-09-14】不再无条件 start dsh-polyfill：本机复刻路径**不生成** polyfill unit（本机源没有），
+    // 老命令会打印 "Failed to start dsh-polyfill.service: Unit not found." 并回 rc=5 —— 看着像失败、
+    // 其实 dsh-web 照样起来了（实测）。改成"有 unit 才启"。
+    await step('启动 DSH Web', async () => {
+      const r = await runCmd(dstConn, [
+        'systemctl enable --now dsh-web 2>&1 | tail -2',
+        'if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl enable --now dsh-polyfill 2>&1 | tail -2; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi',
+        'sleep 5',
+        'echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"',
+      ].join('\n'), 60000);
       taskLine(task, `  ${r.out || r.err}`);
-      if (!/^active\s+active/m.test(r.out)) taskLine(task, '  ⚠ dsh 服务未全部 active, 见上输出');
+      if (!/dsh-web=active/.test(r.out || '')) taskLine(task, '  ⚠ dsh-web 未 active, 见上输出');
     });
     await step('启动桥', async () => {
-      const r = await runCmd(dstConn, `cd /root/qq-bridge && rm -f state/bridge.lock && nohup bash start-bridge.sh >/dev/null 2>&1 & sleep 4; pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down`, 60000);
+      // 优先用随仓库发出去的 start-bridge.sh（老模板服务器上有同名的旧脚本，兼容），
+      // 没有才退回直起 node —— 少了这层兜底，目标机就是 3100 永远不监听。
+      const r = await runCmd(dstConn, [
+        'cd /root/qq-bridge || exit 1',
+        'rm -f state/bridge.lock',
+        'if [ -f start-bridge.sh ]; then nohup bash start-bridge.sh >/dev/null 2>&1 & else nohup node src/bridge.js >/dev/null 2>&1 & fi',
+        'sleep 5',
+        "pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down",
+      ].join('\n'), 60000);
       taskLine(task, `  ${r.out || r.err}`);
     });
     await step('启动 NapCat 容器', async () => {
