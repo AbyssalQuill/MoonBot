@@ -4089,6 +4089,22 @@ app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, 
  * 服务端取不到时**不整条失败**：remote=null + remoteReason 一行原因，本机那份照常返回。 */
 const TOKEN_REPORT_NUM_FIELDS = ['total', 'estTotal', 'prompt', 'completion', 'cacheRead', 'cacheWrite', 'cachePrompt', 'cacheCompletion', 'cacheSamples', 'samples', 'billedTotal'];
 
+/** 把"桥连不上"翻译成人话：**连不上是状态（没在运行/隧道没开），不是"失败"（异常）**。
+ *  以前这里直接把 `fetch failed` 抛给界面，本机没跑桥时面板上就常挂一行
+ *  「本机桥对账失败：fetch failed」，主人会以为坏了——其实只是本机没启动桥（只用服务端时很正常）。 */
+function bridgeUnreachableText(scope, base, detail) {
+  const d = String(detail || '');
+  const refused = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|timed out|aborted|ETIMEDOUT/i.test(d);
+  if (scope === 'remote') {
+    return refused
+      ? `服务端桥没在运行或 Bridge 隧道（13100）不通 —— ${base} 无响应`
+      : `服务端桥读取失败：${d}`;
+  }
+  return refused
+    ? `本机桥没在运行（${base} 无响应）—— 只用服务端时这条可以忽略，不影响服务端那份`
+    : `本机桥读取失败：${d}`;
+}
+
 /** 取某一侧桥控制台的用量报告；失败回 { ok:false, error }，绝不抛 */
 async function fetchTokenReportFrom(base, token, timeoutMs = 15000) {
   const ctrl = new AbortController();
@@ -4149,9 +4165,9 @@ app.get('/api/learning/token-report', async (_req, res) => {
     const t = getLocalBridgeTarget();
     const r = await fetchTokenReportFrom(t.base, t.token);
     if (r.ok) out.local = r.report;
-    else out.localReason = `本机桥（${t.base}）取不到用量：${r.error}`;
+    else out.localReason = bridgeUnreachableText('local', t.base, r.error);
   } catch (e) {
-    out.localReason = '本机桥不可达：' + String(e?.message || e);
+    out.localReason = bridgeUnreachableText('local', getLocalBridgeTarget().base, String(e?.message || e));
   }
 
   // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因
@@ -4167,9 +4183,9 @@ app.get('/api/learning/token-report', async (_req, res) => {
       if (r.ok) {
         out.remote = r.report;
         out.remoteServer = { id: rt.server.id, name: rt.server.name, host: rt.server.host };
-      } else out.remoteReason = `服务端桥未运行或取不到用量：${r.error}`;
+      } else out.remoteReason = bridgeUnreachableText('remote', rt.base, r.error);
     } catch (e) {
-      out.remoteReason = '读取服务端用量失败：' + String(e?.message || e);
+      out.remoteReason = bridgeUnreachableText('remote', rt.base, String(e?.message || e));
     }
   }
 
@@ -4184,7 +4200,7 @@ app.get('/api/learning/token-report', async (_req, res) => {
  * reconciled 行。幂等：水位存在桥侧 state/token-reconcile.json，重复点不会重复补。
  * 与 token-report 一样，本机 + 服务端两边都试，任一侧失败不影响另一侧。 */
 app.post('/api/learning/token-reconcile', async (_req, res) => {
-  const out = { ok: true, at: Date.now(), local: null, remote: null, localReason: '', remoteReason: '' };
+  const out = { ok: true, at: Date.now(), local: null, remote: null, localReason: '', remoteReason: '', localSkipped: false, remoteSkipped: false };
   const call = async (base, token) => {
     const r = await fetch(base + '/api/token-reconcile', {
       method: 'POST',
@@ -4200,7 +4216,9 @@ app.post('/api/learning/token-reconcile', async (_req, res) => {
     const t = getLocalBridgeTarget();
     out.local = await call(t.base, t.token);
   } catch (e) {
-    out.localReason = `本机桥对账失败：${e?.message ?? e}`;
+    const raw = String(e?.message ?? e);
+    out.localReason = bridgeUnreachableText('local', getLocalBridgeTarget().base, raw);
+    out.localSkipped = true;   // 本机没跑桥：这是状态不是错误，界面按"已跳过"呈现
   }
   const rt = resolveRemoteBridgeTarget();
   if (rt) {
@@ -4208,10 +4226,13 @@ app.post('/api/learning/token-reconcile', async (_req, res) => {
       const token = await getRemoteBridgeToken(rt.server, rt.conn);
       out.remote = await call(rt.base, token);
     } catch (e) {
-      out.remoteReason = `服务端桥对账失败：${e?.message ?? e}`;
+      const raw = String(e?.message ?? e);
+      out.remoteReason = bridgeUnreachableText('remote', rt.base, raw);
+      out.remoteSkipped = /没在运行|不通/.test(out.remoteReason);
     }
   } else {
     out.remoteReason = '未连接服务器或 Bridge 隧道不在';
+    out.remoteSkipped = true;
   }
   out.ok = !!(out.local || out.remote);
   mlog(`[token] 用量对账请求：本机 ${out.local ? (out.local.result?.addedTokens ?? 0) : '失败'} / 服务端 ${out.remote ? (out.remote.result?.addedTokens ?? 0) : '失败'}`);

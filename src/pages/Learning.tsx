@@ -741,16 +741,20 @@ function UsagePanel() {
     setRcBusy(true); setRcMsg('');
     try {
       const r: any = await reconcileTokens();
+      // 某一侧桥没在运行 = 状态（后端已把 fetch failed 翻成人话），不写成"失败"吓人；
+      // 只有在两侧都没对成的时候才提示失败。
       const line = (name: string, side: any, reason: string) => {
         if (side) {
           const res = side.result || {};
           if (res.reason) return `${name}：${res.reason}`;
           const add = num(res.addedTokens);
-          return add > 0 ? `${name}：补记 ${num(res.added)} 笔 / ${fmtFull(add)} tokens` : `${name}：无差额，已一致`;
+          return add > 0 ? `${name}：补记 ${num(res.added)} 笔 / ${fmtFull(add)} tokens` : `${name}：无差额，与 DSH 一致`;
         }
-        return reason ? `${name}：${reason}` : '';
+        if (!reason) return '';
+        return reason.includes(name) ? reason : `${name}：${reason}`;
       };
       const parts = [line('本机', r?.local, String(r?.localReason || '')), line('服务端', r?.remote, String(r?.remoteReason || ''))].filter(Boolean);
+      if (!r?.ok) { setRcMsg('两侧桥都没取到，对账未执行：' + parts.join('；')); return; }
       setRcMsg(parts.length ? parts.join('；') : '对账完成');
       await load();
     } catch (e: any) {
