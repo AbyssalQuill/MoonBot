@@ -20,6 +20,8 @@ interface NapStatus {
   bridge?: { webui?: string; http?: string; ws?: string };
   files?: { webui?: boolean; onebot?: string[]; protocol?: string[] };
   mismatch?: { http?: boolean; ws?: boolean };
+  /** 【2026-09-16】NapCat 自己的 QQ 登录态（"不回复"排查的第一分叉：要扫码 vs 桥聋了） */
+  login?: { ok?: boolean; isLogin?: boolean; online?: boolean; nick?: string; uin?: string; loginPhase?: string; coreReady?: boolean; error?: string };
   notes?: string[];
 }
 
@@ -116,6 +118,23 @@ export default function NapcatTokensCard() {
             NapCat 磁盘现状：WebUI <code>{st.napcat?.webui || '（空）'}</code>　HTTP <code>{st.napcat?.http || '（空）'}</code>　WS <code>{st.napcat?.ws || '（空）'}</code>
             <br />
             桥配置期望值：HTTP <code>{st.bridge?.http || '（空）'}</code>　WS <code>{st.bridge?.ws || '（空）'}</code>
+            <br />
+            {/* 【2026-09-16】登录态是"机器人不回复"排查的第一分叉：要扫码 / 还是桥的连接断了 */}
+            QQ 登录态：
+            {st.login?.ok ? (
+              st.login.isLogin ? (
+                <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
+                  ✅ 已登录{st.login.online ? '、在线' : ''}
+                  {st.login.nick ? `（${st.login.nick}${st.login.uin ? ' · ' + st.login.uin : ''}）` : ''}
+                </span>
+              ) : (
+                <span style={{ color: 'var(--nc-danger-600)' }}>
+                  ⚠️ 未登录 —— 需要去管理端首页 → NapCat WebUI 扫码
+                </span>
+              )
+            ) : (
+              <span>查不到（{st.login?.error || 'NapCat 没起来 / WebUI 不可达'}）</span>
+            )}
             {mismatch && (
               <>
                 <br />
@@ -149,7 +168,7 @@ export default function NapcatTokensCard() {
             <label className="switch-row">
               <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} />
               <span>写完重启 NapCat 容器（推荐）</span>
-              <em>NapCat 启动时才读配置；不重启则新令牌要等下次启动才生效。重启用 <code>docker restart -t 30</code>（给 30 秒宽限，避免掉登录态）</em>
+              <em>NapCat 启动时才读配置；不重启则新令牌要等下次启动才生效。重启用 <code>docker restart -t 60</code>（给 30 秒宽限，避免掉登录态）</em>
             </label>
           </div>
 
@@ -175,6 +194,12 @@ export default function NapcatTokensCard() {
             并让 WebUI 也用桥的令牌，三处一次对齐（最省事，推荐先试这个）。
             令牌只允许 4~64 位的字母/数字/符号（不能有空格、引号、中文）；写入前自动备份到同目录 <code>_bak-&lt;时间&gt;</code>。
             WebUI 令牌改完后，管理端首页/服务端入口里那些 NapCat 链接会<b>自动带新令牌</b>（它们每次从服务端读 webui.json，不是写死的）。
+            <br />
+            <b>重启 NapCat 不会掉登录态</b>：QQ 的会话存在数据卷 <code>napcat-qq</code> 里，登录票据在
+            <code>webui.json</code> 同目录的 <code>napcat_&lt;QQ&gt;.json</code>；容器起来后 NapCat 按
+            <code>ACCOUNT=&lt;QQ&gt;</code> <b>自动快速登录</b>，不需要重新扫码。我们已经把重启宽限统一成
+            <code>-t 60</code>（宽限太短会被硬杀）。真正会让它掉登录的只有：① 在别处登录同一个 QQ（手机/电脑）；
+            ② 手动 <code>docker rm</code> 掉容器或用不同的挂载重建（数据卷没带上的话）。
           </div>
         </>
       )}
