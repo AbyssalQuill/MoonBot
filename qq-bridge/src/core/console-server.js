@@ -2144,7 +2144,13 @@ export function startConsoleServer() {
           } catch (eLint) {
             log(`[send] 发送后质量软提醒异常（不影响发送结果）: ${eLint?.message ?? eLint}`);
           }
-          sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
+          /* 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**桥自动加上的引用**也报回去：
+           * 以前自动引用是偷偷加的（结果里 quoted 恒为 null），模型既不知道自己引用了谁、
+           * 也没法解释或纠正。现在 autoQuoted 会列出「第几条气泡引用了哪条消息」。 */
+          const autoQuoted = (Array.isArray(sentMessages) ? sentMessages : [])
+            .map((x, i) => (x && x.quoted ? { bubble: i + 1, quotedId: String(x.quoted) } : null))
+            .filter(Boolean);
+          sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(autoQuoted.length ? { autoQuoted } : {}), ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
         } catch (error) {
           if (error?.sent?.length) {
             recordSentMessages(key, error.sent);
