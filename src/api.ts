@@ -123,9 +123,11 @@ export const personaApply = (uid: string, mode: 'save' | 'apply' | 'fuse', text?
  * 于是旧令牌（默认 truefriend）照样能进、桥却用新令牌连不上。现在这两个接口是真正落地的那个：
  *   GET  /api/napcat/tokens → NapCat 磁盘现状 + 桥配置期望值（都只回掩码）
  *   POST /api/napcat/tokens → 写进 NapCat 的 webui.json / onebot11*.json + 重启容器 + 复验新/旧令牌
- * 请求体：{ webuiToken?, httpToken?, wsToken?, restart? }（不传的项不动） */
+ * 请求体：{ webuiToken?, httpToken?, wsToken?, restart?, useBridgeTokens? }
+ *   useBridgeTokens=true → 不填令牌，直接用**桥配置里现有的** HTTP/WS 令牌去写 NapCat
+ *   （WebUI 令牌没单独填时也用它）：语义是"让三处一致成桥里那个令牌"。 */
 export const getNapcatTokens = () => api<any>('/napcat/tokens');
-export const applyNapcatTokens = (patch: { webuiToken?: string; httpToken?: string; wsToken?: string; restart?: boolean }) =>
+export const applyNapcatTokens = (patch: { webuiToken?: string; httpToken?: string; wsToken?: string; restart?: boolean; useBridgeTokens?: boolean }) =>
   api<any>('/napcat/tokens', { method: 'POST', body: JSON.stringify(patch) });
 /** 【2026-09-14】用量统计现在**两边都取**：local=本机桥、remote=服务端桥（null=没取到，看 remoteReason）、
  *  total=两份合并的合计。report 保留为合计（兼容旧字段）。 */

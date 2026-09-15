@@ -4921,23 +4921,30 @@ export function startConsoleServer() {
         if (req.method === 'POST') {
           const body = await readBody();
           try {
-            const result = await tokMod.applyNapcatTokens({
-              webuiToken: body?.webuiToken,
-              httpToken: body?.httpToken,
-              wsToken: body?.wsToken,
+            // 【2026-09-15 主人反馈"这个界面重复了"】合并成一处之后，管理端不需要再手抄令牌：
+            // useBridgeTokens=true 就用**桥配置里现在这两个令牌**去写 NapCat（HTTP/WS），
+            // WebUI 令牌没单独填时也用它 —— 语义就是"让三处一致成桥里那个令牌"。
+            const useBridge = body?.useBridgeTokens === true;
+            const bridgeHttp = String(cfgRef?.napcat?.accessToken ?? '').trim();
+            const bridgeWs = String(cfgRef?.napcat?.wsAccessToken ?? '').trim() || bridgeHttp;
+            const payload = {
+              webuiToken: String(body?.webuiToken ?? '').trim() || (useBridge ? bridgeHttp : ''),
+              httpToken: String(body?.httpToken ?? '').trim() || (useBridge ? bridgeHttp : ''),
+              wsToken: String(body?.wsToken ?? '').trim() || (useBridge ? bridgeWs : ''),
               restart: body?.restart !== false
-            });
+            };
+            const result = await tokMod.applyNapcatTokens(payload);
             // 写盘成功 → 把桥这边的期望值也对齐（**同时改内存**：config.json 是原子替换写盘，
             // 文件监听偶尔收不到这次变更，只写文件会出现"磁盘已改、桥还拿旧令牌去连"的假不一致）
-            if (result?.ok && (body?.httpToken || body?.wsToken)) {
+            if (result?.ok && (payload.httpToken || payload.wsToken) && !useBridge) {
               try {
-                if (body?.httpToken) cfgRef.napcat.accessToken = String(body.httpToken).trim();
-                if (body?.wsToken) cfgRef.napcat.wsAccessToken = String(body.wsToken).trim();
+                if (payload.httpToken) cfgRef.napcat.accessToken = payload.httpToken;
+                if (payload.wsToken) cfgRef.napcat.wsAccessToken = payload.wsToken;
                 const file = readJsonSafe(configFilePath(), null, true);
                 if (file && typeof file === 'object') {
                   file.napcat = file.napcat ?? {};
-                  if (body?.httpToken) file.napcat.accessToken = String(body.httpToken).trim();
-                  if (body?.wsToken) file.napcat.wsAccessToken = String(body.wsToken).trim();
+                  if (payload.httpToken) file.napcat.accessToken = payload.httpToken;
+                  if (payload.wsToken) file.napcat.wsAccessToken = payload.wsToken;
                   const bak = configFilePath() + '.bak-tokens';
                   try { fs.copyFileSync(configFilePath(), bak); } catch { /* 忽略 */ }
                   atomicWriteJson(configFilePath(), file);
