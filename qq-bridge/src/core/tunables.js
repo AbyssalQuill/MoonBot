@@ -33,6 +33,11 @@ export const TUNABLE_SPECS = [
   { key: 'sendLinearMin', path: ['social', 'send', 'linearMinMs'], type: 'dur', min: 0, max: 5000, label: '两条气泡最小间隔', desc: '无论气泡多短，两条之间至少间隔这么久（默认 250ms），避免贴脸连发' },
   { key: 'sendLinearCap', path: ['social', 'send', 'linearCapMs'], type: 'dur', min: 500, max: 10000, label: '两条气泡最大间隔', desc: '打字间隔的上限（默认 4000ms）：超长气泡也不会等到天荒地老' },
   { key: 'sendLinearJitter', path: ['social', 'send', 'linearJitterRatio'], type: 'float', min: 0, max: 0.9, label: '打字速度抖动', desc: '每条打字时间的随机浮动比例（默认 0.25=±25%），真人不会每条都一样快' },
+  // —— 私聊「不抢话」：等对方打完字再回 + 概率插话（2026-09-15 主人要求，见 core/typing-hold.js）——
+  { key: 'typingEnabled', path: ['social', 'typing', 'enabled'], type: 'bool', label: '私聊等对方打完字', desc: 'true=对方正在输入时先等 ta 打完再回（默认开启）；false=不看打字状态，按正常节奏回' },
+  { key: 'typingHoldMax', path: ['social', 'typing', 'holdMaxMs'], type: 'dur', min: 1000, max: 60000, label: '最多等多久', desc: '对方一直不停打字时，最多等这么久（默认 12000ms）就插话，避免永远不回复' },
+  { key: 'typingBreakProbability', path: ['social', 'typing', 'breakProbability'], type: 'float', min: 0, max: 1, label: '中途插话概率', desc: '"不等 ta 打完直接接话"的概率（默认 0.15）。主人说"别抢话"就调小（0.05），说"多接话/别老等着"就调大（0.3~0.5）' },
+  { key: 'typingRefreshOnMessage', path: ['social', 'typing', 'refreshOnMessageMs'], type: 'dur', min: 0, max: 30000, label: '收到消息后续多少毫秒', desc: 'QQ 的输入状态事件不可靠：收到对方一条消息就认为"他还在打字"，续这么久（默认 5000ms）。不停发消息时打字状态就一直是连续的' },
   // —— 模型相关（改完会同步给隔离 DSH 的 agent-default-model，见 applyTunable）——
   { key: 'modelProvider', path: ['dsh', 'provider'], type: 'str', modelGroup: true, label: '模型服务商', desc: 'deepseek-official=DeepSeek 官方（默认）；xiaomi-token-plan-cn=小米 MiMo；空=自动探测用 DSH 端默认' },
   { key: 'model', path: ['dsh', 'model'], type: 'str', modelGroup: true, label: '主模型', desc: '如 deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro / mimo-v2.5；留空=DSH 默认' },

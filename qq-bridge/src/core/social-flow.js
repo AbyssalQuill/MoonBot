@@ -60,6 +60,19 @@ export function appendSocialMessage(key, sender, textContent, plainContent, quot
   };
   st.lastUnreadSeq = msg.seq;
   st.lastIncomingAt = Date.now();
+  // 【2026-09-15 主人要求「不停打字发消息，打字状态应该是不断的」】
+  // QQ 的 input_status 事件并不可靠（有时只在开始/结束各来一次，中间一直打字也不重发），
+  // 所以这里用"消息本身"续上打字窗口：收到对方一条消息 = ta 刚才在打字，很可能还在接着打。
+  // 私聊才这么做（群里多人说话不代表某一个人在连续打字，误续会把群聊唤醒拖慢）。
+  if (String(key).startsWith('private:') && cfgRef?.social?.typing?.enabled !== false) {
+    const refreshMs = Number(cfgRef?.social?.typing?.refreshOnMessageMs);
+    const keep = Number.isFinite(refreshMs) && refreshMs >= 0 ? refreshMs : 5000;
+    if (keep > 0) {
+      const until = Date.now() + keep;
+      if (!st.peerTypingSince) st.peerTypingSince = Date.now();
+      st.peerTypingUntil = Math.max(Number(st.peerTypingUntil) || 0, until);
+    }
+  }
   st.preSleepWaitSatisfiedAt = 0; // 有新消息进来，之前的“沉睡前已等待/已观察”作废
   st.preSleepWaitObservedAt = 0;
   st.preSleepWaitAccumMs = 0;

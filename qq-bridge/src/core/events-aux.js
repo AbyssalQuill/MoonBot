@@ -206,11 +206,13 @@ export async function handleInputStatusNotice(event) {
   saveSocialState();
   log(`[typing] ${key} 对方正在输入（event_type=${eventType} "${statusText}"）`);
   if (st.pendingWakeTimer) {
+    // 上限取配置里的 social.typing.holdMaxMs（默认 12s）：早先写死 2.5s，遇到"打一长段话"的人会半路插话。
+    const holdMaxMs = Math.max(1000, Number(cfgRef?.social?.typing?.holdMaxMs) || PEER_TYPING_HOLD_MAX_MS);
     const started = st.pendingWakeTimerStartedAt || now;
     const elapsed = now - started;
-    if (elapsed < PEER_TYPING_HOLD_MAX_MS) {
+    if (elapsed < holdMaxMs) {
       clearTimeout(st.pendingWakeTimer);
-      const extendMs = Math.max(500, Math.min(PEER_TYPING_HOLD_MAX_MS - elapsed, 800));
+      const extendMs = Math.max(500, Math.min(holdMaxMs - elapsed, 800));
       st.pendingWakeTimer = setTimeout(() => {
         st.pendingWakeTimer = null;
         st.pendingWakeTimerStartedAt = 0;
@@ -218,7 +220,7 @@ export async function handleInputStatusNotice(event) {
         st.pendingWakeReason = null;
         void sendWakePrompt(key, finalReason).catch((error) => log(`[default] 计划唤醒异常 ${key}:`, error?.message ?? error));
       }, extendMs);
-      log(`[typing] ${key} 对方仍在输入，唤醒窗口顺延 ${extendMs}ms`);
+      log(`[typing] ${key} 对方仍在输入，唤醒窗口顺延 ${extendMs}ms（已等 ${(elapsed / 1000).toFixed(1)}s / 上限 ${(holdMaxMs / 1000).toFixed(0)}s）`);
     }
   }
 }

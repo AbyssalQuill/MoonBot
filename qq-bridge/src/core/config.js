@@ -149,6 +149,15 @@ export function loadConfig() {
         defaultQuietMs: 8000,
         minQuietAfterNewMs: 10000   // 收到新消息后至少再等这么久（默认 10 秒），防止抢话
       },
+      // 【2026-09-15 主人要求】私聊「不抢话」：看对方打字状态、等 ta 打完再回；
+      // 对方不停发消息时打字状态保持连续；用概率骰子决定要不要插话（智能接话）；
+      // 等待期间的消息全部排队 → 合并成一次注入（省注入轮数）。详见 core/typing-hold.js
+      typing: {
+        enabled: true,
+        holdMaxMs: 12000,            // 最多等这么久（到点就插话，避免遇到"打字没完"的人一直不回复）
+        refreshOnMessageMs: 5000,    // 收到一条消息后，把"对方在打字"再续这么多毫秒（QQ 输入事件不可靠）
+        breakProbability: 0.15       // 每次唤醒的插话概率（0=只等他停，1=从不等待）
+      },
       sticker: {
         enabled: true,             // 表情包体系总开关
         syncTtlMs: 60000,          // QQ 收藏表情刷新缓存 TTL（毫秒）
