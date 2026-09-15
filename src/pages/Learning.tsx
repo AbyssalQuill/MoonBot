@@ -883,6 +883,14 @@ function UsagePanel() {
     ? `北京 ${String(Math.floor(dayStartMin / 60)).padStart(2, '0')}:${String(dayStartMin % 60).padStart(2, '0')} 换日`
     : '北京 00:00 换日';
   const note = typeof report?.note === 'string' && report.note ? report.note : '';
+  // 与 DSH 对账状态（桥侧每 5 分钟自动跑一次；标题栏那个按钮是手动再跑一次）
+  const rcLast = isObj(report?.reconcile?.last) ? report.reconcile.last : null;
+  const rcText = rcLast
+    ? `已与 DSH 对账：${bjClock(num(rcLast.at))} 扫描 ${num(rcLast.scanned)} 个会话 · `
+      + (num(rcLast.addedTokens) > 0
+        ? `补记 ${fmtFull(num(rcLast.addedTokens))} tokens（桥侧此前漏记的帧）`
+        : '逐会话与 DSH 完全一致')
+    : '';
 
   return (
     <div className="card token-panel">
@@ -903,6 +911,7 @@ function UsagePanel() {
       </div>
 
       {rcMsg && <div className="lrn-note lrn-note-soft">{rcMsg}</div>}
+      {!rcMsg && rcText && <div className="lrn-note lrn-note-soft">{rcText}（每 5 分钟自动对账一次；平台控制台因结算延迟可能略差几秒的量）</div>}
 
       {note && <div className="lrn-note lrn-note-soft">{note}</div>}
 
