@@ -1692,6 +1692,15 @@ export function startConsoleServer() {
           next.infinite = true;
           next.sleepUntil = null;
           next.triggers.anyMessage = true;
+          /* 【2026-09-15 修「活跃 = 潜水」】以前只强制 anyMessage，概率还是潜水那套 0.05，
+           * 于是"转活跃"之后实际是"每 20 条消息才随机醒一次"，主人一眼看出它和潜水没区别。
+           * 现在：没显式给 probability 时用专用的活跃概率（social.wake.activeProbability，默认 0.3）。 */
+          if (!('probability' in inputTriggers)) {
+            const activeProb = Number(cfgRef.social?.wake?.activeProbability);
+            next.triggers.probability = Number.isFinite(activeProb) && activeProb > 0
+              ? Math.min(1, activeProb)
+              : Math.max(Number(current.triggers?.probability) || 0, 0.3);
+          }
         }
         if (typeof input.infinite === 'boolean' && next.mode !== 'active') next.infinite = input.infinite;
         if (next.infinite) {

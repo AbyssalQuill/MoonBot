@@ -104,6 +104,11 @@ export function loadConfig() {
         recommendedSleepMinMs: 300000,
         recommendedSleepMaxMs: 7200000,
         recommendedProbability: 0.05,
+        /* 【2026-09-15 主人反馈"活跃模式配置看着就是我的潜水配置，那它和潜水有何区别"】
+         * 确实有这个问题：转活跃以前只强制 anyMessage/infinite，**概率仍沿用潜水时代的 0.05** ——
+         * 于是"活跃"= 每 ~20 条消息才随机醒一次，观感和潜水差不多。
+         * 现在给活跃模式一个自己的概率：切到 active 时若没显式指定 probability 就用它。 */
+        activeProbability: 0.3,
         recommendedKeywords: ['小鲸鱼', 'DeepSeek', 'deepseek', 'DS', 'D老师', 'd老师', 'D指导', 'd指导', 'D师傅', 'd师傅', '深度求索', '大肥鱼', '鲸鱼', 'DeepSeek V3', 'DeepSeek R1', 'R1'],
         recommendedAtMention: true,
         recommendedNameMention: true,

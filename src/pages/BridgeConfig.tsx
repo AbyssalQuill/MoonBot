@@ -59,7 +59,7 @@ const LABEL: Record<string, string> = {
   // 名单
   private: '私聊', groups: '群聊',
   // 唤醒
-  defaultMode: '默认模式', recommendedProbability: '普通消息唤醒概率', recommendedKeywords: '唤醒关键词',
+  defaultMode: '默认模式', recommendedProbability: '普通消息唤醒概率', activeProbability: '活跃模式搭话概率', recommendedKeywords: '唤醒关键词',
   recommendedAtMention: '被 @ 唤醒', recommendedNameMention: '被喊名字唤醒', recommendedQuestion: '被提问唤醒',
   recommendedPoke: '被戳一戳唤醒', recommendMsgProbability: '消息触发概率', batchWindowMs: '连发合并窗口',
   maxWakePerMinute: '每分钟唤醒上限', maxWakePerHour: '每小时唤醒上限', maxWakePerMinutePrivate: '私聊每分钟上限',
@@ -184,6 +184,7 @@ const TOOL_MCP: Record<string, string> = {
   trustedCrossSessionUids: '允许 agent 跨会话读取/带话的 QQ 号（数组），一般只放你自己最信任的好友。',
   deepsleep: '总开关：开启后**所有群聊**的消息入库但不唤醒、不回复、不主动冒泡（省 token）；**私聊照常**。拍一拍等群内事件同样被静默。主人发 /start 可随时恢复（这条命令不经过模型，永远有效）。',
   recommendedHint: '喂给模型的“潜水/唤醒行为规则”长文本；一般不建议新手改动。',
+  activeProbability: '「活跃模式搭话概率」：把某个群/私聊**转成活跃**时用的随机搭话概率（默认 0.3 = 三成）。以前转活跃会沿用潜水那套 0.05（每 20 条才醒一次），看起来跟潜水没区别 —— 这个值就是用来区分两者的：调大=更活跃，调小=更省额度（配合「群每小时唤醒上限」兜底）。',
   preSleepWaitMs: '想潜水前先“静默观察”的窗口时长：窗口内若没人说话就可以安心睡。',
   wakeThreshold: '同一大会话累计多少轮后自动归档并轮换到“预热的下一代会话”，防上下文膨胀。',
   prewarmAhead: '到达轮换阈值前提前多少轮预建新会话并预热，让首轮命中缓存、不卡顿。',
@@ -196,8 +197,7 @@ const TOOL_MCP: Record<string, string> = {
   'social.wait.defaultMs': '「假装在想」的基础停顿：收到该回的消息后，先停这么久再开始组织回复（毫秒）。太短=秒回机器人，太长=反应迟钝。建议保留默认。',
   'social.wait.minMs': '每次停顿的随机下限（毫秒）。实际停顿会在 最短~最长 之间随机挑一个，避免每次都一模一样、显得机械。',
   'social.wait.maxMs': '每次停顿的随机上限（毫秒）。上下限差得越大，节奏越自然；设成和下限一样 = 每次都固定停这么久。',
-  'social.wait.defaultQuietMs': '「默认静默」：轮到你开口前，先安静观察这么久。给自己留出判断“这话题该不该接”的时间，群聊里尤其管用。',
-  'social.wait.unfinishedQuietMs': '「话没说完时的静默」：对方最后一句看起来还没说完（例如结尾是“然后…”“等我一下”），就多等这么久再开口，别急着插话。',
+  'social.wait.defaultQuietMs': '「默认静默」：轮到你开口前，先安静观察这么久。给自己留出判断“这话题该不该接”的时间，群聊里尤其管用。',  'social.wait.unfinishedQuietMs': '「话没说完时的静默」：对方最后一句看起来还没说完（例如结尾是“然后…”“等我一下”），就多等这么久再开口，别急着插话。',
   'social.wait.burstQuietMs': '「对方连发时的静默」：对方在很短时间内连着发了好几条（15 秒内 ≥3 条），就多等这么久，等他把话说完再一次性回应。',
   'social.send.linearPerCharMs': '「每个字的打字时间」：一次回复里，第 2 条气泡起，等 `这条字数 × 这个值` 毫秒再发（默认 150）。长句自然等得久、短句快 —— 这是唯一的节奏规则。',
   'social.send.linearMinMs': '「两条气泡最小间隔」：再短的气泡也至少隔这么久（默认 250ms），避免两条贴在一起刷出来。',
