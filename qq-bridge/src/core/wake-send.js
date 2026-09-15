@@ -13,6 +13,10 @@ import { formatGroupInfoLine, formatGroupListLine } from './group-cache.js';
 // 语音在「语音」页，表情包在桥配置页的「表情包」卡）。两边都关着/概率 0 时不会注入多余内容。
 import { voiceTurnHint } from './voice.js';
 import { memeTurnHint } from './send-dice.js';
+// 【2026-09-16 打字窗合并】对方的"正在输入"状态也用来管**在途回合的注入**（不只是唤醒调度）：
+// 主人实测的碎片化就是从这里来的 —— 他连着发两条，桥在两次模型步边界各注入一次，
+// 他看到的对话窗口里就是两个独立的 [Mid-turn] 块（而不是合成一个 2 条的块）。
+import { typingHoldDecision, typingHoldText } from './typing-hold.js';
 import {
   getSocialState, saveSocialState, social, seenForwardIds,
   cancelReplyCheck, setupSleepTimer, collectFreshWakeMedia, isInSleepWindow,
@@ -574,6 +578,33 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     // 调用方一旦分不清，就会把"已经给过"当成"没给过"——正是 §4.13.3 那条"改这类逻辑先 grep 出所有调用点"。
     log(`[steer] ${key}：这 ${unreadAll.length} 条本回合**已经给过它了**（唤醒已展示 ${alreadyShown.size} 条 / 已注入 ${alreadySteered.size} 条）—— 无需再投，按「已交付」返回 true（防重复投递 → 防重复回复）`);
     return true;
+  }
+  // ③-b 【2026-09-16 打字窗合并（主人要求）】"对方还在打字"时**一次都不投**：把这批继续攒着，
+  // 等 ta 打完（或骰子命中插话 / 到 holdMaxMs 上限）再**合成一个** [Mid-turn] 块一次性投出去。
+  //
+  // 为什么要在**这里**加（而不是只在唤醒调度里）：唤醒调度那条路只管"要不要新起一轮"，而在途回合的
+  // 注入走的是本函数。主人 09-15 实测：他在同一个回合里连发 5 条（15:54:14 / 15:56:03 / 15:56:50 /
+  // 15:57:06 / 15:57:46），桥在**每个模型步边界各注入一次** —— 对话窗口里就是 5 个独立的
+  // `[Mid-turn] 1 new message(s)` 块，一条一条被处理；他要的是"打字过程里全部入队，最后合并成一次注入"。
+  // 判据与唤醒调度**共用同一份** typingHoldDecision（typing-hold.js），不会出现两套规则漂移：
+  //   · 对方没在打字 → 原行为（步边界发车 / 即时注入）不变；
+  //   · 对方在打字 → 攒着（消息仍在 unread 里、不进 turnSteeredSeqs，所以下个步边界/保持循环还会来取）；
+  //   · 到 holdMaxMs 上限或骰子命中 → breakIn，照旧投（绝不会因为对方打个没完而永远不回）。
+  if (!opts.noTypingGate) {
+    const gate = typingHoldDecision({
+      typingUntil: Number(st.peerTypingUntil) || 0,
+      // "已等多久"按**最早这条待交付消息的到达时刻**算，跟唤醒调度同一口径
+      since: Number(unread[0]?.time) || Date.now(),
+      now: Date.now(),
+      cfg: cfgRef?.social?.typing,
+    });
+    if (gate.wait) {
+      log(`[steer] ${key} ${typingHoldText(gate)}：这 ${unread.length} 条继续入队攒着，等 ta 打完**一次**注入（不半路一条一条塞）`);
+      // 保持托管（turn-hold）会话：回 'typing-defer' 让保持循环"继续持有、别关回合"；
+      // 非保持会话：回 false，交给调用方按正常唤醒流程（那条路同样受打字判定约束）。
+      return forced ? 'typing-defer' : false;
+    }
+    if (gate.breakIn) log(`[steer] ${key} ${typingHoldText(gate)}（这 ${unread.length} 条照常投）`);
   }
   // ③ 【2026-09-15 合并注入】保持（turn-hold）托管的会话：**不在这里即时注入**。
   //    理由与不变量见文件顶部 STEER_PENDING_MAX_MS 那段：同一个 step 里注入 N 次 = 模型在同一次思考里

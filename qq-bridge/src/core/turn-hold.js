@@ -146,6 +146,7 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
   let lastActivity = now();
   let lastRenew = 0;
   let notLandedLogged = false;   // "报已交付但没落地"只喊一次，避免 200ms 轮询刷屏
+  let typingDeferLogged = false; // 【2026-09-16 打字窗合并】"对方还在打字所以继续攒"也只喊一次
   const budgetEnd = now() + requestBudgetMs;
 
   const finish = (reason) => {
@@ -189,7 +190,19 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
       } catch (error) {
         errText = String(error?.message ?? error);
       }
-      log(`[hold] ${key} steer 结果：${ok === true ? '成功' : '未成功'}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+      log(`[hold] ${key} steer 结果：${ok === true ? '成功' : (ok === 'typing-defer' ? '推迟（对方还在打字）' : '未成功')}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+      if (ok === 'typing-defer') {
+        // 【2026-09-16 打字窗合并】对方还在打字 → 这一批**继续攒**：不投、不改水位、**不关回合**。
+        // 为什么不能走下面的 finish()：那会让 DSH 收尾这一轮、消息退回下一轮唤醒 —— 主人要的是
+        // "打字期间全部入队，最后合并成一次注入"，而不是"再开一轮"。到 holdMaxMs 上限或骰子命中
+        // （判据都在 typing-hold.js）下一次循环就会正常投出去，所以这里不会把消息卡死。
+        if (!typingDeferLogged) {
+          typingDeferLogged = true;
+          log(`[hold] ${key} 对方还在打字 → 这 ${batch.length} 条继续入队（回合不关、水位不动），等 ta 打完一次注入`);
+        }
+        await sleep(POLL_MS);
+        continue;
+      }
       if (ok !== true) {
         // "没塞成"≠"消息没进去"：busy 分支与保持循环会同时看到同一条消息，谁先到谁塞；
         // 而且有些消息在**本轮唤醒正文里就已经展示过**（turnSeenUnread），不必再注入。
@@ -281,7 +294,13 @@ export async function flushStepBatch({ key, sid, turn, cfg } = {}) {
   } catch (error) {
     errText = String(error?.message ?? error);
   }
-  log(`[hold] ${k} 步边界 steer 结果：${ok === true ? '成功' : '未成功'}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+  log(`[hold] ${k} 步边界 steer 结果：${ok === true ? '成功' : (ok === 'typing-defer' ? '推迟（对方还在打字）' : '未成功')}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+  if (ok === 'typing-defer') {
+    // 【2026-09-16 打字窗合并】对方还在打字：这一步**不发车**。消息仍在 unread 里（没标"已给"），
+    // 下一步的 step/end 会再试一次；一旦对方停手（或到 holdMaxMs 上限/骰子命中）就一次性投出去。
+    log(`[hold] ${k} 步边界发车推迟：对方还在打字，这 ${batch.length} 条继续入队等一次注入（不是半路一条一条塞）`);
+    return false;
+  }
   if (ok !== true) {
     // 没塞成不是灾难：消息仍在 unread 里（没标"已给"），wake-send.js 的兜底判据下次会放行即时注入，
     // 投递看门狗 25s 也会兜。这里只保证**绝不静默**。

@@ -62,16 +62,56 @@ t('唤醒展示了 seq59 时，"说好了啊" 引用 seq59（正确的引用要�
   assert.equal(pickSmartQuote(st, '说好了啊', { now: at(0), record: false }), MC);
 });
 
-t('【回归】step 边界注入 seq60 后，"那就说定了" 不再引用老消息 seq59，而是引用 seq60', () => {
+t('【回归】step 边界注入 seq60 后，"那就说定了" 不再引用老消息 seq59（新契约：多条候选+零共同词 → 干脆不引用）', () => {
   const st = { recentMessages: baseMessages(), turnSeenUnread: [59], turnSteeredSeqs: [60] };
   const got = pickSmartQuote(st, '那就说定了 ᗜ ᴗ ᗜ', { now: at(23), record: false });
   assert.notEqual(got, MC, '不得再引用那条老消息（旧 bug）');
-  assert.equal(got, CHANCE);
+  // 【2026-09-16 改契约】旧实现这里会"按位置"挑最新的候选（seq60），但那只是位置兜底 ——
+  // 主人实测的"引用错误"正出在这种零相关的瞎猜上（见 qq-send.js SMART_QUOTE_MIN_SCORE 的复盘）。
+  // 现在的规则：候选多于一条、且没有任何共同词 → 不引用（宁可没有引用框，也不张冠李戴）。
+  assert.equal(got, null);
 });
 
-t('注入 seq61 后，"笑啥" 引用 seq61（同分取更新的一条）', () => {
+t('注入 seq61 后，"笑啥" 零共同词 → 不引用（同上：多候选不做位置兜底）', () => {
   const st = { recentMessages: baseMessages(), turnSeenUnread: [59], turnSteeredSeqs: [60, 61] };
-  assert.equal(pickSmartQuote(st, '笑啥 ᗜ - ᗜ', { now: at(30), record: false }), HEHE);
+  assert.equal(pickSmartQuote(st, '笑啥 ᗜ - ᗜ', { now: at(30), record: false }), null);
+});
+
+t('【2026-09-16 线上回归】群聊那批候选里，回复与任何一条都无共同词 → 不引用（不再挑"决定，绝地反击"）', () => {
+  // 线上真实一批（09-15 15:49）：吓哭了 + 一张图 + 决定，绝地反击 + 拍一拍，
+  // 模型回「投降喵是什么投降法」，却引用了「决定，绝地反击」（autoQuoted.quotedId 就是那条的 id）。
+  const st = {
+    recentMessages: [
+      { seq: 201, time: at(-60), isSelf: false, messageId: '900000001', plain: '吓哭了' },
+      { seq: 202, time: at(-55), isSelf: false, messageId: '900000002', plain: '', hasMedia: true },
+      { seq: 203, time: at(-50), isSelf: false, messageId: '900000003', plain: '决定，绝地反击' },
+      { seq: 204, time: at(-40), isSelf: false, messageId: '900000004', plain: '投降喵是什么投降法' },
+    ],
+    turnSeenUnread: [201, 202, 203], turnSteeredSeqs: [],
+  };
+  assert.equal(pickSmartQuote(st, '投降喵是什么投降法', { now: at(0), record: false }), null);
+});
+
+t('多条候选但有 1 个真实共同词 → 仍然引用（正确的引用不会被这条新规则误杀）', () => {
+  const st = {
+    recentMessages: [
+      { seq: 1, time: at(-30), isSelf: false, messageId: '111', plain: '今晚打不打三角洲' },
+      { seq: 2, time: at(-20), isSelf: false, messageId: '222', plain: '晚饭吃什么好' },
+    ],
+    turnSeenUnread: [1, 2], turnSteeredSeqs: [],
+  };
+  assert.equal(pickSmartQuote(st, '三角洲我玩得菜', { now: at(0), record: false }), '111');
+});
+
+t('停用词不算共同词：满篇"什么/可以"也不构成引用依据', () => {
+  const st = {
+    recentMessages: [
+      { seq: 1, time: at(-30), isSelf: false, messageId: '111', plain: '这个可以吗' },
+      { seq: 2, time: at(-20), isSelf: false, messageId: '222', plain: '什么时候回来' },
+    ],
+    turnSeenUnread: [1, 2], turnSteeredSeqs: [],
+  };
+  assert.equal(pickSmartQuote(st, '什么都可以', { now: at(0), record: false }), null);
 });
 
 t('【新规则】回答"最新那条"时不自动引用（seq62 就是最新 → null，否则每句话都挂引用框）', () => {
