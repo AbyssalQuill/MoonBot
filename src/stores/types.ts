@@ -62,6 +62,8 @@ export interface ManagerState {
   instances: LocalInstance[];
   /** 服务端现场状态（连上服务器时才有；本机状态在 instances 里，两者分开两处展示） */
   remoteStatus?: RemoteServerStatus | null;
+  /** 断线自动重连的现场状态（重连中才有值）：界面显示"服务端重连中…"而不是"未运行" */
+  reconnecting?: { serverId: string; attempt: number; inSeconds: number; reason?: string } | null;
   /** 安装位置体检（装在 Program Files / 同步盘等风险位置的提醒；正常安装为空） */
   warnings?: string[];
 }

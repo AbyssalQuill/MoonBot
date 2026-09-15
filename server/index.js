@@ -197,6 +197,87 @@ function closeTunnels(connId) {
   }
 }
 
+/* ── 断线自动重连（2026-09-15 主人反馈"感觉服务器又断连了…为啥老是断连"）─────────────
+ * 现场：管理器本机开着，但 /api/state 里 connected=false、到 50470 一条 established 都没有 ——
+ * SSH 连接掉了，而**旧代码掉了就永远掉了**：`conn.on('close')` 只清缓存，没有任何重连，
+ * 于是界面一直显示"服务端未运行"，非要人手点一次「连接」。关掉应用再打开也一样（内存里的连接表本来就空了）。
+ *
+ * 现在两条路都补上：
+ *   ① 自动重连：连接**非用户主动断开**地掉了 → 按 5s/10s/20s/30s/60s 退避重连，直到成功；
+ *      重连成功会重建隧道、刷新状态缓存（与点「连接」走同一段代码）。
+ *   ② 开机自动连：管理器启动时如果上次连着某台服务器（activeServerId），自动把它连回来 ——
+ *      打开应用就该看到"服务端运行中"，而不是一个空壳界面。
+ * 安全边界：用户在界面上点过「断开」的那台不会自动重连；SSH 冷却期（凭据错/网络不通的连败）内不硬试，
+ *           免得把 fail2ban 招来，冷却结束再补一次。
+ */
+const reconnectTimers = new Map();     // serverId -> timer
+const manualDisconnects = new Set();   // 用户明确点过「断开」的 serverId（不自动重连）
+let reconnectState = { serverId: null, attempt: 0, nextAt: 0, reason: '' };
+const RECONNECT_BACKOFF_MS = [5000, 10000, 20000, 30000, 60000];
+
+function cancelReconnect(serverId) {
+  const t = reconnectTimers.get(serverId);
+  if (t) { clearTimeout(t); reconnectTimers.delete(serverId); }
+  if (reconnectState.serverId === serverId) reconnectState = { serverId: null, attempt: 0, nextAt: 0, reason: '' };
+}
+
+/** 与「连接」按钮同一段建立流程（鉴权 + 隧道 + 缓存作废 + 设为活动服务器）。 */
+async function establishConnection(server) {
+  if (sshConnections.has(server.id)) { try { sshConnections.get(server.id).end(); } catch {} sshConnections.delete(server.id); closeTunnels(server.id); }
+  const conn = await connectOne(server);
+  sshConnections.set(server.id, conn);
+  const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
+  bridgeTokenCache.delete(server.id);
+  remoteStatusCache.delete(server.id); remoteBridgeDirCache.delete(server.id);
+  remoteBridgeCfgCache.delete(server.id);
+  const cfg2 = loadConfig();
+  cfg2.activeServerId = server.id;
+  saveConfig(cfg2);
+  sshNoteSuccess(server);
+  sshRememberGoodPort(server);
+  void warmRemoteBridgeConfig(server.id, { force: true }).catch(() => {});
+  // 连接掉了就自动重连（用户主动断开的那台除外）
+  conn.on('close', () => {
+    if (manualDisconnects.has(server.id)) return;
+    if (sshConnections.get(server.id) !== conn && sshConnections.has(server.id)) return;
+    mlog(`[ssh] ${server.name || server.host} 连接断开 → 自动重连`);
+    scheduleReconnect(server.id, 'connection-closed');
+  });
+  return tunnelsCreated;
+}
+
+function scheduleReconnect(serverId, reason = '') {
+  if (!serverId || reconnectTimers.has(serverId)) return;
+  if (manualDisconnects.has(serverId)) return;
+  const cfg = loadConfig();
+  const server = cfg.servers.find((s) => s.id === serverId);
+  if (!server) return;
+  const attempt = (reconnectState.serverId === serverId ? reconnectState.attempt : 0) + 1;
+  const cool = sshCooldownInfo(server);
+  if (cool.ms > 0) {
+    // 冷却期不硬试：排到冷却结束时再试一次（冷却本身是按失败性质算的，见 sshCooldownInfo）
+    reconnectState = { serverId, attempt, nextAt: Date.now() + cool.ms, reason: 'cooldown' };
+    mlog(`[ssh] ${server.name || server.host} 冷却中（${cool.kind}），${Math.round(cool.ms / 1000)}s 后重连`);
+    const t = setTimeout(() => { reconnectTimers.delete(serverId); scheduleReconnect(serverId, reason); }, cool.ms + 500);
+    reconnectTimers.set(serverId, t);
+    return;
+  }
+  const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
+  reconnectState = { serverId, attempt, nextAt: Date.now() + delay, reason };
+  const t = setTimeout(async () => {
+    reconnectTimers.delete(serverId);
+    try {
+      await establishConnection(server);
+      mlog(`[ssh] ${server.name || server.host} 自动重连成功（第 ${attempt} 次）`);
+      reconnectState = { serverId: null, attempt: 0, nextAt: 0, reason: '' };
+    } catch (e) {
+      mlog(`[ssh] ${server.name || server.host} 自动重连失败（第 ${attempt} 次）：${e?.message ?? e}`);
+      scheduleReconnect(serverId, reason);
+    }
+  }, delay);
+  reconnectTimers.set(serverId, t);
+}
+
 function connectOne(server, opts = {}) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
@@ -220,7 +301,11 @@ function connectOne(server, opts = {}) {
       // 不开这个开关，ssh2 会在"所有方式都失败"上直接放弃 —— 表现就是那句没头没脑的
       // "All configured authentication methods failed"。开了以后两种服务器都能连。
       tryKeyboard: true,
-      readyTimeout: 10000, keepaliveInterval: 30000,
+      // 【2026-09-15 主人反馈"老是断连"】keepaliveInterval 原来只有 30s、没写 keepaliveCountMax（ssh2 默认 3），
+      // 也就是**连续 3 次探测（≈90 秒）没回应就直接判死断开**。家庭网络抖动/NAT 超时很常见，
+      // 于是隔一阵就掉一次，而掉了以后管理器又不会自己重连（见 scheduleReconnect）。
+      // 现在放宽到 6 次（≈3 分钟容错），配合下面的自动重连，掉线也能自己恢复。
+      keepaliveInterval: 30000, keepaliveCountMax: 6,
       // 认证失败时把服务器回的 USERAUTH_FAILURE(允许哪些方式) 抓下来 —— 这是后面翻译成
       // 可执行建议的唯一证据来源。只留认证相关行，并**遮蔽凭据**（debug 流里可能带上发出去的内容）。
       debug: debugLines ? (m) => {
@@ -1381,6 +1466,14 @@ app.get('/api/state', async (req, res) => {
   res.json({
     mode: r.mode, activeServer: r.server, services, tunnels: tunnelsInfo,
     connected: !!connected && sshConnections.has(connected.id),
+    /* 【2026-09-15】断线自动重连的现场状态：界面可以显示"服务端重连中…"，
+     * 而不是在自动重连的几秒里显示成"服务端未运行"（主人会以为又断了）。 */
+    reconnecting: reconnectState.serverId ? {
+      serverId: reconnectState.serverId,
+      attempt: reconnectState.attempt,
+      inSeconds: Math.max(0, Math.round((reconnectState.nextAt - Date.now()) / 1000)),
+      reason: reconnectState.reason,
+    } : null,
     // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / docker napcat / 桥进程，
     // 与本机那三个实例**分开两处**展示，绝不混在一张卡上（主人 2026-09-14 要求）。
     remoteStatus: r.remoteStatus ?? null,
@@ -1722,19 +1815,10 @@ app.post('/api/ssh/connect', async (req, res) => {
   if (!cfg.servers.find((s) => s.id === server.id)) { cfg.servers = [...cfg.servers.filter((s) => s.id !== server.id), server]; saveConfig(cfg); }
   const debugLines = [];
   try {
-    if (sshConnections.has(server.id)) { sshConnections.get(server.id).end(); sshConnections.delete(server.id); closeTunnels(server.id); }
-    const conn = await connectOne(server, { debugLines });
-    sshConnections.set(server.id, conn);
-    const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
-    bridgeTokenCache.delete(server.id); // 重连后清空 token 缓存，重新实时读取
-    remoteStatusCache.delete(server.id); remoteBridgeDirCache.delete(server.id);   // 重连后服务端现场状态/桥目录缓存作废
-    remoteBridgeCfgCache.delete(server.id);                                         // 服务端配置缓存同样作废
-    cfg.activeServerId = server.id;
-    saveConfig(cfg);
-    sshNoteSuccess(server);
-    sshRememberGoodPort(server);
-    // 连上就**预热**服务端桥配置：用户点开"功能配置"时直接命中缓存，不用先转一会儿
-    void warmRemoteBridgeConfig(server.id, { force: true }).catch(() => {});
+    // 手动连接 = 明确要连：清掉"用户点过断开"的标记，取消可能在排队的自动重连，然后走同一段建立流程
+    manualDisconnects.delete(server.id);
+    cancelReconnect(server.id);
+    const tunnelsCreated = await establishConnection(server, { debugLines });
     res.json({ success: true, message: 'SSH 连接成功，隧道已建立', tunnels: tunnelsCreated });
   } catch (e) {
     const isAuth = /authentication methods failed|authentication failure|Permission denied/i.test(String(e?.message ?? ''));
@@ -1754,6 +1838,8 @@ app.post('/api/ssh/connect', async (req, res) => {
 app.post('/api/ssh/disconnect', (req, res) => {
   const cfg = loadConfig();
   const id = req.body?.serverId ?? cfg.activeServerId;
+  // 用户**主动**断开：打上标记，别让自动重连把它又连回来（否则点了断开、几秒后又连上，人会以为按钮坏了）
+  if (id) { manualDisconnects.add(id); cancelReconnect(id); }
   if (id && sshConnections.has(id)) { sshConnections.get(id).end(); sshConnections.delete(id); }
   closeTunnels(id || '');
   bridgeTokenCache.delete(id || '');
@@ -4502,6 +4588,19 @@ if (process.env.QBM_NO_LISTEN !== '1') {
     console.log(`[QQ-Bridge Manager API] http://127.0.0.1:${PORT}`);
     scheduleAutoStart();
     ensureGuardianArmed();
+    /* 【2026-09-15 主人反馈"本地没显示服务端运行中"】管理器一启动就把上次连着的那台服务器连回来：
+     * 连接表在内存里（进程重启就空），以前打开应用永远显示"服务端未运行"，非要人手点一次「连接」。
+     * 延迟 1.5s 等后端自己稳下来；冷却中则交给 scheduleReconnect 的冷却分支处理。 */
+    setTimeout(() => {
+      try {
+        const cfg2 = loadConfig();
+        const srv = cfg2.activeServerId ? cfg2.servers.find((s) => s.id === cfg2.activeServerId) : null;
+        if (!srv) return;
+        if (sshConnections.has(srv.id)) return;
+        mlog(`[ssh] 启动自动连接 ${srv.name || srv.host}…`);
+        scheduleReconnect(srv.id, 'startup');
+      } catch (e) { mlog(`[ssh] 启动自动连接失败：${e?.message ?? e}`); }
+    }, 1500).unref?.();
     // 每 60s 复查：应用可能是"复用已在跑的后端"打开的，那一路上没有新后端去自动武装，
     // 靠这个定时复查把守卫补上（应用没开时什么都不做）。
     const gTimer = setInterval(ensureGuardianArmed, 60000);
