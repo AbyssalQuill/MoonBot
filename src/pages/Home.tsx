@@ -156,6 +156,8 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
   ];
 
   const sshConn = state?.connected;
+  /** 断线自动重连中（管理器会在几秒内自己连回来）—— 这时显示"服务端重连中…"，别显示成"未运行"让人以为坏了 */
+  const sshReconnecting = !!state?.reconnecting;
 
   /** 服务端某个组件的运行状态：连上服务器且已拿到远程状态时返回 boolean；拿不到就返回 null
    *（null = 还是按本机那套文案显示，界面上不会突然空掉）。 */
@@ -276,7 +278,9 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
               </div>
               <div className="big-foot" title={phase === 'failed' ? (i?.error || '') : (i?.note || '')}>
                 {isRemote
-                  ? <><span className={`status-dot ${remoteUp ? 'online' : 'offline'}`} /><span>{remoteUp ? '服务端运行中' : '服务端未运行'}</span></>
+                  ? (sshReconnecting
+                    ? <><span className="status-dot loading" /><span>服务端重连中…</span></>
+                    : <><span className={`status-dot ${remoteUp ? 'online' : 'offline'}`} /><span>{remoteUp ? '服务端运行中' : '服务端未运行'}</span></>)
                   : <><span className={`status-dot ${dotClass(phase)}`} /><span>{footText(i, phase)}</span></>}
               </div>
             </div>
