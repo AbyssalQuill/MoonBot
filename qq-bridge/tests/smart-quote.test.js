@@ -74,9 +74,9 @@ t('注入 seq61 后，"笑啥" 引用 seq61（同分取更新的一条）', () =
   assert.equal(pickSmartQuote(st, '笑啥 ᗜ - ᗜ', { now: at(30), record: false }), HEHE);
 });
 
-t('注入 seq62 后，"私聊发不了表情包呜呜 群里给你发" 按共同词（表情包）引用 seq62', () => {
+t('【新规则】回答"最新那条"时不自动引用（seq62 就是最新 → null，否则每句话都挂引用框）', () => {
   const st = { recentMessages: baseMessages(), turnSeenUnread: [59], turnSteeredSeqs: [60, 61, 62] };
-  assert.equal(pickSmartQuote(st, '私聊发不了表情包呜呜 群里给你发 ᗜ ‸ ᗜ', { now: at(95), record: false }), MEME);
+  assert.equal(pickSmartQuote(st, '私聊发不了表情包呜呜 群里给你发 ᗜ ‸ ᗜ', { now: at(95), record: false }), null);
 });
 
 t('共同词优先于"更新"：同一批里明确在答更早那条时，引用更早那条', () => {
@@ -102,13 +102,12 @@ t('超过 10 分钟的候选不参与', () => {
   assert.equal(pickSmartQuote(st, '和我玩mc', { now: at(601), record: false }), null);
 });
 
-t('没有投递记录（主动发起/控制台）→ 刚到的（2 分钟内）最新一条', () => {
+t('没有投递记录（主动发起/控制台）→ 也不引用（那条就是最新的，引用没意义）', () => {
   const st = { recentMessages: baseMessages(), turnSeenUnread: [], turnSteeredSeqs: [] };
-  assert.equal(pickSmartQuote(st, '在干嘛呢', { now: at(35), record: false }), MEME);
-  assert.equal(pickSmartQuote(st, '在干嘛呢', { now: at(200), record: false }), null);
+  assert.equal(pickSmartQuote(st, '在干嘛呢', { now: at(35), record: false }), null);
 });
 
-t('群聊 @我 的老消息不再压过刚刚的新消息', () => {
+t('群聊 @我的老消息不再压过新消息（也不会去引用那条老的）', () => {
   const st = {
     recentMessages: [
       { seq: 10, time: at(-300), isSelf: false, messageId: '900', plain: '@我 这个怎么配', atSelf: true },
@@ -116,7 +115,7 @@ t('群聊 @我 的老消息不再压过刚刚的新消息', () => {
     ],
     turnSeenUnread: [10, 11], turnSteeredSeqs: [],
   };
-  assert.equal(pickSmartQuote(st, '午饭吃啥都行', { now: at(0), record: false }), '901');
+  assert.equal(pickSmartQuote(st, '午饭吃啥都行', { now: at(0), record: false }), null);
 });
 
 t('没有对端消息 → 不引用', () => {

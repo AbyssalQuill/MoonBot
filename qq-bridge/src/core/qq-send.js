@@ -322,7 +322,9 @@ export function pickSmartQuote(st, bubbleText, opts = {}) {
     const fallbackMs = Number(opts.fallbackMs) > 0 ? Number(opts.fallbackMs) : SMART_QUOTE_FALLBACK_MS;
     const msgs = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
     const peers = msgs
-      .filter((m) => m && !m.isSelf && m.messageId && (now - Number(m.time || 0) < windowMs))
+      .filter((m) => m && !m.isSelf && m.messageId
+        && (now - Number(m.time || 0) < windowMs)
+        && Number(m.time || 0) <= now)      // 未来时间戳不算（测试夹具/时钟偏移时别把"还没到的消息"当最新）
       .slice(-SMART_QUOTE_MAX_CANDIDATES);
     if (!peers.length) return null;
 
@@ -359,6 +361,15 @@ export function pickSmartQuote(st, bubbleText, opts = {}) {
       if (hit >= bestScore) { bestScore = hit; best = m; }
     }
     if (!best) return null;
+    /* 【2026-09-15 修「每句话都引用」】上面挑出来的候选，如果**就是最新一条对端消息**，
+     * 那引用框纯属噪音 —— 大家都在看这一条，谁都知道你在回它。主人实测：私聊里每句回复
+     * 都挂一个引用框，看着很机械。所以：
+     *   · 回答最新那条 → 不自动引用；
+     *   · 只有"你在答一条更早的消息"（候选不是最新的、或有共同词指向更早的）才引用，
+     *     因为这时候引用框真的在帮你说明"我在回哪句"。
+     * 模型想显式引用任何消息，随时可以自己传 replyToMessageId（qq_reply / qq_send_message）。 */
+    const newestPeer = peers[peers.length - 1];
+    if (newestPeer && String(best.messageId) === String(newestPeer.messageId)) return null;
     if (opts.record !== false && st && typeof st === 'object') {
       const prev = Array.isArray(st.recentQuoteIds) ? st.recentQuoteIds : [];
       st.recentQuoteIds = [...prev, { id: String(best.messageId), at: now }].slice(-30);
@@ -416,10 +427,14 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
       if (pace != null && pace > 0) await sleep(pace);
       try {
         const sendData = await onebotSend(kind, id, msg, useReply, useAt, img);
-        // 记录真实 QQ message_id：撤回（qq_withdraw_message）与 (id:xxx) 展示都依赖它
+        // 记录真实 QQ message_id：撤回（qq_withdraw_message）与 (id:xxx) 展示都依赖它。
+        // 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**实际用上的引用目标**也带回去
+        // （auto 引用以前是桥偷偷加的，工具结果里 quoted:null → 模型压根不知道自己引用了谁，
+        //   于是它既无法解释、也无法自我纠正）。现在 sent[i].quoted 就是那条被引用的消息 id。
         sent.push({
           text: msg || (img ? '[图]' : ''),
-          messageId: sendData && sendData.message_id != null ? String(sendData.message_id) : null
+          messageId: sendData && sendData.message_id != null ? String(sendData.message_id) : null,
+          quoted: useReply ? String(useReply) : null,
         });
         if (pace != null) markSendDelivered(key, msg ? String(msg).length : 0);
       } catch (error) {
