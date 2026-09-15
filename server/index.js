@@ -4179,6 +4179,45 @@ app.get('/api/learning/token-report', async (_req, res) => {
   res.json(out);
 });
 
+/* 用量对账（主人问「面板比真实值虚高/偏低」时加的）：让两侧桥各自与 DSH 的会话级权威计数
+ * （storages/session_projcache 里的 tokenUsage.totals）比对，把被漏记的 usage 帧补成
+ * reconciled 行。幂等：水位存在桥侧 state/token-reconcile.json，重复点不会重复补。
+ * 与 token-report 一样，本机 + 服务端两边都试，任一侧失败不影响另一侧。 */
+app.post('/api/learning/token-reconcile', async (_req, res) => {
+  const out = { ok: true, at: Date.now(), local: null, remote: null, localReason: '', remoteReason: '' };
+  const call = async (base, token) => {
+    const r = await fetch(base + '/api/token-reconcile', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { 'x-console-token': token } : {}) },
+      body: '{}',
+      signal: AbortSignal.timeout(20000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) throw new Error(j?.error || `HTTP ${r.status}`);
+    return j;
+  };
+  try {
+    const t = getLocalBridgeTarget();
+    out.local = await call(t.base, t.token);
+  } catch (e) {
+    out.localReason = `本机桥对账失败：${e?.message ?? e}`;
+  }
+  const rt = resolveRemoteBridgeTarget();
+  if (rt) {
+    try {
+      const token = await getRemoteBridgeToken(rt.server, rt.conn);
+      out.remote = await call(rt.base, token);
+    } catch (e) {
+      out.remoteReason = `服务端桥对账失败：${e?.message ?? e}`;
+    }
+  } else {
+    out.remoteReason = '未连接服务器或 Bridge 隧道不在';
+  }
+  out.ok = !!(out.local || out.remote);
+  mlog(`[token] 用量对账请求：本机 ${out.local ? (out.local.result?.addedTokens ?? 0) : '失败'} / 服务端 ${out.remote ? (out.remote.result?.addedTokens ?? 0) : '失败'}`);
+  res.json(out);
+});
+
 app.get('/api/learning/slang-library', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang', method: 'GET' }));
 
 /* 用量实时推流：把桥的 SSE 原样透传给浏览器（同源，前端无需直连 3100）。

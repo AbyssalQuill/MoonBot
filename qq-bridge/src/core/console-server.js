@@ -4877,6 +4877,24 @@ export function startConsoleServer() {
         }
         return;
       }
+      // POST /api/token-reconcile：立刻与 DSH 的会话级权威计数对账（补上被漏记的 usage 帧）。
+      // 幂等：水位在 state/token-reconcile.json，重复点不会重复补。
+      if (req.method === 'POST' && url.pathname === '/api/token-reconcile') {
+        try {
+          const meterMod = await import('../core/token-meter.js');
+          if (typeof meterMod.reconcileWithDsh !== 'function') {
+            sendJson({ ok: false, error: 'token meter 不支持对账（桥版本较旧）' }, 503);
+            return;
+          }
+          const r = meterMod.reconcileWithDsh();
+          log(`控制台：用量对账 → added=${r.added} tokens=${r.addedTokens}${r.ok ? '' : ' 失败:' + r.reason}`);
+          sendJson({ ok: r.ok, result: r, status: typeof meterMod.tokenReconcileStatus === 'function' ? meterMod.tokenReconcileStatus() : null });
+        } catch (error) {
+          log(`控制台：用量对账失败：${error?.message ?? error}`);
+          sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+        }
+        return;
+      }
       // GET /api/token-stream：SSE 实时推送用量（token-meter 落一条推一次，最短间隔 400ms + 20s 心跳）
       if (req.method === 'GET' && url.pathname === '/api/token-stream') {
         await handleTokenStream(req, res);

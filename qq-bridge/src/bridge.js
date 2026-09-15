@@ -157,7 +157,7 @@ import {
   initSlangNightly,
 } from './core/slang.js';
 import {
-  initTokenMeter, setConvKeyResolver,
+  initTokenMeter, setConvKeyResolver, setTokenReconcileHome, startTokenReconcile,
 } from './core/token-meter.js';
 import {
   enqueueForRetry, flushQueue, deliverPrompt, drainPromptQueue, drainAllPromptQueues,
@@ -289,6 +289,21 @@ async function main() {
   initSlangCore(cfg);
   initPersonaLearnCore(cfg);
   initTokenMeter(cfg);
+  // 用量对账：DSH 自己的 projcache 里有按会话累计的权威 token 数（tokenUsage.totals）。
+  // 单帧漏记（帧里没有 sessionId / 会话刚好结束）会让面板偏低，这里定期把差额补成
+  // reconciled:true 的行，使面板 == DSH 侧真实值。找不到 DSH home 时静默跳过（不影响主流程）。
+  try {
+    const dshTarget = resolveDshTarget();
+    if (dshTarget && !dshTarget.refusedDesktop && dshTarget.home) {
+      setTokenReconcileHome(dshTarget.home);
+      startTokenReconcile();
+      log(`[token] 用量对账已启用：${path.join(dshTarget.home, 'storages', 'session_projcache', 'sessions')}`);
+    } else {
+      log('[token] 未找到可用的 DSH home，跳过用量对账（面板数字只按 usage 帧累计）');
+    }
+  } catch (error) {
+    log(`[token] 用量对账初始化失败（忽略）: ${error?.message ?? error}`);
+  }
   initSessionArchiveCore(cfg);
   try { setConvKeyResolver((sessionId) => reverse.get(String(sessionId)) ?? null); } catch (_) {}
   initPromptDeliverCore(cfg);
