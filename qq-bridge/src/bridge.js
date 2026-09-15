@@ -388,6 +388,8 @@ async function main() {
     accessToken: cfg.napcat.wsAccessToken || cfg.napcat.accessToken || undefined,
     reconnect: true
   });
+  // 【2026-09-16 保登录态】连接是否活着（下面 open/close 里维护）+ "不回复"排查用的登录态巡检
+  let napcatUp = false;
   setStickerBot(bot);
   setQqSendBot(bot);
   setGroupCacheBot(bot);
@@ -453,8 +455,8 @@ async function main() {
     } catch (error) { log('自动审批好友请求出错:', error?.message ?? error); }
   });
 
-  bot.on('open', () => log(`NapCat 已连接：${cfg.napcat.wsUrl}`));
-  bot.on('close', (info) => log(`NapCat 连接断开（code=${info?.code ?? '?'} reason=${String(info?.reason ?? '').slice(0, 80)}），重连中…`));
+  bot.on('open', () => { napcatUp = true; log(`NapCat 已连接：${cfg.napcat.wsUrl}`); });
+  bot.on('close', (info) => { napcatUp = false; log(`NapCat 连接断开（code=${info?.code ?? '?'} reason=${String(info?.reason ?? '').slice(0, 80)}），重连中…`); });
   // 【2026-09-15】以前这里直接把 error 对象丢给 log，而 Error 经 JSON.stringify 是 `{}` ——
   // 日志里只看到 `NapCat 错误: {}`，**一点线索都没有**（排查"不回复"时被这个坑了一次）。
   // 现在把 message/code/cause 都打出来，并带上 WS 状态与 URL，一眼能看出是握手被拒还是断线。
@@ -463,6 +465,42 @@ async function main() {
       .filter(Boolean).join(' | ') || String(error);
     log(`NapCat 错误: ${detail}（wsUrl=${cfg.napcat.wsUrl}）`);
   });
+
+  /* 【2026-09-16 保登录态：把"不回复"的分叉判据写进日志】
+   * 主人反复遇到的"又不回复了"其实只有两种：
+   *   ① **QQ 掉登录态**（NapCat 里没登录）→ 只能扫码，扫码后**会话/快速登录信息**会重新落进数据卷；
+   *   ② **桥的连接断了**（QQ 那边一切正常）→ 3.1.3 起桥会判死即重建（退避封顶 10s），自己接回。
+   * 以前这两种在日志里长得一模一样（都只是连不上），只能靠翻 NapCat 容器日志去猜。
+   * 现在：只要 WS 没连上，就每分钟去问一次 NapCat 的 WebUI「QQ 到底登录没有」，状态变了才打一行，
+   * 说明白是哪一种、下一步该干什么。连上时完全不查、不打日志。
+   */
+  const LOGIN_WATCH_MS = 60000;
+  let loginNote = '';
+  let loginNoteAt = 0;
+  const loginWatch = setInterval(() => {
+    void (async () => {
+      if (napcatUp) return;
+      let st = null;
+      try {
+        const mod = await import('./core/napcat-tokens.js');
+        st = await mod.probeQqLoginState();
+      } catch (error) {
+        st = { ok: false, error: String(error?.message ?? error) };
+      }
+      const note = !st?.ok
+        ? `登录态查不到（${st?.error ?? '未知'}）—— 多半是 NapCat 还没起来/WebUI 不可达，桥会继续重连`
+        : (st.isLogin
+          ? `QQ **仍是登录态**（${st.nick || '已登录'}${st.online ? '、在线' : ''}）⇒ 只是桥的连接断了，桥会自动重连（退避封顶 10s）；一分钟还没接上就看上面的重连错误`
+          : '⚠️ **QQ 已掉登录态**：需要去管理端首页 → NapCat WebUI 扫码。登录态存在数据卷 napcat-qq + 配置目录里的 napcat_<qq>.json，正常情况下重启桥/重启容器/掉电都**不会**掉登录（容器起来后按 ACCOUNT 自动快速登录）');
+      const now = Date.now();
+      if (note !== loginNote || now - loginNoteAt > 300000) {
+        loginNote = note;
+        loginNoteAt = now;
+        log(`[napcat-login] ${note}`);
+      }
+    })();
+  }, LOGIN_WATCH_MS);
+  loginWatch.unref?.();
 
   // 【2026-09-12 修「启动不顺畅 / 桥自己死掉」】
   // onebot-ws 的老语义是：**首次 open 之前就 close** → reject(NAPCAT_CONN) → 这里 await 抛出去 →

@@ -758,7 +758,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       const stopScript = [
         `mkdir -p ${stageDir} && rm -rf ${stageDir}/*`,
         `pkill -f 'node src/bridge.js' 2>/dev/null; sleep 1`,
-        `systemctl stop dsh-web 2>/dev/null; docker stop napcat 2>/dev/null; sleep 1`,
+        `systemctl stop dsh-web 2>/dev/null; docker stop -t 60 napcat 2>/dev/null; sleep 1`,
       ].join('; ');
       const stopped = await runCmd(srcConn, stopScript, 60000);
       if (!stopped.ok) taskLine(task, `  停机阶段输出: ${stopped.out || stopped.err}`);

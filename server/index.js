@@ -2567,7 +2567,7 @@ app.post('/api/ssh/stack', async (req, res) => {
   ];
   const stopPlan = [
     ['停止 QQ 桥', "pkill -f 'node src/bridge[.]js' 2>/dev/null; pkill -f 'start-bridge[.]sh' 2>/dev/null; sleep 2; pgrep -f 'node src/bridge[.]js' >/dev/null && echo still-running || echo stopped", 60000],
-    ['停止 NapCat 容器', 'docker stop -t 30 napcat 2>&1 || true', 120000],
+    ['停止 NapCat 容器', 'docker stop -t 60 napcat 2>&1 || true', 120000],
     ['停止 DSH', 'systemctl stop dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl stop dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 60000],
   ];
   const plan = action === 'start' ? startPlan : stopPlan;
@@ -2625,8 +2625,8 @@ app.post('/api/ssh/service', async (req, res) => {
        * docker 默认 10 秒宽限就发 SIGKILL —— QQ 客户端来不及保存登录态，**下次启动就又要扫码**
        * （实测 10:30/10:33 两次 stop 之后 NapCat 都出了二维码）。这里统一给 30 秒宽限，
        * 让它正常退场、把会话写回 napcat-qq 卷，重启后能自动快速登录。 */
-      if (a === 'stop') return `docker stop -t 30 napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
-      if (a === 'restart') return `docker restart -t 30 napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+      if (a === 'stop') return `docker stop -t 60 napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+      if (a === 'restart') return `docker restart -t 60 napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
       return `docker start napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
     }
     // bridge

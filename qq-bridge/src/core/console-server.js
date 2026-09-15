@@ -4903,7 +4903,8 @@ export function startConsoleServer() {
       // ── NapCat 鉴权令牌（WebUI / HTTP / WS）真正落地 ─────────────────────────────
       // 【2026-09-15 主人反馈】管理端改「NapCat 令牌」只改了桥 config.json 里"期望用哪个"，
       // 从没写进 NapCat 自己的配置 → NapCat 还收默认 truefriend、旧令牌照样能进。
-      // 这里把三个令牌写进 NapCat 的 webui.json / onebot11*.json，并重启容器（docker restart -t 30）；
+      // 这里把三个令牌写进 NapCat 的 webui.json / onebot11*.json，并重启容器（docker restart -t 60，
+      // 宽限 60s：NapCat 的 PID1 不转发 SIGTERM，来不及就是 SIGKILL —— 参见 napcat-tokens.js 的说明）；
       // 写完同时把桥 config.json 的 napcat.accessToken / wsAccessToken 对齐（否则桥用新令牌连不上旧配置）。
       if (url.pathname === '/api/napcat/tokens') {
         let tokMod;
@@ -4915,7 +4916,8 @@ export function startConsoleServer() {
           return;
         }
         if (req.method === 'GET') {
-          sendJson(tokMod.napcatTokenStatus());
+          // 【2026-09-16】napcatTokenStatus 现在是 async（顺带查 NapCat 的 QQ 登录态）
+          sendJson(await tokMod.napcatTokenStatus());
           return;
         }
         if (req.method === 'POST') {
