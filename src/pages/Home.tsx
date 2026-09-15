@@ -111,7 +111,14 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
    *   · 按钮直接操作服务端（systemctl / docker / 桥进程），不再去起本机进程；
    *   · "打开"打开的是**服务端**的界面（经隧道），不是本机那份。
    *  没连服务器时，一切保持原样（本机实例）。 */
-  const remoteId = state?.connected && state.activeServer ? state.activeServer.id : null;
+  /* 【2026-09-15 修「按钮还是操作本机 / NapCat 没法重启」】
+   * 原来 `isRemote = remoteUp !== null && !!remoteId` —— 只要"服务端状态没取到"（断线那几秒、
+   * 或某个组件字段缺失），remoteUp 就是 null，于是三张卡**悄悄切回本机语义**：
+   * 显示的是本机那几个空闲实例的状态（所以出现"只剩启动、没有重启/停止"），
+   * 点「启动」去拉的是**本机** NapCat/DSH/桥（主人 2026-09-14 明确不要）。
+   * 现在只要存在活动服务器就按服务端语义显示；没连上时按钮提示"正在重连"，绝不误操作本机。 */
+  const serverMode = !!state?.activeServer;
+  const remoteId = serverMode ? (state?.activeServer?.id ?? null) : null;
   const remoteCompOf = (id: SvcId): 'dsh' | 'napcat' | 'bridge' =>
     (id === 'napcat-local' ? 'napcat' : id === 'dsh-isolated' ? 'dsh' : 'bridge');
   const remoteSvcIdOf = (id: SvcId): string =>
@@ -120,6 +127,7 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
 
   const doRemoteAction = async (id: SvcId, action: 'start' | 'stop' | 'restart') => {
     if (!remoteId) return;
+    if (!sshConn) { setMsg('服务端正在重连，稍等几秒再操作（不会去动本机那套）'); return; }
     setBusy(id); setActing(`${id}:${action}`); setMsg(null);
     try {
       const r = await sshServiceAction(remoteId, remoteCompOf(id), action);
@@ -221,7 +229,7 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
         {svcs.map((t) => {
           const i = inst(t.id);
           const remoteUp = sshConn ? serverUpOf(t.id) : null;
-          const isRemote = remoteUp !== null && !!remoteId;
+          const isRemote = serverMode;
           // 连上服务器时：状态取服务端、按钮操作服务端、打开的是服务端界面；否则完全按本机老逻辑。
           const phase: Phase = isRemote ? (remoteUp ? 'running' : 'idle') : phaseOf(i);
           const startAct = () => (isRemote ? doRemoteAction(t.id, 'start') : act(t.id));
