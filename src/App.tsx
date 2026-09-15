@@ -6,6 +6,7 @@ import BridgeConfig from './pages/BridgeConfig';
 import WebView from './pages/WebView';
 import Learning from './pages/Learning';
 import GroupPortrait from './pages/GroupPortrait';
+import VoiceConfig from './pages/VoiceConfig';
 import { getState } from './api';
 import type { ManagerState } from './stores/types';
 
@@ -15,6 +16,7 @@ type View =
   | { name: 'bridge' }
   | { name: 'learning' }
   | { name: 'portrait' }
+  | { name: 'voice' }
   | { name: 'web'; url: string; title: string }
   | { name: 'cfg'; id: 'dsh-isolated' | 'napcat-local' | 'bridge-local' };
 
@@ -57,12 +59,14 @@ export default function App() {
   if (view.name === 'ssh') return <SSHConfig state={state} onBack={back} onRefresh={refresh} />;
   if (view.name === 'learning') return <Learning onBack={() => setView({ name: 'bridge' })} />;
   if (view.name === 'portrait') return <GroupPortrait onBack={() => setView({ name: 'bridge' })} />;
+  if (view.name === 'voice') return <VoiceConfig onBack={() => setView({ name: 'bridge' })} />;
   if (view.name === 'bridge') return (
     <BridgeConfig
       onBack={back}
       onRefresh={refresh}
       onOpenLearning={() => setView({ name: 'learning' })}
       onOpenPortrait={() => setView({ name: 'portrait' })}
+      onOpenVoice={() => setView({ name: 'voice' })}
       /* 【2026-09-14】连上服务器时，功能配置页读写**服务端** /root/qq-bridge/config.json（页面会显示明显横幅） */
       remote={state?.connected && state.activeServer ? { id: state.activeServer.id, name: state.activeServer.name, host: state.activeServer.host } : null}
     />
