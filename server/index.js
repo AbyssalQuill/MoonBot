@@ -160,7 +160,10 @@ function tunnelMapFor(server) {
 }
 
 function openTunnels(connId, conn, list) {
-  return Promise.all(list.map(({ remote, local, name }) => new Promise((resolve) => {
+  // 整体加超时：ssh2 的 forwardOut 在某些网络下会既不回调也不报错，那样 establishConnection 永远
+  // await 不完 —— 表现就是"connected=true 但一条隧道都没有"（界面里服务端界面全点不开）。
+  return Promise.race([
+    Promise.all(list.map(({ remote, local, name }) => new Promise((resolve) => {
     /* 【2026-09-14】断线重连/连点"连接"时会先 closeTunnels 再重新 listen，而 Windows 上刚关掉的
      * 监听端口不会立刻释放 → bind 报 EADDRINUSE，于是"SSH 连上了但隧道一条都没建"
      * （表现：/api/state 里 connected=true 而 srv-* 全部 reachable=false，界面里服务端界面点不开）。
@@ -188,7 +191,36 @@ function openTunnels(connId, conn, list) {
       });
     };
     attempt(1);
-  })));
+    }))),
+    new Promise((resolve) => setTimeout(() => resolve(list.map(({ local, remote, name }) => ({ name, local, remote, ok: false, error: '隧道建立超时（8s）' }))), 8000)),
+  ]);
+}
+
+/** 隧道健康检查 + 自愈：连接还在、隧道却没了（或丢了某几条）就补建。
+ *  现场教训（2026-09-15 主人反馈"主页界面打不开 / 一键启动有问题"）：/api/state 显示
+ *  connected=true，但 13000/13080/13100 **一个都没在听** —— 界面里所有"打开"全点不开。
+ *  根因是 establishConnection 先记连接、再建隧道，隧道失败/超时后没人补。现在每次取状态都自检一遍。 */
+async function ensureTunnels(serverId) {
+  const conn = sshConnections.get(serverId);
+  if (!conn) return false;
+  const cfg = loadConfig();
+  const server = cfg.servers.find((s) => s.id === serverId);
+  if (!server) return false;
+  const want = tunnelMapFor(server);
+  const alive = (tun) => { try { return !!(tun?.server && tun.server.listening); } catch { return false; } };
+  const missing = want.filter(({ name }) => !alive(tunnels.get(`${serverId}:${name}`)));
+  if (!missing.length) return true;
+  mlog(`[ssh] ${server.name || server.host} 隧道缺失 ${missing.length}/${want.length} 条 → 自动补建`);
+  closeTunnels(serverId);            // 先清掉"挂着但其实没在听"的条目
+  try {
+    const created = await openTunnels(serverId, conn, want);
+    const okCount = created.filter((x) => x.ok).length;
+    mlog(`[ssh] ${server.name || server.host} 隧道补建：${okCount}/${want.length} 条成功`);
+    return okCount === want.length;
+  } catch (e) {
+    mlog(`[ssh] ${server.name || server.host} 隧道补建失败：${e?.message ?? e}`);
+    return false;
+  }
 }
 
 function closeTunnels(connId) {
@@ -222,11 +254,15 @@ function cancelReconnect(serverId) {
 }
 
 /** 与「连接」按钮同一段建立流程（鉴权 + 隧道 + 缓存作废 + 设为活动服务器）。 */
-async function establishConnection(server) {
+async function establishConnection(server, opts = {}) {
   if (sshConnections.has(server.id)) { try { sshConnections.get(server.id).end(); } catch {} sshConnections.delete(server.id); closeTunnels(server.id); }
-  const conn = await connectOne(server);
+  const conn = await connectOne(server, opts);
   sshConnections.set(server.id, conn);
   const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
+  // 【2026-09-15】隧道没全建起来**不再当作"连上了"**：以前先记连接、隧道失败就没人管，
+  // 于是界面显示"服务端运行中"却所有界面都打不开。现在至少喊出来（并由 ensureTunnels 每次自愈重试）。
+  const badTunnels = (tunnelsCreated || []).filter((x) => !x.ok);
+  if (badTunnels.length) mlog(`[ssh] ${server.name || server.host} 隧道未全建成：${badTunnels.map((x) => `${x.name}(${x.error || '失败'})`).join('、')}`);
   bridgeTokenCache.delete(server.id);
   remoteStatusCache.delete(server.id); remoteBridgeDirCache.delete(server.id);
   remoteBridgeCfgCache.delete(server.id);
@@ -503,7 +539,15 @@ function buildRuntimeInfo(id, cfg) {
     }
     probeUrl = `http://127.0.0.1:${cfg.port}`;
   }
-  if (id === 'napcat-local') { url = `http://127.0.0.1:${cfg.webuiPort || 6099}`; probeUrl = url; }
+  if (id === 'napcat-local') {
+    /* 【2026-09-15 主人要求】NapCat 界面链接**直接带鉴权**，别再让人手输 token：
+     *   http://127.0.0.1:6099/webui/?token=<webuiToken>
+     * （NapCat 的 WebUI 登录页认 ?token=；之前只给 `http://127.0.0.1:6099`，点开还要自己贴 token。） */
+    const port = cfg.webuiPort || 6099;
+    const tok = String(cfg.webuiToken ?? '').trim();
+    url = `http://127.0.0.1:${port}/webui/${tok ? '?token=' + encodeURIComponent(tok) : ''}`;
+    probeUrl = `http://127.0.0.1:${port}/webui/`;
+  }
   if (id === 'bridge-local') { url = `http://127.0.0.1:${cfg.webuiPort || 3100}`; probeUrl = url; }
   return { running, startedAt: rt?.startedAt, pid: rt?.proc?.pid, logFile: instanceLogPath(id), url, probeUrl };
 }
@@ -1338,7 +1382,10 @@ async function resolveServices(cfg, connected) {
    * 于是「本机 · NapCat 官方界面」点开看到的是**服务器**的 NapCat（实测 reachable=false→串到隧道）。
    * 现在本机就是本机端口（没跑就如实显示不可达），服务端那组单独给（见下方 remoteServices）。 */
   const localDshUrl = `http://127.0.0.1:${dshIso.port}`;
-  const localNapUrl = `http://127.0.0.1:${napLocal.webuiPort || 6099}`;
+  // NapCat 本机入口同样**带 webui token**（主人要求：点开就用，不用再输 token）
+  const localNapPort = napLocal.webuiPort || 6099;
+  const localNapTok = String(napLocal.webuiToken ?? '').trim();
+  const localNapUrl = `http://127.0.0.1:${localNapPort}/webui/${localNapTok ? '?token=' + encodeURIComponent(localNapTok) : ''}`;
   const localBrUrl = `http://127.0.0.1:${brLocal.webuiPort || 3100}`;
 
   // 本机那一组：名字统一带「本机 · 」前缀，和服务端那组一眼分得清（主人 2026-09-14 要求）。
@@ -1423,6 +1470,8 @@ app.get('/api/state', async (req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
   const r = await resolveServices(cfg, connected);
+  // 【2026-09-15】取状态时顺手做隧道自愈：缺了就补建（幂等、不阻塞主流程）。
+  if (connected && sshConnections.has(connected.id)) void ensureTunnels(connected.id).catch(() => {});
   const tunnelsInfo = [];
   if (connected) for (const [key, tun] of tunnels.entries()) if (key.startsWith(connected.id + ':')) tunnelsInfo.push({ name: tun.name, localPort: tun.local, remotePort: tun.remote });
   const dshIso = cfg.instances.dshIsolated;
@@ -2518,7 +2567,7 @@ app.post('/api/ssh/stack', async (req, res) => {
   ];
   const stopPlan = [
     ['停止 QQ 桥', "pkill -f 'node src/bridge[.]js' 2>/dev/null; pkill -f 'start-bridge[.]sh' 2>/dev/null; sleep 2; pgrep -f 'node src/bridge[.]js' >/dev/null && echo still-running || echo stopped", 60000],
-    ['停止 NapCat 容器', 'docker stop napcat 2>&1 || true', 120000],
+    ['停止 NapCat 容器', 'docker stop -t 30 napcat 2>&1 || true', 120000],
     ['停止 DSH', 'systemctl stop dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl stop dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 60000],
   ];
   const plan = action === 'start' ? startPlan : stopPlan;
@@ -2571,7 +2620,15 @@ app.post('/api/ssh/service', async (req, res) => {
   const bridgeStop = 'pkill -f \'node src/bridge[.]js\' 2>/dev/null; sleep 2; pgrep -f \'node src/bridge[.]js\' >/dev/null && echo still-running || echo stopped';
   const cmdOf = (c, a) => {
     if (c === 'dsh') return `systemctl ${a} dsh-web 2>&1; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null)"`;
-    if (c === 'napcat') return `docker ${a} napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+    if (c === 'napcat') {
+      /* 【2026-09-15 主人反馈"我没法重启napcat" + 每次重启都要重新扫码】
+       * docker 默认 10 秒宽限就发 SIGKILL —— QQ 客户端来不及保存登录态，**下次启动就又要扫码**
+       * （实测 10:30/10:33 两次 stop 之后 NapCat 都出了二维码）。这里统一给 30 秒宽限，
+       * 让它正常退场、把会话写回 napcat-qq 卷，重启后能自动快速登录。 */
+      if (a === 'stop') return `docker stop -t 30 napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+      if (a === 'restart') return `docker restart -t 30 napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+      return `docker start napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+    }
     // bridge
     if (a === 'stop') return bridgeStop;
     if (a === 'start') return bridgeStart;
