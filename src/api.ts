@@ -117,6 +117,16 @@ export const personaApply = (uid: string, mode: 'save' | 'apply' | 'fuse', text?
     method: 'POST',
     body: JSON.stringify(text === undefined ? { uid, mode } : { uid, mode, text }),
   });
+
+/* ================= NapCat 鉴权令牌（WebUI / HTTP / WS） =================
+ * 之前管理端改「NapCat 令牌」只改了桥 config.json 里"期望用哪个"，没写进 NapCat 自己的配置，
+ * 于是旧令牌（默认 truefriend）照样能进、桥却用新令牌连不上。现在这两个接口是真正落地的那个：
+ *   GET  /api/napcat/tokens → NapCat 磁盘现状 + 桥配置期望值（都只回掩码）
+ *   POST /api/napcat/tokens → 写进 NapCat 的 webui.json / onebot11*.json + 重启容器 + 复验新/旧令牌
+ * 请求体：{ webuiToken?, httpToken?, wsToken?, restart? }（不传的项不动） */
+export const getNapcatTokens = () => api<any>('/napcat/tokens');
+export const applyNapcatTokens = (patch: { webuiToken?: string; httpToken?: string; wsToken?: string; restart?: boolean }) =>
+  api<any>('/napcat/tokens', { method: 'POST', body: JSON.stringify(patch) });
 /** 【2026-09-14】用量统计现在**两边都取**：local=本机桥、remote=服务端桥（null=没取到，看 remoteReason）、
  *  total=两份合并的合计。report 保留为合计（兼容旧字段）。 */
 export interface TokenReportSide {
