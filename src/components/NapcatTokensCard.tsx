@@ -40,10 +40,8 @@ export default function NapcatTokensCard() {
       const r: any = await getNapcatTokens();
       if (r?.ok === false && r?.error) { setErr(String(r.error)); setSt(null); return; }
       setSt(r as NapStatus);
-      // 输入框预填"桥配置里期望的值"——那通常就是主人在管理端填过的令牌；点写入即把它们落到 NapCat
-      setHttp(String(r?.bridge?.http ? '' : ''));
-      setWs('');
-      setWebui('');
+      // 输入框一律留空 = "不改动"，避免把掩码串（形如 ab****yz）当成真令牌写进去；要沿用桥的值就点「用桥里现有的令牌写入」
+      setWebui(''); setHttp(''); setWs('');
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
@@ -51,18 +49,21 @@ export default function NapcatTokensCard() {
 
   useEffect(() => { void load(); }, [load]);
 
-  const apply = async () => {
+  const apply = async (useBridgeTokens = false) => {
     if (busy) return;
     const patch: any = { restart };
-    if (webui.trim()) patch.webuiToken = webui.trim();
-    if (http.trim()) patch.httpToken = http.trim();
-    if (ws.trim()) patch.wsToken = ws.trim();
-    if (!patch.webuiToken && !patch.httpToken && !patch.wsToken) {
-      setMsg('先在下面至少填一个令牌（WebUI / HTTP / WS），再点「写入 NapCat」。');
-      return;
+    if (useBridgeTokens) patch.useBridgeTokens = true;
+    else {
+      if (webui.trim()) patch.webuiToken = webui.trim();
+      if (http.trim()) patch.httpToken = http.trim();
+      if (ws.trim()) patch.wsToken = ws.trim();
+      if (!patch.webuiToken && !patch.httpToken && !patch.wsToken) {
+        setMsg('先在下面至少填一个令牌（WebUI / HTTP / WS），或者点右边那个「用桥里现有的令牌写入」。');
+        return;
+      }
     }
     const ok = window.confirm(
-      `把令牌写进 NapCat 配置${restart ? '并重启 NapCat 容器（约 30~60 秒）' : '（不重启，下次启动才生效）'}？\n\n`
+      `${useBridgeTokens ? '把桥配置里现有的令牌统一写进 NapCat' : '把上面填的令牌写进 NapCat 配置'}${restart ? '并重启 NapCat 容器（约 30~60 秒）' : '（不重启，下次启动才生效）'}？\n\n`
       + `· 会先自动备份 webui.json / onebot11*.json（同目录 _bak-<时间>，最多留 5 份）\n`
       + `· 重启 NapCat 可能会掉登录态、需要重新扫码（当前若已掉登录，重启没有额外代价）\n`
       + `· 写完后旧令牌立即失效，管理端的入口链接会自动带上新令牌`,
@@ -120,7 +121,7 @@ export default function NapcatTokensCard() {
                 <br />
                 <span style={{ color: 'var(--nc-danger-600)' }}>
                   ⚠️ 两者不一致 —— 这正是"改了令牌却没生效"的原因：桥拿着新令牌去连，NapCat 只认旧的。
-                  把令牌填在下面点「写入 NapCat」即可让两边一致。
+                  点下面「用桥里现有的令牌写入」让两边一致，或自己填好新令牌点「写入上面填的令牌」。
                 </span>
               </>
             )}
@@ -153,8 +154,13 @@ export default function NapcatTokensCard() {
           </div>
 
           <div className="lrn-actions" style={rowStyle}>
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void apply()}>
-              {busy ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} 写入 NapCat{restart ? '并重启' : ''}
+            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void apply(false)}>
+              {busy ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} 写入上面填的令牌{restart ? '并重启' : ''}
+            </button>
+            <button className="btn btn-soft-primary btn-sm" disabled={busy || !st?.bridge?.http}
+              title="不手抄令牌：直接用桥配置里现有的 HTTP/WS 令牌去写 NapCat（WebUI 也用它），让三处一致"
+              onClick={() => void apply(true)}>
+              {busy ? <Loader2 size={14} className="spin" /> : <KeyRound size={14} />} 用桥里现有的令牌写入
             </button>
             <button className="btn btn-sm" disabled={busy} onClick={() => void load()}><RefreshCw size={13} /> 刷新现状</button>
             <button className="btn btn-sm" onClick={() => setShow((v) => !v)}>
@@ -164,9 +170,11 @@ export default function NapcatTokensCard() {
           {msg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{msg}</div>}
 
           <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75, marginTop: 6 }}>
-            说明：令牌只允许 4~64 位的字母/数字/符号（不能有空格、引号、中文）。写入前会自动备份配置到同目录
-            <code>_bak-&lt;时间&gt;</code>。WebUI 令牌改完后，管理端首页/服务端入口里那些 NapCat 链接会**自动带新令牌**
-            （它们每次从服务端读 webui.json，不是写死的），不用手工改收藏夹以外的任何地方。
+            两种用法：<b>直接在上面填</b>三个令牌（想给 WebUI / HTTP / WS 设不同值就用这个）；
+            或者点 <b>用桥里现有的令牌写入</b> —— 不用手抄，直接把桥配置里那两个令牌写进 NapCat，
+            并让 WebUI 也用桥的令牌，三处一次对齐（最省事，推荐先试这个）。
+            令牌只允许 4~64 位的字母/数字/符号（不能有空格、引号、中文）；写入前自动备份到同目录 <code>_bak-&lt;时间&gt;</code>。
+            WebUI 令牌改完后，管理端首页/服务端入口里那些 NapCat 链接会<b>自动带新令牌</b>（它们每次从服务端读 webui.json，不是写死的）。
           </div>
         </>
       )}

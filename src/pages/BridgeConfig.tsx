@@ -51,8 +51,9 @@ const LABEL: Record<string, string> = {
   baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: 'API Key', model: '主模型',
   visionModel: '识图模型', reasoningEffort: '推理档位',
   // NapCat
-  wsUrl: 'WebSocket 地址', wsAccessToken: 'WS 访问令牌', httpUrl: 'HTTP 地址', accessToken: 'HTTP 访问令牌',
+  wsUrl: 'WebSocket 地址', wsAccessToken: 'WS 访问令牌（已移到「NapCat 鉴权令牌」卡）', httpUrl: 'HTTP 地址', accessToken: 'HTTP 访问令牌（已移到「NapCat 鉴权令牌」卡）',
   launcherPath: '启动器路径', homeDir: '运行目录', allowProcessControl: '允许进程控制',
+  imageFileMode: '图片文件传法', tmpDir: '临时文件目录', dockerPathMap: '容器路径映射',
   // 基础与会话
   agentPreset: '人设预设', workspaceTitle: '工作区名称', ownerQQ: '主人 QQ', adminQQ: '管理员',
   sessionCwd: '会话工作目录', ackMessage: '收到回执语', sendDelayMs: '发送间隔', questionTimeoutMs: '问题等待超时',
@@ -179,6 +180,9 @@ const TOOL_MCP: Record<string, string> = {
   launcherPath: '仅在你手动拉 QQ 网关时使用；本项目 NapCat 已内置并由管理端拉起，一般保持留空。',
   homeDir: '网关侧可写目录（容器映射等），本地 NapCat 一般不需要。',
   allowProcessControl: '是否允许 DSH 内的 agent 自动启停本机 QQ 网关。请仅在完全信任时开启。',
+  'napcat.imageFileMode': '发图片/表情时，桥交给 NapCat 的文件该怎么传：path=直接给路径（本机裸机部署）；base64=读成 base64 直接塞过去（跨容器/跨机都能发）；auto=先按「容器路径映射」换成容器内路径（服务器 Docker 用这个），换不了再退 base64。服务器上推荐 auto。',
+  'napcat.tmpDir': '桥写临时文件（表情、语音、文档）的目录。服务器上要指到**NapCat 容器挂载出来的那个目录**（例如 /root/napcat/config/moonbot-tmp），否则容器读不到文件、图/语音发不出去。',
+  'napcat.dockerPathMap': '宿主目录 → 容器内目录的映射表，配合 imageFileMode=auto 用。服务器 NapCat 跑在 Docker 里时填 [{"host":"/root/napcat/config","container":"/app/napcat/config"}] 这类值。',
   accessToken: '「HTTP 访问令牌」：桥接进程通过 HTTP 接口（http://127.0.0.1:3000，NapCat 的 httpServers）收发消息时使用的令牌，需与 NapCat WebUI 里 HTTP 服务的 token 一致。它和下面的「WS 访问令牌」是两种不同传输各自的令牌——即使值相同也是分开的字段，改一个不影响另一个；填错会导致 HTTP 工具全部 401。',
   wsAccessToken: '「WS 访问令牌」：桥接进程通过 WebSocket 接口（ws://127.0.0.1:3001，NapCat 的 websocketServers）收发消息时使用的令牌，需与 NapCat WebUI 里 WS 服务的 token 一致。与「HTTP 访问令牌」相互独立（哪怕默认值相同）；填错会导致 WS 连接被拒、机器人收不到/发不出消息。',
   consolePort: '桥接内部服务端口（本地管理端会探测它判断是否在运行）。',
@@ -1121,8 +1125,12 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
     <div className="cfg-grid">
       <GroupCard title="模型与推理" path="dsh" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="连到哪个 DSH、用什么模型回话。服务商默认「自动探测」（即用隔离 DSH 里已配置的官方 DeepSeek），也可显式选 DeepSeek 官方；留空模型即用 DSH 默认。改这里会自动重启隔离 DSH 使其生效。「推理档位」是单次调用耗时与思考 token 最大的一块——实测同一次调用出现过 37 秒，嫌慢/嫌贵先从它和「工具与规则」页的精简名单入手。" />
-      <GroupCard title="NapCat 连接" path="napcat" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="机器人与 NapCat 的通信地址和令牌；本地一键启动时一般不用改。注意：这里改的令牌只影响**桥**用哪个令牌去连；要让 NapCat 自己改用新令牌，用下面那张「NapCat 鉴权令牌」卡写入并重启。" />
+      {/* 【2026-09-15 主人反馈"这个界面不就重复了"】令牌字段**只留下面那张卡**：
+          这里改成白名单，只列地址/运行路径等连接项，不再重复显示 accessToken / wsAccessToken。 */}
+      <GroupCard title="NapCat 连接（地址与路径）"
+        blocks={[{ path: 'napcat', only: ['wsUrl', 'httpUrl', 'launcherPath', 'homeDir', 'imageFileMode', 'tmpDir', 'dockerPathMap', 'allowProcessControl'] }]}
+        cfg={cfg} ch={ch} onHelp={onHelp}
+        desc="机器人与 NapCat 的通信地址与运行路径，本地一键启动时一般不用改。**令牌不在这张卡里**：WebUI / HTTP / WS 三个令牌统一在下面那张「NapCat 鉴权令牌」卡里配 —— 它会同时写进 NapCat 自己的配置和桥的配置，并重启 NapCat 生效。" />
       {/* 【2026-09-15 主人反馈】令牌要真正写进 NapCat 才生效：见 NapcatTokensCard 的注释 */}
       <NapcatTokensCard />
       <GroupCard title="基础与会话" path="" only={topOnly} cfg={cfg} ch={ch} onHelp={onHelp}
