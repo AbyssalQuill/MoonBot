@@ -232,6 +232,12 @@
       "idleCloseMs": 1800000,
       "maxWaitMs": 3600000,
       "requestBudgetMs": 55000
+    },
+    "typing": {
+      "enabled": true,
+      "holdMaxMs": 12000,
+      "refreshOnMessageMs": 5000,
+      "breakProbability": 0.15
     }
   }
 }

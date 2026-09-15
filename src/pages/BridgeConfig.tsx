@@ -95,6 +95,7 @@ const LABEL: Record<string, string> = {
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
   maxRemarkChars: '备注字数上限', defaultMs: '默认等待', minMs: '最短等待', maxMs: '最长等待',
   defaultQuietMs: '默认静默', minQuietAfterNewMs: '新消息后最短静默', sendProbability: '发表情概率（桥侧掷骰）', sendCooldownMs: '表情包冷却（毫秒）',
+  typingEnabled: '私聊等对方打完字', typingHoldMaxMs: '最多等多久（毫秒）', typingBreakProbability: '中途插话概率', typingRefreshOnMessageMs: '收到消息后续多久（毫秒）',
   unfinishedQuietMs: '话没说完时的静默', burstQuietMs: '对方连发时的静默',
   deepsleepGroups: '单群静默名单',
   // 智能体其他
@@ -210,6 +211,10 @@ const TOOL_MCP: Record<string, string> = {
   'social.send.linearResetMs': '「静默后重新秒回」：安静这么久之后计数归零 —— 下一条回复重新从"第 1 条气泡立即发出"开始。',
   'social.send.linearEnabled': '「按字数打字节拍」：开着 = 第 2 条气泡起按字数等（第 1 条永远秒回）。关掉 = 完全不等，多条气泡直接连发。',
   'social.wait.minQuietAfterNewMs': '「新消息后最短静默」：群里刚有人说话时，至少安静这么久再插嘴，防止抢话、刷屏、显得很急。',
+  'social.typing.enabled': '「私聊等对方打完字」：开启后，私聊里检测到对方正在输入（QQ 的输入状态）就先等 ta 打完再回，不抢话；等待期间到的消息会全部排队，最后**合并成一次**发给模型（省注入轮数）。关掉 = 不看打字状态，按正常节奏回。',
+  'social.typing.holdMaxMs': '「最多等多久」：对方一直不停地打字时，最多等这么久（默认 12000 毫秒）就插话，避免遇到"打字没完"的人永远不回复。',
+  'social.typing.breakProbability': '「中途插话概率」（桥侧掷骰）：每次唤醒掷一次骰子，命中就**不等 ta 打完**、按正常节奏接话 —— 这是"智能接话"的来源。0 = 绝不抢话，只等对方停；0.15 = 偶尔接（默认）；0.5 以上 = 多半会接。',
+  'social.typing.refreshOnMessageMs': '「收到消息后续多久」：QQ 的输入状态事件并不可靠（有时只在开始/结束各来一次），所以收到对方一条消息就认为"他还在打字"，把状态再续这么久（默认 5000 毫秒）。这就是"对方不停发消息时打字状态一直是连续的"的实现方式。',
   // —— 表情包 ——
   'social.sticker.enabled': '表情包总开关。开着：机器人会用你 QQ 的收藏表情回消息（接梗、赞同、晚安等场合）；关掉：只用文字聊天。',
   'social.sticker.syncTtlMs': '隔多久向 QQ 同步一次收藏表情（毫秒）。同步一次够用很久，不用每条消息都去拉，调小只会更频繁地刷新、多花资源。',
@@ -1142,8 +1147,11 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
       <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />
 
-      <GroupCard title="等待：回复前的停顿" path="social.wait" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="模拟真人“想一想再回”：停顿多久、新消息后静默多久。全调 0 = 秒回机器人。" />
+      <GroupCard title="等待：回复前的停顿" path="social.wait" cfg={cfg} ch={ch} onHelp={onHelp}        desc="模拟真人“想一想再回”：停顿多久、新消息后静默多久。全调 0 = 秒回机器人。" />
+      {/* 【2026-09-15 主人要求】私聊看对方打字状态：等 ta 打完再回、不停发消息时状态连续、
+          概率骰子决定要不要插话；等待期间的消息合并成一次注入。见 qq-bridge/src/core/typing-hold.js */}
+      <GroupCard title="私聊打字等待（不抢话 / 智能接话）" path="social.typing" cfg={cfg} ch={ch} onHelp={onHelp}
+        desc="私聊里先看对方是不是正在打字：正在输入就先等 ta 打完再回（不抢话）；对方不停发消息时打字状态会一直延续；每次唤醒再掷一次骰子，命中就插话接上（智能接话）。等待期间到的消息全部排队、最后合并成一次发给模型，省注入轮数。" />
       <StickerCard cfg={cfg} ch={ch} onHelp={onHelp} uploadStickers={uploadStickers} />
       <GroupCard title="静默群聊" path="social" only={['deepsleep', 'deepsleepGroups']} cfg={cfg} ch={ch} onHelp={onHelp}
         desc="想省钱/想安静：全群静默（总开关），或只让名单里的个别群静默。" />

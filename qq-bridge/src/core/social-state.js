@@ -12,6 +12,8 @@ import { sanitizeForwardId } from '../forward.js';
 import { collectors, TurnStartAt, pendingWakeKeys, promptQueues, MAX_MEDIA_COUNT, activeAiTurns, wakeConfigUpdatedKeys, markReadCalledKeys, wakeConfigMissCount, messageMediaStore, activeWaits, queued } from './session-state.js';
 import { state } from './config.js';
 import { isSessionAllowedInCurrentMode } from './mode.js';
+// 私聊「不抢话」的等待/插话决策（纯函数，见 typing-hold.js）
+import { typingHoldDecision, typingHoldText } from './typing-hold.js';
 import { isDirectedAtAi } from '../lib/social-timeline.js';
 import { looksLikeUnfinished } from '../wait.js';
 import { readRoleState } from '../lib/role-access.js';
@@ -800,12 +802,19 @@ export function scheduleWake(key, reason) {
     : (interactiveReasons.test(String(reason))
       ? (isPrivateWake ? 1000 : 800)
       : Math.min(3000, Math.max(400, Number(st.wakeConfig?.batchWindowMs) || 2000)));
-  // 私聊智能等待：对方正在输入时，把唤醒窗口拉长到输入等待上限，等 ta 发完再醒（超上限则中途唤醒兜底）。
+  // 私聊智能等待（2026-09-15 主人要求：看对方打字状态、等打完再回，并用概率骰子决定要不要插话）：
+  //   · 命中"等"→ 把唤醒窗口拉长（上限 social.typing.holdMaxMs），期间到的消息全进 unread → 合并成一次注入；
+  //   · 命中"插话"（骰子命中 / 等太久到上限）→ 按正常节奏回，不抢话也不干等。
   // 补发轮跳过这一条：那批消息早在"会话忙"期间就等着了，再等他打完字只是二次延迟。
-  if (!isReplayWake && key.startsWith('private:') && st.peerTypingUntil && Date.now() < st.peerTypingUntil) {
-    const remainTyping = Math.max(500, st.peerTypingUntil - Date.now() + 500);
-    batchMs = Math.max(batchMs, Math.min(PEER_TYPING_HOLD_MAX_MS, remainTyping));
-    log(`[typing] ${key} 对方正在输入，唤醒窗口拉长至 ${Math.round(batchMs / 1000)}s`);
+  if (!isReplayWake && key.startsWith('private:')) {
+    const decision = typingHoldDecision({ typingUntil: st.peerTypingUntil, since: st.peerTypingSince, cfg: cfgRef });
+    if (decision.wait) {
+      const waitMs = Math.min(decision.cfg.holdMaxMs, decision.remainMs + 500);
+      batchMs = Math.max(batchMs, waitMs);
+      log(`[typing] ${typingHoldText(decision, key)}；唤醒窗口 ${(batchMs / 1000).toFixed(1)}s`);
+    } else if (decision.breakIn) {
+      log(`[typing] ${typingHoldText(decision, key)}`);
+    }
   }
   if (isReplayWake) log(`[default] ${key} 补发轮提速：合并窗 ${batchMs}ms（这批消息已在忙期间等过，不再攒窗/不再等对方输入）`);
   st.pendingWakeTimerStartedAt = Date.now();
