@@ -173,7 +173,24 @@ MoonBot Public/
 2. 安装到普通目录，例如 `D:\MoonBot`
 3. 启动后按 DSH、NapCat、桥的顺序启动实例，或使用一键启动
 
-安装目录需要可写，不要安装到 `C:\Program Files`；不要安装到同步盘，SQLite 数据库会被同步破坏。
+安装目录需要可写，且不能放在同步盘。原因是**程序的运行数据全部写在安装目录里**：
+
+| 数据 | 位置 |
+|---|---|
+| 聊天记忆库（SQLite：`chat_messages` / `profiles` / `memory_entries`） | `<安装目录>\resources\runtime\qq-bridge\state\memory.db` |
+| 会话与唤醒状态、活跃时段、用量计量、对账水位、日志 | 同层 `...\qq-bridge\state\` |
+| 机器人人设 / 发言规则（「覆盖人设」写的就是它） | `...\qq-bridge\persona.md`、`speech-rules.md` |
+| DSH 隔离运行目录（会话转录等） | `...\resources\runtime\.runtime\dsh-isolated-home` |
+
+所以：
+
+- **不要装到 `C:\Program Files`**：受保护目录，非管理员进程只能读不能写；更麻烦的是 Windows 的 UAC 虚拟化会把写入悄悄重定向到 `%LOCALAPPDATA%\VirtualStore\...`——看起来"存上了"，程序读的却是原路径，于是记忆库/人设对不上、甚至整库只读报错。
+  安装包默认按用户装到 `%LOCALAPPDATA%\Programs\MoonBot`（不需要管理员、天然可写），只有你在安装向导里改了目录才会踩到这个坑。
+- **不要装在同步盘**（OneDrive / Dropbox / Google Drive / 坚果云 / 微云）：SQLite 靠 WAL 日志 + 文件锁 + 原子替换保证一致性，而同步客户端会在任意时刻抓取/上传/回写文件，云盘的锁对本地 SQLite 也无效——结果可能是 `memory.db-wal` 与主库不匹配、半写文件被上传、旧版本回滚覆盖新数据，SQLite 直接报 `database disk image is malformed`，整个聊天记忆库打不开；还会冒出一堆 `memory.db (1)` 之类的冲突副本。
+  另外安装树里带着 DSH 运行时和几十万个会话小文件（好几 GB），同步客户端会不停扫描上传：卡机器、占流量，还可能把会话内容一起传上云。
+- **网络映射盘 / UNC 路径同理不要用**（例如 `\\nas\share\MoonBot`）：网络文件系统上的文件锁不可靠，SQLite 一样会损坏。
+
+首页在检测到 `Program Files` 或上述同步盘目录时，会直接给出对应警告（见 `server/index.js` 的安装位置体检）。
 
 ### 源码
 
@@ -558,7 +575,13 @@ node ..\tools\verify-installer-content.ps1
 
 **安装位置**
 
-运行数据保存在安装目录内，安装目录需要可写，且不能位于同步盘。首页在检测到风险位置时给出警告。
+运行数据（SQLite 记忆库、会话状态、日志、人设）都写在**安装目录里**，所以安装目录必须可写，且不能位于同步盘：
+
+- 装在 `C:\Program Files` → 非管理员进程写不进去，或被 UAC 虚拟化"假写入"到 `%LOCALAPPDATA%\VirtualStore\`，表现为记忆库/人设对不上、数据库只读报错。安装包默认装到 `%LOCALAPPDATA%\Programs\MoonBot`，是安全的；别在安装向导里改成 `Program Files`。
+- 装在 OneDrive / Dropbox / Google Drive / 坚果云 / 微云等同步盘 → SQLite 的 WAL 日志与文件锁会被云同步打断，可能出现 `database disk image is malformed`（记忆库打不开）、数据回滚、`memory.db (1)` 冲突副本。
+- 网络映射盘 / UNC（`\\nas\share\...`）同样不行：网络文件系统上的文件锁不可靠。
+
+想换位置：先退出管理端与所有组件，把整个安装目录**整体复制**到本地非同步盘（例如 `D:\MoonBot`），再改快捷方式指向新目录里的 `start-manager.vbs`。首页会在检测到风险位置时给出警告。
 
 **界面或行为没有变化**
 
