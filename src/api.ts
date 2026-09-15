@@ -312,6 +312,20 @@ export const saveBridgeConfig = (body: Record<string, any>) =>
   api<BridgeResp>('/bridge/config', { method: 'POST', body: JSON.stringify(body) });
 export const resetSpeechRules = () => api<BridgeResp>('/bridge/speech-reset', { method: 'POST' });
 
+/* ================= 群聊活跃时段（按会话存，走桥控制台；本机/服务端两种 scope） ================= */
+export interface ActivityHoursRow { key: string; windows: string; inWindow?: boolean; nextWindowStart?: string; ok: boolean; error?: string }
+export const getActivityHours = (keys: string[], opts?: { scope?: 'local' | 'remote'; serverId?: string }) =>
+  api<{ ok: boolean; rows: ActivityHoursRow[]; message?: string }>(
+    `/bridge/activity-hours?keys=${encodeURIComponent(keys.join(','))}`
+    + (opts?.scope ? `&scope=${opts.scope}` : '')
+    + (opts?.serverId ? `&serverId=${encodeURIComponent(opts.serverId)}` : ''),
+  );
+export const saveActivityHours = (changes: Array<{ key: string; windows: string | Array<{ start: string; end: string }> }>, opts?: { scope?: 'local' | 'remote'; serverId?: string }) =>
+  api<{ ok: boolean; results: Array<{ key: string; ok: boolean; windows?: string; error?: string }>; message?: string }>(
+    '/bridge/activity-hours',
+    { method: 'POST', body: JSON.stringify({ changes, ...(opts ?? {}) }) },
+  );
+
 /* ================= 桥代码同步 / 整套移除（SSH 服务器） ================= */
 export interface SyncStepsResp {
   success: boolean;

@@ -2901,6 +2901,116 @@ app.get('/api/bridge/config', (_req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+/* ── 群聊活跃时段（2026-09-15 主人要求"管理端加上一个活跃时段配置选项"）────────────────
+ * 数据不在 config.json 里，而是桥的 state/activity-windows.json（按会话存分钟区间，支持跨午夜）。
+ * 读/写都走**桥的控制台 API**（桥把这张表放在内存里，直接改文件会被它下一次保存覆盖）：
+ *   · 本机   → http://127.0.0.1:<config.consolePort 默认 3100>
+ *   · 服务端 → 隧道 127.0.0.1:<Bridge 控制台隧道端口>（后台会带 console token）
+ * 为什么前端传 keys：桥的 GET 接口要一个具体 key，这里由页面把「要看的群」列出来（来自 allow.groups）。
+ */
+
+/** 分钟数 → "HH:MM"（北京时间口径，与桥一致；>1440 表示次日，显示成 01:00 这种） */
+function minToClockText(m) {
+  const n = Number(m);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const hh = String(Math.floor((n % 1440) / 60)).padStart(2, '0');
+  const mm = String(Math.round(n % 60)).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+function windowsToText(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((w) => `${minToClockText(w?.start)}-${minToClockText(w?.end)}`)
+    .filter((s) => s !== '-')
+    .join(', ');
+}
+
+/** 取"活跃时段"要用的控制台地址与 token */
+function activityConsoleTarget(scope, serverId) {
+  if (scope === 'remote') {
+    const cfg = loadConfig();
+    const server = cfg.servers.find((s) => s.id === (serverId || cfg.activeServerId));
+    if (!server) return { error: '没有可用的服务器配置' };
+    if (!sshConnections.has(server.id)) return { error: '服务端未连接（先在 SSH 配置页点「连接」）' };
+    const p = tunnelLocalPort(server.id, 'Bridge 控制台', 13100);
+    return { base: `http://127.0.0.1:${p}`, token: bridgeTokenCache.get(server.id) || '' };
+  }
+  const cfg = readBridgeCfg();
+  const port = Number(cfg.consolePort) || 3100;
+  return { base: `http://127.0.0.1:${port}`, token: String(cfg.consoleToken || '') };
+}
+
+app.get('/api/bridge/activity-hours', async (req, res) => {
+  try {
+    const scope = String(req.query.scope || (req.query.serverId ? 'remote' : 'local'));
+    const keys = String(req.query.keys || '').split(',').map((s) => s.trim()).filter((s) => /^(group|private):\d+$/.test(s));
+    const t = activityConsoleTarget(scope, req.query.serverId);
+    if (t.error) { res.json({ ok: false, message: t.error, rows: [] }); return; }
+    const rows = [];
+    for (const key of keys) {
+      try {
+        const r = await fetch(`${t.base}/api/social/activity-hours?key=${encodeURIComponent(key)}`, {
+          headers: t.token ? { 'x-console-token': t.token } : {},
+          signal: AbortSignal.timeout(6000),
+        });
+        const j = await r.json().catch(() => null);
+        rows.push({
+          key,
+          windows: windowsToText(j?.windows),
+          inWindow: j?.inWindow === true,
+          nextWindowStart: j?.nextWindowStart != null ? minToClockText(j.nextWindowStart) : '',
+          ok: !!j?.ok,
+          error: j?.ok ? '' : (j?.error || `HTTP ${r.status}`),
+        });
+      } catch (e) {
+        rows.push({ key, windows: '', ok: false, error: e?.message ?? String(e) });
+      }
+    }
+    res.json({ ok: true, scope, rows });
+  } catch (e) {
+    res.json({ ok: false, message: e?.message ?? String(e), rows: [] });
+  }
+});
+
+app.post('/api/bridge/activity-hours', async (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const scope = String(body.scope || (body.serverId ? 'remote' : 'local'));
+    const changes = Array.isArray(body.changes) ? body.changes : [];
+    if (!changes.length) { res.status(400).json({ ok: false, message: 'changes 不能为空' }); return; }
+    const t = activityConsoleTarget(scope, body.serverId);
+    if (t.error) { res.json({ ok: false, message: t.error }); return; }
+    const results = [];
+    for (const ch of changes) {
+      const key = String(ch?.key || '').trim();
+      if (!/^(group|private):\d+$/.test(key)) { results.push({ key, ok: false, error: 'key 格式应为 group:群号' }); continue; }
+      // 前端传 "[{start:"09:00",end:"01:00"}]" 或 "09:00-01:00,13:00-14:00" 都认
+      let windows = Array.isArray(ch.windows) ? ch.windows : [];
+      if (typeof ch.windows === 'string') {
+        windows = String(ch.windows).split(/[,，;；\s]+/).filter(Boolean).map((seg) => {
+          const m = /^(\d{1,2}:\d{2})\s*[-~～至]\s*(\d{1,2}:\d{2})$/.exec(seg);
+          return m ? { start: m[1], end: m[2] } : null;
+        }).filter(Boolean);
+      }
+      try {
+        const r = await fetch(`${t.base}/api/social/activity-hours`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(t.token ? { 'x-console-token': t.token } : {}) },
+          body: JSON.stringify({ key, windows }),
+          signal: AbortSignal.timeout(8000),
+        });
+        const j = await r.json().catch(() => null);
+        results.push({ key, ok: !!j?.ok, windows: windowsToText(j?.windows), error: j?.ok ? '' : (j?.error || `HTTP ${r.status}`) });
+      } catch (e) {
+        results.push({ key, ok: false, error: e?.message ?? String(e) });
+      }
+    }
+    mlog(`[activity] 管理端更新活跃时段：${results.map((r) => `${r.key}${r.ok ? '=' + (r.windows || '不限') : '失败'}`).join('、')}`);
+    res.json({ ok: results.every((r) => r.ok), results });
+  } catch (e) {
+    res.json({ ok: false, message: e?.message ?? String(e) });
+  }
+});
+
 app.post('/api/bridge/config', (req, res) => {
   try {
     const body = req.body ?? {};

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, getBridgeConfig, saveBridgeConfig, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, getActivityHours, saveActivityHours, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
 import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle } from 'lucide-react';
 import NumInput from '../components/NumInput';
@@ -670,7 +670,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           </button>
         </div>
 
-        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} />}
+        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} />}
         {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} />}
 
         {tab === 'persona' && (
@@ -1079,10 +1079,11 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 }
 
 /* ================= 常用设置：一功能一卡片，3 列等高对齐 ================= */
-function CommonTab({ cfg, ch, onHelp, uploadStickers }: {
+function CommonTab({ cfg, ch, onHelp, uploadStickers, remote }: {
   cfg: any; ch: (p: string) => (v: any) => void;
   onHelp: (h: any) => void;
   uploadStickers: (files: File[]) => Promise<void>;
+  remote?: { id: string; name?: string } | null;
 }) {
   // 精简后的基础项：删掉端口/令牌/会话目录等系统自管项，避免无效配置
   const topOnly = ['agentPreset', 'workspaceTitle', 'ownerQQ', 'adminQQ', 'ackMessage', 'sendDelayMs', 'questionTimeoutMs'];
@@ -1112,6 +1113,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers }: {
         desc="每轮带多少历史、聊太久自动换新会话，防止记性爆掉。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
+      <ActivityHoursCard cfg={cfg} remote={remote} />
 
       <GroupCard title="等待：回复前的停顿" path="social.wait" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="模拟真人“想一想再回”：停顿多久、新消息后静默多久。全调 0 = 秒回机器人。" />
@@ -1176,6 +1178,84 @@ function GroupCard({ title, path, blocks, cfg, ch, onHelp, filter, only, desc, c
         );
       })}
       {children}
+    </div>
+  );
+}
+
+/** 群聊活跃时段卡（2026-09-15 主人要求加在管理端）
+ *  数据不在 config.json，而是桥的 state/activity-windows.json（按会话存，支持跨午夜如 09:00-01:00）。
+ *  读改都走后端 /api/bridge/activity-hours（本机走 3100，服务端走隧道 13100），改完立刻生效。 */
+function ActivityHoursCard({ cfg, remote }: { cfg: any; remote?: { id: string; name?: string } | null }) {
+  const groups: string[] = Array.isArray(cfg?.allow?.groups) ? cfg.allow.groups.map(String).filter(Boolean) : [];
+  const [rows, setRows] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<Record<string, string>>({});
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const scope = remote ? 'remote' : 'local';
+
+  const refresh = async () => {
+    if (!groups.length) return;
+    try {
+      const r = await getActivityHours(groups.map((g) => `group:${g}`), { scope, serverId: remote?.id });
+      const w: Record<string, string> = {};
+      const s: Record<string, string> = {};
+      for (const row of r.rows ?? []) {
+        const gid = row.key.split(':')[1];
+        w[gid] = row.windows || '';
+        s[gid] = row.ok ? (row.windows ? (row.inWindow ? '现在在时段内' : `现在不在时段内（下一个 ${row.nextWindowStart || '—'} 开始）`) : '未设时段（全天随意）') : (row.error || '读取失败');
+      }
+      setRows(w); setStatus(s);
+    } catch (e) { setMsg('读取活跃时段失败：' + (e as Error).message); }
+  };
+  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [JSON.stringify(groups), scope, remote?.id]);
+
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const changes = groups.map((g) => ({ key: `group:${g}`, windows: rows[g] ?? '' }));
+      const r = await saveActivityHours(changes, { scope, serverId: remote?.id });
+      const bad = (r.results ?? []).filter((x) => !x.ok);
+      setMsg(bad.length
+        ? '部分没保存成功：' + bad.map((x) => `${x.key.split(':')[1]}（${x.error}）`).join('、')
+        : `已保存${remote ? '到服务端' : ''}：${(r.results ?? []).map((x) => `${x.key.split(':')[1]}${x.windows ? ' = ' + x.windows : ' = 不限'}`).join('、')}`);
+      await refresh();
+    } catch (e) { setMsg('保存失败：' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="cfg-card">
+      <div className="cfg-card-title">群聊活跃时段{remote ? '（服务端）' : ''}</div>
+      <div className="cfg-card-desc">
+        按群设"该活跃的时间段"（北京时间，支持跨午夜，如 <code>09:00-01:00</code>；多个用逗号分隔）。
+        时段内：正常参与、别急着潜水；时段外：没正事就潜水，不在安静时段刷存在感。<br />
+        留空 = 不设时段（机器人不受时间约束）。@、叫名字、提问这类唤醒不受时段限制，永远会回。
+      </div>
+      {!groups.length ? (
+        <div className="cfg-card-desc">当前「允许名单」里还没有群 —— 先在下面「允许名单」加群号，这里才有可设的对象。</div>
+      ) : (
+        <div className="cfg-fields">
+          {groups.map((g) => (
+            <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+              <span style={{ minWidth: 110, opacity: 0.85 }}>{g}</span>
+              <input
+                className="input" style={{ maxWidth: 240 }}
+                placeholder="如 09:00-01:00 ，留空=不限"
+                value={rows[g] ?? ''}
+                onChange={(e) => setRows((p) => ({ ...p, [g]: e.target.value }))}
+              />
+              <span style={{ fontSize: 12, opacity: 0.7 }}>{status[g] || ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || !groups.length} onClick={save}>
+          {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存活跃时段
+        </button>
+        <button type="button" className="btn btn-sm" disabled={busy || !groups.length} onClick={refresh}>刷新</button>
+        {msg && <span style={{ fontSize: 12 }}>{msg}</span>}
+      </div>
     </div>
   );
 }
