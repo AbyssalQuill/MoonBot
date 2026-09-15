@@ -346,9 +346,27 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
 @media (max-width: 1080px) { .lrn-grid { grid-template-columns: 1fr; } }
 
-/* 右卡「人格学习状态」：与左卡等高（stretch + flex 撑满），列表超出就滚动而不是无限变长 */
-.lrn-status-card { display: flex; flex-direction: column; }
+/* 右卡「人格学习状态」：内部拆成「人格学习 / 画像学习」上下两栏。
+   等高靠 .lrn-grid 的 align-items: stretch（两栏都是 grid item）；这里负责"撑满 + 内部滚动 + 底部不留死空白"：
+   卡片是 flex 列 → 正文区 flex: 1 + min-height: 0 → 滚动区自己 flex: 1 + min-height: 0。
+   下面那一栏（画像学习 .lrn-status-block-fill）吃满卡片剩余高度，资料区一直铺到卡底。 */
+.lrn-status-card { display: flex; flex-direction: column; min-height: 0; }
+.lrn-status-body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+.lrn-status-block { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
+/* 下面那一栏（画像学习）：吃满卡片剩余高度 —— 浅色托底让它看着是"铺到卡底"的一块栏，而不是留白 */
+.lrn-status-block-fill {
+  flex: 1 1 auto;
+  background: hsl(339.13 92% 98.4% / .7);
+  border: 1px solid hsl(339.33 90% 90% / .9);
+  border-radius: var(--nc-radius-m);
+  padding: 10px 12px 6px;
+}
+.lrn-status-body .lrn-divider { margin: 4px 0; }
+.lrn-status-hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--nc-foreground-400); }
+.lrn-block-refresh { margin-left: auto; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
+/* 最后一栏里的列表不再限高：限高会在卡片被左卡拉高时在底部留下一块死空白 */
+.lrn-status-block-fill .lrn-status-scroll { max-height: none; }
 /* 悬停动效：与主页那几张启动卡一致（微微抬起 + 阴影 + 边框变亮） */
 .lrn-status-row { cursor: pointer; transition: box-shadow .2s, transform .2s, border-color .2s; }
 .lrn-status-row:hover { transform: translateY(-2px); border-color: hsl(339.33 90% 70.39% / .9); box-shadow: 0 6px 16px hsl(339.13 92% 9% / .10); }
@@ -377,6 +395,25 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .pfp-k { flex: 0 0 88px; color: var(--nc-foreground-400); }
 .pfp-v { flex: 1 1 auto; color: var(--nc-foreground-800); white-space: pre-wrap; word-break: break-word; }
 .pfp-empty { margin-top: 6px; font-size: 12.5px; color: var(--nc-foreground-400); }
+
+/* 黑话库弹窗：批量手动审批（勾选 + 全选/反选/清空 + 批量通过/拒收/分析） */
+.lrn-slang-tools { padding: 10px 18px 0; display: flex; flex-direction: column; gap: 8px; }
+.lrn-batch-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lrn-batch-count { font-size: 12.5px; font-weight: 700; color: var(--nc-primary-600); }
+.lrn-batch-spacer { flex: 1 1 auto; }
+.lrn-slang-note {
+  font-size: 12px; line-height: 1.65; color: var(--nc-foreground-500);
+  background: hsl(339.13 92% 97% / .8); border-radius: 8px; padding: 7px 10px;
+}
+.lrn-slang-result {
+  font-size: 12.5px; line-height: 1.6; color: var(--tb-azure-600);
+  background: var(--tb-azure-100); border: 1px solid hsl(199 100% 86% / .9); border-radius: 8px; padding: 6px 10px;
+}
+/* 词条行：整行可点选（复选框也能点） */
+.lrn-slang-row { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.lrn-slang-row .lrn-status-main { flex: 1 1 auto; min-width: 0; }
+.lrn-slang-row .lrn-pick { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 3px; cursor: pointer; accent-color: var(--nc-primary-500); }
+.lrn-slang-row.is-selected { border-color: var(--nc-primary-500); background: hsl(339.33 90% 98.5%); box-shadow: 0 0 0 1px hsl(339.33 90% 80.39% / .7); }
 
 /* 区块内分组 */
 .lrn-block { }

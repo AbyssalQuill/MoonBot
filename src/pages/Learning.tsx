@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
-  getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
-  reconcileTokens,
+  getLearningConfig, saveLearningConfig, slangAction, personaAction, personaApply, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
+  reconcileTokens, slangBatchConfirm, slangBatchReject, slangResearch,
 } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
   Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw, BookOpen, Scale,
+  Check, X, Search, Wand2,
 } from 'lucide-react';
 
 interface Props { onBack: () => void; }
@@ -34,6 +35,16 @@ const pick = (...ks: string[]) => (o: any): string => {
 };
 /** 兼容桥侧 { ok, result:{...} } 与直接对象两种回包 */
 const unwrap = (r: any): any => (isObj(r?.result) ? r.result : isObj(r) ? r : {});
+/** api() 抛出的 HTTP 错误 → 人话：404 基本等于「管理端还没转发这条桥接口」，
+ *  直接抛 `API /xx -> HTTP 404` 会让主人以为桥坏了，这里补一句可落地的说明。 */
+const apiErrText = (e: any): string => {
+  const t = String(e?.message ?? e);
+  const m = /API (\S+) -> HTTP (\d+)/.exec(t);
+  if (m && m[2] === '404') {
+    return `管理端没有转发该接口（HTTP 404：${m[1]}）——需要在 server 侧加一条到桥同名端点的代理`;
+  }
+  return t;
+};
 const bjClock = (ms: number): string =>
   new Date(ms).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(/\//g, '-');
 /** 紧凑计数：万 → W，到百万级切 M（例：14.7W / 1.25M / 12.5M） */
@@ -81,6 +92,13 @@ interface HourStat {
 interface PItem {
   uid: string; state: string; learnedAtMs: number; samples: number;
   nickname: string; preview: string;
+  /** 英文人设正文（桥侧 persona-library[uid].personaEn，随 status 一起回来）：主人审批/修正的对象 */
+  personaEn: string;
+  /** 审批痕迹：最近一次「保存修正」/「覆盖机器人人设」的时刻 */
+  personaEditedAtMs: number;
+  personaAppliedAtMs: number;
+  /** 是否在 learning-config persona.targetQQ（人格学习目标列表）里；false 的多半是「画像学习」自动筛出来的 */
+  inTargetList: boolean;
 }
 
 function normDays(dates: any[] | undefined): DayStat[] {
@@ -138,6 +156,11 @@ function normStatus(r: any): PItem[] {
     samples: isObj(it) ? num(it.samples) : 0,
     nickname: String(isObj(it) ? (it.nickname ?? '') : ''),
     preview: String(isObj(it) ? (it.personalityPreview ?? it.preview ?? '') : ''),
+    // 老桥没有这几个字段 → 空值/0/false 走"没有英文人设正文"的老档案分支，不假装有
+    personaEn: String(isObj(it) ? (it.personaEn ?? '') : ''),
+    personaEditedAtMs: isObj(it) ? num(it.personaEditedAtMs) : 0,
+    personaAppliedAtMs: isObj(it) ? num(it.personaAppliedAtMs) : 0,
+    inTargetList: isObj(it) ? it.inTargetList !== false : true,
   }));
 }
 
@@ -180,6 +203,11 @@ export default function Learning({ onBack }: Props) {
   const [profDetail, setProfDetail] = useState<Record<string, any>>({});
   const [profErr, setProfErr] = useState<Record<string, string>>({});
   const [profBusy, setProfBusy] = useState<string>('');
+  // 英文人设正文（personaEn）的编辑草稿 / 进行中的动作 / 每行结果提示。
+  // 草稿单独存：60 秒静默轮询会重刷 pStatus，直接改源对象会把主人正在敲的字冲掉。
+  const [peDraft, setPeDraft] = useState<Record<string, string>>({});
+  const [peBusy, setPeBusy] = useState<string>('');   // `${mode}:${uid}`
+  const [peNote, setPeNote] = useState<Record<string, string>>({});
 
   const openProfile = async (uid: string) => {
     if (openUid === uid) { setOpenUid(''); return; }
@@ -198,14 +226,116 @@ export default function Learning({ onBack }: Props) {
       setProfErr((m) => ({ ...m, [uid]: String(e?.message ?? e) }));
     } finally { setProfBusy(''); }
   };
+
+  /** 人格学习的目标名单（左侧卡片「目标 QQ」里配的人）。
+   *  只学名单里的人是主人要求的边界：名单外的人（「画像学习」按活跃度自动筛出来的群友、
+   *  或主人指令里临时带的号码）档案能看，但**不许一键变成机器人自己的人设** —— 覆盖按钮直接禁用。 */
+  const personaTargets = useMemo(
+    () => new Set<string>(Array.isArray(cfg?.persona?.targetQQ) ? cfg.persona.targetQQ.map((x: any) => String(x)) : []),
+    [cfg?.persona?.targetQQ],
+  );
+  /** 右卡两栏的"分家"（2026-09-15 主人要求：人格学习要和画像学习分立）：
+   *   · 人格学习栏 = **只有目标名单里的人**（左侧「目标 QQ」里配的）；
+   *   · 画像学习栏 = 名单外的那些（画像学习按活跃度自动筛出来的群友，以及主人指令里临时带的号）。
+   *  以前学的那些人大多来自画像学习，就会**自动落到画像学习栏**，不再混在人格学习栏里；
+   *  人设覆盖按钮也因此只会长在目标身上。 */
+  const inTargetOf = (it: PItem): boolean => (cfg ? personaTargets.has(String(it.uid)) : it.inTargetList === true);
+  const pTargetRows = useMemo(() => pStatus.filter((it) => inTargetOf(it)), [pStatus, cfg, personaTargets]);
+  const pOtherRows = useMemo(() => pStatus.filter((it) => !inTargetOf(it)), [pStatus, cfg, personaTargets]);
+  /** 框里当前该显示的正文：有草稿用草稿，否则用桥侧库里的值 */
+  const peValueOf = (it: PItem): string => (peDraft[it.uid] !== undefined ? peDraft[it.uid] : String(it.personaEn ?? ''));
+  const peErrOf = (r: any): string => firstErr(r) || String(unwrap(r)?.error ?? '');
+
+  /** 「结合原人设完善」：让桥侧跑一轮模型，把学到的特点**融进当前的 persona.md**（增删改），
+   *  产出的是**草稿**——只填进下面的框里让你看/改，绝不自动写盘。
+   *  【2026-09-15 主人要求】覆盖人设不该只有"整篇替换"：更多时候要的是在原有基础上"完善"。 */
+  const fusePersonaEn = async (uid: string) => {
+    if (peBusy) return;
+    setPeBusy(`fuse:${uid}`);
+    setPeNote((m) => ({ ...m, [uid]: '正在结合当前人设生成完善稿（要跑一轮模型，十几秒到一分钟）…' }));
+    try {
+      const r: any = await personaApply(uid, 'fuse');
+      const e = peErrOf(r);
+      if (e) { setPeNote((m) => ({ ...m, [uid]: `生成完善稿失败：${e}` })); return; }
+      const res = unwrap(r);
+      const text = String(res?.text ?? '');
+      if (!text.trim()) { setPeNote((m) => ({ ...m, [uid]: '生成完善稿失败：模型返回空内容' })); return; }
+      setPeDraft((m) => ({ ...m, [uid]: text }));
+      setPeNote((m) => ({
+        ...m,
+        [uid]: `已生成完善稿草稿（${num(res.chars) || text.length} 字；原人设 ${num(res.currentChars)} 字）。`
+          + `**还没有生效**：先看/改下面的稿子，满意再点「整篇覆盖人设」写进去（会自动备份旧人设）。`,
+      }));
+    } catch (err: any) {
+      setPeNote((m) => ({ ...m, [uid]: `生成完善稿失败：${apiErrText(err)}` }));
+    } finally { setPeBusy(''); }
+  };
+
+  /** 「保存修正」：把框里的文字写回该 uid 的 personaEn（机器人当前人设不动） */
+  const savePersonaEn = async (uid: string, text: string) => {
+    if (peBusy) return;
+    setPeBusy(`save:${uid}`);
+    setPeNote((m) => ({ ...m, [uid]: '正在保存修正…' }));
+    try {
+      const r: any = await personaApply(uid, 'save', text);
+      const e = peErrOf(r);
+      if (e) { setPeNote((m) => ({ ...m, [uid]: `保存修正失败：${e}` })); return; }
+      const res = unwrap(r);
+      setPeDraft((m) => { const n = { ...m }; delete n[uid]; return n; });   // 落库成功后以库里的值为准
+      setPeNote((m) => ({ ...m, [uid]: `已保存修正（${num(res.savedChars) || text.trim().length} 字）。机器人当前人设没动，想让它生效再点「整篇覆盖人设」。` }));
+      await refreshStatus(true);
+    } catch (err: any) {
+      setPeNote((m) => ({ ...m, [uid]: `保存修正失败：${apiErrText(err)}` }));
+    } finally { setPeBusy(''); }
+  };
+
+  /** 「覆盖机器人人设」：把框里的正文写 qq-bridge/persona.md（桥侧自动备份旧人设，下一条消息起生效）。
+   *  覆盖是**不可逆**的破坏性动作，所以先 confirm 把"会覆盖 / 会自动备份"说清楚。 */
+  const applyPersonaEn = async (uid: string, text: string) => {
+    if (peBusy) return;
+    const ok = window.confirm(
+      `确定把框里这段英文【整篇替换】机器人当前的人设吗？（写 qq-bridge/persona.md）\n\n`
+      + `· 当前人设会自动备份成 persona.md.bak-<日期-时间>（同目录，最多保留 5 份）\n`
+      + `· 下一条消息起就用新人设，不用重启桥\n`
+      + `· 正文必须是纯英文，含中文会被桥侧拒回\n`
+      + `· 只想在原有基础上"完善"而不是替换：先点左边「结合原人设完善」生成草稿，改好再来这里覆盖`,
+    );
+    if (!ok) return;
+    setPeBusy(`apply:${uid}`);
+    setPeNote((m) => ({ ...m, [uid]: '正在覆盖机器人人设…' }));
+    try {
+      const r: any = await personaApply(uid, 'apply', text);
+      const e = peErrOf(r);
+      if (e) { setPeNote((m) => ({ ...m, [uid]: `覆盖失败：${e}` })); return; }
+      const res = unwrap(r);
+      setPeDraft((m) => { const n = { ...m }; delete n[uid]; return n; });
+      setPeNote((m) => ({
+        ...m,
+        [uid]: `已覆盖机器人人设：写入 ${num(res.bytes)} 字节`
+          + `${res.backup ? `，旧人设已备份为 ${String(res.backup)}` : '（此前没有 persona.md，所以没有备份）'}`
+          + `。下一条消息起生效，不用重启桥。`,
+      }));
+      await refreshStatus(true);
+    } catch (err: any) {
+      setPeNote((m) => ({ ...m, [uid]: `覆盖失败：${apiErrText(err)}` }));
+    } finally { setPeBusy(''); }
+  };
+
   // 黑话库弹窗
   const [slangOpen, setSlangOpen] = useState(false);
   const [slangEntries, setSlangEntries] = useState<any[]>([]);
   const [slangErr, setSlangErr] = useState('');
   const [slangQ, setSlangQ] = useState('');
+  // 黑话库批量审批：勾选的词条 id（只认当前可见列表里勾上的那些）+ 进行中的动作 + 弹窗内结果提示
+  const [slangSel, setSlangSel] = useState<string[]>([]);
+  const [slangBusy, setSlangBusy] = useState<string>('');
+  const [slangNote, setSlangNote] = useState('');
+  // 画像学习状态（右卡「画像学习」栏；来源 portraitAction('status')，与人格状态共用 60 秒静默轮询）
+  const [ptStatus, setPtStatus] = useState<any>(null);
+  const [ptErr, setPtErr] = useState('');
 
   const openSlangLib = async () => {
-    setSlangOpen(true); setSlangErr('');
+    setSlangOpen(true); setSlangErr(''); setSlangNote('');
     if (slangEntries.length) { void loadSlangLib(true); return; }
     await loadSlangLib();
   };
@@ -215,10 +345,50 @@ export default function Learning({ onBack }: Props) {
       const list: any[] = Array.isArray(r?.entries) ? r.entries
         : (Array.isArray(r?.result?.entries) ? r.result.entries : (Array.isArray(r?.data?.entries) ? r.data.entries : []));
       setSlangEntries(list);
+      // 列表重取后，把已经不存在的勾选丢掉（否则「已选 N 条」会算进幽灵词条）
+      setSlangSel((prev) => (prev.length ? prev.filter((id) => list.some((e) => String(e?.id ?? '') === id)) : prev));
       setSlangErr('');
     } catch (e: any) {
       if (!quiet) setSlangErr(String(e?.message ?? e));
     }
+  };
+
+  /** 黑话库批量操作：confirm = 批量通过 / reject = 批量拒收 / research = 批量分析（桥侧只研究候选词条）。
+   *  动作完成后按最新状态重取列表，并把结果同时写进页面提示条与弹窗内提示（弹窗盖着页面，只有前者看不见）。 */
+  const slangBatch = async (kind: 'confirm' | 'reject' | 'research', ids: string[]) => {
+    if (slangBusy) return;
+    if (!ids.length) { setSlangNote('请先勾选要处理的词条'); return; }
+    const label = kind === 'confirm' ? '批量通过' : kind === 'reject' ? '批量拒收' : '批量分析';
+    setSlangBusy(kind);
+    setSlangNote(`${label}：已提交 ${ids.length} 条，等待桥侧回执…`);
+    try {
+      const r: any = kind === 'confirm' ? await slangBatchConfirm(ids)
+        : kind === 'reject' ? await slangBatchReject(ids)
+          : await slangResearch(ids);
+      const e = firstErr(r);
+      if (e) { const t = `${label}失败：${e}`; setMsg(t); setSlangNote(t); return; }
+      const res = unwrap(r);
+      let text: string;
+      if (kind === 'confirm') {
+        const done = num(res.confirmedCount);
+        const skip = num(res.skippedCount);
+        const skipped: any[] = Array.isArray(res.skipped) ? res.skipped : [];
+        const why = skipped.length
+          ? `（跳过：${skipped.slice(0, 3).map((s: any) => `${String(s?.content ?? s?.id ?? '')}——${String(s?.reason ?? '')}`).join('；')}${skipped.length > 3 ? ' …' : ''}）`
+          : '';
+        text = `批量通过：已确认 ${done} 条${skip ? `，跳过 ${skip} 条${why}` : ''}`;
+      } else if (kind === 'reject') {
+        text = `批量拒收：已拒收 ${num(res.rejectedCount)} 条`;
+      } else {
+        text = `批量分析：已提交 ${num(res.count)} 条候选词条的研究任务（桥侧后台串行跑，完成后自动补释义）`;
+      }
+      setMsg(text); setSlangNote(text);
+      setSlangSel([]);
+      await loadSlangLib(true);
+    } catch (err: any) {
+      const t = `${label}失败：${apiErrText(err)}`;
+      setMsg(t); setSlangNote(t);
+    } finally { setSlangBusy(''); }
   };
 
   const qqs = qqListOf(qqText);
@@ -268,10 +438,23 @@ const clampHrs = (v: any): number => {
     }
   };
 
-  // 进页拉一次配置与人格状态；状态区只读，无手动刷新按钮 → 60 秒静默轮询
+  /** 画像学习状态（右卡下面那一栏）。回包 { ok, result:{ config, lastTargets, status, running } } */
+  const refreshPortrait = async (quiet = false) => {
+    try {
+      const r: any = await portraitAction('status');
+      const e = firstErr(r);
+      if (e) { if (!quiet) setPtErr(e); return; }
+      setPtStatus(unwrap(r));
+      setPtErr('');
+    } catch (err: any) {
+      if (!quiet) setPtErr(String(err?.message ?? err));
+    }
+  };
+
+  // 进页拉一次配置、人格状态与画像学习状态；状态区只读，无手动刷新按钮 → 60 秒静默轮询
   useEffect(() => {
-    loadConfig(); refreshStatus();
-    const iv = setInterval(() => refreshStatus(true), 60000);
+    loadConfig(); refreshStatus(); refreshPortrait();
+    const iv = setInterval(() => { refreshStatus(true); refreshPortrait(true); }, 60000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -493,26 +676,43 @@ const clampHrs = (v: any): number => {
               )}
             </div>
 
-            {/* ============ 右：人格学习状态（与左卡片等高；超出滚动；点开看完整资料） ============ */}
+            {/* ============ 右：人格学习状态（与左卡片等高；上下两栏：人格学习 / 画像学习；超出滚动；点开看完整资料） ============ */}
             <div className="card lrn-status-card">
               <div className="card-title">
                 <Users size={17} /> 人格学习状态
                 <span className="lrn-updated">只读展示 · 每 60 秒自动刷新{statusAt ? ` · 更新于 ${statusAt}` : ''}</span>
               </div>
+              <div className="lrn-status-body">
+              {/* ——— 上面一栏：人格学习（现有那批人格学习目标；点一条展开看完整资料，行为不变） ——— */}
+              <div className="lrn-status-block">
+                <div className="lrn-block-title">人格学习<span className="lrn-status-hint">只学「目标 QQ」里的人 · 点一条看完整资料</span></div>
+                {/* 主人看到的现状是"学完只攒了个性格档案"——这里把边界和出口写在栏标题上：
+                    学谁、学完怎么变成机器人自己的人设。 */}
+                <div style={{ margin: '-4px 0 8px', fontSize: 11.5, lineHeight: 1.65, color: 'var(--nc-foreground-400)' }}>
+                  只学左侧「目标 QQ」里配的人，这一栏也只列**目标名单里的人**。展开一条可以看到学习产出的
+                  <b>英文人设正文</b>，可以「结合原人设完善」（在现有基础上按学到的特点增删改，先出草稿）或直接「整篇覆盖人设」。
+                  {pOtherRows.length > 0 && (
+                    <> 另外 {pOtherRows.length} 个人的档案不在目标名单里（画像学习自动筛出来的），已归到下面「画像学习」栏。</>
+                  )}
+                </div>
               {statusErr ? (
                 <div className="lrn-error">
                   <AlertTriangle size={15} />
                   <div style={{ flex: 1 }}>{statusErr}</div>
                   <button className="btn btn-sm btn-danger" onClick={() => refreshStatus()}><RefreshCw size={13} /> 重试</button>
                 </div>
-              ) : pStatus.length === 0 ? (
+              ) : pTargetRows.length === 0 ? (
                 <div className="empty-state" style={{ padding: '34px 12px' }}>
                   <Users size={34} style={{ color: 'var(--nc-foreground-300)', marginBottom: 10 }} />
-                  <div style={{ color: 'var(--nc-foreground-400)', fontSize: 13 }}>暂无档案<br />学习过 / 正在学习的目标会显示在这里（点「人格立即学习」开始）</div>
+                  <div style={{ color: 'var(--nc-foreground-400)', fontSize: 13 }}>
+                    {pOtherRows.length > 0
+                      ? <>目标名单里还没有档案<br />（另外 {pOtherRows.length} 个人的档案在下面「画像学习」栏）<br />点「人格立即学习」开始学目标 QQ</>
+                      : <>暂无档案<br />学习过 / 正在学习的目标会显示在这里（点「人格立即学习」开始）</>}
+                  </div>
                 </div>
               ) : (
                 <div className="lrn-status-list lrn-status-scroll">
-                  {pStatus.map((it) => {
+                  {pTargetRows.map((it) => {
                     const open = openUid === it.uid;
                     const d = profDetail[it.uid] || null;
                     const pf = d?.profile || null;
@@ -545,6 +745,13 @@ const clampHrs = (v: any): number => {
                             const lib = d?.library ?? null;
                             const intro = String(lib?.profile || pf?.personality || d?.personaSummary || '').trim();
                             const summaryText = String(d?.personaSummary || '').trim();
+                            // 目标列表以本页读到的学习配置为准（和左侧「目标 QQ」同一份）；配置没读到时
+                            // 退回桥侧 status 的 inTargetList，别因为一次加载失败就把按钮全禁了。
+                            const inTarget = cfg ? personaTargets.has(it.uid) : it.inTargetList;
+                            // 英文人设正文：库里有就展示（可编辑），没有走"旧版档案"提示，绝不假装有
+                            const peLib = String(it.personaEn || lib?.personaEn || '').trim();
+                            const peText = peValueOf(it);
+                            const peHasDraft = peDraft[it.uid] !== undefined;
                             const styleBits = lib?.style
                               ? [lib.style.sentenceLength, lib.style.toneWords, lib.style.rhetoricalQuestions].filter(Boolean).join('；')
                               : '';
@@ -597,6 +804,86 @@ const clampHrs = (v: any): number => {
                               {summaryText && summaryText !== intro && (
                                 <div className="lrn-wide"><span className="lrn-dk">人格摘要</span><p className="lrn-prose">{summaryText}</p></div>
                               )}
+
+                              {/* 英文人设正文（personaEn）：人格学习这一轮的**成品**，主人在这里审批/修正，
+                                  再一键覆盖机器人自己的人设。整块 stopPropagation：不清掉冒泡的话，
+                                  在框里打字会触发整行的「点一下收起」，字还没敲完卡片就合上了。 */}
+                              <div
+                                className="lrn-wide"
+                                style={{
+                                  marginTop: 6, padding: '8px 10px', borderRadius: 8,
+                                  background: 'hsl(339.13 92% 97.2% / .75)',
+                                  border: '1px solid hsl(339.33 90% 90% / .9)',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <span className="lrn-dk">英文人设正文</span>
+                                {!inTarget && (
+                                  <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.6, color: 'var(--nc-danger-600)' }}>
+                                    该目标不在人格学习目标列表里（左侧「目标 QQ」里配的才算；这一条多半是「画像学习」自动筛出来的），只能看，不能覆盖机器人人设。
+                                  </div>
+                                )}
+                                {!peLib && !peHasDraft && (
+                                  <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.6, color: 'var(--nc-foreground-400)' }}>
+                                    这条档案是旧版学的，还没有英文人设正文：重跑一次人格学习就会生成
+                                    {inTarget ? '（也可以在下面自己写一段纯英文，再点保存或覆盖）' : ''}。
+                                  </div>
+                                )}
+                                {(inTarget || !!peLib) && (
+                                  <textarea
+                                    value={peText}
+                                    readOnly={!inTarget}
+                                    onChange={(e) => setPeDraft((m) => ({ ...m, [it.uid]: e.target.value }))}
+                                    rows={7}
+                                    spellCheck={false}
+                                    placeholder="纯英文人设正文（150~400 词）：你是谁、怎么说话、在意什么、什么口吻、忌讳什么。含中文会被桥侧拒回。"
+                                    style={{
+                                      width: '100%', marginTop: 5, padding: '7px 9px', boxSizing: 'border-box',
+                                      fontSize: 12.5, lineHeight: 1.6, borderRadius: 8,
+                                      border: '1px solid hsl(339.33 90% 88%)',
+                                      background: inTarget ? '#fff' : 'hsl(339.13 92% 98%)',
+                                      color: 'var(--nc-foreground-800)', resize: 'vertical',
+                                    }}
+                                  />
+                                )}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+                                  <button
+                                    className="btn btn-soft-primary btn-sm"
+                                    disabled={!!peBusy || !inTarget || !peLib}
+                                    title={inTarget
+                                      ? '让桥跑一轮模型：把学到的特点融进【当前机器人人设】重新增删改，产出一份草稿填到框里（不写盘，你确认后再覆盖）'
+                                      : '该目标不在人格学习目标列表里，不能用'}
+                                    onClick={() => fusePersonaEn(it.uid)}
+                                  >
+                                    {peBusy === `fuse:${it.uid}` ? <Loader2 size={13} className="spin" /> : <Wand2 size={13} />} 结合原人设完善
+                                  </button>
+                                  <button
+                                    className="btn btn-soft-primary btn-sm"
+                                    disabled={!!peBusy || !inTarget || !peText.trim()}
+                                    title={inTarget ? '把框里的正文写回这条档案（机器人当前人设不动）' : '该目标不在人格学习目标列表里，不能改'}
+                                    onClick={() => savePersonaEn(it.uid, peText)}
+                                  >
+                                    {peBusy === `save:${it.uid}` ? <Loader2 size={13} className="spin" /> : <Save size={13} />} 保存修正
+                                  </button>
+                                  <button
+                                    className="btn btn-primary btn-sm"
+                                    disabled={!!peBusy || !inTarget || !peText.trim()}
+                                    title={inTarget ? '用框里的这段英文【整篇替换】机器人当前人设（旧人设自动备份）' : '该目标不在人格学习目标列表里，不能覆盖'}
+                                    onClick={() => applyPersonaEn(it.uid, peText)}
+                                  >
+                                    {peBusy === `apply:${it.uid}` ? <Loader2 size={13} className="spin" /> : <Zap size={13} />} 整篇覆盖人设
+                                  </button>
+                                  {num(it.personaEditedAtMs) > 0 && <span style={{ fontSize: 11.5, color: 'var(--nc-foreground-400)' }}>上次修正 {bjClock(num(it.personaEditedAtMs))}</span>}
+                                  {num(it.personaAppliedAtMs) > 0 && <span style={{ fontSize: 11.5, color: 'var(--nc-foreground-400)' }}>上次覆盖 {bjClock(num(it.personaAppliedAtMs))}</span>}
+                                </div>
+                                <div style={{ marginTop: 5, fontSize: 11.5, lineHeight: 1.65, color: 'var(--nc-foreground-400)' }}>
+                                  两种用法：<b>「结合原人设完善」</b>＝在现在的人设上按学到的特点增删改，产出一份草稿（<b>不写盘</b>，你改好再覆盖）；
+                                  <b>「整篇覆盖人设」</b>＝直接用框里这段替换掉当前人设（覆盖前自动备份，下一条消息生效）。
+                                </div>
+                                {peNote[it.uid] && (
+                                  <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.6, color: 'var(--nc-foreground-500)' }}>{peNote[it.uid]}</div>
+                                )}
+                              </div>
                               {!profBusy && !profErr[it.uid] && !intro && !pf && !summaryText && (
                                 <div className="lrn-dk">这个人在记忆库里还没有档案（只有上面的学习状态）。</div>
                               )}
@@ -609,10 +896,104 @@ const clampHrs = (v: any): number => {
                   })}
                 </div>
               )}
+              </div>
+
+              <div className="lrn-divider" />
+
+              {/* ——— 下面一栏：画像学习（portraitAction('status') 的 config / status / lastTargets / running）———
+                  这一栏 flex: 1：卡片被左卡拉高时由它吃满余量，资料区一直铺到卡底，不留死空白。 */}
+              <div className="lrn-status-block lrn-status-block-fill">
+                <div className="lrn-block-title">
+                  画像学习
+                  <button className="btn btn-sm lrn-block-refresh" onClick={() => refreshPortrait()} title="重新读一次画像学习状态（平时每 60 秒自动刷新）">
+                    <RefreshCw size={12} /> 刷新
+                  </button>
+                </div>
+                {ptErr ? (
+                  <div className="lrn-error">
+                    <AlertTriangle size={15} />
+                    <div style={{ flex: 1 }}>{ptErr}</div>
+                    <button className="btn btn-sm btn-danger" onClick={() => refreshPortrait()}><RefreshCw size={13} /> 重试</button>
+                  </div>
+                ) : !ptStatus ? (
+                  <div className="lrn-status-meta"><Loader2 size={13} className="spin" /> 正在读取画像学习状态…</div>
+                ) : (() => {
+                  const ptCfg: Record<string, any> = isObj(ptStatus?.config) ? ptStatus.config : {};
+                  const ptList: any[] = Array.isArray(ptStatus?.status) ? ptStatus.status : [];
+                  const ptLast: string[] = Array.isArray(ptStatus?.lastTargets) ? ptStatus.lastTargets.map(String) : [];
+                  const winDays = Math.max(1, Math.round(num(ptCfg.windowHours) / 24) || 1);
+                  const ptTime = typeof ptCfg.timeHHMM === 'string' ? ptCfg.timeHHMM.trim() : '';
+                  // 「进行中」按**这一栏真正列出来的档案**数，避免和上面的列表对不上
+                  const ptLearning = pOtherRows.filter((x) => x.state === 'learning').length;
+                  // 画像学习自己记录过、但库里还没有档案的目标（刚跑完还没落库）：单独列一行，不假装有资料
+                  const ptOnlyUids = ptList.map((x: any) => String(x?.uid ?? '')).filter((u) => u && !pOtherRows.some((r) => String(r.uid) === u));
+                  return (
+                    <div className="lrn-status-list lrn-status-scroll">
+                      <div className="lrn-status-meta">
+                        <Clock3 size={13} /> 上次自动学习：{num(ptCfg.lastRunAtMs) > 0 ? bjClock(num(ptCfg.lastRunAtMs)) : '尚未跑过'}
+                        {' · '}进行中 {ptLearning} 个
+                        {ptLast.length > 0 && <> · 最近一轮目标 {ptLast.length} 个</>}
+                        {ptCfg.enabled === false && <span className="badge badge-soft">已停用</span>}
+                        {ptStatus?.running === true && <span className="badge badge-warn">正在跑</span>}
+                      </div>
+                      <div className="lrn-status-meta">
+                        取样窗口 {winDays} 天 · 最少发言 {num(ptCfg.minMessages)} 条 · 单轮最多 {num(ptCfg.maxTargets)} 个目标
+                        {ptCfg.autoIntervalEnabled === true ? ` · 每 ${num(ptCfg.autoIntervalHours)} 小时自动一次` : ''}
+                        {ptTime ? ` · 每日定时 ${ptTime}` : ''}
+                      </div>
+                      {/* 名单外的档案（含"以前学过的那些群友"）全部列在这一栏：点一条**展开/收起**完整资料，
+                          展示字段与上面人格学习栏一致，但**没有**英文人设正文与「覆盖机器人人设」——
+                          人设只能来自目标名单。 */}
+                      {pOtherRows.map((it: PItem) => {
+                        const uid = String(it.uid);
+                        const open = openUid === uid;
+                        const d = profDetail[uid] || null;
+                        return (
+                          <div className={`lrn-status-row${open ? ' is-open' : ''}`} key={uid} id={`lrn-row-${uid}`}
+                            onClick={() => openProfile(uid)} title={open ? '点一下收起资料' : '点一下看完整资料'}>
+                            <div className="lrn-status-main">
+                              <div className="lrn-status-uid">
+                                <b>{uid}</b>
+                                {it.nickname && <span className="lrn-nick">{it.nickname}</span>}
+                                <span className="lrn-status-caret">{open ? '收起 ▾' : '展开 ▸'}</span>
+                              </div>
+                              <div className="lrn-status-meta">
+                                {it.state === 'learning'
+                                  ? <span className="badge badge-warn">学习中…</span>
+                                  : it.learnedAtMs > 0
+                                    ? <span className="badge badge-success">已学习</span>
+                                    : <span className="badge badge-soft">无资料</span>}
+                                <span>{it.learnedAtMs > 0 ? `最近学习 ${bjClock(it.learnedAtMs)}` : '尚未学习'}</span>
+                                {it.samples > 0 && <span>样本 {it.samples} 条</span>}
+                                <span className="badge badge-soft">画像</span>
+                              </div>
+                              {!open && it.preview && <div className="lrn-status-preview">{it.preview}</div>}
+                              {open && <PortraitDetail it={it} detail={d} busy={profBusy === uid} err={profErr[uid]} />}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {pOtherRows.length === 0 && (
+                        <div className="lrn-status-preview" style={{ borderLeft: 'none', paddingLeft: 0 }}>
+                          {pStatus.length === 0
+                            ? '还没有任何档案：点左侧「画像立即学习」按配置自动筛活跃群成员，或打开自动间隔 / 每日定时。'
+                            : '目标名单以外的档案是空的（学过的都是目标名单里的人，或画像学习还没跑过）。'}
+                        </div>
+                      )}
+                      {ptOnlyUids.length > 0 && (
+                        <div className="lrn-status-preview" style={{ borderLeft: 'none', paddingLeft: 0 }}>
+                          最近一轮画像学习到过 {ptOnlyUids.length} 个人但还没落下档案：{ptOnlyUids.slice(0, 12).join('、')}{ptOnlyUids.length > 12 ? ' …' : ''}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+              </div>
             </div>
           </div>
 
-          {/* ============ 黑话库弹窗 ============ */}
+          {/* ============ 黑话库弹窗（搜索 / 刷新 / 状态徽章不变，新增勾选 + 批量通过·拒收·分析） ============ */}
           {slangOpen && (() => {
             const kw = slangQ.trim().toLowerCase();
             const list = slangEntries
@@ -624,6 +1005,18 @@ const clampHrs = (v: any): number => {
             const badge = (st: string) => (st === 'confirmed'
               ? <span className="badge badge-success">已确认</span>
               : st === 'rejected' ? <span className="badge badge-soft">已拒收</span> : <span className="badge badge-warn">候选</span>);
+            // 勾选只认「当前可见（过了搜索）列表」里的那些，避免看搜索词换了还留在选择里
+            const idOf = (e: any): string => String(e?.id ?? '');
+            const selSet = new Set(slangSel);
+            const visIds = list.map(idOf).filter(Boolean);
+            const selIds = visIds.filter((id) => selSet.has(id));
+            const selCand = list.filter((e) => selSet.has(idOf(e)) && String(e?.status ?? '') === 'candidate').length;
+            const allSel = visIds.length > 0 && selIds.length === visIds.length;
+            const toggle = (id: string) => {
+              if (!id) return;
+              setSlangSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+            };
+            const act = (kind: 'confirm' | 'reject' | 'research') => { void slangBatch(kind, selIds); };
             return (
               <div className="pfp-mask" onClick={() => setSlangOpen(false)}>
                 <div className="pfp-modal" onClick={(e) => e.stopPropagation()}>
@@ -631,17 +1024,50 @@ const clampHrs = (v: any): number => {
                     <div>
                       <div className="pfp-title">黑话库</div>
                       <div className="pfp-sub">
-                        共 {slangEntries.length} 条{kw ? ` · 命中 ${list.length} 条` : ''} · 已确认的会注入到聊天上下文里
+                        共 {slangEntries.length} 条{kw ? ` · 命中 ${list.length} 条` : ''} · 确认后不会每轮注入聊天，机器人需要时会自己查黑话库
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button className="btn btn-sm" onClick={() => loadSlangLib()}><RefreshCw size={13} /> 刷新</button>
+                      <button className="btn btn-sm" disabled={!!slangBusy} onClick={() => loadSlangLib()}><RefreshCw size={13} /> 刷新</button>
                       <button className="btn btn-sm" onClick={() => setSlangOpen(false)}>关闭</button>
                     </div>
                   </div>
-                  <div style={{ padding: '10px 18px 0' }}>
+
+                  <div className="lrn-slang-tools">
                     <input className="input" placeholder="搜词条 / 含义 / 例句…" value={slangQ} onChange={(e) => setSlangQ(e.target.value)} />
+                    <div className="lrn-batch-bar">
+                      <span className="lrn-batch-count">
+                        已选 {selIds.length} 条{selCand > 0 ? `（其中候选 ${selCand} 条）` : ''}
+                      </span>
+                      <button className="btn btn-sm" disabled={!visIds.length || allSel} onClick={() => setSlangSel((prev) => [...new Set([...prev, ...visIds])])}>全选</button>
+                      <button className="btn btn-sm" disabled={!visIds.length} onClick={() => setSlangSel((prev) => {
+                        const s = new Set(prev);
+                        for (const id of visIds) { if (s.has(id)) s.delete(id); else s.add(id); }
+                        return [...s];
+                      })}>反选</button>
+                      <button className="btn btn-sm" disabled={!slangSel.length} onClick={() => setSlangSel([])}>清空选择</button>
+                      <span className="lrn-batch-spacer" />
+                      <button className="btn btn-primary btn-sm" disabled={!!slangBusy || !selIds.length}
+                        onClick={() => act('confirm')} title="把选中的候选词条标记为已确认（桥侧只确认候选、且必须有含义，其余会被跳过）">
+                        {slangBusy === 'confirm' ? <Loader2 size={13} className="spin" /> : <Check size={13} />} 批量通过
+                      </button>
+                      <button className="btn btn-outline-danger btn-sm" disabled={!!slangBusy || !selIds.length}
+                        onClick={() => act('reject')} title="把选中词条标为已拒收（不再参与查询，可留档不删）">
+                        {slangBusy === 'reject' ? <Loader2 size={13} className="spin" /> : <X size={13} />} 批量拒收
+                      </button>
+                      <button className="btn btn-soft-primary btn-sm" disabled={!!slangBusy || !selIds.length}
+                        onClick={() => act('research')} title="对选中的候选词条触发一次研究分析（桥侧后台串行跑，完成后补上含义/用法/例句）">
+                        {slangBusy === 'research' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} 批量分析
+                      </button>
+                    </div>
+                    <div className="lrn-slang-note">
+                      确认的含义：这个词条「已入库、有含义、可被查到」。黑话默认不注入唤醒提示词（桥侧 injectIntoPrompt 默认关闭），
+                      机器人遇到不认识的词时会自己调用 qq_slang_query 工具按需查库；只有「已确认 + 填了含义」的词条才查得到，
+                      所以「批量通过」会跳过缺含义的候选——可以先「批量分析」补释义再通过。
+                    </div>
+                    {slangNote && <div className="lrn-slang-result">{slangNote}</div>}
                   </div>
+
                   <div className="pfp-body">
                     {slangErr && <div className="pfp-empty">读取失败：{slangErr}（黑话库在桥的 state/slang.json 里，桥没连上时读不到）</div>}
                     {!slangErr && list.length === 0 && (
@@ -651,8 +1077,14 @@ const clampHrs = (v: any): number => {
                     )}
                     {list.map((e, idx) => {
                       const ev: any[] = Array.isArray(e?.evidence) ? e.evidence : [];
+                      const id = idOf(e);
+                      const picked = !!id && selSet.has(id);
                       return (
-                        <div className="lrn-status-row" key={String(e?.id ?? idx)} style={{ cursor: 'default' }}>
+                        <div className={`lrn-status-row lrn-slang-row${picked ? ' is-selected' : ''}`} key={id || idx}
+                          title={id ? (picked ? '点一下取消选择' : '点一下选择这一条') : '这条词条没有 id，无法勾选（桥侧旧数据）'}
+                          onClick={(evt) => { if ((evt.target as HTMLElement)?.tagName === 'INPUT') return; toggle(id); }}>
+                          <input type="checkbox" className="lrn-pick" checked={picked} disabled={!id}
+                            aria-label={`选择词条 ${String(e?.content ?? '')}`} onChange={() => toggle(id)} />
                           <div className="lrn-status-main">
                             <div className="lrn-status-uid">
                               <b>{String(e?.content ?? '(空)')}</b>
@@ -661,7 +1093,7 @@ const clampHrs = (v: any): number => {
                             </div>
                             {String(e?.meaning ?? '').trim()
                               ? <div className="lrn-status-preview">{String(e.meaning)}</div>
-                              : <div className="lrn-status-preview" style={{ opacity: .65 }}>（还没有释义：达到出现次数阈值后会自动研究补齐）</div>}
+                              : <div className="lrn-status-preview" style={{ opacity: .65 }}>（还没有释义：达到出现次数阈值后会自动研究补齐，也可以勾上它点「批量分析」）</div>}
                             {String(e?.usage ?? '').trim() && <div className="lrn-dk">用法：{String(e.usage)}</div>}
                             {String(e?.example ?? '').trim() && <div className="lrn-dk">例句：{String(e.example)}</div>}
                             {ev.length > 0 && (
@@ -1350,6 +1782,60 @@ function TokenPanel({ hours }: { hours: HourStat[] }) {
           <button type="button" className="btn btn-sm" onClick={() => setCfg({ ...COST_DEFAULT })}><RotateCcw size={12} /> 恢复默认参数</button>
         </div>
       </section>
+    </div>
+  );
+}
+
+/** 画像学习栏展开后的资料：字段与上面人格学习栏用的是**同一份库数据**，展示也保持一致，
+ *  但**没有**英文人设正文与「覆盖机器人人设」——人设只能来自目标名单（主人明确要求的边界）。
+ *  抽成小组件，避免两栏各写一份、以后加字段漏改一边。 */
+function PortraitDetail({ it, detail, busy, err }: { it: PItem; detail: any; busy: boolean; err?: string }) {
+  const d = detail || null;
+  const pf = d?.profile || null;
+  const lib = d?.library ?? null;
+  const intro = String(lib?.profile || pf?.personality || d?.personaSummary || '').trim();
+  const summaryText = String(d?.personaSummary || '').trim();
+  const styleBits = lib?.style
+    ? [lib.style.sentenceLength, lib.style.toneWords, lib.style.rhetoricalQuestions].filter(Boolean).join('；')
+    : '';
+  const phraseText = (lib?.catchphrases ?? [])
+    .map((c: any) => (c?.context ? `${c.phrase}（${c.context}）` : c?.phrase))
+    .filter(Boolean).join('；');
+  return (
+    <div className="lrn-status-detail">
+      {busy && <div className="lrn-dk">正在读取完整资料…</div>}
+      {err && <div className="lrn-dk">读取失败：{err}</div>}
+      <div>
+        <span className="lrn-dk">资料样本</span>
+        {it.samples} 条
+        {num(d?.msgCount) > 0 ? ` · 近 30 天发言 ${num(d.msgCount)} 条` : ''}
+        {num(d?.memoryCount) > 0 ? ` · 记忆条目 ${num(d.memoryCount)} 条` : ''}
+      </div>
+      {it.learnedAtMs > 0 && <div><span className="lrn-dk">最近学习</span>{bjClock(it.learnedAtMs)}</div>}
+      {num(pf?.updatedAt) > 0 && <div><span className="lrn-dk">档案更新</span>{bjClock(num(pf.updatedAt))}</div>}
+      {num(d?.lastSeen) > 0 && <div><span className="lrn-dk">最近活跃</span>{bjClock(num(d.lastSeen))}</div>}
+      {pf?.name && <div><span className="lrn-dk">通讯录昵称</span>{pf.name}</div>}
+      {pf?.birthday && <div><span className="lrn-dk">生日</span>{pf.birthday}</div>}
+      {intro ? <div className="lrn-wide"><span className="lrn-dk">完整介绍</span><p className="lrn-prose">{intro}</p></div> : null}
+      {!intro && lib?.personality && <div className="lrn-wide"><span className="lrn-dk">性格</span><p className="lrn-prose">{lib.personality}</p></div>}
+      {!intro && !lib && pf?.personality && <div className="lrn-wide"><span className="lrn-dk">性格</span><p className="lrn-prose">{pf.personality}</p></div>}
+      {lib?.addressTerms && <div className="lrn-wide"><span className="lrn-dk">称呼方式</span>{lib.addressTerms}</div>}
+      {styleBits && <div className="lrn-wide"><span className="lrn-dk">说话风格</span>{styleBits}</div>}
+      {lib?.style?.examples?.length ? <div className="lrn-wide"><span className="lrn-dk">原句样例</span>{lib.style.examples.join(' / ')}</div> : null}
+      {lib?.chatHabits && <div className="lrn-wide"><span className="lrn-dk">聊天习惯</span>{lib.chatHabits}</div>}
+      {lib?.emojiHabits && <div className="lrn-wide"><span className="lrn-dk">表情习惯</span>{lib.emojiHabits}</div>}
+      {phraseText && <div className="lrn-wide"><span className="lrn-dk">口头禅</span>{phraseText}</div>}
+      {lib?.topics?.length ? <div className="lrn-wide"><span className="lrn-dk">常聊话题</span>{lib.topics.join('；')}</div> : null}
+      {lib?.taboos?.length ? <div className="lrn-wide"><span className="lrn-dk">要注意</span>{lib.taboos.join('；')}</div> : null}
+      {lib?.relationshipAdvice && <div className="lrn-wide"><span className="lrn-dk">相处建议</span>{lib.relationshipAdvice}</div>}
+      {pf?.likes && <div className="lrn-wide"><span className="lrn-dk">喜好</span>{pf.likes}</div>}
+      {pf?.dislikes && <div className="lrn-wide"><span className="lrn-dk">不喜欢</span>{pf.dislikes}</div>}
+      {pf?.notes && <div className="lrn-wide"><span className="lrn-dk">备注</span>{pf.notes}</div>}
+      {summaryText && summaryText !== intro && <div className="lrn-wide"><span className="lrn-dk">画像摘要</span><p className="lrn-prose">{summaryText}</p></div>}
+      {!busy && !err && !intro && !pf && !summaryText && <div className="lrn-dk">这个人在记忆库里还没有档案（只有上面的画像状态）。</div>}
+      <div className="lrn-wide" style={{ fontSize: 11.5, lineHeight: 1.6, color: 'var(--nc-foreground-400)' }}>
+        这属于「画像学习」的群友画像，只进群友画像，不会变成机器人的人设；想让它成为人设得先把号码填进左侧「目标 QQ」再走人格学习。
+      </div>
     </div>
   );
 }
