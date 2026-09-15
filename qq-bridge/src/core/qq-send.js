@@ -161,7 +161,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     let srcStat = null;
     try { srcStat = fs.statSync(imagePath); } catch {}
     if (!srcStat || !srcStat.isFile()) {
-      throw new Error(`图片文件不存在或不可访问: ${imagePath}。请传本机真实存在的图片绝对路径；发鲸鱼娘同人表情请用 qq_whale_meme_search + qq_send_whale_meme，发收藏表情请用 qq_send_sticker。`);
+      throw new Error(`图片文件不存在或不可访问: ${imagePath}。请传本机真实存在的图片绝对路径；发内置表情包里的表情请用 qq_meme_search + qq_send_meme，发收藏表情请用 qq_send_sticker。`);
     }
     const buf = fs.readFileSync(imagePath);
     const ext = String(path.extname(imagePath) || '').replace(/^\./, '') || 'img';

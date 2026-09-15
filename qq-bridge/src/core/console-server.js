@@ -67,6 +67,8 @@ import { mimeFromBuffer, mimeFromUrl, base64FromMaybe } from '../lib/media-meta.
 import { log, appendActivity, readActivityTail } from '../lib/log.js';
 import { SILENT_MARKER, isSilentMarker, SEND_TOOL_RE, isSendToolName, SPACE_SPLIT_HINT, DIRECTION_HINT } from '../lib/markers.js';
 import { state, loadConfig, loadState, saveState } from './config.js';
+// 表情包抽签的登记口（内置表情库直发 + 收藏表情两条路都记一笔，供 [Meme] 冷却使用）
+import { noteMemeSent } from './send-dice.js';
 import { acquireLock, releaseLock } from './runtime.js';
 import { enqueueSend, currentSendChain, cancelKeyedSends, cancelAllKeyedSends } from './send-chain.js';
 import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
@@ -2544,7 +2546,7 @@ export function startConsoleServer() {
         }
         return;
       }
-      // ========== 登记自己刚发出的消息（鲸鱼同人表情等直发通道，撤回要用 messageId） ==========
+      // ========== 登记自己刚发出的消息（内置表情包等直发通道，撤回要用 messageId） ==========
       if (req.method === 'POST' && url.pathname === '/api/social/record-own-sent') {
         const body = await readBody();
         const key = String(body.key ?? '').trim();
@@ -2579,6 +2581,11 @@ export function startConsoleServer() {
         }
         saveSocialState();
         log(`[record-sent] 登记自己发出的消息 ${key} messageId=${messageId} text=${text.slice(0, 40)}`);
+        // 【2026-09-15】内置表情库走的是"直发 + 回登记"这条路（qq_send_meme 不经桥的发送端点），
+        // 所以表情包冷却要在这里认：登记文本是 [表情:xxx] / [收藏表情:xxx] 就当作发过表情包。
+        if (/^\[(表情|收藏表情|大肥鱼表情|鲸鱼表情)/.test(text)) {
+          try { noteMemeSent(key); } catch { /* 忽略 */ }
+        }
         sendJson({ ok: true, key, messageId, recorded: !dupR });
         return;
       }
@@ -2808,6 +2815,8 @@ export function startConsoleServer() {
           scheduleReplyCheck(key);
           log(`[sticker] 工具发送表情 ${key}: ${sent.entry?.id || stickerId}`);
           appendActivity(`${key} [sticker] 工具发送表情：${label}`);
+          // 【2026-09-15】登记「这个会话刚发过表情包」：唤醒正文里的 [Meme] 抽签靠它做冷却
+          try { noteMemeSent(key); } catch { /* 忽略 */ }
           sendJson({ ok: true, key, sticker: sent.entry, sent: 1, failed: 0, quoted: quotedInfo });
         } catch (error) {
           const st = getSocialState(key);
@@ -4705,6 +4714,192 @@ export function startConsoleServer() {
         }, 500);
         return;
       }
+      // ── 语音（MiMo-V2.5-TTS / VoiceDesign / VoiceClone / ASR）────────────────────
+      // 配置与试听走管理端（consoleToken 统一校验，见上方）；发送/识别走 agent token + 白名单，与其它发送工具同规矩。
+      // 模块动态 import：开发期文件缺失时不影响其它路由。
+      if (url.pathname.startsWith('/api/voice/')) {
+        let voiceMod;
+        try {
+          voiceMod = await import('../core/voice.js');
+        } catch (error) {
+          log(`控制台：语音模块加载失败：${error?.message ?? error}`);
+          sendJson({ ok: false, error: 'voice module unavailable' }, 503);
+          return;
+        }
+        const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody();
+
+        // 配置读取（密钥只回掩码）
+        if (req.method === 'GET' && url.pathname === '/api/voice/config') {
+          sendJson(voiceMod.voiceConfigPublic());
+          return;
+        }
+        // 配置保存
+        if (req.method === 'PUT' && url.pathname === '/api/voice/config') {
+          try {
+            sendJson(voiceMod.saveVoiceConfig(body));
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        // 音色库
+        if (req.method === 'GET' && url.pathname === '/api/voice/voices') {
+          sendJson(voiceMod.listVoices());
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/voice/voices') {
+          try {
+            sendJson(voiceMod.saveCustomVoice({ name: body.name, kind: body.kind, description: body.description, sampleBase64: body.sampleBase64 }));
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        if (req.method === 'DELETE' && url.pathname === '/api/voice/voices') {
+          try {
+            sendJson(voiceMod.deleteCustomVoice(url.searchParams.get('id')));
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        // 试听（管理端）：合成完把音频 base64 回给界面直接播
+        if (req.method === 'POST' && url.pathname === '/api/voice/preview') {
+          try {
+            const text = String(body.text ?? '').trim() || '你好呀，这是音色试听。';
+            // 【2026-09-15 补】音色库里**已保存**的音色用 voiceId 试听：管理端手里没有复刻样本的
+            // base64（样本存在桥侧 state 里），只靠 mode/sampleBase64 是没法试听"复刻型音色"的
+            // ——早先那样点试听会报「音色复刻需要音频样本」。这里按 id/名字查库后再合成。
+            const voiceId = String(body.voiceId ?? '').trim();
+            const hit = voiceId
+              ? (voiceMod.listVoices().custom.find((v) => v.id === voiceId || v.name === voiceId) || null)
+              : null;
+            if (voiceId && !hit) {
+              sendJson({ ok: false, error: `音色库里没有「${voiceId}」这个音色（可能是刚被删除，刷新一下再看）` }, 400);
+              return;
+            }
+            const r = hit
+              ? await voiceMod.synthesizeWithSavedVoice(text, hit.id, { style: body.style, format: body.format })
+              : await voiceMod.synthesize({
+                text,
+                mode: body.mode,
+                voice: body.voice,
+                style: body.style,
+                description: body.description,
+                sampleBase64: body.sampleBase64,
+                format: body.format
+              });
+            const buf = fs.readFileSync(r.filePath);
+            sendJson({
+              ok: true, mime: r.mime, audioBase64: buf.toString('base64'), bytes: r.bytes,
+              cached: r.cached, ms: r.ms, finalTextPreview: r.finalTextPreview, mode: r.mode,
+              voiceName: hit ? hit.name : ''
+            });
+            log(`控制台：语音试听（${r.mode}${hit ? `，音色=${hit.name}` : ''}）${text.slice(0, 18)}… → ${r.bytes} 字节${r.cached ? '（缓存）' : ''}`);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        // 连通性自检
+        if (req.method === 'POST' && url.pathname === '/api/voice/test') {
+          try {
+            sendJson(await voiceMod.testRole(String(body.role ?? 'tts')));
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        // 发送语音（模型工具 qq_send_voice）：与文字发送同一套令牌/白名单/限频规矩
+        if (req.method === 'POST' && url.pathname === '/api/voice/send') {
+          const key = String(body.key ?? '').trim();
+          const token = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!token) { sendJson({ ok: false, error: '语音发送必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim' }, 403); return; }
+          if (!SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
+          const km = /^(group|private):(\d+)$/.exec(key);
+          if (!km) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = km[1];
+          const id = Number(km[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfgRef, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const st = getSocialState(key);
+          const now = Date.now();
+          const sendCfgV = cfgRef.social?.send ?? {};
+          const maxPerMinuteV = Number(sendCfgV.maxSendPerMinute) || 0;
+          const recentMinuteV = (st.sendTimes || []).filter((t) => now - t < 60000).length;
+          if (maxPerMinuteV > 0 && recentMinuteV + 1 > maxPerMinuteV) { sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429); return; }
+          let sent = null;
+          try {
+            // 自定义音色（音色库里的 id/名字）→ 走它的描述或样本；否则按内置音色
+            const lib = voiceMod.listVoices();
+            const want = String(body.voice ?? '').trim();
+            const hit = want ? lib.custom.find((v) => v.id === want || v.name === want) : null;
+            const text = String(body.text ?? '').trim();
+            const r = hit
+              ? await voiceMod.synthesizeWithSavedVoice(text, hit.id, { style: body.style, format: body.format })
+              : await voiceMod.synthesize({
+                text,
+                mode: body.mode,
+                voice: want,
+                style: body.style,
+                description: body.description,
+                format: body.format
+              });
+            const out = await voiceMod.sendVoiceToOneBot(key, r.filePath, { replyToMessageId: body.replyToMessageId });
+            sent = { messageId: out.messageId, bytes: out.bytes, format: out.format };
+            // 登记「这个会话刚发过语音」：唤醒提示词的抽签靠它做冷却，避免概率虽小却连发两条
+            try { if (typeof voiceMod.noteVoiceSent === 'function') voiceMod.noteVoiceSent(key); } catch { /* 忽略 */ }
+            // 登记自己发过这条语音（不登记模型会忘记，还会重复发）
+            try {
+              recordSentMessages(key, [{ messageId: out.messageId, text: `[语音] ${text.slice(0, 60)}` }]);
+            } catch (eReg) { log(`[voice] 语音回执登记失败（不影响发送）: ${eReg?.message ?? eReg}`); }
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            if (st.wakeConfig) st.wakeConfig.noActionCount = 0;
+            saveSocialState();
+            if (typeof scheduleReplyCheck === 'function') scheduleReplyCheck(key);
+            appendActivity(`${key} [voice] 语音已发送：${text.slice(0, 30)}（${r.bytes} 字节${r.cached ? '，缓存' : ''}）`);
+            sendJson({
+              ok: true, sent, voice: hit ? { id: hit.id, name: hit.name } : { id: want || 'default' },
+              chars: text.length, cached: r.cached, ms: r.ms, finalTextPreview: r.finalTextPreview
+            });
+          } catch (error) {
+            // 语音失败绝不影响对话：明确告诉模型「改用文字回复」，不要重试到烧钱
+            log(`[voice] 发送语音失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `${error?.message ?? error}（语音没发出去；这条内容请改用文字发送，不要反复重试）` }, 502);
+          }
+          return;
+        }
+        // 语音识别（模型工具 qq_transcribe_voice）
+        if (req.method === 'POST' && url.pathname === '/api/voice/transcribe') {
+          const key = String(body.key ?? '').trim();
+          const token = String(req.headers['x-agent-token'] ?? '').trim();
+          if (!token) { sendJson({ ok: false, error: '语音识别必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim' }, 403); return; }
+          if (!SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!ToolEnabled('transcribeVoice')) { sendJson({ ok: false, error: '工具未启用：qq_transcribe_voice' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          try {
+            const { buf } = await voiceMod.fetchVoiceFromMessage(body.messageId);
+            const r = await voiceMod.transcribeBuffer(buf, { language: body.language });
+            log(`控制台：语音识别 ${key} messageId=${body.messageId} → ${r.text.slice(0, 40)}`);
+            sendJson({ ok: true, messageId: String(body.messageId ?? ''), text: r.text, ms: r.ms, format: r.format });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 502);
+          }
+          return;
+        }
+        sendJson({ ok: false, error: `未知语音接口：${url.pathname}` }, 404);
+        return;
+      }
+
       // ── 学习管理 / 用量统计 REST（学习系统重构新增；鉴权沿用上方统一 consoleToken 校验） ──
       // GET/PUT state/learning-config.json（PUT 白名单+先读后合并；slang.lastLearnAtMs 永远不被覆盖）
       if (req.method === 'GET' && url.pathname === '/api/learning-config') {
@@ -4792,6 +4987,59 @@ export function startConsoleServer() {
           sendJson({ ok: true, result });
         } catch (error) {
           sendJson({ ok: false, error: `人格学习 ${action} 调用失败：${error?.message ?? error}` }, 500);
+        }
+        return;
+      }
+      // POST /api/learning/persona-apply { uid, mode:'save'|'apply'|'fuse', text? }
+      //   人格学习的**审批 / 修正**口（管理端「人格学习」栏展开后的几个按钮）：
+      //     mode='save'  → text 当作修正后的英文人设正文写回该 uid 的库记录（键 personaEn）
+      //     mode='apply' → text（没传则用库里的 personaEn）**整篇覆盖**写入 qq-bridge/persona.md；
+      //                    桥每轮唤醒按 mtime 读它注入 [PERSONA]，文件一改下一条消息就是新人设、
+      //                    不用重启桥；覆盖前桥侧自动备份旧人设（persona.md.bak-…，最多 5 份）。
+      //     mode='fuse'  → 【2026-09-15 主人要求】**不替换、而是结合**：把学到的特点融进**当前 persona.md**
+      //                    重新增删改写出一份草稿返回（不写盘，主人看过再决定是否覆盖）。
+      //   校验（uid 格式 / 正文非空 / apply 禁中文）统一在 persona-learn.js 里做，
+      //   端点只做转发与类型兜底，保证桥内其它调用方拿到同一套规则；
+      //   鉴权沿用本段上方的统一 consoleToken 校验（管理端经 /api/learning/persona-apply 代理过来）。
+      if (req.method === 'POST' && url.pathname === '/api/learning/persona-apply') {
+        const body = await readBody();
+        const uid = String(body?.uid ?? '').trim();
+        const mode = String(body?.mode ?? '').trim();
+        if (!/^\d{1,11}$/.test(uid)) { sendJson({ ok: false, error: 'uid 必须是 1~11 位数字 QQ 号' }, 400); return; }
+        if (mode !== 'save' && mode !== 'apply' && mode !== 'fuse') {
+          sendJson({ ok: false, error: "mode 仅支持 'save'（保存修正）/ 'apply'（整篇覆盖人设）/ 'fuse'（结合原人设完善）" }, 400);
+          return;
+        }
+        if (body?.text !== undefined && body?.text !== null && typeof body.text !== 'string') {
+          sendJson({ ok: false, error: 'text 必须是字符串（人设正文）' }, 400);
+          return;
+        }
+        let applyMod;
+        try {
+          applyMod = await import('../core/persona-learn.js');
+        } catch (error) {
+          log(`控制台：人格学习模块加载失败（persona module unavailable）：${error?.message ?? error}`);
+          sendJson({ ok: false, error: 'persona module unavailable' }, 503);
+          return;
+        }
+        if (typeof applyMod.personaApply !== 'function') { sendJson({ ok: false, error: 'persona module unavailable' }, 503); return; }
+        const modeLabel = mode === 'save' ? '保存修正' : (mode === 'fuse' ? '结合原人设完善' : '覆盖机器人人设');
+        try {
+          // fuse 要跑一轮模型（读当前人设 + 学到的特点 → 重写），是异步且慢的，必须 await
+          const result = mode === 'fuse'
+            ? await (typeof applyMod.personaFuseDraft === 'function'
+              ? applyMod.personaFuseDraft(uid)
+              : { ok: false, error: 'persona module unavailable（桥版本过旧，没有完善模式）' })
+            : applyMod.personaApply(uid, mode, body?.text);
+          if (!result?.ok) {
+            sendJson({ ok: false, error: result?.error ?? `${modeLabel}失败` }, 400);
+            return;
+          }
+          log(`控制台：人格学习${modeLabel} ${uid} → ${mode === 'fuse' ? `${result.chars} 字草稿（未写盘）` : JSON.stringify(result)}`);
+          sendJson(result);
+        } catch (error) {
+          log(`控制台：人格学习 ${mode} 调用失败 ${uid}：${error?.message ?? error}`);
+          sendJson({ ok: false, error: `人格学习${modeLabel}调用失败：${error?.message ?? error}` }, 500);
         }
         return;
       }

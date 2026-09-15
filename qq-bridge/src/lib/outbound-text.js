@@ -13,8 +13,8 @@ export function redactKnownTokensOnly(text) {
 
 // —— 表情/图片占位符根治（2026-09-03）——
 // AI 常把"想发的图/表情描述"误写成文字占位符（[表情:蓝鱼吃白米饭，开心]、
-// [表情包:喜欢阁下：蓝发猫耳女仆…]、[QQ表情:害羞(148)]、[鲸鱼表情:xx.webp]、[收藏表情:…]等）。
-// 本应通过 qq_send_whale_meme / qq_send_sticker / qq_send_qq_face 或 qq_send_message 的 images
+// [表情包:喜欢阁下：蓝发猫耳女仆…]、[QQ表情:害羞(148)]、[表情:xx.webp]、[收藏表情:…]等）。
+// 本应通过 qq_send_meme / qq_send_sticker / qq_send_qq_face 或 qq_send_message 的 images
 // 参数发真图；直接发这段文字 = "表情没发出去"，是观感崩坏的根源。
 // 根治策略：出站文本把这类占位【全部剥掉】，占位单独成条且无法翻译成真表情时【整条丢弃】，
 // 绝不把文字版表情发出去；可翻译成 QQ 原生 face 的（如 (148)）直接改发真 face 段。

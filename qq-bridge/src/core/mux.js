@@ -1,4 +1,4 @@
-﻿// M11 事件层：
+// M11 事件层：
 // handleIncoming：QQ 消息 → DSH prompt；pumpMux：DSH 事件流 → QQ。
 // cfg/api/bot 运行期注入（initMuxCore/setMuxApi/setMuxBot），其余依赖同 bridge 顶层 import。
 import fs from 'node:fs';
@@ -1063,7 +1063,7 @@ export async function pumpMux() {
               } catch (eUd) { log(`[default] 暂存未发出正文失败 (${key}): ${eUd?.message ?? eUd}`); }
             } else if (ended.reason.kind === 'error') {
               const msg = ended.reason.error?.message ?? '未知错误';
-              // === 429/限流拦截：不发原始报错到 QQ，发"小鲸鱼饿了"并结束桥进程 ===
+              // === 429/限流拦截：不发原始报错到 QQ，发一句中性的提示并结束桥进程 ===
               const isRateLimit = /429|rate.?limit|FreeUsageLimit|quota.?exceed|Too.?Many.?Requests|过载|流控/i.test(msg);
               if (isRateLimit) {
                 // 限流去重：每个 key 只发一次提示，恢复前不再重复
@@ -1072,7 +1072,9 @@ export async function pumpMux() {
                   globalThis._rateLimitMuted[key] = true;
                   log(`[rateLimit] 模型限流 (${key}): ${msg.slice(0, 200)}`);
                   appendActivity(`[rateLimit] ${key} 模型限流，静默等待恢复`);
-                  void sendToQQ(key, '🐟 小鲸鱼饿了，需要主人喂饭～').catch(() => {}); // 泵内不阻塞: 发送走链异步完成
+                  // 【2026-09-15 去人设化】原来发的是"🐟 小鲸鱼饿了，需要主人喂饭～"——
+                  // 那是开发初版鲸鱼人设的口吻，且不说清发生了什么。现在只讲事实给主人看。
+                  void sendToQQ(key, '⚠️ 模型通道被限流（429），我这边先停一下；额度恢复后重启桥就能继续。').catch(() => {}); // 泵内不阻塞: 发送走链异步完成
                 } else {
                   log(`[rateLimit] ${key} 限流中，静默跳过`);
                 }

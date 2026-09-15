@@ -161,7 +161,7 @@ for (const [label, re] of mustHave) {
   if (re === null) continue;
   check('D 提示词包含：' + label, re.test(preset));
 }
-// 鲸鱼身份必须清零（工具名 qq_send_whale_meme / qq_whale_meme_search 是随包表情库的真实工具名，允许保留）
+// 鲸鱼身份必须清零（表情工具现在叫 qq_send_meme / qq_meme_search，名字里也不带鲸鱼了）
 const whaleHits = preset.split(/\r?\n/).filter((l) => /小鲸鱼|鲸鱼娘|大肥鱼|whale-girl|ᗜ|本鱼/.test(l));
 check('D 预设里不再有鲸鱼身份字样', whaleHits.length === 0, whaleHits.map((l) => l.trim().slice(0, 80)).join(' / '));
 check('D 主人段落已中性化（不再有撒娇/顺从/娇羞注册）', !/撒娇|顺从|娇羞|配合调情|装可怜/.test(preset));

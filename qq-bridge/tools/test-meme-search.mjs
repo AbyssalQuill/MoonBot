@@ -1,14 +1,14 @@
-// 鲸鱼娘表情包工具的真调用测试（MCP over stdio，不是"看文件在不在"）。
+// 内置表情包工具的真调用测试（MCP over stdio，不是"看文件在不在"）。
 //
-// 背景：现网 qq_whale_meme_search 一直回"表情包图库搜索失败 / 本机没装鲸鱼娘同人表情库"，
+// 背景：现网 qq_meme_search 一直回"表情包图库搜索失败 / 本机没装内置表情包"，
 // 根因是安装包 payload 与现网 runtime 都漏装了 meme/ 表情包。本脚本用**真实 MCP 握手 + 真实工具调用**
 // 证明：工具找得到 pack、SQLite 查得到行、返回的文件名在本机磁盘上真实存在（且不是提示语）。
 //
 // 用法：
-//   node tools/test-whale-meme-search.mjs                       # 测本仓库 src/mcp-napcat-safe.js
-//   node tools/test-whale-meme-search.mjs <server.js 路径>       # 测指定副本（现网 runtime / 打包 payload）
-//   node tools/test-whale-meme-search.mjs <server.js> --pack <pack 根>
-//   node tools/test-whale-meme-search.mjs --negative             # 反向自测：无 pack 时必须"响亮报错"
+//   node tools/test-meme-search.mjs                       # 测本仓库 src/mcp-napcat-safe.js
+//   node tools/test-meme-search.mjs <server.js 路径>       # 测指定副本（现网 runtime / 打包 payload）
+//   node tools/test-meme-search.mjs <server.js> --pack <pack 根>
+//   node tools/test-meme-search.mjs --negative             # 反向自测：无 pack 时必须"响亮报错"
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -137,7 +137,7 @@ if (NEGATIVE) {
     check('initialize 成功', !!(await wait(1)));
     send({ jsonrpc: '2.0', method: 'notifications/initialized' });
     await new Promise((r) => setTimeout(r, 400)); // 等启动日志落到 stderr
-    const line = stderrLines.find((l) => l.includes('未找到鲸鱼娘同人表情库')) ?? '';
+    const line = stderrLines.find((l) => l.includes('未找到内置表情包')) ?? '';
     console.log(`stderr 启动日志：${line || '(没有！)'}`);
     check('启动时打出一行"未找到表情库"日志', !!line);
     const m = line.match(/已尝试 (\d+) 条路径/);
@@ -145,10 +145,10 @@ if (NEGATIVE) {
     check('日志列出每条尝试过的路径', !!m && listed.length === Number(m[1]), `声明 ${m?.[1] ?? '?'} 条 / 实际 ${listed.length} 条`);
     check('候选里包含隔离 DSH home 的 meme-packs 位置', listed.some((p) => /\.qq-bridge-manager[\\/]dsh-isolated-home/.test(p) && /meme-packs/.test(p)));
     check('候选里包含 DSH plugins pack 位置', listed.some((p) => /[\\/]plugins[\\/]/.test(p)));
-    send({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'qq_whale_meme_search', arguments: { query: '开心' } } });
+    send({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'qq_meme_search', arguments: { query: '开心' } } });
     const t = textOf(await wait(10, 20000));
     console.log(`工具返回：${t.slice(0, 200)}`);
-    check('无 pack 时工具返回缺包提示（而不是崩溃）', t.includes('本机没装鲸鱼娘同人表情库'));
+    check('无 pack 时工具返回缺包提示（而不是崩溃）', t.includes('本机没装内置表情包'));
     child.kill();
   } finally {
     // 安全闸：只允许删 `.meme-selftest-` 开头的临时目录（绝不能是 node_modules）
@@ -189,14 +189,14 @@ send({ jsonrpc: '2.0', method: 'notifications/initialized' });
 send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
 const list = await wait(2, 30000);
 const names = list?.result?.tools?.map((t) => t.name) ?? [];
-check('tools/list 里有两个表情工具', names.includes('qq_whale_meme_search') && names.includes('qq_send_whale_meme'), `共 ${names.length} 个工具`);
+check('tools/list 里有两个表情工具', names.includes('qq_meme_search') && names.includes('qq_send_meme'), `共 ${names.length} 个工具`);
 
 /** 校验一次搜索返回：不是提示语、行数对得上、文件名在磁盘上真实存在且非空 */
 function verifySearch(label, text, expectCountMin) {
   console.log(`\n--- ${label} 原始返回 ---\n${text}\n---`);
-  check(`${label}: 不是"没装表情库"提示`, !text.includes('本机没装鲸鱼娘同人表情库'));
+  check(`${label}: 不是"没装表情库"提示`, !text.includes('本机没装内置表情包'));
   check(`${label}: 不是"搜索失败"错误`, !text.includes('搜索失败'));
-  const m = text.match(/找到 (\d+) 张鲸鱼娘表情/);
+  const m = text.match(/找到 (\d+) 张表情/);
   check(`${label}: 声称找到表情张数`, !!m && Number(m[1]) >= expectCountMin, m ? `found=${m[1]}` : '无"找到 N 张"字样');
   const rows = text.split('\n').slice(1).map((l) => l.match(/^\d+\.\s+(.+?)\s+\[(.+?)\]\s+(.*)$/)).filter(Boolean);
   check(`${label}: 解析出真实行数`, rows.length >= expectCountMin, `rows=${rows.length}`);
@@ -206,25 +206,25 @@ function verifySearch(label, text, expectCountMin) {
   return rows;
 }
 
-send({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'qq_whale_meme_search', arguments: { query: '开心' } } });
+send({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'qq_meme_search', arguments: { query: '开心' } } });
 const t1 = textOf(await wait(10, 30000));
 const rows1 = verifySearch('query="开心"', t1, 1);
 
-send({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'qq_whale_meme_search', arguments: { query: '', tag: 'happy', limit: 5 } } });
+send({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'qq_meme_search', arguments: { query: '', tag: 'happy', limit: 5 } } });
 const t2 = textOf(await wait(11, 30000));
 const rows2 = verifySearch('tag="happy" limit=5', t2, 1);
 check('tag 过滤真的生效（每行 tag 都是 happy）', rows2.length > 0 && rows2.every((r) => r[2].toLowerCase() === 'happy'), rows2.map((r) => r[2]).join(','));
 const uniq2 = new Set(rows2.map((r) => r[1]));
 check('tag 过滤返回的是不同图片', uniq2.size === rows2.length, `unique=${uniq2.size}/${rows2.length}`);
 
-send({ jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'qq_whale_meme_search', arguments: { query: 'zzz-不存在的关键词-zzz' } } });
+send({ jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'qq_meme_search', arguments: { query: 'zzz-不存在的关键词-zzz' } } });
 const t3 = textOf(await wait(12, 30000));
 console.log(`\n--- 空结果对照 原始返回 ---\n${t3}\n---`);
-check('查不到时是"没找到匹配"而不是缺包提示', t3.includes('没找到匹配的鲸鱼娘表情') && !t3.includes('本机没装鲸鱼娘同人表情库'));
+check('查不到时是"没找到匹配"而不是缺包提示', t3.includes('没找到匹配的表情') && !t3.includes('本机没装内置表情包'));
 
 section('server stderr（启动日志）');
 for (const l of stderrLines) console.log(l || '(空)');
-check('启动日志里报了 pack 位置（可诊断）', stderrLines.some((l) => l.includes('鲸鱼娘同人表情库已加载') || l.includes('未找到鲸鱼娘同人表情库')));
+check('启动日志里报了 pack 位置（可诊断）', stderrLines.some((l) => l.includes('内置表情包已加载') || l.includes('未找到内置表情包')));
 
 child.kill();
 console.log(`\n${fails ? `${fails} FAILED` : 'ALL PASS'}（${steps} 项检查）`);
