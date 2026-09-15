@@ -2971,6 +2971,51 @@ app.get('/api/bridge/activity-hours', async (req, res) => {
   }
 });
 
+/** 「活跃时段目标清单」：群号不在管理端写死，向桥要一份运行态里的对象清单
+ *  （允许名单 + 已建会话 + 已设时段的键，带群名/是否在时段内/未读数）。
+ *  桥是老版本没有这个接口时，退化成"只列允许名单里的群"，管理端不至于整卡报错。 */
+app.get('/api/bridge/activity-targets', async (req, res) => {
+  try {
+    const scope = String(req.query.scope || (req.query.serverId ? 'remote' : 'local'));
+    const t = activityConsoleTarget(scope, req.query.serverId);
+    if (t.error) { res.json({ ok: false, message: t.error, targets: [] }); return; }
+    const r = await fetch(`${t.base}/api/social/targets`, {
+      headers: t.token ? { 'x-console-token': t.token } : {},
+      signal: AbortSignal.timeout(9000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!j?.ok) {
+      res.json({ ok: false, message: j?.error || `桥未返回目标清单（HTTP ${r.status}）；若桥版本较旧请先同步桥代码`, targets: [] });
+      return;
+    }
+    const targets = (Array.isArray(j.targets) ? j.targets : []).map((x) => ({
+      key: String(x?.key || ''),
+      kind: x?.kind === 'private' ? 'private' : 'group',
+      id: String(x?.id || ''),
+      name: String(x?.name || ''),
+      inAllowList: !!x?.inAllowList,
+      windows: windowsToText(x?.windows),
+      inWindow: x?.inWindow === true,
+      nextWindowStart: x?.nextWindowStart != null ? minToClockText(x.nextWindowStart) : '',
+      unread: Number(x?.unread) || 0,
+      wakeMode: String(x?.wakeMode || ''),
+      allowed: x?.allowed !== false,
+    }));
+    res.json({
+      ok: true, scope, targets,
+      deepsleep: !!j.deepsleep,
+      deepsleepGroups: Array.isArray(j.deepsleepGroups) ? j.deepsleepGroups : [],
+      allowGroups: Array.isArray(j.allowGroups) ? j.allowGroups : [],
+    });
+  } catch (e) {
+    const scope = String(req.query.scope || (req.query.serverId ? 'remote' : 'local'));
+    const hint = scope === 'remote'
+      ? '服务端隧道 13100 不通（先在 SSH 配置页确认已连接、四个隧道都在）'
+      : '本机桥没在运行（Bridge 控制台 3100 无响应）——本机没跑桥就切到「服务端」；这一步只影响读列表，服务端那边不受影响';
+    res.json({ ok: false, message: `${hint}｜原始错误：${e?.message ?? String(e)}`, targets: [] });
+  }
+});
+
 app.post('/api/bridge/activity-hours', async (req, res) => {
   try {
     const body = req.body ?? {};

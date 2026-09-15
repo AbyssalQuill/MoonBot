@@ -7,7 +7,11 @@
 import { EventEmitter } from 'node:events';
 
 const RECONNECT_BASE_MS = 1500;
-const RECONNECT_MAX_MS = 30000;
+// 【2026-09-15 修「又不回复了：桥连不上 NapCat 却一直刷错误」】见 _scheduleReconnect 的调用点。
+// 原来这里封顶 30 秒：一旦 NapCat 侧重登/重启（WS 服务短暂拒绝连接），桥最长要等 30 秒才再试一次，
+// 而且连续失败时退避会一直停在 30 秒 —— 实测出现"账号已重新登好、桥却还在刷 NapCat 错误"的状态，
+// 直到手动重启桥才接上。封顶降到 10 秒：代价只是失败时多几次握手，收益是几秒内自动接回。
+const RECONNECT_MAX_MS = 10000;
 const HEARTBEAT_WATCHDOG_MS = 90000; // 无任何下行（含心跳/事件）超时即视为假死
 const CONNECT_TIMEOUT_MS = 15000;
 const SEND_TIMEOUT_MS = 20000;

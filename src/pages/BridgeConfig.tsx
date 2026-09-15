@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { api, getBridgeConfig, saveBridgeConfig, getActivityHours, saveActivityHours, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile, type ActivityTarget } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
 import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle } from 'lucide-react';
 import NumInput from '../components/NumInput';
@@ -110,6 +110,9 @@ const LABEL: Record<string, string> = {
   security: '安全', interceptNotify: '拦截通知', burstIntervalMinMsLegacy: '',
   // 投递 / 省额度（2026-09-12 新增到管理端）
   steerEnabled: '在途回合注入', slimTools: '工具 schema 精简',
+  // 回合保持（social.turnHold）：以前管理端完全没有露出来，主人问"投递与回合那张卡没错吧"时才发现
+  turnHold: '回合保持', maxExchanges: '最多来回次数', idleCloseMs: '空闲关闭时长', maxWaitMs: '最长保持时长',
+  requestBudgetMs: '每段等待预算', privateOnly: '只对私聊保持', keys: '限定会话',
 };
 
 /** MCP 工具中文名（工具与规则页） */
@@ -243,6 +246,17 @@ const TOOL_MCP: Record<string, string> = {
     + '为什么这个最值钱：单次请求约 85,800 字符里 tools 占 72,858（约 87%），而且每一步都会重发一遍。'
     + '改成 config 里那组「QQ 工具开关」只在调用时拒绝（403），**一个字符都省不掉**。'
     + '改动后必须重启隔离 DSH 才生效（工具表只在 DSH 启动时取一次）。',
+  // —— 回合保持（social.turnHold）：4.49 之后重写的持段协议，管理端逐项说明 ——
+  'social.turnHold.enabled': '「回合保持」总开关。开着的时候：桥在一次唤醒里把 DSH 那个回合**留住**一段时间，你在这段时间里连着补的几句话会被并进同一个回合处理，'
+    + '不用每条都重新唤醒（省一次整包提示 + 少一轮排队）。关掉就回到"每条消息各自起一轮"的老行为。',
+  'social.turnHold.keys': '限定哪些会话生效（每行一个，如 `private:1736784911` 或 `group:123456789`）；留空 = 不按会话限制，具体范围由下面「只对私聊保持」决定。',
+  'social.turnHold.privateOnly': '只对私聊保持：群聊不开保持（群里人多、话题散，一直占着回合既费额度又容易答错对象）。'
+    + '想让某个群也保持，就在这里关掉它，再用上面的「限定会话」写死那几个群号。',
+  'social.turnHold.maxExchanges': '一次保持里最多来回多少轮：到数就放行，防止你一直说话害它一直不结束（回合数直接等于模型步数，就是额度）。',
+  'social.turnHold.idleCloseMs': '空闲关闭：这么久（毫秒）没有新消息就主动放开这个回合，让 DSH 正常收尾。',
+  'social.turnHold.maxWaitMs': '最长保持：不管有没有新消息，到这个时长（毫秒）都必须结束，避免回合永久挂着。',
+  'social.turnHold.requestBudgetMs': '每段等待预算（毫秒，默认 55000）：桥不是一次把回合攥到底，而是**一段一段**跟插件续问；'
+    + '每段最多等这么久，插件要它继续就回 `again:true` 续下一段。这个值必须**小于** DSH 插件那侧的单次请求超时，否则回合会在预算到点前被断开。',
 };
 
 /** 开关下方的一行小字提示（按完整路径/字段名精确命中） */
@@ -256,6 +270,9 @@ const TIP: Record<string, string> = {
   'social.provideRecommendations': '把推荐参数一起喂给模型',
   'social.deepsleepGroups': '每行一个群号；只静默这些群',
   'social.steerEnabled': '思考中收到的新消息直接塞进这一轮',
+  'social.turnHold.enabled': '一次唤醒里留住回合，连着补话不用重新唤醒',
+  'social.turnHold.privateOnly': '群里不开保持；确有需要再关掉并写死群号',
+  'social.turnHold.requestBudgetMs': '必须小于 DSH 插件那侧的单次请求超时',
 };
 
 function pretty(label: string) {
@@ -670,7 +687,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           </button>
         </div>
 
-        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} />}
+        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} writeConfig={(next) => writeBridge({ config: next })} onCfgChange={setCfg} />}
         {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} />}
 
         {tab === 'persona' && (
@@ -1079,11 +1096,14 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 }
 
 /* ================= 常用设置：一功能一卡片，3 列等高对齐 ================= */
-function CommonTab({ cfg, ch, onHelp, uploadStickers, remote }: {
+function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfgChange }: {
   cfg: any; ch: (p: string) => (v: any) => void;
   onHelp: (h: any) => void;
   uploadStickers: (files: File[]) => Promise<void>;
   remote?: { id: string; name?: string } | null;
+  /** 活跃时段卡要用：整份配置写回 + 回写页面状态（加群要落进 allow.groups） */
+  writeConfig: (next: any) => Promise<any>;
+  onCfgChange: (next: any) => void;
 }) {
   // 精简后的基础项：删掉端口/令牌/会话目录等系统自管项，避免无效配置
   const topOnly = ['agentPreset', 'workspaceTitle', 'ownerQQ', 'adminQQ', 'ackMessage', 'sendDelayMs', 'questionTimeoutMs'];
@@ -1113,7 +1133,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote }: {
         desc="每轮带多少历史、聊太久自动换新会话，防止记性爆掉。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
-      <ActivityHoursCard cfg={cfg} remote={remote} />
+      <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />
 
       <GroupCard title="等待：回复前的停顿" path="social.wait" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="模拟真人“想一想再回”：停顿多久、新消息后静默多久。全调 0 = 秒回机器人。" />
@@ -1124,9 +1144,9 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote }: {
       <GroupCard title="智能体开关与自动回复" path="social" only={['enabled', 'autoReplyCheckMs', 'provideRecommendations']}
         cfg={cfg} ch={ch} onHelp={onHelp}
         desc="整套智能体的总开关、检查新消息的频率、是否给模型喂推荐参数。" />
-      <GroupCard title="投递与回合（速度 / 不吞消息）" path="social" only={['steerEnabled']}
+      <GroupCard title="投递与回合（速度 / 不吞消息）" blocks={[{ path: 'social', only: ['steerEnabled'] }, { path: 'social.turnHold' }]}
         cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="「在途回合注入」：模型正在思考时，新消息会被直接塞进这一轮（而不是等它回完再另起一轮）。默认开启——关掉会让每条消息都要多等一整轮，而且容易卡在 DSH 的 next-turn 队列里出不来。" />
+        desc="「在途回合注入」：模型正在思考时，新消息会被直接塞进这一轮（而不是等它回完再另起一轮）。默认开启——关掉会让每条消息都要多等一整轮，而且容易卡在 DSH 的 next-turn 队列里出不来。下面一组是「回合保持」：一次唤醒后把这个回合留住多久、最多来回多少次，留住期间你可以连着补话而不用每条都重新唤醒（保持太久会一直占着会话，建议只对私聊开）。" />
       <GroupCard title="好友申请与信任" path="social" only={['autoFriendApproval', 'autoFriendGuard', 'trustedCrossSessionUids']}
         cfg={cfg} ch={ch} onHelp={onHelp}
         desc="自动通过好友申请、敏感操作只信谁、允许跨会话读取的账号。" />
@@ -1182,78 +1202,201 @@ function GroupCard({ title, path, blocks, cfg, ch, onHelp, filter, only, desc, c
   );
 }
 
-/** 群聊活跃时段卡（2026-09-15 主人要求加在管理端）
- *  数据不在 config.json，而是桥的 state/activity-windows.json（按会话存，支持跨午夜如 09:00-01:00）。
- *  读改都走后端 /api/bridge/activity-hours（本机走 3100，服务端走隧道 13100），改完立刻生效。 */
-function ActivityHoursCard({ cfg, remote }: { cfg: any; remote?: { id: string; name?: string } | null }) {
-  const groups: string[] = Array.isArray(cfg?.allow?.groups) ? cfg.allow.groups.map(String).filter(Boolean) : [];
-  const [rows, setRows] = useState<Record<string, string>>({});
-  const [status, setStatus] = useState<Record<string, string>>({});
-  const [msg, setMsg] = useState('');
-  const [busy, setBusy] = useState(false);
+/** 群聊活跃时段卡（2026-09-15 主人要求加在管理端；同日改成"列表化"）
+ *  【对象清单不写死】群号/QQ 全从桥运行态枚举：GET /api/bridge/activity-targets →
+ *  桥的 /api/social/targets（允许名单 ∪ 已建会话 ∪ 已设时段的键，附群名）→ 点哪一行就展开设哪一行。
+ *  时段数据不在 config.json，而在桥的 state/activity-windows.json（按会话存，支持跨午夜如 09:00-01:00）。
+ *  「添加群号」会同时补进允许名单（配置由本卡整份写回），否则机器人根本不处理那个群。 */
+function ActivityHoursCard({ cfg, remote, writeConfig, onCfgChange }: {
+  cfg: any;
+  remote?: { id: string; name?: string } | null;
+  /** 整份配置写回：本机走 /api/bridge/config，服务端走 /api/ssh/bridge-config */
+  writeConfig: (next: any) => Promise<any>;
+  onCfgChange: (next: any) => void;
+}) {
   const scope = remote ? 'remote' : 'local';
+  const [targets, setTargets] = useState<ActivityTarget[]>([]);
+  const [meta, setMeta] = useState<{ deepsleep: boolean; deepsleepGroups: string[] }>({ deepsleep: false, deepsleepGroups: [] });
+  const [openKey, setOpenKey] = useState('');
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [showPrivate, setShowPrivate] = useState(false);
+  const [newGid, setNewGid] = useState('');
 
   const refresh = async () => {
-    if (!groups.length) return;
+    setLoading(true);
     try {
-      const r = await getActivityHours(groups.map((g) => `group:${g}`), { scope, serverId: remote?.id });
-      const w: Record<string, string> = {};
-      const s: Record<string, string> = {};
-      for (const row of r.rows ?? []) {
-        const gid = row.key.split(':')[1];
-        w[gid] = row.windows || '';
-        s[gid] = row.ok ? (row.windows ? (row.inWindow ? '现在在时段内' : `现在不在时段内（下一个 ${row.nextWindowStart || '—'} 开始）`) : '未设时段（全天随意）') : (row.error || '读取失败');
-      }
-      setRows(w); setStatus(s);
-    } catch (e) { setMsg('读取活跃时段失败：' + (e as Error).message); }
+      const r = await getActivityTargets({ scope, serverId: remote?.id });
+      const list = Array.isArray(r.targets) ? r.targets : [];
+      setTargets(list);
+      setMeta({ deepsleep: !!r.deepsleep, deepsleepGroups: Array.isArray(r.deepsleepGroups) ? r.deepsleepGroups : [] });
+      setDrafts((prev) => {
+        const next = { ...prev };
+        for (const t of list) if (next[t.key] === undefined) next[t.key] = t.windows || '';
+        return next;
+      });
+      setMsg(r.ok ? '' : (r.message || '读取失败'));
+    } catch (e) { setMsg('读取失败：' + (e as Error).message); }
+    finally { setLoading(false); }
   };
-  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [JSON.stringify(groups), scope, remote?.id]);
+  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope, remote?.id]);
 
-  const save = async () => {
+  const groups = targets.filter((t) => t.kind === 'group');
+  const privates = targets.filter((t) => t.kind === 'private');
+  const visible = showPrivate ? targets : groups;
+
+  /** 保存单个对象的时段（留空 = 不限） */
+  const saveOne = async (key: string) => {
     setBusy(true); setMsg('');
     try {
-      const changes = groups.map((g) => ({ key: `group:${g}`, windows: rows[g] ?? '' }));
-      const r = await saveActivityHours(changes, { scope, serverId: remote?.id });
-      const bad = (r.results ?? []).filter((x) => !x.ok);
-      setMsg(bad.length
-        ? '部分没保存成功：' + bad.map((x) => `${x.key.split(':')[1]}（${x.error}）`).join('、')
-        : `已保存${remote ? '到服务端' : ''}：${(r.results ?? []).map((x) => `${x.key.split(':')[1]}${x.windows ? ' = ' + x.windows : ' = 不限'}`).join('、')}`);
+      const r = await saveActivityHours([{ key, windows: drafts[key] ?? '' }], { scope, serverId: remote?.id });
+      const one = (r.results ?? [])[0];
+      if (!one?.ok) { setMsg(`没保存成功：${one?.error || r.message || '未知原因'}`); return false; }
+      setMsg(`已保存${remote ? '到服务端' : ''}：${key.replace(':', ' ')} = ${one.windows || '不限（全天随意）'}`);
       await refresh();
-    } catch (e) { setMsg('保存失败：' + (e as Error).message); }
+      return true;
+    } catch (e) { setMsg('保存失败：' + (e as Error).message); return false; }
     finally { setBusy(false); }
+  };
+
+  /** 添加群号：先补进允许名单（否则桥不处理该群），再设它的活跃时段 */
+  const addGroup = async () => {
+    const gid = newGid.replace(/\D/g, '');
+    if (!gid) { setMsg('先填群号（纯数字）'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const list: string[] = Array.isArray(cfg?.allow?.groups) ? cfg.allow.groups.map(String) : [];
+      if (!list.includes(gid)) {
+        const next = { ...(cfg || {}), allow: { ...(cfg?.allow || {}), groups: [...list, gid] } };
+        const r = await writeConfig(next);
+        if (r && r.ok === false) { setMsg('写入允许名单失败：' + (r.message || '未知原因')); return; }
+        onCfgChange(next);
+      }
+      setNewGid('');
+      setOpenKey('group:' + gid);
+      await refresh();
+      setMsg(`群 ${gid} 已加入允许名单（上方保存后长期生效），下面接着设它的活跃时段`);
+    } catch (e) { setMsg('添加失败：' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  /** 一键关掉「静默群聊」总开关：开着的时候所有群消息都被跳过，活跃时段形同虚设 */
+  const turnOffSilence = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const next = { ...(cfg || {}), social: { ...(cfg?.social || {}), deepsleep: false } };
+      const r = await writeConfig(next);
+      if (r && r.ok === false) { setMsg('关闭失败：' + (r.message || '未知原因')); return; }
+      onCfgChange(next);
+      setMsg('已关闭「静默群聊」——群消息会重新交给机器人处理');
+      await refresh();
+    } catch (e) { setMsg('关闭失败：' + (e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const statusText = (t: ActivityTarget) => {
+    if (!t.allowed) return '当前模式不允许这个会话';
+    if (!t.windows) return '不限时段（全天随意）';
+    return t.inWindow ? '现在在时段内' : `现在不在时段内（下一个 ${t.nextWindowStart || '—'} 开始）`;
   };
 
   return (
     <div className="cfg-card">
       <div className="cfg-card-title">群聊活跃时段{remote ? '（服务端）' : ''}</div>
       <div className="cfg-card-desc">
-        按群设"该活跃的时间段"（北京时间，支持跨午夜，如 <code>09:00-01:00</code>；多个用逗号分隔）。
-        时段内：正常参与、别急着潜水；时段外：没正事就潜水，不在安静时段刷存在感。<br />
-        留空 = 不设时段（机器人不受时间约束）。@、叫名字、提问这类唤醒不受时段限制，永远会回。
+        列表由机器人当前认识的对象自动生成（允许名单 + 已建会话），点一行就能单独设它的时段。
+        时间是北京时间，支持跨午夜（如 <code>09:00-01:00</code>），多个用逗号分隔。<br />
+        时段内：正常参与、别急着潜水；时段外：没正事就潜水。留空 = 不设时段。
+        @、叫名字、提问这类唤醒不受时段限制，永远会回。
       </div>
-      {!groups.length ? (
-        <div className="cfg-card-desc">当前「允许名单」里还没有群 —— 先在下面「允许名单」加群号，这里才有可设的对象。</div>
-      ) : (
-        <div className="cfg-fields">
-          {groups.map((g) => (
-            <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-              <span style={{ minWidth: 110, opacity: 0.85 }}>{g}</span>
-              <input
-                className="input" style={{ maxWidth: 240 }}
-                placeholder="如 09:00-01:00 ，留空=不限"
-                value={rows[g] ?? ''}
-                onChange={(e) => setRows((p) => ({ ...p, [g]: e.target.value }))}
-              />
-              <span style={{ fontSize: 12, opacity: 0.7 }}>{status[g] || ''}</span>
-            </div>
-          ))}
+
+      {meta.deepsleep && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '6px 0', padding: '6px 8px', border: '1px solid #d9822b', borderRadius: 6 }}>
+          <AlertTriangle size={14} />
+          <span style={{ fontSize: 12 }}>
+            「静默群聊」总开关正开着 —— 所有群消息都会被跳过，这里的时段一个也不会生效。
+          </span>
+          <button type="button" className="btn btn-soft-primary btn-sm" disabled={busy} onClick={turnOffSilence}>关闭静默，恢复群聊响应</button>
         </div>
       )}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
-        <button type="button" className="btn btn-primary btn-sm" disabled={busy || !groups.length} onClick={save}>
-          {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存活跃时段
+
+      {meta.deepsleepGroups.length > 0 && (
+        <div className="cfg-card-desc" style={{ fontSize: 12 }}>
+          单群静默名单：{meta.deepsleepGroups.join('、')}（这些群的消息照样被跳过，调之前先从名单里去掉）
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '6px 0', flexWrap: 'wrap' }}>
+        <button type="button" className="btn btn-sm" disabled={loading} onClick={refresh}>
+          {loading ? <Loader2 size={14} className="spin" /> : <RotateCcw size={14} />} 刷新列表
         </button>
-        <button type="button" className="btn btn-sm" disabled={busy || !groups.length} onClick={refresh}>刷新</button>
+        <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
+          <input type="checkbox" checked={showPrivate} onChange={(e) => setShowPrivate(e.target.checked)} />
+          连私聊一起列（{privates.length}）
+        </label>
+        <span style={{ fontSize: 12, opacity: 0.7 }}>群 {groups.length} 个</span>
+      </div>
+
+      {!visible.length && !loading ? (
+        <div className="cfg-card-desc">桥还没认识任何对象 —— 下面填群号加一个，或先在「允许名单」里加群。</div>
+      ) : (
+        <div className="cfg-fields">
+          {visible.map((t) => {
+            const open = openKey === t.key;
+            return (
+              <div key={t.key} style={{ marginBottom: 6, borderBottom: '1px solid rgba(128,128,128,0.18)', paddingBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <button
+                    type="button" className="btn btn-sm"
+                    style={{ minWidth: 190, justifyContent: 'flex-start' }}
+                    onClick={() => setOpenKey(open ? '' : t.key)}
+                  >
+                    {open ? '▾' : '▸'} {t.kind === 'group' ? '群 ' : '私聊 '}
+                    {t.name ? `${t.name}（${t.id}）` : t.id}
+                  </button>
+                  <span style={{ fontSize: 12, opacity: 0.85 }}>时段：{t.windows || '不限'}</span>
+                  <span style={{ fontSize: 12, opacity: 0.6 }}>{statusText(t)}</span>
+                  {t.kind === 'group' && !t.inAllowList && <span style={{ fontSize: 12, color: '#d9822b' }}>不在允许名单</span>}
+                  {!!t.unread && <span style={{ fontSize: 12, opacity: 0.6 }}>未读 {t.unread}</span>}
+                </div>
+                {open && (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
+                    <input
+                      className="input" style={{ maxWidth: 260 }}
+                      placeholder="如 09:00-01:00 ，留空=不限"
+                      value={drafts[t.key] ?? ''}
+                      onChange={(e) => setDrafts((p) => ({ ...p, [t.key]: e.target.value }))}
+                    />
+                    <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void saveOne(t.key)}>
+                      {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存这个
+                    </button>
+                    <button
+                      type="button" className="btn btn-sm" disabled={busy}
+                      onClick={() => { setDrafts((p) => ({ ...p, [t.key]: '' })); void saveActivityHours([{ key: t.key, windows: '' }], { scope, serverId: remote?.id }).then(refresh); }}
+                    >清空（不限时段）</button>
+                    <span style={{ fontSize: 12, opacity: 0.6 }}>
+                      快捷：<a style={{ cursor: 'pointer' }} onClick={() => setDrafts((p) => ({ ...p, [t.key]: '09:00-01:00' }))}>09:00-01:00</a>
+                      {' · '}<a style={{ cursor: 'pointer' }} onClick={() => setDrafts((p) => ({ ...p, [t.key]: '08:00-12:00,14:00-23:00' }))}>白天+晚间</a>
+                      {' · '}<a style={{ cursor: 'pointer' }} onClick={() => setDrafts((p) => ({ ...p, [t.key]: '00:00-24:00' }))}>全天</a>
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
+        <input
+          className="input" style={{ maxWidth: 160 }} placeholder="群号，如 123456789"
+          value={newGid} onChange={(e) => setNewGid(e.target.value)}
+        />
+        <button type="button" className="btn btn-soft-primary btn-sm" disabled={busy} onClick={addGroup}>
+          <Users size={14} /> 添加群（并加入允许名单）
+        </button>
         {msg && <span style={{ fontSize: 12 }}>{msg}</span>}
       </div>
     </div>

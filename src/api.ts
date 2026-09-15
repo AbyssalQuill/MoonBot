@@ -326,6 +326,19 @@ export const saveActivityHours = (changes: Array<{ key: string; windows: string 
     { method: 'POST', body: JSON.stringify({ changes, ...(opts ?? {}) }) },
   );
 
+/** 活跃时段「可选对象清单」：群号/QQ 由桥的运行态枚举出来（不写死在管理端），带群名与当前状态 */
+export interface ActivityTarget {
+  key: string; kind: 'group' | 'private'; id: string; name: string;
+  inAllowList: boolean; windows: string; inWindow: boolean; nextWindowStart: string;
+  unread: number; wakeMode: string; allowed: boolean;
+}
+export const getActivityTargets = (opts?: { scope?: 'local' | 'remote'; serverId?: string }) =>
+  api<{ ok: boolean; targets: ActivityTarget[]; deepsleep?: boolean; deepsleepGroups?: string[]; allowGroups?: string[]; message?: string }>(
+    '/bridge/activity-targets'
+    + (opts?.scope ? `?scope=${opts.scope}` : '')
+    + (opts?.serverId ? `${opts?.scope ? '&' : '?'}serverId=${encodeURIComponent(opts.serverId)}` : ''),
+  );
+
 /* ================= 桥代码同步 / 整套移除（SSH 服务器） ================= */
 export interface SyncStepsResp {
   success: boolean;
