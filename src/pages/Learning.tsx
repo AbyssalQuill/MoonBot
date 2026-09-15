@@ -2,10 +2,11 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
   getLearningConfig, saveLearningConfig, slangAction, personaAction, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
+  reconcileTokens,
 } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
-  Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw, BookOpen,
+  Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw, BookOpen, Scale,
 } from 'lucide-react';
 
 interface Props { onBack: () => void; }
@@ -730,8 +731,32 @@ function UsagePanel() {
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState('');
   const [live, setLive] = useState<'sse' | 'poll'>('poll');
+  const [rcBusy, setRcBusy] = useState(false);
+  const [rcMsg, setRcMsg] = useState('');
   const inflight = useRef(false);
   const lastReload = useRef(0);
+
+  /** 与 DSH 会话级权威计数对账：把被漏记的 usage 帧补进来，面板数字对上真实值 */
+  const doReconcile = async () => {
+    setRcBusy(true); setRcMsg('');
+    try {
+      const r: any = await reconcileTokens();
+      const line = (name: string, side: any, reason: string) => {
+        if (side) {
+          const res = side.result || {};
+          if (res.reason) return `${name}：${res.reason}`;
+          const add = num(res.addedTokens);
+          return add > 0 ? `${name}：补记 ${num(res.added)} 笔 / ${fmtFull(add)} tokens` : `${name}：无差额，已一致`;
+        }
+        return reason ? `${name}：${reason}` : '';
+      };
+      const parts = [line('本机', r?.local, String(r?.localReason || '')), line('服务端', r?.remote, String(r?.remoteReason || ''))].filter(Boolean);
+      setRcMsg(parts.length ? parts.join('；') : '对账完成');
+      await load();
+    } catch (e: any) {
+      setRcMsg('对账失败：' + String(e?.message ?? e));
+    } finally { setRcBusy(false); }
+  };
 
   const load = async () => {
     if (inflight.current) return;
@@ -868,8 +893,16 @@ function UsagePanel() {
           <button className="btn btn-sm" disabled={loading} onClick={load}>
             {loading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
           </button>
+          <button
+            className="btn btn-sm" disabled={rcBusy} onClick={doReconcile}
+            title="拿 DSH 自己记的每个会话累计用量与桥侧对账，补上被漏记的 usage 帧（幂等，可反复点）"
+          >
+            {rcBusy ? <Loader2 size={13} className="spin" /> : <Scale size={13} />} 与 DSH 对账
+          </button>
         </span>
       </div>
+
+      {rcMsg && <div className="lrn-note lrn-note-soft">{rcMsg}</div>}
 
       {note && <div className="lrn-note lrn-note-soft">{note}</div>}
 

@@ -339,6 +339,16 @@ export const getActivityTargets = (opts?: { scope?: 'local' | 'remote'; serverId
     + (opts?.serverId ? `${opts?.scope ? '&' : '?'}serverId=${encodeURIComponent(opts.serverId)}` : ''),
   );
 
+/** 用量对账：让本机/服务端桥各自与 DSH 会话级权威计数比对，补上被漏记的 usage 帧（幂等） */
+export interface TokenReconcileResp {
+  ok: boolean; at: number;
+  local: { ok?: boolean; result?: { added?: number; addedTokens?: number; reason?: string } } | null;
+  remote: { ok?: boolean; result?: { added?: number; addedTokens?: number; reason?: string } } | null;
+  localReason?: string; remoteReason?: string;
+}
+export const reconcileTokens = () =>
+  api<TokenReconcileResp>('/learning/token-reconcile', { method: 'POST', body: '{}' });
+
 /* ================= 桥代码同步 / 整套移除（SSH 服务器） ================= */
 export interface SyncStepsResp {
   success: boolean;

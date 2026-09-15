@@ -7,6 +7,16 @@
 //    "est":true,"promptChars":pc,"completionChars":cc}
 // est=false = 帧内真实 usage（LLM 上报）；est=true = 无真实 usage 时按帧 transcript 字符估算。
 //
+// ── 与 DSH 权威计数对账（2026-09-15，主人问「面板比真实值虚高/偏低」时加的）────────────────
+// 单帧漏记是**真实存在**的：帧里拿不到 sessionId 时整帧被丢弃（原实现直接 return no-sessionId），
+// 实测 2026-09-15 有一个会话 DSH 侧 961,349、桥侧 889,248，差 72,101（正好一步的量）。
+// 现在每隔一段时间（默认 5 分钟）+ 桥启动时，读 DSH 自己落的
+//   <dshHome>/storages/session_projcache/sessions/session-*.json → record.rows.tokenUsage.val.totals
+// （uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens，按会话累计）
+// 与桥侧同会话的累计逐桶比对，**只补桥侧少掉的那部分**（reconciled:true 的行），
+// 并把已对账水位写进 state/token-reconcile.json —— 因此可反复执行、不会重复补，
+// 也不会因为文件截断（MAX_LINES 裁剪）把历史重新加一遍。
+//
 // 单钩子用法：集成方（mux）在事件环每帧只调一次 meterTokenFrame(frame)，其余全在本模块内完成：
 //   (a) 深度扫描（≤6 层、数组元素>200 跳过）整帧 usage 键（snake/camel 命名 + usage 对象内含键），
 //       命中且 sessionId 存在 → 写 est:false 行；
@@ -46,6 +56,7 @@ import { beijingDateKey, bjMinutes } from '../lib/time.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATE_DIR = path.resolve(__dirname, '..', '..', 'state'); // qq-bridge/state
 const TOKEN_USAGE_FILE = 'token-usage.jsonl';
+const TOKEN_RECONCILE_FILE = 'token-reconcile.json'; // 与 DSH 对账的水位（按会话）
 const MAX_LINES = 50000;      // 行数上限（截旧触发点）
 const PRUNE_TO_LINES = 45000; // 截旧后保留行数（留缓冲，避免每写一行都整文件重写）
 const MAX_DEPTH = 6;          // usage 递归扫描深度上限
@@ -56,6 +67,7 @@ const ACC_CHARS_CAP = 5000000;            // 单回合暂存字符上限（防�
 const ACC_IDLE_FLUSH_MS = 90 * 1000;      // 暂存超过该时长无回合边界 → 主动落一条防丢失
 const REAL_SIG_KEEP_MS = 24 * 60 * 60 * 1000; // 真实 usage 签名保留窗口（跨重启去重有效时长）
 const REAL_SIG_MAX_PER_SESSION = 64;          // 每会话最多保留的签名条数（防无界增长）
+const DEFAULT_RECONCILE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 只对"最近 6 小时内还动过"的会话补差额
 
 // 计费日偏移（分钟）：480 = UTC 自然日 = 北京时每天 08:00 换日（对齐提供方控制台）。
 // 设 0 则退回北京自然日口径；环境变量 QQ_TOKEN_DAY_OFFSET_MIN 可覆盖（便于现场比对/回退）。
@@ -100,6 +112,12 @@ const meter = {
   turnAcc: new Map(),
   realSeen: new Set(),  // 本回合出现过真实 usage 的 sessionId（抑制回合末估算，防双计）
   lastReal: new Map(),  // 会话 -> 最近已落行的真实 usage 签名 [{ts,sig}]（防多帧/快照回放/重启回放重复计数）
+  // 按会话累计（对账用）：sessionId -> {prompt, completion, cacheRead, cacheWrite}
+  sessionSums: new Map(),
+  // 对账水位：sessionId -> {prompt, completion, cacheRead, cacheWrite}（DSH 侧已确认过的量）
+  reconcileFloor: new Map(),
+  reconcileLast: null,   // 最近一次对账结果 { at, scanned, added, addedTokens, sessions[] }
+  dshHome: null,         // DSH home（用于定位 projcache）；未设置 = 不对账
   lastErr: null
 };
 
@@ -204,6 +222,15 @@ function applyToMemory(rec) {
   // 真实 usage 签名登记：ensureInit 回填历史行 + 每次落行都登记，使去重在桥重启后依然生效
   // （follow 快照在重启后会整段回放旧事件，仅靠内存 2.5s 窗口会把这批 usage 全部重记一遍）。
   if (!rec.est) rememberReal(rec.sessionId, rec.tsMs, usageSig(rec.prompt, rec.completion, rec.total));
+  // 按会话累计（对账基准）：不管窗口有没有被 7 天裁掉，只要还留在文件里就记
+  if (rec.sessionId) {
+    const s = meter.sessionSums.get(rec.sessionId) || { prompt: 0, completion: 0, cacheRead: 0, cacheWrite: 0 };
+    s.prompt += rec.prompt;
+    s.completion += rec.completion;
+    s.cacheRead += rec.cacheRead || 0;
+    s.cacheWrite += rec.cacheWrite || 0;
+    meter.sessionSums.set(rec.sessionId, s);
+  }
   const agg = meter.days.get(key) ?? emptyAgg();
   agg.samples += 1;
   if (rec.est) agg.estTotal += rec.total;
@@ -237,6 +264,10 @@ function pruneFile() {
     const keep = lines.slice(lines.length - PRUNE_TO_LINES);
     fs.writeFileSync(meter.file, keep.join('\n') + (keep.length ? '\n' : ''));
     meter.lineCount = keep.length;
+    // 裁剪后必须按**裁剪过的**文件重建按会话累计：否则对账基准会把被裁掉的历史算成
+    // 「桥侧已经记过」，DSH 侧的真实总量减去它会得出一个假增量（重复补）。
+    meter.inited = false;
+    ensureInit();
   } catch (error) { meter.lastErr = error; }
 }
 
@@ -255,6 +286,7 @@ function ensureInit() {
   meter.hours.clear();
   meter.hoursDate = '';
   meter.lastReal.clear();
+  meter.sessionSums.clear();
   for (const line of lines) {
     const rec = parseLine(line);
     if (rec) applyToMemory(rec);
@@ -274,6 +306,7 @@ export function initTokenMeter(cfg) {
   meter.dayOffsetMin = normalizeDayOffset(opt.dayOffsetMinutes, ENV_DAY_OFFSET_MIN);
   meter.inited = false;
   if (typeof opt.convKeyResolver === 'function') meter.convKeyResolver = opt.convKeyResolver;
+  if (opt.dshHome) meter.dshHome = path.resolve(String(opt.dshHome));
   ensureInit();
   return { file: meter.file, inited: true };
 }
@@ -634,11 +667,195 @@ export function getTokenReport(days = 7, opts) {
     ? `${windowText}。${elapsedFraction <= 0.05 ? '今日记录尚少（<5% 时间），暂不外推，直接显示当前值' : '按当前速率外推,仅供参考'}`
     : `${windowText}。今日暂无用量记录（尚未收到 usage 帧或可估算的 transcript）`;
 
-  return { dates, today, todayEstimatedTotal, todayHourly, note, dayWindow };
+  return { dates, today, todayEstimatedTotal, todayHourly, note, dayWindow, reconcile: tokenReconcileStatus() };
 }
 
 /** 数据文件绝对路径（诊断/展示用） */
 export function tokenUsageFile() {
   ensureInit();
   return meter.file;
+}
+
+// ── 与 DSH 权威计数对账 ────────────────────────────────────────────────────────
+/** DSH 的 projcache 目录（按 DSH home 推导：sessions 的兄弟目录 storages） */
+export function dshProjcacheDir(dshHome = meter.dshHome) {
+  if (!dshHome) return null;
+  return path.join(String(dshHome), 'storages', 'session_projcache', 'sessions');
+}
+
+/** 设置 DSH home（桥启动时用 resolveDshTarget().home 调一次即可） */
+export function setTokenReconcileHome(dshHome) {
+  meter.dshHome = dshHome ? path.resolve(String(dshHome)) : null;
+  return meter.dshHome;
+}
+
+function reconcileFilePath() { return path.join(meter.stateDir, TOKEN_RECONCILE_FILE); }
+
+function loadReconcileFloor() {
+  if (meter.reconcileFloor.size) return;
+  try {
+    const raw = JSON.parse(fs.readFileSync(reconcileFilePath(), 'utf8'));
+    const s = raw && typeof raw === 'object' && raw.sessions && typeof raw.sessions === 'object' ? raw.sessions : {};
+    for (const [sid, v] of Object.entries(s)) {
+      meter.reconcileFloor.set(String(sid), {
+        prompt: num(v?.prompt), completion: num(v?.completion),
+        cacheRead: num(v?.cacheRead), cacheWrite: num(v?.cacheWrite), at: num(v?.at)
+      });
+    }
+  } catch { /* 没有水位文件 = 首次对账 */ }
+}
+
+function saveReconcileFloor() {
+  try {
+    const sessions = {};
+    for (const [sid, v] of meter.reconcileFloor) sessions[sid] = v;
+    fs.writeFileSync(reconcileFilePath(), `${JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), sessions }, null, 2)}\n`, 'utf8');
+  } catch (error) { meter.lastErr = error; }
+}
+
+const fl = (v) => ({ prompt: num(v?.prompt), completion: num(v?.completion), cacheRead: num(v?.cacheRead), cacheWrite: num(v?.cacheWrite) });
+const sumOf = (v) => v.prompt + v.completion + v.cacheRead + v.cacheWrite;
+
+/** 这个会话是不是"本桥工作区"里的会话（`<dshHome>/sessions/<slug>/session-<id>/`，
+ *  slug 里带 qq-bridge 的工作区：agents / slang-agent / persona-agent / self-test 等）。
+ *  用于「桥侧一条记录都没有、但确实是我们这套机器人花的量」的判定，避免把 DSH 桌面端/
+ *  别人手工开的会话也算进机器人额度。结果缓存，避免每轮都扫目录。 */
+const ownedSessionCache = new Map();
+function isBridgeOwnedSession(sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid || !meter.dshHome) return false;
+  if (ownedSessionCache.has(sid)) return ownedSessionCache.get(sid);
+  let hit = false;
+  try {
+    const root = path.join(meter.dshHome, 'sessions');
+    for (const slug of fs.readdirSync(root)) {
+      if (!/qq-bridge|qqbridge|state-agents|state-slang|state-persona|self-test/i.test(slug)) continue;
+      if (fs.existsSync(path.join(root, slug, sid))) { hit = true; break; }
+    }
+  } catch { hit = false; }
+  if (ownedSessionCache.size > 500) ownedSessionCache.clear();
+  ownedSessionCache.set(sid, hit);
+  return hit;
+}
+
+/**
+ * 与 DSH 的会话级权威计数对账，把桥侧漏掉的部分补成 reconciled:true 的计量行。
+ *
+ * 为什么可以反复执行：DSH 的 totals 是**按会话累计**，桥侧水位（reconcileFloor）只记录
+ * 「已经认可过的 DSH 总量」。只有当 DSH 总量比上次水位高时才补，且补的量 = DSH 现在的量 −
+ * max(桥侧同会话累计, 上次水位) 的逐桶差额；补完把水位抬到 DSH 当前值 → 幂等。
+ *
+ * @param {{dir?:string, maxAgeMs?:number, quotaPerRun?:number}} [opts]
+ * @returns {{ok:boolean, reason?:string, dir:string|null, scanned:number, added:number, addedTokens:number, sessions:Array}}
+ */
+export function reconcileWithDsh(opts = {}) {
+  ensureInit();
+  loadReconcileFloor();
+  const dir = String(opts.dir || dshProjcacheDir() || '');
+  const out = { ok: false, reason: '', dir: dir || null, scanned: 0, added: 0, addedTokens: 0, skippedNoBaseline: 0, skippedStale: 0, sessions: [] };
+  if (!dir || !fs.existsSync(dir)) {
+    out.reason = dir ? `找不到 DSH 会话统计目录：${dir}` : '未设置 DSH home（setTokenReconcileHome / initTokenMeter({dshHome})）';
+    meter.reconcileLast = { at: Date.now(), ...out };
+    return out;
+  }
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (e) {
+    out.reason = `读取失败：${e?.message ?? e}`;
+    meter.reconcileLast = { at: Date.now(), ...out };
+    return out;
+  }
+  const quota = Number(opts.quotaPerRun) > 0 ? Number(opts.quotaPerRun) : 200; // 单次最多补多少会话
+  // 只对"最近还活跃"的会话补差额：DSH 的 totals 是会话**终身**累计，而计量文件会截断，
+  // 首次对账若不分窗，会把几十个历史会话的量（可达数千万 token）一起补进来，7 日曲线直接爆掉。
+  const maxAgeMs = Number(opts.maxAgeMs) > 0 ? Number(opts.maxAgeMs) : DEFAULT_RECONCILE_MAX_AGE_MS;
+  const nowTs = opts.nowMs != null ? Number(opts.nowMs) : Date.now();
+  for (const f of files) {
+    if (out.added >= quota) break;
+    const p = path.join(dir, f);
+    let j = null; let mtime = nowTs;
+    try { j = JSON.parse(fs.readFileSync(p, 'utf8')); mtime = fs.statSync(p).mtimeMs; } catch { continue; }
+    const tu = j?.record?.rows?.tokenUsage?.val?.totals;
+    if (!tu) continue;
+    const sid = String(j?.record?.sessionId || f.replace(/\.json$/, ''));
+    out.scanned += 1;
+    const dshNow = fl({
+      prompt: tu.uncachedInputTokens, completion: tu.outputTokens,
+      cacheRead: tu.cacheReadTokens, cacheWrite: tu.cacheWriteTokens
+    });
+    const floor = fl(meter.reconcileFloor.get(sid));
+    const mine = fl(meter.sessionSums.get(sid));
+    const grown = sumOf(dshNow) > sumOf(floor);
+    if (!grown) continue;                                            // 没增长（或本会话已对过账）
+    const recent = nowTs - mtime <= maxAgeMs;
+    // 桥侧有基准 → 正常对账；没有基准时，只有"确实是本桥工作区里的会话 + 最近还在动"
+    // 才算数（例如子代理会话：桥没跟它的帧，但量是这套机器人花的）。
+    const owned = sumOf(mine) > 0 || (recent && isBridgeOwnedSession(sid));
+    if (!owned || !recent) {
+      if (sumOf(mine) <= 0) out.skippedNoBaseline += 1; else out.skippedStale += 1;
+      meter.reconcileFloor.set(sid, { ...dshNow, at: nowTs });       // 抬水位后跳过，防以后整段历史被补进来
+      continue;
+    }
+    const base = {
+      prompt: Math.max(mine.prompt, floor.prompt),
+      completion: Math.max(mine.completion, floor.completion),
+      cacheRead: Math.max(mine.cacheRead, floor.cacheRead),
+      cacheWrite: Math.max(mine.cacheWrite, floor.cacheWrite)
+    };
+    const delta = {
+      prompt: Math.max(0, dshNow.prompt - base.prompt),
+      completion: Math.max(0, dshNow.completion - base.completion),
+      cacheRead: Math.max(0, dshNow.cacheRead - base.cacheRead),
+      cacheWrite: Math.max(0, dshNow.cacheWrite - base.cacheWrite)
+    };
+    const dTokens = sumOf(delta);
+    if (dTokens <= 0) continue;
+    const ts = Number.isFinite(mtime) && mtime > 0 ? Math.round(mtime) : nowTs;
+    const rec = {
+      tsMs: ts, sessionId: sid, convKey: resolveConvKey(sid, null),
+      prompt: delta.prompt, completion: delta.completion,
+      total: dTokens, cacheRead: delta.cacheRead, cacheWrite: delta.cacheWrite,
+      est: false, reconciled: true, promptChars: 0, completionChars: 0
+    };
+    if (writeRecord(rec)) {
+      out.added += 1;
+      out.addedTokens += dTokens;
+      out.sessions.push({ sessionId: sid, tokens: dTokens, at: new Date(ts).toISOString() });
+    } else {
+      meter.reconcileFloor.set(sid, { ...floor });  // 落盘失败 → 回滚水位，下次再来
+    }
+  }
+  saveReconcileFloor();
+  out.ok = true;
+  meter.reconcileLast = { at: Date.now(), ...out };
+  if (out.added) {
+    // 落一条便于事后排查（谁在什么时候补了多少）
+    try {
+      fs.appendFileSync(path.join(meter.stateDir, 'token-reconcile.log'),
+        `${new Date().toISOString()} added=${out.added} tokens=${out.addedTokens} sessions=${out.sessions.map((s) => s.sessionId.slice(0, 20) + ':' + s.tokens).join(',')}\n`);
+    } catch {}
+  }
+  return out;
+}
+
+/** 上一次对账结果（控制台/面板展示用） */
+export function tokenReconcileStatus() {
+  ensureInit();
+  return {
+    dshHome: meter.dshHome || null,
+    dir: dshProjcacheDir(),
+    last: meter.reconcileLast,
+    tracked: meter.reconcileFloor.size,
+  };
+}
+
+let reconcileTimer = null;
+/** 起一个周期性对账定时器（幂等；默认 5 分钟一次，先延迟 20 秒跑第一次） */
+export function startTokenReconcile(intervalMs = 5 * 60 * 1000) {
+  if (reconcileTimer) return reconcileTimer;
+  const every = Math.max(30 * 1000, Number(intervalMs) || 5 * 60 * 1000);
+  const tick = () => { try { reconcileWithDsh(); } catch (error) { meter.lastErr = error; } };
+  setTimeout(tick, 20 * 1000).unref?.();
+  reconcileTimer = setInterval(tick, every);
+  reconcileTimer.unref?.();
+  return reconcileTimer;
 }
