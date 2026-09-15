@@ -3978,6 +3978,67 @@ export function startConsoleServer() {
         }
         return;
       }
+      // ── 活跃时段「目标清单」（管理端群聊活跃时段卡用：群号不写死在管理端，从桥运行态枚举）──
+      // 三个来源取并集：允许名单 / 已经建过会话 / 已经设过时段的键。
+      // 群名走 group-cache（有缓存直接用），缺名的最多预热 6 个、整体最多等 2.5s —— 超时先返回，
+      // 预热在后台继续，管理端下次点刷新自然就带上名字（get_group_info 在 NapCat 慢时会超时）。
+      if (req.method === 'GET' && url.pathname === '/api/social/targets') {
+        const found = new Map(); // key -> 条目
+        const add = (rawKey, name) => {
+          const key = String(rawKey ?? '').trim();
+          if (!/^(group|private):\d+$/.test(key)) return;
+          const prev = found.get(key) || {
+            key,
+            kind: key.startsWith('group:') ? 'group' : 'private',
+            id: key.slice(key.indexOf(':') + 1),
+            name: '',
+            inAllowList: false,
+          };
+          if (name && !prev.name) prev.name = String(name);
+          found.set(key, prev);
+        };
+        const allowGroups = Array.isArray(cfgRef?.allow?.groups) ? cfgRef.allow.groups.map(String) : [];
+        const allowPrivate = Array.isArray(cfgRef?.allow?.private) ? cfgRef.allow.private.map(String) : [];
+        const markAllow = (key) => { const e = found.get(key); if (e) e.inAllowList = true; };
+        for (const g of allowGroups) { add('group:' + g, getGroupDisplayName(g)); markAllow('group:' + g); }
+        for (const p of allowPrivate) { add('private:' + p); markAllow('private:' + p); }
+        for (const key of Object.keys(activityWindows || {})) add(key, key.startsWith('group:') ? getGroupDisplayName(key.slice(6)) : '');
+        for (const key of social.conversations.keys()) add(key, key.startsWith('group:') ? getGroupDisplayName(key.slice(6)) : '');
+        const missing = [...found.values()].filter((t) => t.kind === 'group' && !t.name).slice(0, 6);
+        if (missing.length) {
+          await Promise.race([
+            Promise.all(missing.map((t) => warmGroupName(t.id).catch(() => null))),
+            new Promise((r) => setTimeout(r, 2500)),
+          ]);
+          for (const t of missing) { const nm = getGroupDisplayName(t.id); if (nm) t.name = nm; }
+        }
+        const targets = [...found.values()].map((t) => {
+          const st = social.conversations.get(t.key);
+          const w = st?.wake || {};
+          let allowed = true;
+          try { allowed = isSessionAllowedInCurrentMode(t.key) !== false; } catch { allowed = true; }
+          return {
+            ...t,
+            windows: getActivityWindows(t.key),
+            inWindow: inActivityWindow(t.key) === true,
+            nextWindowStart: nextActivityWindowStart(t.key) ?? null,
+            unread: Array.isArray(st?.unread) ? st.unread.length : 0,
+            wakeMode: String(w.mode || ''),
+            allowed,
+          };
+        }).sort((a, b) => (a.kind === b.kind
+          ? String(a.id).localeCompare(String(b.id))
+          : (a.kind === 'group' ? -1 : 1)));
+        sendJson({
+          ok: true,
+          now: Date.now(),
+          deepsleep: !!cfgRef?.social?.deepsleep,
+          deepsleepGroups: Array.isArray(cfgRef?.social?.deepsleepGroups) ? cfgRef.social.deepsleepGroups.map(String) : [],
+          allowGroups,
+          targets,
+        });
+        return;
+      }
       // ── 活跃时段表（主人自然语言设定 → qq_set_activity_hours / qq_get_activity_hours） ──
       if (req.method === 'GET' && url.pathname === '/api/social/activity-hours') {
         const key = String(url.searchParams.get('key') ?? '').trim();

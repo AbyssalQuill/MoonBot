@@ -1,4 +1,4 @@
-﻿// QQ ↔ DeepSeek Harness 桥接主程序。
+// QQ ↔ DeepSeek Harness 桥接主程序。
 //
 // 链路：
 //   QQ 消息 → NapCat (OneBot v11 WS) → 本进程 → DSH Web API session.prompt
@@ -430,8 +430,15 @@ async function main() {
   });
 
   bot.on('open', () => log(`NapCat 已连接：${cfg.napcat.wsUrl}`));
-  bot.on('close', (info) => log(`NapCat 连接断开（code=${info?.code ?? '?'}），重连中…`));
-  bot.on('error', (error) => log('NapCat 错误:', error));
+  bot.on('close', (info) => log(`NapCat 连接断开（code=${info?.code ?? '?'} reason=${String(info?.reason ?? '').slice(0, 80)}），重连中…`));
+  // 【2026-09-15】以前这里直接把 error 对象丢给 log，而 Error 经 JSON.stringify 是 `{}` ——
+  // 日志里只看到 `NapCat 错误: {}`，**一点线索都没有**（排查"不回复"时被这个坑了一次）。
+  // 现在把 message/code/cause 都打出来，并带上 WS 状态与 URL，一眼能看出是握手被拒还是断线。
+  bot.on('error', (error) => {
+    const detail = [error?.message, error?.code, error?.cause?.code, error?.cause?.message]
+      .filter(Boolean).join(' | ') || String(error);
+    log(`NapCat 错误: ${detail}（wsUrl=${cfg.napcat.wsUrl}）`);
+  });
 
   // 【2026-09-12 修「启动不顺畅 / 桥自己死掉」】
   // onebot-ws 的老语义是：**首次 open 之前就 close** → reject(NAPCAT_CONN) → 这里 await 抛出去 →
