@@ -155,6 +155,10 @@ export function loadConfig() {
         maxListCount: 100,         // qq_list_stickers 单次最大返回数
         includeInPrompt: true,     // 是否在 qq_get_prompt / 唤醒提示里附带表情摘要与策略
         promptMaxStickers: 8,      // 提示里最多列出的常用表情数
+        // 【2026-09-15】发表情概率从"提示词软引导"改成**桥侧掷骰**（与语音同一套机制，见 core/send-dice.js）：
+        // 每次唤醒桥掷一次，把 [Meme] dice HIT/MISS 写进唤醒正文；sendCooldownMs 管同一会话的连发。
+        sendProbability: 0.3,      // 0~1；0 = 不主动发表情（只有被明确要求才发）
+        sendCooldownMs: 180000,    // 刚发过表情包后这段时间内不再抽中（默认 3 分钟）
         collect: {
           enabled: true,           // AI 收藏他人表情总开关
           maxPerMinute: 2,         // 每分钟最多收藏次数
@@ -214,6 +218,9 @@ export function loadConfig() {
     stickerNote: true,
     collectSticker: true,
     getSelfImage: true,
+    // 语音能力（MiMo TTS/ASR）：默认开启，但 config 里 voice.enabled 不打开时工具仍会被语音模块拒绝
+    sendVoice: true,
+    transcribeVoice: true,
     ...(cfg.social.tools ?? {})
   };
 

@@ -9,6 +9,10 @@ import { state, saveState } from './config.js';
 import { createStandbySession, ensureSession } from './dsh-session.js';
 import { formatMemory, formatProfileText, formatContactsLine, recentChatMessages, fetchUnreadChatMessages, markMessagesRead } from './memory.js';
 import { formatGroupInfoLine, formatGroupListLine } from './group-cache.js';
+// 语音/表情包：唤醒正文里注入一行「本轮轮到哪一种」的抽签数据（概率与冷却在管理端配：
+// 语音在「语音」页，表情包在桥配置页的「表情包」卡）。两边都关着/概率 0 时不会注入多余内容。
+import { voiceTurnHint } from './voice.js';
+import { memeTurnHint } from './send-dice.js';
 import {
   getSocialState, saveSocialState, social, seenForwardIds,
   cancelReplyCheck, setupSleepTimer, collectFreshWakeMedia, isInSleepWindow,
@@ -250,7 +254,7 @@ export function buildWakePrompt(key, reason) {
       // 【2026-09-12 规则搬家】原 rulesShort（12 条：跨会话读取/转达/@/提醒/撤回/长文 docx/
       // 收尾与配额/主人私聊收尾/活跃时段/系统配置键，共 4,274 字符）已**整段搬进系统提示词**
       // （agent.cordis.yml 的 [RULES] 段）——唤醒注入不再每轮重复塞一遍，省的是长期驻留的上下文。
-  const base = tokenLine + statusLine + wakeLine + memoryLine + participationLine + (gInfoText ? gInfoText + '\n' : '') + (groupListText ? groupListText + '\n\n' : (gInfoText ? '\n' : ''));
+  const base = tokenLine + statusLine + wakeLine + voiceTurnHint(key) + memeTurnHint(key) + memoryLine + participationLine + (gInfoText ? gInfoText + '\n' : '') + (groupListText ? groupListText + '\n\n' : (gInfoText ? '\n' : ''));
   // 【2026-09-12 规则搬家】原 protocolNote（2,886 字符的「回合协议」：➤ 哨兵含义、读/发/收尾步骤、
   // 步数预算、等待工具禁令）已整段搬进系统提示词的 [WAKE DATA] / [WAKE TYPES] 两段。
   // 现在唤醒正文只留数据行：[Token] + [Wake ...]/[Unread n]/[Mid-turn]/[Note]...，不再携带规则散文。
