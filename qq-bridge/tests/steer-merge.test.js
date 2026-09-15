@@ -187,6 +187,47 @@ await wakeMod.steerIntoRunningTurn(KEY, 'group');
 check('⑥ 对照：非保持会话里两条相隔的消息 = 两个注入（保持托管会话是同一步合并成一个）', sent.length === before + 2, `注入次数=${sent.length - before}`);
 check('⑥ 对照：第二个块只带第十条（不是把两条又合起来投一遍）', /第十条/.test(sent[sent.length - 1]?.text ?? '') && !/第九条/.test(sent[sent.length - 1]?.text ?? ''));
 
+console.log('=== ⑦ 对方还在打字 → 一条都不投，等 ta 打完合成一次注入（2026-09-16 主人要求）===');
+// 主人原话："这两句应该检测我的输入状态然后合并成 [Mid-turn] 2 new message(s)"。
+// 线上实测（09-15 15:54~15:58）：他连着发了 5 条，桥在**每个模型步边界各注入一次** ——
+// 对话窗口里就是 5 个独立的 `[Mid-turn] 1 new message(s)`。原因：打字判定只管"要不要新起一轮"，
+// 在途回合的注入完全不看输入状态。现在这条路上也接上同一个判据（typing-hold.js）。
+cfg.social.turnHold.enabled = true;
+stateMod.holdActiveKeys.add(KEY);
+// 骰子写成 0（绝不插话），这样"等"这一支是确定的，不受随机影响
+cfg.social.typing = { enabled: true, holdMaxMs: 12000, refreshOnMessageMs: 5000, breakProbability: 0 };
+wakeMod.markSteerCycleStart(KEY, 'step/end');
+const ty1 = push('打字那条：第一条');
+const ty2 = push('打字那条：第二条');
+st.peerTypingUntil = Date.now() + 8000;   // QQ 的 input_status 刚报过"正在输入"
+st.peerTypingSince = Date.now();
+const before7 = sent.length;
+const deferRes = await wakeMod.steerIntoRunningTurn(KEY, 'turnHold', { force: true });
+check('⑦ 保持循环拿到明确的"推迟"信号（typing-defer，而不是"失败"）', deferRes === 'typing-defer', String(deferRes));
+const f7a = await holdMod.flushStepBatch({ key: KEY, sid: SID, turn: 12, cfg });
+check('⑦ 打字期间步边界**不发车**（一条都不投）', f7a === false && sent.length === before7, `注入次数=${sent.length - before7}`);
+check('⑦ 两条都还没被标"已给过"（下一次还能带走）', ![ty1, ty2].some((n) => (st.turnSteeredSeqs || []).map(Number).includes(n)), JSON.stringify(st.turnSteeredSeqs));
+
+// 对方停止输入（QQ 的 stop 事件把 peerTypingUntil 清零，events-aux.js 就是这么干的）
+st.peerTypingUntil = 0;
+st.peerTypingSince = 0;
+wakeMod.markSteerCycleStart(KEY, 'step/end');
+const f7b = await holdMod.flushStepBatch({ key: KEY, sid: SID, turn: 12, cfg });
+const block7 = sent[sent.length - 1]?.text ?? '';
+check('⑦ 打完字后**一次**注入，两条在同一个块里', f7b === true && block7.includes('[Mid-turn] 2 new message(s)') && block7.includes('打字那条：第一条') && block7.includes('打字那条：第二条'), JSON.stringify(block7.split('\n')[1] ?? ''));
+check('⑦ 这一投还是只产生一个块（不是两条两个块）', (block7.match(/\[Mid-turn\]/g) || []).length === 1);
+
+// 兜底：对方"打个没完" → 到 holdMaxMs 上限必须插话，绝不永远不回复
+cfg.social.typing.breakProbability = 0;
+wakeMod.markSteerCycleStart(KEY, 'step/end');
+const ty3 = push('打字那条：第三条');
+const row3 = st.unread.find((m) => Number(m.seq) === ty3);
+if (row3) row3.time = Date.now() - 20000;   // 这条已经等了 20s > holdMaxMs(12s)
+st.peerTypingUntil = Date.now() + 60000;    // 对方还在打（而且看着要一直打下去）
+st.peerTypingSince = Date.now();
+const f7c = await holdMod.flushStepBatch({ key: KEY, sid: SID, turn: 13, cfg });
+check('⑦ 打字打不完也有兜底：到"最多等多久"上限就投（绝不永远等）', f7c === true && (sent[sent.length - 1]?.text ?? '').includes('打字那条：第三条'), `注入次数=${sent.length - before7}`);
+
 try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* Windows 占用忽略 */ }
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

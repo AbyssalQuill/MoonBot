@@ -299,6 +299,33 @@ export const SMART_QUOTE_FALLBACK_MS = 120 * 1000;     // 没有本回合投递�
 export const SMART_QUOTE_REUSE_MS = 10 * 60 * 1000;    // 同一条消息多久内不再被自动引用
 const SMART_QUOTE_MAX_CANDIDATES = 12;
 
+/* 【2026-09-16 修「零相关也引用 = 引用错误」】
+ * 主人 09-15 在群里实测（随后在私聊追问"你群聊里那个，引用错误了吧"）：
+ *   群里 猫猫头 发了「吓哭了」+ 一张图 +「决定，绝地反击」+ 两个拍一拍，
+ *   bot 回复「投降喵是什么投降法」，气泡上却挂着**「决定，绝地反击」的引用框**（工具结果里
+ *   autoQuoted 报出来的就是那条的 messageId）。
+ * 复盘：打分循环用 `hit >= bestScore`、初值 -1 且**没有下限**，于是"和这句话 0 个共同词"的候选
+ * 也会被选出来 —— 候选多于一条时，这等于**按位置瞎猜**（挑最靠后的那条），正是"引用错误"的来源。
+ * 现在两道收紧（方向统一是"**宁可不引用，也不张冠李戴**"，要引用由模型自己传 replyToMessageId）：
+ *   ① 候选**多于一条**时至少要有 `SMART_QUOTE_MIN_SCORE` 个共同词才允许自动引用（默认 1）；
+ *      候选只有一条时例外 —— 本回合只给过它这一条，引用它没有歧义（旧行为保留）；
+ *   ② 打分前剔除"什么/就是/可以"这类高频 2-gram 停用词 —— 它们几乎和任何一句话都"有共同词"。
+ */
+export const SMART_QUOTE_MIN_SCORE = 1;
+
+/** 高频中文 2-gram 停用词：命中它们不代表"在答这条"，反而制造假相关。 */
+const SMART_QUOTE_STOP_GRAMS = new Set([
+  '什么', '怎么', '这个', '那个', '我们', '你们', '他们', '她们', '自己', '可以', '不是', '就是',
+  '没有', '一个', '现在', '时候', '然后', '因为', '所以', '但是', '如果', '真的', '知道', '觉得',
+  '应该', '一下', '一样', '这么', '那么', '还是', '已经', '出来', '起来', '不好', '不是', '不能',
+  '不会', '大家', '一点', '有点', '好像', '可能', '意思', '东西', '事情', '问题', '怎么', '为啥',
+]);
+
+function dropStopGrams(grams) {
+  for (const g of [...grams]) if (SMART_QUOTE_STOP_GRAMS.has(g)) grams.delete(g);
+  return grams;
+}
+
 /**
  * 自动智能引用：返回要引用的 messageId（字符串），不引用返回 null。
  *
@@ -348,19 +375,26 @@ export function pickSmartQuote(st, bubbleText, opts = {}) {
     const pool = cands.filter((m) => !usedRecently.has(String(m.messageId)));
     if (!pool.length) return null;
 
-    const mine = smartQuoteGrams(bubbleText);
+    const mine = dropStopGrams(smartQuoteGrams(bubbleText));
     let best = null;
     let bestScore = -1;
     for (const m of pool) {
       let hit = 0;
       if (mine.size) {
-        const g = smartQuoteGrams(m.tail || m.plain || m.text || '');
+        const g = dropStopGrams(smartQuoteGrams(m.tail || m.plain || m.text || ''));
         for (const x of g) { if (mine.has(x)) { hit += 1; if (hit >= 3) break; } }
       }
       // >= ：同分保留时间更靠后（更新）的一条 —— 旧实现用 > 会永远挑最早的
       if (hit >= bestScore) { bestScore = hit; best = m; }
     }
     if (!best) return null;
+    // 【2026-09-16】判定"依据够不够"：候选只有一条（本回合就给过它这一条）→ 无歧义，照旧引用；
+    // 有**多条**候选却一个共同词都没有 → 纯属瞎猜（主人看到的"引用错误"就是这样来的），不引用。
+    const need = pool.length > 1 ? SMART_QUOTE_MIN_SCORE : 0;
+    if (bestScore < need) {
+      log(`[quote] 自动引用放弃：候选有 ${pool.length} 条、最相关的一条只有 ${Math.max(0, bestScore)} 个共同词（需 ≥${need}）—— 宁可不引用，也不张冠李戴（模型要引用可自己传 replyToMessageId）`);
+      return null;
+    }
     /* 【2026-09-15 修「每句话都引用」】上面挑出来的候选，如果**就是最新一条对端消息**，
      * 那引用框纯属噪音 —— 大家都在看这一条，谁都知道你在回它。主人实测：私聊里每句回复
      * 都挂一个引用框，看着很机械。所以：
