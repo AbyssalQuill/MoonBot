@@ -126,7 +126,12 @@ export class OneBotWsClient extends EventEmitter {
       this._ws = ws;
       this._connecting = true;
       const timer = setTimeout(() => {
-        if (this._connecting && ws.readyState === 0) { try { ws.close(4000, 'connect timeout'); } catch {} }
+        if (this._connecting && ws.readyState === 0) {
+          try { ws.close(4000, 'connect timeout'); } catch {}
+          // 【2026-09-16】对 CONNECTING 的 socket，close() 按 WHATWG 语义不保证触发 onclose；
+          // 一旦不触发，重连链就断在这里（见 _forceReconnect 的注释）。所以这里直接判死重排。
+          if (this._ws === ws) this._forceReconnect('connect timeout');
+        }
       }, CONNECT_TIMEOUT_MS);
 
       ws.onopen = () => {
@@ -148,6 +153,9 @@ export class OneBotWsClient extends EventEmitter {
       ws.onmessage = (ev) => { this._lastActivityAt = Date.now(); this._handleFrame(String(ev.data ?? '')); };
       ws.onclose = (info) => {
         clearTimeout(timer);
+        // 【2026-09-16】陈旧 socket 的 close 一律忽略：它属于"已经判死、正在被 _forceReconnect 换掉"
+        // 的那条连接。不挡住的话会把**新连接**上正在等待的 action 全部 reject、还多发一次 close 事件。
+        if (this._ws !== ws) return;
         this._connecting = false;
         const reason = new Error(`NapCat 连接已关闭 code=${info?.code ?? '?'}`);
         this._rejectPending(reason);
@@ -159,7 +167,12 @@ export class OneBotWsClient extends EventEmitter {
         }
         this._scheduleReconnect();
       };
-      ws.onerror = (e) => { this._emitError(e?.error ?? new Error('NapCat WebSocket error')); };
+      ws.onerror = (e) => {
+        this._emitError(e?.error ?? new Error('NapCat WebSocket error'));
+        // 【2026-09-16】错误之后**不保证**有 close（实测 NapCat 抖一下只来 error）→ 这里就排重连，
+        // 否则连接链断掉、桥从此聋掉（"又不回复了"）。已经开着的那条连接出错时同样该重建。
+        if (!this._closed && this._ws === ws) this._forceReconnect('ws error');
+      };
     });
   }
 
@@ -207,12 +220,35 @@ export class OneBotWsClient extends EventEmitter {
       if (this._closed) return;
       if (this._lastActivityAt && Date.now() - this._lastActivityAt > HEARTBEAT_WATCHDOG_MS) {
         this._emitError(new Error('NapCat 心跳超时（假死），强制重建连接'));
-        try { this._ws?.close(4001, 'heartbeat timeout'); } catch {}
+        // 【2026-09-16 修「又不回复了」】原实现这里只 `this._ws?.close(4001)` 就完事，靠 onclose 里那句
+        // `_scheduleReconnect()` 把连接接回来。实测（服务器 09-16 00:33 那次）：undici 的 WebSocket 在
+        // 握手失败/连接已死时**只发 error、不发 close**，于是 onclose 永远不执行 —— 看门狗每 30 秒
+        // 重复 close 一个已经死掉的 socket（空操作）、每 30 秒刷一次"假死"，但**再也不会重连**。
+        // 现象就是主人看到的"又不回复了"：桥进程活着、3100 正常、NapCat 那边消息照收，桥却聋了，
+        // 只有手动重启才恢复。现在重连由 _forceReconnect 直接负责，不再依赖 close 事件。
+        this._forceReconnect('heartbeat timeout');
       }
     }, 30000);
     this._watchdog.unref?.();
   }
   _stopWatchdog() { if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; } }
+
+  /**
+   * 【2026-09-16】把当前 socket 判死并**直接**排一次重连（不等 close 事件）。
+   * 幂等：`_scheduleReconnect()` 自己会清掉旧定时器、只留一个；退避上限 10s。
+   */
+  _forceReconnect(reason) {
+    if (this._closed || !this.reconnect) return;
+    this._connecting = false;
+    const sock = this._ws;
+    this._ws = null;
+    if (sock) {
+      // 摘掉回调，防止这个"已判死"的 socket 稍后再触发 onclose/onerror 造成第二次重连
+      try { sock.onclose = null; sock.onerror = null; sock.onmessage = null; sock.onopen = null; } catch { /* ignore */ }
+      try { sock.close(4001, String(reason || 'force reconnect').slice(0, 100)); } catch { /* 对死 socket 是空操作 */ }
+    }
+    this._scheduleReconnect();
+  }
 
   _scheduleReconnect() {
     if (this._closed || !this.reconnect) return;

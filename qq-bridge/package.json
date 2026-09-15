@@ -18,7 +18,7 @@
     "test-forward": "node scripts/test-forward.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
-    "check": "node scripts/check-scope.mjs && node scripts/check-size.mjs && node --check src/bridge.js && node tests/lib.test.js && node tests/paths.test.js && node tests/voice.test.js && node tests/typing-hold.test.js && node tests/smart-quote.test.js && node tests/steer-merge.test.js",
+    "check": "node scripts/check-scope.mjs && node scripts/check-size.mjs && node --check src/bridge.js && node tests/lib.test.js && node tests/paths.test.js && node tests/voice.test.js && node tests/typing-hold.test.js && node tests/smart-quote.test.js && node tests/steer-merge.test.js && node tests/onebot-reconnect.test.js",
     "test-voice": "node tests/voice.test.js",
     "analyze": "node scripts/analyze-bridge.mjs src/bridge.js",
     "test-lib": "node tests/lib.test.js && node tests/paths.test.js",
