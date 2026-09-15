@@ -107,6 +107,16 @@ export const slangAction = (action: 'learn' | 'stop') =>
   api<BridgeResp>('/learning/slang', { method: 'POST', body: JSON.stringify({ action }) });
 export const personaAction = (action: 'start' | 'stop' | 'status', qq?: string[]) =>
   api<BridgeResp>('/learning/persona', { method: 'POST', body: JSON.stringify(qq?.length ? { action, qq } : { action }) });
+/** 人格学习：**审批 / 修正**学到的英文人设正文（personaEn）。
+ *  mode='save'  → 把 text 作为修正后的正文写回该 uid 的库记录（机器人人设不动）；
+ *  mode='apply' → 把 text（不传则用库里的 personaEn）覆盖写入桥的 qq-bridge/persona.md，
+ *                 桥侧覆盖前自动备份旧人设（persona.md.bak-<日期-时间>，最多留 5 份），下一条消息起生效。
+ *  返回 save: { ok, uid, savedChars }；apply: { ok, uid, bytes, backup }；失败 { ok:false, error }（中文）。 */
+export const personaApply = (uid: string, mode: 'save' | 'apply' | 'fuse', text?: string) =>
+  api<BridgeResp>('/learning/persona-apply', {
+    method: 'POST',
+    body: JSON.stringify(text === undefined ? { uid, mode } : { uid, mode, text }),
+  });
 /** 【2026-09-14】用量统计现在**两边都取**：local=本机桥、remote=服务端桥（null=没取到，看 remoteReason）、
  *  total=两份合并的合计。report 保留为合计（兼容旧字段）。 */
 export interface TokenReportSide {
@@ -269,6 +279,15 @@ export interface OwnerProfileResp {
 export const getLearningGraph = () => api<GraphData>('/learning/graph');
 /** 黑话库（桥的 state/slang.json，经管理端代理） */
 export const getSlangLibrary = () => api<any>('/learning/slang-library');
+/** 黑话库**批量手动审批**（管理端同名路径转发到桥控制台）：
+ *   · batch-confirm / batch-reject：body { ids: string[] } → { ok, confirmedCount|rejectedCount, skippedCount?, skipped? }
+ *   · research：body { ids: string[] } → { ok, count }（**只对候选生效**，已确认/已拒收的会被桥侧过滤掉） */
+export const slangBatchConfirm = (ids: string[]) =>
+  api<BridgeResp>('/slang/batch-confirm', { method: 'POST', body: JSON.stringify({ ids }) });
+export const slangBatchReject = (ids: string[]) =>
+  api<BridgeResp>('/slang/batch-reject', { method: 'POST', body: JSON.stringify({ ids }) });
+export const slangResearch = (ids: string[]) =>
+  api<BridgeResp>('/slang/research', { method: 'POST', body: JSON.stringify({ ids }) });
 /** 单人**完整**画像资料（直读 memory.db，不做截断） */
 export const getPersonProfile = (uid: string) => api<any>(`/learning/profile?uid=${encodeURIComponent(uid)}`);
 export const getOwnerProfile = () => api<OwnerProfileResp>('/learning/owner-profile');

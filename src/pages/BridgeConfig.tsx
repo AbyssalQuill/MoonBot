@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile, type ActivityTarget } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
-import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic } from 'lucide-react';
 import NumInput from '../components/NumInput';
 
 /** remote：连上服务器时把「服务端」那套传进来（配置读写服务端 /root/qq-bridge），null = 编辑本机 */
-interface Props { onBack: () => void; onRefresh: () => void; onOpenLearning: () => void; onOpenPortrait: () => void; remote?: { id: string; name: string; host: string } | null; }
+interface Props { onBack: () => void; onRefresh: () => void; onOpenLearning: () => void; onOpenPortrait: () => void; onOpenVoice: () => void; remote?: { id: string; name: string; host: string } | null; }
 
 /* 【2026-09-12】隔离 DSH 里**实际生效**的模型段（settings.yaml 的 agent-default-model）。
  * 管理端保存模型配置时写的就是它；这里读回来只为两件事：
@@ -93,7 +93,7 @@ const LABEL: Record<string, string> = {
   stickerEnabled: '表情包', syncTtlMs: '同步缓存', maxListCount: '列表上限', includeInPrompt: '提示里附带',
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
   maxRemarkChars: '备注字数上限', defaultMs: '默认等待', minMs: '最短等待', maxMs: '最长等待',
-  defaultQuietMs: '默认静默', minQuietAfterNewMs: '新消息后最短静默', sendProbability: '发表情概率',
+  defaultQuietMs: '默认静默', minQuietAfterNewMs: '新消息后最短静默', sendProbability: '发表情概率（桥侧掷骰）', sendCooldownMs: '表情包冷却（毫秒）',
   unfinishedQuietMs: '话没说完时的静默', burstQuietMs: '对方连发时的静默',
   deepsleepGroups: '单群静默名单',
   // 智能体其他
@@ -129,8 +129,8 @@ const TOOL_LABEL: Record<string, string> = {
   musicSearch: '搜歌', globalOverview: '全局总览', scheduleMessage: '定时发消息', withdrawMessage: '撤回消息',
   sendForward: '合并转发', like: '点赞', proactiveSend: '主动私聊', getGroupOwner: '查群主',
   getGroupMembers: '查成员', adminSet: '管理设置', whitelist: '白名单', blacklist: '拉黑',
-  profileSet: '改档案', profileQuery: '查档案', qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间', sendQzone: '发说说', whaleMemeSearch: '搜大肥鱼表情',
-  sendWhaleMeme: '发大肥鱼表情', scheduleList: '定时列表', scheduleCancel: '取消定时', activityHours: '活跃时段',
+  profileSet: '改档案', profileQuery: '查档案', qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间', sendQzone: '发说说', memeSearch: '搜表情包',
+  sendMeme: '发表情包（内置表情库）', scheduleList: '定时列表', scheduleCancel: '取消定时', activityHours: '活跃时段',
 };
 
 /**
@@ -163,7 +163,7 @@ const TOOL_MCP: Record<string, string> = {
   activityHours: 'qq_get_activity_hours / qq_set_activity_hours', adminSet: 'qq_admin_set',
   whitelist: 'qq_whitelist', blacklist: 'qq_blacklist / qq_remove_friend',
   profileSet: 'qq_profile_set', profileQuery: 'qq_profile_get',
-  whaleMemeSearch: 'qq_whale_meme_search', sendWhaleMeme: 'qq_send_whale_meme',
+  memeSearch: 'qq_meme_search', sendMeme: 'qq_send_meme',
   qzoneView: 'qq_qzone_view', sendQzone: 'qq_send_qzone',
 };
 
@@ -219,7 +219,8 @@ const TOOL_MCP: Record<string, string> = {
   'social.sticker.collect.enabled': '自动收藏：AI 在群里看到表情很贴语境时，可以把它存进你的 QQ 收藏，慢慢攒自己的表情库。',
   'social.sticker.collect.maxPerMinute': '自动收藏每分钟最多几次，防止突然疯狂收藏刷屏。',
   'social.sticker.collect.maxPerHour': '自动收藏每小时最多几次。',
-  'social.sticker.sendProbability': '「发表情概率」：AI 回复时用收藏表情的频率（0~1）。0.2≈偶尔来一张；0.35≈中等，接梗/赞同/输了赢了常跟一张；0.5 以上≈几乎每轮都用表情。只是软引导，AI 仍会看语境判断。',
+  'social.sticker.sendProbability': '「发表情概率」：**由桥侧掷骰决定**，不再靠 AI 自己拿捏。每次唤醒桥掷一次，把结果显示在唤醒提示里（[Meme] dice HIT / MISS）：HIT 这一轮最多发 1 个表情，MISS 就只发文字（有人明确要表情包时无视骰子）。0 = 不主动发；0.3≈偶尔来一张（默认）；0.5 以上≈几乎每轮都有。',
+  'social.sticker.sendCooldownMs': '表情包冷却（毫秒）：同一个会话刚发过表情包后，这段时间内不再抽中，防止"概率虽小却连着发"。默认 180000（3 分钟）。',
   'social.deepsleepGroups': '「单群静默名单」：只对这几个群静默（每行一个群号，可留空）。名单里的群消息入库但不唤醒、不回复，其它群照常。想全群静默用上面的总开关。',
   // —— 智能体开关与自动回复 ——
   'social.enabled': '整套社交模块的总开关。开着：机器人读消息、判断要不要回、按人设互动；关掉：完全不理任何消息（相当于下班）。',
@@ -304,7 +305,7 @@ function RichText({ text }: { text: string }) {
 }
 const isArr = (v: any) => Array.isArray(v);
 
-export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpenPortrait, remote }: Props) {
+export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpenPortrait, onOpenVoice, remote }: Props) {
   const [tab, setTab] = useState<'common' | 'tools' | 'persona' | 'json' | 'profiles'>('common');
   /* 【2026-09-14 主人要求】SSH 模式下这一页读写的是**服务端** /root/qq-bridge/config.json：
    *  · target 记录本页当前编辑的是哪一套（local / remote）—— 横幅必须一眼看见，别让人以为在改本机；
@@ -615,6 +616,9 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           </button>
           <button className="btn btn-soft" onClick={onOpenPortrait} title="群友画像 / 主人画像 · 直读本机桥记忆库">
             <Users size={14} /> 群友画像
+          </button>
+          <button className="btn btn-soft" onClick={onOpenVoice} title="语音：合成音色、音色设计/复刻、语音识别（MiMo 语音模型）">
+            <Mic size={14} /> 语音
           </button>
           <button className="btn btn-soft-primary" onClick={onOpenLearning} title="黑话 / 人格学习与 Token 用量统计">
             <Activity size={14} /> 学习与用量

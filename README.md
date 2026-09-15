@@ -434,7 +434,7 @@ npm run dev
 | --- | --- |
 | 消息读取 | `qq_get_recent_messages`、`qq_get_unread_messages`、`qq_mark_read`、`qq_get_message_detail`、`qq_get_message_images`、`qq_get_my_recent_messages`、`qq_get_forward_msg`、`qq_get_file_content`、`qq_get_group_history`、`qq_history_clear`、`qq_history_delete`、`qq_wait_for_messages`、`qq_get_prompt` |
 | 发送 | `qq_send_message`、`qq_send_group_message`、`qq_send_private_message`、`qq_reply`、`qq_send_burst`、`qq_send_poke`、`qq_send_rich`、`qq_send_forward`、`qq_send_docx`、`qq_send_qq_face`、`qq_send_sticker`、`qq_withdraw_message`、`qq_proactive_send` |
-| 表情与媒体 | `qq_list_stickers`、`qq_collect_sticker`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_face_list`、`qq_get_self_image`、`qq_whale_meme_search`、`qq_send_whale_meme`、`qq_music_search` |
+| 表情与媒体 | `qq_list_stickers`、`qq_collect_sticker`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_face_list`、`qq_get_self_image`、`qq_meme_search`、`qq_send_meme`、`qq_music_search` |
 | 群与成员 | `qq_list_groups`、`qq_get_group_members`、`qq_get_group_owner`、`qq_get_active_members`、`qq_remove_friend` |
 | 记忆与画像 | `qq_memory_append`、`qq_memory_search`、`qq_memory_query`、`qq_memory_remove`、`qq_memory_clear`、`qq_profile_get`、`qq_profile_set` |
 | 社交状态 | `qq_social_state`、`qq_global_overview`、`qq_get_system_config`、`qq_set_system_config`、`qq_set_wake_config`、`qq_get_activity_hours`、`qq_set_activity_hours`、`qq_admin_set`、`qq_whitelist`、`qq_blacklist`、`qq_like`、`qq_report_feedback` |

@@ -4053,7 +4053,7 @@ async function proxyToBridgeConsole(_req, res, target) {
   if (t.kind === 'remote') token = await getRemoteBridgeToken(t.server, t.conn);
   else token = t.token;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 30000);
+  const timer = setTimeout(() => ctrl.abort(), Number(target.timeoutMs) > 0 ? Number(target.timeoutMs) : 30000);
   let resp;
   try {
     resp = await fetch(t.base + target.path, {
@@ -4082,6 +4082,27 @@ app.post('/api/learning/config', (req, res) => proxyToBridgeConsole(req, res, { 
 app.post('/api/learning/slang', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/slang', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/persona', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/portrait', method: 'POST', body: req.body ?? {} }));
+
+/* ── 语音（MiMo-V2.5 TTS / 音色设计 / 音色复刻 / 语音识别）────────────────────────────
+ * 桥侧新增的能力，全部转发到桥控制台（/api/voice/*）：管理端只负责配置与试听转发，
+ * 发送与识别由桥里的 MCP 工具带会话令牌调用，不经过管理端。
+ * 合成一次可能跑十几秒（语音服务返回整段音频），所以这里把代理超时放宽到 90 秒。 */
+const VOICE_TIMEOUT_MS = 90000;
+app.get('/api/voice/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/config', method: 'GET', timeoutMs: VOICE_TIMEOUT_MS }));
+app.put('/api/voice/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/config', method: 'PUT', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
+app.get('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/voices', method: 'GET', timeoutMs: VOICE_TIMEOUT_MS }));
+app.post('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/voices', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
+app.delete('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: `/api/voice/voices?id=${encodeURIComponent(String(req.query.id ?? ''))}`, method: 'DELETE', timeoutMs: VOICE_TIMEOUT_MS }));
+app.post('/api/voice/preview', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/preview', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
+app.post('/api/voice/test', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/test', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
+
+/* 黑话库批量审批（管理端弹窗的三个批量按钮）：桥侧端点早就有了，管理端此前没有转发，
+ * 于是界面上的「批量通过 / 批量拒收 / 批量分析」会 404。这里按同路径补三条 POST 代理。 */
+app.post('/api/slang/batch-confirm', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/batch-confirm', method: 'POST', body: req.body ?? {} }));
+app.post('/api/slang/batch-reject', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/batch-reject', method: 'POST', body: req.body ?? {} }));
+app.post('/api/slang/research', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/research', method: 'POST', body: req.body ?? {}, timeoutMs: 60000 }));
+/* 人格学习：审批修正 / 结合原人设完善（fuse 要跑一轮模型，所以超时放宽到 3 分钟）/ 覆盖机器人人设 */
+app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona-apply', method: 'POST', body: req.body ?? {}, timeoutMs: 180000 }));
 /* 用量统计（/api/learning/token-report）——**两边都不漏**：
  * 【2026-09-14 主人要求】以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
  * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
@@ -4409,6 +4430,13 @@ function personaLibraryEntry(uid) {
     return {
       nickname: String(it.nickname ?? '') || null,
       addressTerms: String(it.addressTerms ?? ''),
+      profile: String(it.profile ?? '') || null,
+      personality: String(it.personality ?? '') || null,
+      // 人格学习产出的**英文人设正文**（2026-09-15 新增）：界面「人物资料 / 完整资料」里也要能看到，
+      // 所以在这条组装里一并透出（审批与覆盖动作仍走桥侧 /api/learning/persona-apply）。
+      personaEn: String(it.personaEn ?? '') || null,
+      personaEditedAtMs: Number(it.personaEditedAtMs) || 0,
+      personaAppliedAtMs: Number(it.personaAppliedAtMs) || 0,
       profile: String(it.profile ?? '') || null,
       personality: String(it.personality ?? '') || null,
       chatHabits: String(it.chatHabits ?? ''),

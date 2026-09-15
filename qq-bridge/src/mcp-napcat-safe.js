@@ -19,8 +19,13 @@ import { napcatImageFileArg } from './lib/napcat-file.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-// 鲸鱼娘同人表情资源根：优先项目 meme/ 目录（随项目分发，已从服务器打包集成，分类在 meme/whale-fanart-001/memes/），
+// 内置表情包资源根：优先项目 meme/ 目录（随项目分发，已从服务器打包集成，分类在 meme/<pack>/memes/），
 // 再退到项目 .runtime / 项目 meme-packs / 用户主目录 .dsh（服务器旧形态），全部运行时探测，禁止写死。
+//
+// 【2026-09-15 改名】工具从 qq_whale_meme_search / qq_send_whale_meme 改成 qq_meme_search / qq_send_meme：
+// 旧名字带开发初版「鲸鱼娘人设」的味道，工具本身跟人设无关（就是"从内置表情包里挑一张发"）。
+// **pack 目录名 whale-fanart-001 保持不变**：那是已分发到本机 runtime 与 4 份安装包 payload 里的真实
+// 磁盘路径，改名会让所有已装好的机器找不到表情包（工具退化成"没装表情库"）；等哪天重打包再一起改。
 //
 // 【2026-09-13 修「表情包图库搜索失败」】现网 <安装目录>\resources\runtime 与所有安装包 payload
 // 都漏装了 meme/ 表情包 → MEME_ROOT 解析为 null → 工具直接回"本机没装鲸鱼娘同人表情库"，
@@ -99,9 +104,9 @@ function resolveMemeRoot() {
 
 let memeRootCache = resolveMemeRoot();
 if (memeRootCache) {
-  console.error(`[mcp-napcat-safe] 鲸鱼娘同人表情库已加载：${memeRootCache}`);
+  console.error(`[mcp-napcat-safe] 内置表情包已加载：${memeRootCache}`);
 } else {
-  console.error(`[mcp-napcat-safe] 未找到鲸鱼娘同人表情库（${MEME_PACK_ID}）：qq_whale_meme_search / qq_send_whale_meme 将不可用。已尝试 ${MEME_CANDIDATES.length} 条路径：${MEME_CANDIDATES.join(' | ')}`);
+  console.error(`[mcp-napcat-safe] 未找到内置表情包（${MEME_PACK_ID}）：qq_meme_search / qq_send_meme 将不可用。已尝试 ${MEME_CANDIDATES.length} 条路径：${MEME_CANDIDATES.join(' | ')}`);
 }
 
 /** 取 pack 根：启动时没找到会重新探测，运行期补装后无需重启桥 */
@@ -109,7 +114,7 @@ function getMemeRoot() {
   if (!memeRootCache) memeRootCache = resolveMemeRoot();
   return memeRootCache;
 }
-const memeMissingHint = '本机没装鲸鱼娘同人表情库（meme-packs），这个工具不可用。想发图可以试试 qq_send_message 带本地图片路径，或直接发文字。';
+const memeMissingHint = '本机没装内置表情包（meme-packs），这个工具不可用。想发图可以试试 qq_send_message 带本地图片路径，或直接发文字。';
 
 function loadConfig() {
   try {
@@ -954,7 +959,7 @@ registerTool(
     token: z.string().describe('Session token (from the wake prompt)'),
     messages: z.union([z.string(), z.array(z.string()).min(1)]).optional().describe('string = one message; array = several; empty array = images only'),
     message: z.string().optional().describe('Alias of messages (string; kept only for typos). Prefer messages.'),
-    images: z.array(z.string()).optional().describe('Absolute local paths of static images (e.g. C:\\\\path\\\\xx.webp; meme/ sticker files work too), one per sent item or a single one. Never send animated GIFs by path - QQ shows a flickering static preview; find those with qq_list_stickers (search 大肥鱼 for the whale GIF set) and send via qq_send_sticker. Only static png/jpg/webp go by path.'),
+    images: z.array(z.string()).optional().describe('Absolute local paths of static images (e.g. C:\\\\path\\\\xx.webp; meme/ sticker files work too), one per sent item or a single one. Never send animated GIFs by path - QQ shows a flickering static preview; find those with qq_meme_search (GIF set) or qq_list_stickers and send via qq_send_sticker. Only static png/jpg/webp go by path.'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Message id to quote/reply to (non-zero int, may be negative, optional)'),
     atUserId: z.union([z.number(), z.string()]).optional().describe('QQ id to @ (group chats; needed for at-mentions). Never hand-write [CQ:at,qq=...] in the message text - it is sent verbatim as garbage. Not together with a quote; do not overuse.'),
     gapMode: z.enum(['auto', 'fixed', 'byLength']).optional().describe('auto = random (bridge default), fixed = interval, byLength = by text length'),
@@ -1490,7 +1495,7 @@ if (cfg.social?.sticker?.enabled !== false && cfg.social?.tools?.collectSticker 
 if (cfg.social?.tools?.getSelfImage !== false) {
   registerTool(
     'qq_get_self_image',
-    'View your own default chibi avatar image (the DeepSeek little whale). Call when asked what you look like, to send a selfie, or what your form is; the returned image goes straight into your visual context.',
+    'View your own default avatar image (the bot account\'s built-in chibi avatar). Call when asked what you look like, to send a selfie, or what your form is; the returned image goes straight into your visual context.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token (from the wake prompt)')
@@ -1697,8 +1702,8 @@ if (cfg.social?.tools?.proactiveSend !== false) {
 
 
 registerTool(
-  'qq_whale_meme_search',
-  'Search the whale-girl fan meme pack (Blue Big Fat Fish archive fan art, 163 images). query = an emotion/content description (e.g., angry, crying, sleeping); returns matching memes whose filename equals the description. Send the chosen one with qq_send_whale_meme.',
+  'qq_meme_search',
+  'Search the bundled meme pack (a local fan-art/GIF sticker archive shipped with the bot). query = an emotion/content description (e.g., angry, crying, sleeping); returns matching memes whose filename equals the description. Send the chosen one with qq_send_meme.',
   {
     query: z.string().describe('Query: emotion/content description, e.g., 生气、哭、睡觉、开心、疑惑'),
     tag: z.string().optional().describe('Filter by category: happy/angry/sad/shy/confused/surprised/sigh/sleep/daily/love/work'),
@@ -1720,9 +1725,9 @@ registerTool(
       sql += ' LIMIT ?'; params.push(n);
       const rows = db.prepare(sql).all(...params);
       db.close();
-      if (!rows.length) return { content: [{ type: 'text', text: `没找到匹配的鲸鱼娘表情，试试：生气/哭/睡觉/开心/疑惑/害羞/干活/日常` }] };
+      if (!rows.length) return { content: [{ type: 'text', text: `没找到匹配的表情，试试：生气/哭/睡觉/开心/疑惑/害羞/干活/日常` }] };
       const lines = rows.map((r, i) => `${i + 1}. ${r.file_name} [${r.tag}] ${r.caption}`).join('\n');
-      return { content: [{ type: 'text', text: `找到 ${rows.length} 张鲸鱼娘表情：\n${lines}` }] };
+      return { content: [{ type: 'text', text: `找到 ${rows.length} 张表情：\n${lines}` }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `搜索失败：${error.message}` }], isError: true };
     }
@@ -1730,12 +1735,12 @@ registerTool(
 );
 
 registerTool(
-  'qq_send_whale_meme',
-  'Send one whale-girl fan meme to a QQ session. file = the filename returned by qq_whale_meme_search (the filename is the description note). Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
+  'qq_send_meme',
+  'Send one meme from the bundled meme pack to a QQ session. file = the filename returned by qq_meme_search (the filename is the description note). Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token'),
-    file: z.string().describe('Sticker filename (from qq_whale_meme_search), e.g., 蓝发女仆生气.webp'),
+    file: z.string().describe('Sticker filename (from qq_meme_search), e.g., 蓝发女仆生气.webp'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to')
   },
   async ({ key, token, file, replyToMessageId }) => {
@@ -1746,7 +1751,7 @@ registerTool(
       const db = new DatabaseSync(root + '/index.db', { readOnly: true });
       const row = db.prepare('SELECT path FROM memes WHERE file_name = ?').get(String(file));
       db.close();
-      if (!row) return { content: [{ type: 'text', text: `找不到表情 ${file}，请先用 qq_whale_meme_search 搜索` }], isError: true };
+      if (!row) return { content: [{ type: 'text', text: `找不到表情 ${file}，请先用 qq_meme_search 搜索` }], isError: true };
       const filePath = root + '/' + row.path;
       if (!fs.existsSync(filePath)) return { content: [{ type: 'text', text: '图片文件不存在' }], isError: true };
       // NapCat 需读它**自己能读到**的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
@@ -1757,7 +1762,7 @@ registerTool(
       const cfgMeme = getConfig();
       const wantTmpDir = String(cfgMeme?.napcat?.tmpDir ?? '').trim() || tmpDir;
       fs.mkdirSync(wantTmpDir, { recursive: true });
-      const tmpName = `${Date.now()}-whale-${path.basename(row.path || 'meme.webp')}`;
+      const tmpName = `${Date.now()}-meme-${path.basename(row.path || 'meme.webp')}`;
       const tmpPath = path.join(wantTmpDir, tmpName);
       fs.copyFileSync(filePath, tmpPath);
       const napcatPath = napcatImageFileArg(tmpPath, cfgMeme);
@@ -1807,7 +1812,7 @@ registerTool(
         if (messageId != null && token) {
           await agentApi('/api/social/record-own-sent', {
             method: 'POST',
-            body: JSON.stringify({ key, messageId: String(messageId), text: `[鲸鱼表情:${file}]`, token }),
+            body: JSON.stringify({ key, messageId: String(messageId), text: `[表情:${file}]`, token }),
             headers: { 'x-agent-token': token },
             timeoutMs: 10000
           });
@@ -1818,6 +1823,57 @@ registerTool(
       return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file, messageId }) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `发送失败：${error.message}` }], isError: true };
+    }
+  }
+);
+
+registerTool(
+  'qq_send_voice',
+  'Send a spoken (voice) message to a QQ session: the text is synthesized into real speech with the configured voice and sent as a QQ voice bubble. Use it ONLY when a voice is actually wanted (the owner or the conversation asks you to speak / sing / say it out loud, or the session is in a voice mood) - normal replies stay text, and voice is not a substitute for answering. text = what to say (short, one breath; over the configured limit it is rejected). voice = optional built-in voice id (冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean) or a saved custom voice id/name; omit for the default voice. style = optional one-sentence delivery direction (e.g. 轻轻的，带一点笑意). mode = tts (default, built-in voice) | design (with description = a voice description, synthesizes that voice) | clone (voice = a saved clone voice). replyToMessageId optionally quotes a message.',
+  {
+    key: z.string().describe('Session key: group:ID or private:QQ'),
+    token: z.string().describe('Session token (from the wake prompt)'),
+    text: z.string().describe('What the voice should say (short; Chinese works best)'),
+    voice: z.string().optional().describe('Voice id: built-in (冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean) or a saved custom voice'),
+    style: z.string().optional().describe('Optional delivery direction, one sentence, e.g. 轻轻的，带一点笑意'),
+    mode: z.enum(['tts', 'design', 'clone']).optional().describe('tts = built-in voice (default); design = voice described by text; clone = saved cloned voice'),
+    description: z.string().optional().describe('Only for mode=design: the voice description'),
+    replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to')
+  },
+  async ({ key, token, text, voice, style, mode, description, replyToMessageId }) => {
+    try {
+      const data = await agentApi('/api/voice/send', {
+        method: 'POST',
+        body: JSON.stringify({ key, text, voice, style, mode, description, replyToMessageId }),
+        headers: { 'x-agent-token': token },
+        timeoutMs: 180000
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `发送语音失败：${error?.message ?? error}（语音发不出去时改用文字回复，不要反复重试）` }], isError: true };
+    }
+  }
+);
+
+registerTool(
+  'qq_transcribe_voice',
+  'Transcribe (speech to text) a voice message someone sent, so you know what was actually said. Call it whenever the text shows [语音] and the content matters. messageId = that voice message\'s id (from qq_get_unread_messages / qq_get_recent_messages / (id:xxx)). Never guess or make up what a voice message said.',
+  {
+    key: z.string().describe('Session key: group:ID or private:QQ'),
+    token: z.string().describe('Session token (from the wake prompt)'),
+    messageId: z.union([z.number(), z.string()]).describe('Message id of the voice message')
+  },
+  async ({ key, token, messageId }) => {
+    try {
+      const data = await agentApi('/api/voice/transcribe', {
+        method: 'POST',
+        body: JSON.stringify({ key, messageId }),
+        headers: { 'x-agent-token': token },
+        timeoutMs: 180000
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `语音识别失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

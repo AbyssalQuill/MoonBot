@@ -148,6 +148,8 @@ import {
   initPersonaLearnCore, setPersonaLearnApi, initPersonaAutoLearn,
 } from './core/persona-learn.js';
 import { initPortraitLearn } from './core/portrait-learn.js';
+import { initVoiceCore } from './core/voice.js';
+import { initSendDice } from './core/send-dice.js';
 import { ensureLearningToken } from './core/learning-token.js';
 import {
   initSessionArchiveCore, setSessionArchiveApi, startSessionArchiveTicker,
@@ -288,6 +290,10 @@ async function main() {
   initDshSessionCore(cfg);
   initSlangCore(cfg);
   initPersonaLearnCore(cfg);
+  // 语音能力（MiMo TTS/ASR）：配置存在 state/voice-config.json，管理端保存即生效，无需重启桥
+  initVoiceCore(cfg);
+  // 发送抽签（语音 / 表情包的概率与冷却）：桥侧掷骰后写进唤醒正文，不让模型自己猜概率
+  initSendDice(cfg);
   initTokenMeter(cfg);
   // 用量对账：DSH 自己的 projcache 里有按会话累计的权威 token 数（tokenUsage.totals）。
   // 单帧漏记（帧里没有 sessionId / 会话刚好结束）会让面板偏低，这里定期把差额补成

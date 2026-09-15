@@ -11,7 +11,11 @@ export function isSilentMarker(text) {
 // DSH MCP 发送类工具：一旦 AI 在回合里调用过这些工具，说明消息已经由工具发出，
 // 桥接应跳过该回合的自动转发，避免"工具发一条 + 自动转发一条"的重复。
 // Send tools are named qq_send_message etc.; accept bare names and mcp__<service>__ prefixes (historically napcat).
-export const SEND_TOOL_RE = /^(?:mcp__[a-z0-9_-]+__)?qq_(send_group_message|send_private_message|reply|send_burst|send_message|send_sticker|send_qq_face|send_whale_meme|send_poke|proactive_send|send_docx|send_forward|send_rich)$/;
+// 【2026-09-15 兼容位】表情工具已从 send_whale_meme 更名为 send_meme，但**改名那一刻 DSH 里已经加载的
+// MCP 会话仍然只有旧工具名**（MCP 由 DSH 按会话拉起，桥说了不算）。如果这里只认新名，那段时间里用旧名
+// 发出的表情会被判成"没用发送工具"→ 桥把模型正文也自动转发一遍，主人会看到重复消息。
+// 所以旧名**暂时**保留为别名；等所有会话都轮换过（或 DSH 重启）后可以删掉这一项。
+export const SEND_TOOL_RE = /^(?:mcp__[a-z0-9_-]+__)?qq_(send_group_message|send_private_message|reply|send_burst|send_message|send_sticker|send_qq_face|send_meme|send_whale_meme|send_poke|proactive_send|send_docx|send_forward|send_rich)$/;
 
 export function isSendToolName(name) {
   return SEND_TOOL_RE.test(String(name ?? ''));
