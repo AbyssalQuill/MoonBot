@@ -66,7 +66,7 @@ import { singleLineForQQ, splitLongSegment } from '../lib/segment.js';
 import { mimeFromBuffer, mimeFromUrl, base64FromMaybe } from '../lib/media-meta.js';
 import { log, appendActivity, readActivityTail } from '../lib/log.js';
 import { SILENT_MARKER, isSilentMarker, SEND_TOOL_RE, isSendToolName, SPACE_SPLIT_HINT, DIRECTION_HINT } from '../lib/markers.js';
-import { state, loadConfig, loadState, saveState } from './config.js';
+import { state, loadConfig, loadState, saveState, configFilePath } from './config.js';
 // 表情包抽签的登记口（内置表情库直发 + 收藏表情两条路都记一笔，供 [Meme] 冷却使用）
 import { noteMemeSent } from './send-dice.js';
 import { acquireLock, releaseLock } from './runtime.js';
@@ -4897,6 +4897,64 @@ export function startConsoleServer() {
           return;
         }
         sendJson({ ok: false, error: `未知语音接口：${url.pathname}` }, 404);
+        return;
+      }
+
+      // ── NapCat 鉴权令牌（WebUI / HTTP / WS）真正落地 ─────────────────────────────
+      // 【2026-09-15 主人反馈】管理端改「NapCat 令牌」只改了桥 config.json 里"期望用哪个"，
+      // 从没写进 NapCat 自己的配置 → NapCat 还收默认 truefriend、旧令牌照样能进。
+      // 这里把三个令牌写进 NapCat 的 webui.json / onebot11*.json，并重启容器（docker restart -t 30）；
+      // 写完同时把桥 config.json 的 napcat.accessToken / wsAccessToken 对齐（否则桥用新令牌连不上旧配置）。
+      if (url.pathname === '/api/napcat/tokens') {
+        let tokMod;
+        try {
+          tokMod = await import('../core/napcat-tokens.js');
+        } catch (error) {
+          log(`控制台：NapCat 令牌模块加载失败：${error?.message ?? error}`);
+          sendJson({ ok: false, error: 'napcat-tokens module unavailable' }, 503);
+          return;
+        }
+        if (req.method === 'GET') {
+          sendJson(tokMod.napcatTokenStatus());
+          return;
+        }
+        if (req.method === 'POST') {
+          const body = await readBody();
+          try {
+            const result = await tokMod.applyNapcatTokens({
+              webuiToken: body?.webuiToken,
+              httpToken: body?.httpToken,
+              wsToken: body?.wsToken,
+              restart: body?.restart !== false
+            });
+            // 写盘成功 → 把桥这边的期望值也对齐（**同时改内存**：config.json 是原子替换写盘，
+            // 文件监听偶尔收不到这次变更，只写文件会出现"磁盘已改、桥还拿旧令牌去连"的假不一致）
+            if (result?.ok && (body?.httpToken || body?.wsToken)) {
+              try {
+                if (body?.httpToken) cfgRef.napcat.accessToken = String(body.httpToken).trim();
+                if (body?.wsToken) cfgRef.napcat.wsAccessToken = String(body.wsToken).trim();
+                const file = readJsonSafe(configFilePath(), null, true);
+                if (file && typeof file === 'object') {
+                  file.napcat = file.napcat ?? {};
+                  if (body?.httpToken) file.napcat.accessToken = String(body.httpToken).trim();
+                  if (body?.wsToken) file.napcat.wsAccessToken = String(body.wsToken).trim();
+                  const bak = configFilePath() + '.bak-tokens';
+                  try { fs.copyFileSync(configFilePath(), bak); } catch { /* 忽略 */ }
+                  atomicWriteJson(configFilePath(), file);
+                }
+                log('[napcat-tokens] 桥 config.json（内存 + 文件）的 napcat.accessToken / wsAccessToken 已对齐');
+              } catch (eCfg) {
+                log(`[napcat-tokens] 写桥 config.json 失败（NapCat 侧已改）: ${eCfg?.message ?? eCfg}`);
+              }
+            }
+            log(`控制台：NapCat 令牌写入 → ${JSON.stringify({ changed: result?.changed, restart: result?.restart?.ok, verify: result?.verify })}`);
+            sendJson(result);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+        sendJson({ ok: false, error: '仅支持 GET / POST' }, 405);
         return;
       }
 

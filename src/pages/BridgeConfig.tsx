@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile, type ActivityTarget } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
 import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic } from 'lucide-react';
+import NapcatTokensCard from '../components/NapcatTokensCard';
 import NumInput from '../components/NumInput';
 
 /** remote：连上服务器时把「服务端」那套传进来（配置读写服务端 /root/qq-bridge），null = 编辑本机 */
@@ -1116,7 +1117,9 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
       <GroupCard title="模型与推理" path="dsh" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="连到哪个 DSH、用什么模型回话。服务商默认「自动探测」（即用隔离 DSH 里已配置的官方 DeepSeek），也可显式选 DeepSeek 官方；留空模型即用 DSH 默认。改这里会自动重启隔离 DSH 使其生效。「推理档位」是单次调用耗时与思考 token 最大的一块——实测同一次调用出现过 37 秒，嫌慢/嫌贵先从它和「工具与规则」页的精简名单入手。" />
       <GroupCard title="NapCat 连接" path="napcat" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="机器人与 NapCat 的通信地址和令牌；本地一键启动时一般不用改。" />
+        desc="机器人与 NapCat 的通信地址和令牌；本地一键启动时一般不用改。注意：这里改的令牌只影响**桥**用哪个令牌去连；要让 NapCat 自己改用新令牌，用下面那张「NapCat 鉴权令牌」卡写入并重启。" />
+      {/* 【2026-09-15 主人反馈】令牌要真正写进 NapCat 才生效：见 NapcatTokensCard 的注释 */}
+      <NapcatTokensCard />
       <GroupCard title="基础与会话" path="" only={topOnly} cfg={cfg} ch={ch} onHelp={onHelp}
         desc="人设预设、主人 QQ、工作区与发送节奏等基础项。" />
 

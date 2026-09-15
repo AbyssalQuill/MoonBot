@@ -4103,6 +4103,11 @@ app.post('/api/slang/batch-reject', (req, res) => proxyToBridgeConsole(req, res,
 app.post('/api/slang/research', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/research', method: 'POST', body: req.body ?? {}, timeoutMs: 60000 }));
 /* 人格学习：审批修正 / 结合原人设完善（fuse 要跑一轮模型，所以超时放宽到 3 分钟）/ 覆盖机器人人设 */
 app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona-apply', method: 'POST', body: req.body ?? {}, timeoutMs: 180000 }));
+
+/* NapCat 鉴权令牌（WebUI / HTTP / WS）：读现状 + 写进 NapCat 配置并重启容器。
+ * 重启容器要等它起来（约 30~60 秒），加上写盘后的复验，超时给到 4 分钟。 */
+app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
+app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
 /* 用量统计（/api/learning/token-report）——**两边都不漏**：
  * 【2026-09-14 主人要求】以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
  * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
