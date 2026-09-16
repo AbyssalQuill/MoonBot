@@ -15,6 +15,10 @@ import { recordAiTurnOutbound } from './turn-guard.js';
 import { resolveArtifactFaceId } from '../lib/qq-face-parse.js';
 import { writeStickerTmpFile } from './sticker.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
+// 全语音发送模式（state/voice-config.json 的 send.allVoice）：回复正文改语音发出、失败退回文字。
+// 放在这里是因为本文件是**模型回复正文**的唯一出口（sendMessages → onebotSend）；
+// 开关关闭时 tryAllVoiceReply 是空转（不打日志、不发请求），老用户行为不变。
+import { tryAllVoiceReply } from './voice.js';
 
 export const SEND_TIMEOUT_MS = 15000;
 
@@ -412,6 +416,31 @@ export function pickSmartQuote(st, bubbleText, opts = {}) {
   } catch { return null; }
 }
 
+/**
+ * 全语音模式用：把模型写的正文洗成"能朗读的那部分"。
+ *
+ * 为什么不能直接把原文交给 TTS（三个坑，都在 onebotSend 里已经处理过一遍）：
+ *   ① 出站文本要先去输入法 emoji + 表情/图片占位符（`[表情:xx]`）——否则 TTS 会把占位符念出来；
+ *   ② 整条就是纯占位符（`[表情:…]`）时清洗结果为空：那种消息会被转成真 QQ face 发出，
+ *      **不能**改成语音（改了就丢表情），所以这里返回 ''，全语音模式也会按原样发；
+ *   ③ 会话令牌绝不能"念出来"：onebotSend 会拦住并报错，这里提前返回 '' 让它照旧走文字通道拦截
+ *      （语音通道没有这套拦截，把令牌合成进去就等于泄露）。
+ * @returns {string} 可朗读的正文；'' = 这条不该/不能用语音发
+ */
+function speakableForVoice(raw) {
+  const rawText = String(raw ?? '');
+  if (!rawText.trim()) return '';
+  try {
+    if (tokenDisclosureIn(rawText)) return '';
+    const swept = sweepMessageArtifacts(rawText);
+    let t = cleanOutboundText(rawText);
+    if (t === '' && swept.removed === 0) t = redactKnownTokensOnly(rawText);
+    return String(t).trim();
+  } catch {
+    return '';   // 清洗炸了就按文字发（不丢消息优先）
+  }
+}
+
 export function sendMessages(key, messages, delays, replyToMessageId, atUserId = null, images = []) {
   // 循环复读监测：AI 回合内通过本函数发出的文本计入本回合输出（2026-09-03）
   try {
@@ -460,17 +489,38 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
       const pace = i === 0 ? 0 : nextSendPaceMs(key, String(msg || '').length);
       if (pace != null && pace > 0) await sleep(pace);
       try {
-        const sendData = await onebotSend(kind, id, msg, useReply, useAt, img);
-        // 记录真实 QQ message_id：撤回（qq_withdraw_message）与 (id:xxx) 展示都依赖它。
-        // 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**实际用上的引用目标**也带回去
-        // （auto 引用以前是桥偷偷加的，工具结果里 quoted:null → 模型压根不知道自己引用了谁，
-        //   于是它既无法解释、也无法自我纠正）。现在 sent[i].quoted 就是那条被引用的消息 id。
-        sent.push({
-          text: msg || (img ? '[图]' : ''),
-          messageId: sendData && sendData.message_id != null ? String(sendData.message_id) : null,
-          quoted: useReply ? String(useReply) : null,
-        });
-        if (pace != null) markSendDelivered(key, msg ? String(msg).length : 0);
+        /* ── 全语音发送模式（state/voice-config.json 的 send.allVoice）──────────────
+         * 开关打开时：这条回复**先试着用语音发**；只要语音没成功（合成失败/超单条上限/
+         * 当日额度用尽/被限流/念不出来/这条带图），就**原地退回下面的文字发送** —— 不丢消息是这个
+         * 功能的第一条规矩，所以这里绝不能写 `return`/`continue` 把兜底路径绕过去。
+         * 放在发送任务**里面**（而不是函数开头）的原因：语音要沿用同一套节奏、同一个串行链，
+         * 也要沿用 console-server 在调用前就检查/预占好的发送频率额度（那里在 sendMessages 之前）。
+         * 开关关闭时 tryAllVoiceReply 直接返回 off（不打日志、不发请求），老用户完全无感。 */
+        const spoken = img ? '' : speakableForVoice(msg);
+        const voiceOut = await tryAllVoiceReply(key, spoken, { replyToMessageId: useReply, hasMedia: !!img });
+        if (voiceOut.ok) {
+          // 与模型自己调 qq_send_voice 的记录格式保持一致（见 console-server `/api/voice/send`）：
+          // 记成 `[语音] 说了什么`，上下文里模型才知道自己刚才"说"过这句。
+          sent.push({
+            text: `[语音] ${voiceOut.text}`,
+            messageId: voiceOut.messageId != null ? String(voiceOut.messageId) : null,
+            quoted: useReply ? String(useReply) : null,
+            voice: true,
+          });
+          if (pace != null) markSendDelivered(key, voiceOut.text.length);
+        } else {
+          const sendData = await onebotSend(kind, id, msg, useReply, useAt, img);
+          // 记录真实 QQ message_id：撤回（qq_withdraw_message）与 (id:xxx) 展示都依赖它。
+          // 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**实际用上的引用目标**也带回去
+          // （auto 引用以前是桥偷偷加的，工具结果里 quoted:null → 模型压根不知道自己引用了谁，
+          //   于是它既无法解释、也无法自我纠正）。现在 sent[i].quoted 就是那条被引用的消息 id。
+          sent.push({
+            text: msg || (img ? '[图]' : ''),
+            messageId: sendData && sendData.message_id != null ? String(sendData.message_id) : null,
+            quoted: useReply ? String(useReply) : null,
+          });
+          if (pace != null) markSendDelivered(key, msg ? String(msg).length : 0);
+        }
       } catch (error) {
         log(`QQ 发送失败 (${key}):`, error?.message ?? error); if (error?.stack) log('[send-stack]', error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | '));
         failed.push(error);
