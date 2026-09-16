@@ -150,6 +150,7 @@ import {
 import { initPortraitLearn } from './core/portrait-learn.js';
 import { initVoiceCore } from './core/voice.js';
 import { initNapcatTokens } from './core/napcat-tokens.js';
+import { initNapcatGuard, startNapcatGuard } from './core/napcat-guard.js';
 import { initSendDice } from './core/send-dice.js';
 import { ensureLearningToken } from './core/learning-token.js';
 import {
@@ -307,6 +308,9 @@ async function main() {
   initVoiceCore(cfg);
   // NapCat 鉴权令牌：写进 NapCat 自己的配置 + 重启容器（管理端「NapCat 令牌」卡走这里）
   initNapcatTokens(cfg);
+  // NapCat 会话守护：定期用 get_rkey 探活，会话"假死"（还显示在线但发不出去）时自动重启自愈。
+  // 为什么需要：2026-09-16 亲历静默死 50 分钟 —— QQ 服务端把登录态作废，客户端一条错都不报。
+  initNapcatGuard(cfg, { callAction: (action, params) => bot.raw(action, params) });
   // 发送抽签（语音 / 表情包的概率与冷却）：桥侧掷骰后写进唤醒正文，不让模型自己猜概率
   initSendDice(cfg);
   initTokenMeter(cfg);
@@ -618,6 +622,8 @@ async function main() {
     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
   }
   startDshWatch();
+  // NapCat 会话守护：探针定时器在这里起（放在 OneBot 客户端建好之后，没配 httpUrl 时还能走 WS 探活）
+  startNapcatGuard();
   startConsoleServer();
   // 配置热加载：管理器保存 config.json 后**原地**更新 cfg（不换对象引用——它已被 initXxxCore 注入到
   // 十几个模块），免重启即生效。模型相关字段变化时清掉"已 selectModel"缓存，让已存在的会话下一轮就换新模型。

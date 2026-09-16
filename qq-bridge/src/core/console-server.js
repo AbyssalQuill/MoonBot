@@ -5229,6 +5229,61 @@ export function startConsoleServer() {
         await handleTokenStream(req, res);
         return;
       }
+      // ── NapCat 会话守护（探针 + 假死自愈）───────────────────────────────────────
+      // 【2026-09-16 亲历】QQ 服务端把登录态作废时，客户端可能**一条错都不报**：WebUI 上
+      // isLogin/online 还是 true，但发消息被 QQ 内核拒绝（网络连接异常 1006514），收消息也停。
+      // 当天就这么静默了 50 分钟没人知道。这里把"会话健康"做成可查、可手动自愈、可开关自动自愈。
+      // 鉴权沿用本段上方的统一 consoleToken 校验（管理端走这条）。
+      if (url.pathname === '/api/napcat/guard' || url.pathname === '/api/napcat/guard/heal' || url.pathname === '/api/napcat/quick-password' || url.pathname === '/api/napcat/qr') {
+        let gMod;
+        try {
+          gMod = await import('../core/napcat-guard.js');
+        } catch (error) {
+          log(`控制台：NapCat 守护模块加载失败：${error?.message ?? error}`);
+          sendJson({ ok: false, error: 'napcat-guard module unavailable（桥版本较旧）' }, 503);
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/napcat/guard') {
+          sendJson({ ok: true, guard: gMod.guardStatus() });
+          return;
+        }
+        // 二维码现抓一份回给管理端（base64 dataUrl，管理端直接 <img> 就能显示/保存）
+        if (req.method === 'GET' && url.pathname === '/api/napcat/qr') {
+          sendJson(await gMod.qrSnapshot());
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/napcat/guard') {
+          const body = await readBody();
+          const patch = {};
+          if (typeof body?.autoHeal === 'boolean' || body?.autoHeal === null) patch.autoHeal = body.autoHeal;
+          if (typeof body?.enabled === 'boolean') patch.enabled = body.enabled;
+          const guard = gMod.setGuardConfig(patch);
+          log(`控制台：会话守护设置更新 → autoHeal=${guard.autoHeal} enabled=${guard.enabled}`);
+          sendJson({ ok: true, guard });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/napcat/guard/heal') {
+          // 手动自愈：忽略冷却与开关（人明确点了就执行），仍然走同一条"重启 + 等登录"路径
+          const r = await gMod.guardTick(true);
+          log(`控制台：手动自愈 → ${r?.verdict ?? '?'}（${r?.lastProbeDetail ?? ''}）`);
+          sendJson({ ok: true, guard: r, healed: r?.verdict === 'ok', detail: r?.lastProbeDetail ?? '' });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/napcat/quick-password') {
+          const body = await readBody();
+          const password = String(body?.password ?? '');
+          if (!password.trim()) { sendJson({ ok: false, error: '密码不能为空' }, 400); return; }
+          log('控制台：开始配置免扫码回退登录（重建容器；密码只算 md5，明文不落盘、不进日志）');
+          try {
+            const r = await gMod.applyQuickPassword(password);
+            sendJson(r.ok ? { ok: true, detail: r.detail, loginState: r.loginState } : { ok: false, error: r.error, loginState: r.loginState, qrPath: r.qrPath }, r.ok ? 200 : 500);
+          } catch (error) {
+            log(`控制台：配置免扫码回退登录异常：${error?.message ?? error}`);
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+          }
+          return;
+        }
+      }
       sendJson({ ok: false, error: 'not found' }, 404);
     } catch (error) {
       const status = Number(error?.statusCode) || 500;

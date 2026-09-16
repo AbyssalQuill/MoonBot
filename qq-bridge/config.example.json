@@ -18,6 +18,17 @@
     "dockerPathMap": []
   },
   "ownerQQ": 0,
+  "guard": {
+    "enabled": true,
+    "probeIntervalMs": 60000,
+    "failThreshold": 2,
+    "cooldownMs": 600000,
+    "maxHealsPerHour": 3,
+    "restartGraceSec": 60,
+    "recoverWaitMs": 150000,
+    "autoHeal": null,
+    "_note": "NapCat 会话守护：定期用 get_rkey 探活（该接口每次都真的请求 QQ 服务器，且对别人不可见），连续 failThreshold 次失败就判定「会话假死」并重启容器自愈。autoHeal=null（默认）表示「容器配了免扫码回退登录（NAPCAT_QUICK_PASSWORD_MD5）才自动重启」；没配就只记录告警不出手，避免把机器人推到必须扫码的状态。管理端「NapCat」卡里可以开关、手动自愈、看二维码。"
+  },
   "sessionCwd": "",
   "agentPreset": "default",
   "workspaceTitle": "QQ 聊天",
