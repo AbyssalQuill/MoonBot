@@ -129,6 +129,76 @@ export const personaApply = (uid: string, mode: 'save' | 'apply' | 'fuse', text?
 export const getNapcatTokens = () => api<any>('/napcat/tokens');
 export const applyNapcatTokens = (patch: { webuiToken?: string; httpToken?: string; wsToken?: string; restart?: boolean; useBridgeTokens?: boolean }) =>
   api<any>('/napcat/tokens', { method: 'POST', body: JSON.stringify(patch) });
+
+/* ================= NapCat 会话守护（探针 + 假死自愈） =================
+ * 【2026-09-16】QQ 服务端把登录态作废时客户端可能**一条错都不报**（WebUI 上还是 isLogin/online=true），
+ * 实测静默了 50 分钟没人知道。桥侧现在每 60 秒用 NapCat 的 get_rkey 探活，连续失败就重启容器自愈；
+ * 这几个接口就是把它的状态读出来、把两个开关写回去、手动触发一次自愈、配置"免扫码回退登录"，
+ * 以及在它已经掉登录态时把二维码现抓出来给人扫（那种情况重启救不了）。
+ *   GET  /api/napcat/guard           → { ok, guard }
+ *   POST /api/napcat/guard           → body { autoHeal?, enabled? } → { ok, guard }
+ *   POST /api/napcat/guard/heal      → { ok, healed, detail, waitedMs }（自愈要重启+等登录，可能一两分钟）
+ *   POST /api/napcat/quick-password  → body { password }（明文只随请求发送，桥侧只算 md5 写容器环境变量）
+ *   GET  /api/napcat/qr              → { ok, path, bytes, dataUrl }（掉登录态时给人扫的那张码）
+ * 鉴权：走管理端代理（它自己带 x-console-token），前端不接触桥的控制台令牌。 */
+export type NapcatGuardAlertLevel = 'failed' | 'cooldown' | 'giveup' | 'manual' | 'needs-login';
+export interface NapcatGuardAlert {
+  ts?: string;
+  level?: NapcatGuardAlertLevel;
+  reason?: string;
+  qrPath?: string | null;
+}
+export interface NapcatGuard {
+  /** 桥侧守护总开关（关掉则完全不再探活） */
+  enabled?: boolean;
+  /** 自动自愈开关（POST 写的就是它） */
+  autoHeal?: boolean;
+  /** 这个开关是配置给的还是人手动设的（桥侧回传，界面不依赖它） */
+  autoHealSource?: 'auto' | 'manual';
+  /** ok | suspect | dead（另有 disabled=守护关闭、unknown=还没探过） */
+  verdict?: string;
+  lastProbeAt?: number;
+  lastProbeOk?: boolean;
+  lastProbeDetail?: string;
+  consecutiveFails?: number;
+  failThreshold?: number;
+  probeIntervalMs?: number;
+  /** 最近自愈时间戳（最多 20 条） */
+  heals?: number[];
+  lastHealAt?: number;
+  /** "" | success | failed | cooldown | giveup | manual */
+  lastHealResult?: string;
+  alert?: NapcatGuardAlert | null;
+  /** 免扫码回退登录是否已配置（只回 configured/source，不回值本身） */
+  passwordFallback?: { configured?: boolean; source?: string; error?: string };
+  container?: { name?: string; status?: string; startedAt?: string };
+}
+export const getNapcatGuard = () => api<{ ok: boolean; guard?: NapcatGuard; error?: string; message?: string }>('/napcat/guard');
+export const setNapcatGuard = (patch: { autoHeal?: boolean; enabled?: boolean }) =>
+  api<{ ok: boolean; guard?: NapcatGuard; error?: string; message?: string }>('/napcat/guard', { method: 'POST', body: JSON.stringify(patch) });
+/** 手动自愈：忽略冷却与开关，直接重启容器并等登录（可能一两分钟，期间 NapCat 不可用） */
+export const healNapcatGuard = () =>
+  api<{ ok: boolean; healed?: boolean; detail?: string; waitedMs?: number; guard?: NapcatGuard; error?: string; message?: string }>(
+    '/napcat/guard/heal', { method: 'POST', body: '{}' });
+/** 免扫码回退登录：桥侧只把密码算成 md5 写进容器环境变量（明文不落盘、不进日志），过程会重建容器。
+ *  【安全约定】密码只随这一条请求发送 —— 不写日志、不进 localStorage、不落任何本地文件。 */
+export const applyNapcatQuickPassword = (password: string) =>
+  api<{ ok: boolean; detail?: string; loginState?: { isLogin?: boolean; online?: boolean }; error?: string; message?: string }>(
+    '/napcat/quick-password', { method: 'POST', body: JSON.stringify({ password }) });
+
+/* 【2026-09-16 补充契约】二维码现抓：alert.level='needs-login'（QQ 已掉登录态，重启救不了）时，
+ * 人必须扫码 —— 而人往往不在服务器边上，所以把容器里的缓存二维码 docker cp 出来转成 dataUrl 直接显示。
+ *   GET /api/napcat/qr → { ok, path, bytes, dataUrl } / 失败 { ok:false, error }（没在等登录、docker cp 失败…）
+ * NapCat 会定期换新码，所以界面上要给「重新获取二维码」重新打这一条（不要缓存）。 */
+export interface NapcatQrSnapshot {
+  ok: boolean;
+  path?: string;
+  bytes?: number;
+  /** data:image/png;base64,... —— 直接塞给 <img src> */
+  dataUrl?: string;
+  error?: string;
+}
+export const getNapcatQr = () => api<NapcatQrSnapshot>('/napcat/qr');
 /** 【2026-09-14】用量统计现在**两边都取**：local=本机桥、remote=服务端桥（null=没取到，看 remoteReason）、
  *  total=两份合并的合计。report 保留为合计（兼容旧字段）。 */
 export interface TokenReportSide {

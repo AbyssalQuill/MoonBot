@@ -4108,6 +4108,17 @@ app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, 
  * 重启容器要等它起来（约 30~60 秒），加上写盘后的复验，超时给到 4 分钟。 */
 app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
 app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
+
+/* NapCat 会话守护（探针 + 假死自愈）。
+ * 为什么要有它：QQ 服务端把登录态作废时，客户端可能一条错都不报（WebUI 上 isLogin/online 还是 true），
+ * 表现是"看起来在线、其实发不出去"，实测静默了 50 分钟。桥侧每 60s 用 get_rkey 探活，连续失败就重启容器自愈。
+ * 超时：heal 要重启容器并等它登回来（最长 ~2.5 分钟），quick-password 要重建容器（最长 ~3 分钟），都放宽。 */
+app.get('/api/napcat/guard', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/guard', method: 'GET', timeoutMs: 60000 }));
+app.post('/api/napcat/guard', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/guard', method: 'POST', body: req.body ?? {}, timeoutMs: 60000 }));
+app.post('/api/napcat/guard/heal', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/guard/heal', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
+app.post('/api/napcat/quick-password', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/quick-password', method: 'POST', body: req.body ?? {}, timeoutMs: 300000 }));
+/* 二维码现抓一份（base64 dataUrl）。要扫码时人在管理端，这条是唯一的救命路径。 */
+app.get('/api/napcat/qr', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/qr', method: 'GET', timeoutMs: 60000 }));
 /* 用量统计（/api/learning/token-report）——**两边都不漏**：
  * 【2026-09-14 主人要求】以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
  * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
