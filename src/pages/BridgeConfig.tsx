@@ -46,9 +46,13 @@ function providerChoices() {
 }
 
 /* ---------- 界面文字：全中文，不带英文括号/版本前缀 ---------- */
+/** 【2026-09-18】标签表兜底：config 里出现「标签表还没登记」的键时显示这一句，
+ *  绝不再把 refreshOnMessageMs 这类原始英文键名当字段名糊在界面上。
+ *  这种情况不会静默丢信息：Field 会自动给这类字段配一个 ⓘ，里面写清**桥里的键名**与当前值。 */
+const UNNAMED_LABEL = '未登记名称的配置项';
 const LABEL: Record<string, string> = {
   // 模型与推理
-  baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: 'API Key', model: '主模型',
+  baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: '接口密钥', model: '主模型',
   visionModel: '识图模型', reasoningEffort: '推理档位',
   // NapCat
   wsUrl: 'WebSocket 地址', wsAccessToken: 'WS 访问令牌（已移到「NapCat 鉴权令牌」卡）', httpUrl: 'HTTP 地址', accessToken: 'HTTP 访问令牌（已移到「NapCat 鉴权令牌」卡）',
@@ -57,7 +61,7 @@ const LABEL: Record<string, string> = {
   // 基础与会话
   agentPreset: '人设预设', workspaceTitle: '工作区名称', ownerQQ: '主人 QQ', adminQQ: '管理员',
   sessionCwd: '会话工作目录', ackMessage: '收到回执语', sendDelayMs: '发送间隔', questionTimeoutMs: '问题等待超时',
-  consolePort: '本机服务端口', allowAllWhenEmpty: '名单为空时全部放行',
+  consolePort: '本机服务端口', consoleToken: '本机服务令牌', allowAllWhenEmpty: '名单为空时全部放行',
   // 名单
   private: '私聊', groups: '群聊',
   // 唤醒
@@ -118,12 +122,57 @@ const LABEL: Record<string, string> = {
   'social.docx': 'Word 文档额度',
   dailyQuotaChars: '每日额度', interactionCount: '互动次数',
   // 通用
-  security: '安全', interceptNotify: '拦截通知', burstIntervalMinMsLegacy: '',
+  security: '安全', interceptNotify: '拦截通知', burstIntervalMinMsLegacy: '（已废弃）连发间隔下限（旧键名）',
   // 投递 / 省额度（2026-09-12 新增到管理端）
   steerEnabled: '在途回合注入', slimTools: '工具 schema 精简',
   // 回合保持（social.turnHold）：以前管理端完全没有露出来，主人问"投递与回合那张卡没错吧"时才发现
   turnHold: '回合保持', maxExchanges: '最多来回次数', idleCloseMs: '空闲关闭时长', maxWaitMs: '最长保持时长',
   requestBudgetMs: '每段等待预算', privateOnly: '只对私聊保持', keys: '限定会话',
+  /* 【2026-09-18 主人要求「界面上英文键一个别留」】
+     这一段的由来：config.json 里**对象型的键**自己也会被当成"小分组标题"渲染
+     （Field 遇到 isObj 就 renderLabel()），而平时没人给它写标签 —— 于是界面上出现过
+     光秃秃的 collect / docx / slimTools 这类英文分组名。分组名一律在这里登记，
+     同时把「管理端目前没单独开卡、但键确实存在于配置里」的那些键也一并登记：
+     它们是**按完整路径渲染**的，哪天真开了卡也不会再回落成英文键名。
+     规范：标签必须自解释（不许"参数一/参数二"），看不出行为的再配 HELP 里的 ⓘ。 */
+  // 分组名（对象型键当小标题时用）
+  dsh: '模型与推理', napcat: 'NapCat 连接', social: '社交模块', allow: '允许名单', deny: '拒绝名单',
+  guard: 'NapCat 会话守护', slang: '黑话学习', tools: 'QQ 工具开关', collect: '自动收藏',
+  sessionArchive: '空闲会话自动归档', feedback: '反馈上报',
+  context: '上下文', autoReset: '会话轮换', send: '发送节奏', wake: '唤醒与潜水',
+  wait: '回复前停顿', sticker: '表情包', proactive: '主动闲聊', typing: '私聊打字等待',
+  // 路径专属（同名键在不同分组里含义不同，必须按完整路径写死）
+  'social.agentPreset': '社交模块的人设预设',
+  'social.proactive.enabled': '主动闲聊总开关',
+  'social.slimTools.enabled': '启用精简名单',
+  'social.slimTools.deny': '不注册给模型的工具名单',
+  'social.sessionArchive.enabled': '空闲会话自动归档',
+  // 会话守护（guard：NapCat 假死时自动重启容器自愈）
+  'guard.enabled': '会话守护总开关', probeIntervalMs: '探活间隔（毫秒）',
+  failThreshold: '连续失败几次判定假死', cooldownMs: '自愈冷却（毫秒）',
+  maxHealsPerHour: '每小时最多自愈几次', restartGraceSec: '重启宽限（秒）',
+  recoverWaitMs: '重启后等待恢复（毫秒）', autoHeal: '自动自愈',
+  // 黑话学习（slang）
+  'slang.enabled': '黑话学习开关', extractMinMessages: '凑够几条消息才提取',
+  extractCooldownMs: '两次提取的最小间隔（毫秒）', inferenceThresholds: '推断阈值（出现次数）',
+  injectMax: '最多注入几条黑话', injectIntoPrompt: '把黑话写进提示词',
+  learnerPreset: '学习会话的人设预设', 'slang.workspaceTitle': '学习工作区名称',
+  autoResearch: '自动联网考究', charactersDir: '角色库目录',
+  // 空闲会话自动归档（social.sessionArchive）
+  intervalMs: '巡检间隔（毫秒）', idleMinutes: '闲置多少分钟算空闲',
+  batchMax: '单批最多归档几个', pruneDays: '归档保留天数',
+  // 反馈上报（social.feedback）
+  maxLength: '反馈字数上限', notifyOwnerOnError: '出错时通知主人',
+  // 私聊打字等待（social.typing）：键名就是 typing.*，这里按完整路径登记
+  'social.typing.enabled': '私聊等对方打完字', 'social.typing.holdMaxMs': '最多等多久（毫秒）',
+  'social.typing.refreshOnMessageMs': '收到消息后续多久（毫秒）', 'social.typing.breakProbability': '中途插话概率（0~1）',
+  /* 已废弃的旧发送节奏键（config.json 里可能还留着）：
+     桥早已改成「只有按字数一套节拍」，这些键写了也不生效 —— 标签写清"已废弃"，
+     免得主人以为还能调。ⓘ 里说明了替代项。 */
+  'social.send.linearBaseMs': '（已废弃）首条气泡延迟', 'social.send.linearStepMs': '（已废弃）每条递增间隔',
+  'social.send.gapBaseMs': '（已废弃）间隔基数', 'social.send.gapPerCharMs': '（已废弃）每字追加间隔',
+  'social.send.gapJitterRatio': '（已废弃）间隔抖动比例',
+  'social.burstIntervalMinMs': '（已废弃）连发间隔下限', 'social.burstIntervalMaxMs': '（已废弃）连发间隔上限',
 };
 
 /** MCP 工具中文名（工具与规则页） */
@@ -142,6 +191,8 @@ const TOOL_LABEL: Record<string, string> = {
   getGroupMembers: '查成员', adminSet: '管理设置', whitelist: '白名单', blacklist: '拉黑',
   profileSet: '改档案', profileQuery: '查档案', qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间', sendQzone: '发说说', memeSearch: '搜表情包',
   sendMeme: '发表情包（内置表情库）', scheduleList: '定时列表', scheduleCancel: '取消定时', activityHours: '活跃时段',
+  // 【2026-09-18】config.example.json 里已有、但标签表漏登的开关：漏了就会在「工具与规则」页裸奔英文 key
+  characterCards: '角色卡（角色库）',
 };
 
 /**
@@ -178,13 +229,63 @@ const TOOL_MCP: Record<string, string> = {
   qzoneView: 'qq_qzone_view', sendQzone: 'qq_send_qzone',
 };
 
+/**
+ * MCP 工具原名的中文名（键 = `mcp__napcat__` 前缀之后的名字）。
+ *
+ * 【为什么要单独一张表】「工具 schema 精简」卡会把 src/tool-schema-chars.ts 里
+ * **每一个** mcp__napcat__ 工具逐行列出来勾选。以前每行显示的就是 `qq_send_message`
+ * 这种原始工具名 —— 主人看到的是一屏英文标识符（2026-09-18 主人要求「一个别留」）。
+ * 现在行标题一律是这里的中文名，原名默认**不显示**；要跟 config.json 里的
+ * social.slimTools.deny 对照时，勾上卡片里的「显示 MCP 工具原名」即可（原名必须逐字一致）。
+ *
+ * 加工具时请一并补这张表：漏了的话（① 中文名缺失）tools/audit-ui-labels.mjs 会直接报错拦下。
+ */
+const MCP_LABEL: Record<string, string> = {
+  qq_get_prompt: '查看人设与工具', qq_get_unread_messages: '读未读消息', qq_get_recent_messages: '读最近消息',
+  qq_social_state: '查看社交状态', qq_send_group_message: '发群消息', qq_send_private_message: '发私聊消息',
+  qq_reply: '引用回复', qq_send_burst: '连发多条', qq_send_message: '发送消息',
+  qq_wait_for_messages: '等待新消息', qq_report_feedback: '反馈给主人', qq_get_my_recent_messages: '看我最近发言',
+  qq_get_message_detail: '查看消息详情', qq_get_active_members: '查活跃成员', qq_set_wake_config: '设置唤醒条件',
+  qq_mark_read: '标记已读', qq_memory_append: '追加记忆', qq_memory_query: '查记忆',
+  qq_memory_remove: '删记忆', qq_memory_clear: '清空记忆', qq_memory_search: '搜聊天记录',
+  qq_slang_query: '查黑话', qq_slang_submit: '提交黑话', qq_get_message_images: '查看消息图片',
+  qq_get_forward_msg: '读取转发', qq_send_poke: '发戳一戳', qq_list_stickers: '表情包列表',
+  qq_get_sticker_image: '取表情图', qq_send_sticker: '发表情包', qq_set_sticker_remark: '改表情备注',
+  qq_sticker_note: '写表情备注', qq_collect_sticker: '收藏表情', qq_get_self_image: '取我的图片',
+  qq_get_file_content: '读文件内容', qq_send_qq_face: '发 QQ 表情', qq_face_list: 'QQ 表情列表',
+  qq_history_delete: '删聊天记录', qq_history_clear: '清空聊天记录', qq_send_docx: '发 Word 文档',
+  qq_send_rich: '发卡片消息', qq_music_search: '搜歌', qq_global_overview: '全局总览',
+  qq_schedule_message: '定时发消息', qq_schedule_list: '定时消息列表', qq_schedule_cancel: '取消定时消息',
+  qq_withdraw_message: '撤回消息', qq_send_forward: '合并转发', qq_like: '点赞',
+  qq_proactive_send: '主动私聊', qq_get_group_owner: '查群主', qq_get_group_members: '查群成员',
+  qq_get_group_history: '读群聊历史', qq_admin_set: '管理设置', qq_whitelist: '加白名单',
+  qq_blacklist: '拉黑', qq_remove_friend: '删好友', qq_profile_set: '改档案',
+  qq_profile_get: '查档案', qq_qzone_view: '看空间', qq_qzone_comment: '评论空间',
+  qq_qzone_like: '赞空间', qq_qzone_reply_comment: '回空间评论', qq_send_qzone: '发说说',
+  qq_meme_search: '搜表情包', qq_send_meme: '发内置表情',
+  qq_get_activity_hours: '读活跃时段', qq_set_activity_hours: '设活跃时段',
+  qq_persona_learn_start: '启动人格学习',
+  qq_persona_learn_stop: '停止人格学习', qq_persona_learn_status: '人格学习状态',
+  qq_deepsleep: '群聊静默', qq_crosschat_send: '跨会话发话', qq_crosschat_inbox: '跨会话收件箱',
+  qq_status: '机器人状态', qq_list_groups: '列出群聊', qq_get_system_config: '读桥系统配置',
+  qq_set_system_config: '改桥系统配置',
+};
+
+/** 精简名单里某一行该显示的中文名；未登记时回落到「未登记」占位（绝不显示英文原名） */
+function mcpLabel(fullName: string) {
+  const short = fullName.startsWith(SLIM_PREFIX) ? fullName.slice(SLIM_PREFIX.length) : fullName;
+  return MCP_LABEL[short] || UNNAMED_LABEL;
+}
+
 /** 进阶项说明（点 ⓘ 展开），只给对新手不友好的项加 */const HELP: Record<string, string> = {
   baseUrl: 'DSH（DeepSeek Harness）Web 服务地址。本地内置隔离实例默认 http://127.0.0.1:10721；也可用环境变量 QQB_DSH_BASE_URL 覆盖。不要填桌面端 3210。',
   provider: '模型服务商标识，由 DSH 端已配置的 provider 决定；不确定时保持默认，改错会导致会话建不起来（日志会提示）。',
   apiKey: '如你的服务商需要在 DSH 侧配置密钥，请到隔离 DSH 的密钥/设置页配置；此处填写的 Key 只会随本配置保存，不会注入运行进程。',
   model: '主对话模型。留空由 DSH 默认决定。',
   visionModel: '识图（多模态）模型，用于带图片消息的会话。留空时自动使用上面的主模型——请保证主模型是多模态的（默认已是）。',
-  reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。',
+  reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。'
+    + '下拉里显示的是中文名，对应的英文档位 id（也是写进 DSH settings.yaml 的值）依次是：'
+    + '关闭思考=off、同「关闭思考」=none、最低=minimal、快但粗略=low、平衡=medium、仔细但慢=high、更高=xhigh、最高=max。',
   launcherPath: '仅在你手动拉 QQ 网关时使用；本项目 NapCat 已内置并由管理端拉起，一般保持留空。',
   homeDir: '网关侧可写目录（容器映射等），本地 NapCat 一般不需要。',
   allowProcessControl: '是否允许 DSH 内的 agent 自动启停本机 QQ 网关。请仅在完全信任时开启。',
@@ -294,6 +395,63 @@ const TOOL_MCP: Record<string, string> = {
   'social.turnHold.maxWaitMs': '最长保持：不管有没有新消息，到这个时长（毫秒）都必须结束，避免回合永久挂着。',
   'social.turnHold.requestBudgetMs': '每段等待预算（毫秒，默认 55000）：桥不是一次把回合攥到底，而是**一段一段**跟插件续问；'
     + '每段最多等这么久，插件要它继续就回 `again:true` 续下一段。这个值必须**小于** DSH 插件那侧的单次请求超时，否则回合会在预算到点前被断开。',
+  /* ================= 【2026-09-18】为「界面不许出现英文键」补齐的说明 =================
+     这些键以前管理端没有卡片、也没写说明，所以只有"标签"没有"解释"；现在逐个补上，
+     统一写清三件事：它管什么、默认值、桥里的键名（审计脚本按标签表查，说明是给主人看的）。 */
+  // —— 已废弃的旧发送节奏键（老配置里很可能还留着，读了也不生效）——
+  'social.send.linearBaseMs': '已废弃（老版的"首条气泡延迟"，桥里的键名 social.send.linearBaseMs）。'
+    + '桥现在只剩「按字数」一套打字节拍：第 1 条气泡立即发，第 2 条起按字数等。这个键写了也不生效，留着只为兼容老配置文件；'
+    + '要调节奏请改用「按字数打字节拍 / 每个字的打字时间 / 两条气泡最小间隔 / 两条气泡最大间隔 / 打字速度抖动 / 静默后重新秒回」。',
+  'social.send.linearStepMs': '已废弃（老版的"每条递增间隔"，桥里的键名 social.send.linearStepMs），桥不读它、写了也不生效；替代项是「每个字的打字时间」。',
+  'social.send.gapBaseMs': '已废弃（老版的"间隔基数"，桥里的键名 social.send.gapBaseMs），桥不读它、写了也不生效；替代项是「两条气泡最小间隔」。',
+  'social.send.gapPerCharMs': '已废弃（老版的"每字追加间隔"，桥里的键名 social.send.gapPerCharMs），桥不读它、写了也不生效；替代项是「每个字的打字时间」。',
+  'social.send.gapJitterRatio': '已废弃（老版的"间隔抖动比例"，桥里的键名 social.send.gapJitterRatio），桥不读它、写了也不生效；替代项是「打字速度抖动」。',
+  'social.burstIntervalMinMs': '已废弃（老版的"连发间隔下限"，桥里的键名 social.burstIntervalMinMs），桥不读它；连发间隔现在由「按字数打字节拍」那一组决定。',
+  'social.burstIntervalMaxMs': '已废弃（老版的"连发间隔上限"，桥里的键名 social.burstIntervalMaxMs），桥不读它；连发间隔现在由「按字数打字节拍」那一组决定。',
+  burstIntervalMinMsLegacy: '更旧的键名（桥里的键名 burstIntervalMinMsLegacy），任何版本都不生效。看到它说明这份配置是从很旧的版本抄过来的，'
+    + '可以在「JSON 进阶」页直接删掉。',
+  // —— NapCat 会话守护（guard）：定期探活、假死就重启容器自愈 ——
+  'guard.enabled': 'NapCat 会话守护总开关（桥里的键名 guard.enabled，默认开）。开着的时候桥会定期发一次 get_rkey 探活：'
+    + '该接口每次都真的请求 QQ 服务器（对别人不可见），连续失败达到阈值就判定"会话假死"并重启容器自愈。',
+  probeIntervalMs: '探活间隔（毫秒，桥里的键名 guard.probeIntervalMs，默认 60000 = 1 分钟）：每隔这么久探一次活。'
+    + '调密了会频繁打扰 QQ 服务器，一般不用动。',
+  failThreshold: '连续失败几次判定假死（桥里的键名 guard.failThreshold，默认 2）：达到这个次数才动手自愈，避免网络抖一下就把容器重启了。',
+  cooldownMs: '自愈冷却（毫秒，桥里的键名 guard.cooldownMs，默认 600000 = 10 分钟）：一次自愈之后这么久内不再重复自愈，防止反复重启。',
+  maxHealsPerHour: '每小时最多自愈几次（桥里的键名 guard.maxHealsPerHour，默认 3）：超过就只记录告警，不再自动重启。',
+  restartGraceSec: '重启宽限（秒，桥里的键名 guard.restartGraceSec，默认 60）：重启容器时留给 QQ 客户端的退出时间，给太短容易掉登录态。',
+  recoverWaitMs: '重启后等待恢复（毫秒，桥里的键名 guard.recoverWaitMs，默认 150000 = 2.5 分钟）：重启完先等这么久，再探活确认是不是真的恢复了。',
+  autoHeal: '自动重启自愈（桥里的键名 guard.autoHeal，默认 null = 自动判断）：null 表示"容器配了免扫码回退登录（NAPCAT_QUICK_PASSWORD_MD5）才自动重启"，'
+    + '没配就只记录告警、不动手（免得把机器人推到必须扫码的状态）；true = 总是自动重启；false = 只告警不重启。',
+  // —— 空闲会话自动归档（social.sessionArchive）——
+  'social.sessionArchive.enabled': '空闲会话自动归档开关（桥里的键名 social.sessionArchive.enabled，默认开）：把闲置太久的 DSH 会话归档，'
+    + '避免常驻会话越堆越多、上下文越滚越大。归档不是删除：会话文件还在桥的 state 目录下，需要时会被重新唤醒。',
+  intervalMs: '巡检间隔（毫秒，桥里的键名 social.sessionArchive.intervalMs，默认 600000 = 10 分钟）：桥每隔这么久巡检一次有没有该归档的会话。',
+  idleMinutes: '闲置多少分钟算空闲（桥里的键名 social.sessionArchive.idleMinutes，默认 30）：超过这个时长、而且当前没有回合在跑的会话才会被归档。',
+  batchMax: '单批最多归档几个（桥里的键名 social.sessionArchive.batchMax，默认 20）：一次巡检最多处理这么多，避免集中归档把桥卡住。',
+  pruneDays: '归档保留天数（桥里的键名 social.sessionArchive.pruneDays，默认 0 = 不清理）：大于 0 时，归档超过这么多天的会话文件会被删掉；'
+    + '填 0 就是只归档、永不删除。',
+  // —— 反馈上报（social.feedback）——
+  maxLength: '反馈字数上限（桥里的键名 social.feedback.maxLength，默认 500）：机器人通过「反馈给主人」工具发来的内容最长多少字，超了会被截断。',
+  notifyOwnerOnError: '出错时通知主人（桥里的键名 social.feedback.notifyOwnerOnError，默认关）：开着的时候机器人自己遇到错误会主动私聊告诉你。',
+  // —— 黑话学习（slang）：目前的管理端没有单独开这张卡，键照样登记，需要时可在「JSON 进阶」里改 ——
+  'slang.enabled': '黑话学习开关（桥里的键名 slang.enabled，默认开）：关掉后桥会跳过所有黑话学习任务，聊天里发 /slang 学习 也不会跑。',
+  extractMinMessages: '凑够几条消息才提取（桥里的键名 slang.extractMinMessages，默认 10）：一小段语料里消息太少就不值得跑一次模型，直接跳过。',
+  extractCooldownMs: '两次提取的最小间隔（毫秒，桥里的键名 slang.extractCooldownMs，默认 300000 = 5 分钟）：防止短时间内反复提取把额度烧掉。',
+  inferenceThresholds: '推断阈值（桥里的键名 slang.inferenceThresholds，默认 [2,4,8]）：一个词出现到这些次数时，触发不同深度的考究；数字越小的门槛越容易触发。',
+  injectMax: '最多注入几条黑话（桥里的键名 slang.injectMax，默认 8）：唤醒提示里最多带上几条学到的黑话，避免把提示词撑大。',
+  injectIntoPrompt: '把黑话写进提示词（桥里的键名 slang.injectIntoPrompt）：开着 = 模型每次都能看到学到的黑话；关掉 = 只有主动查询工具能读到。',
+  learnerPreset: '学习会话的人设预设（桥里的键名 slang.learnerPreset）：黑话学习是单独起一个 DSH 会话跑的，这里指定它用哪套预设。',
+  'slang.workspaceTitle': '学习工作区名称（桥里的键名 slang.workspaceTitle）：给黑话学习的那个会话工作区起的名字，只是显示用，不影响行为。',
+  autoResearch: '自动联网考究（桥里的键名 slang.autoResearch，默认开）：提取到新词后自动联网查它的含义，查不到就留成"未确认"等下次。',
+  charactersDir: '角色库目录（桥里的键名 social.charactersDir）：一个角色 = 一个子目录 = 一个角色包（SKILL.md / personality.md / manifest.json 等）。'
+    + '留空 = 用默认目录（用户主目录下的 Downloads/characters/characters）。四个角色卡工具都**只读**这个目录，不会写盘。',
+  // —— 同名键按路径区分说明 ——
+  'social.agentPreset': '社交会话用的人设预设（桥里的键名 social.agentPreset，默认 default）：只作用于社交模块建的会话；'
+    + '「基础与会话」里那个同名的项是全局预设，两个都在时以社交模块这个为准。',
+  'social.slimTools.enabled': '启用精简名单（桥里的键名 social.slimTools.enabled）：打勾 = 名单里的工具干脆不注册给模型，它的 JSON 描述从每一次请求里彻底消失（真省额度）；'
+    + '不打勾 = 全部正常注册。工具表只在隔离 DSH 启动时取一次，所以改完必须重启隔离 DSH。',
+  'social.slimTools.deny': '不注册给模型的工具名单（桥里的键名 social.slimTools.deny）：里面写的是 MCP 工具原名（形如 mcp__napcat__qq_send_message），'
+    + '必须与桥侧注册的名字逐字一致，写错了不报错但也不生效。',
 };
 
 /** 开关下方的一行小字提示（按完整路径/字段名精确命中） */
@@ -313,10 +471,11 @@ const TIP: Record<string, string> = {
 };
 
 function pretty(label: string) {
-  return LABEL[label] || label;
+  // 兜底一律是中文占位，绝不回落成原始英文键名（审计脚本 tools/audit-ui-labels.mjs 会盯着这张表）
+  return LABEL[label] || UNNAMED_LABEL;
 }
 function prettyTool(k: string) {
-  return TOOL_LABEL[k] || LABEL[k] || k;
+  return TOOL_LABEL[k] || LABEL[k] || mcpLabel(k);
 }
 
 function get(o: any, p: string) { return p ? p.split('.').reduce((x, k) => (x ? x[k] : undefined), o) : o; }
@@ -902,7 +1061,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
               <DocSection title="怎么用">
                 <ul>
                   <li>在 QQ 里（群聊或私聊都可以）直接发这些指令，机器人会立刻照做并回一句话确认。</li>
-                  <li><b>管理类指令只有管理员（ownerQQ）能生效</b>；其他人发会被回「管理命令仅管理员可用」。</li>
+                  <li><b>管理类指令只有管理员（也就是配置里的「主人 QQ」）能生效</b>；其他人发会被回「管理命令仅管理员可用」。</li>
                   <li>指令要单独发一条，且以 <code>/</code> 开头；带参数时参数用空格隔开。</li>
                 </ul>
               </DocSection>
@@ -910,7 +1069,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
               <DocSection title="会话管理">
                 <ul>
                   <li><code>/reset</code> 或 <code>/new</code>：清空当前会话的 DSH 上下文，下一条消息开新会话（长期记忆、档案、聊天库都保留）。顺手取消该会话还没发出的待发任务。</li>
-                  <li><code>/status</code>：回一条状态——当前 sessionId、白名单是否通过、角色、模式。</li>
+                  <li><code>/status</code>：回一条状态——当前会话编号、白名单是否通过、角色、模式。</li>
                   {/* 【2026-09-13 主人要求】/help（发《小鲸鱼能力概览》docx）已整条删除，这里不再列出 */}
                 </ul>
               </DocSection>
@@ -958,7 +1117,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
                   <li><code>/portrait learn</code>（也认 <code>/portrait start</code>、<code>/群友画像学习</code>、<code>/画像学习</code>）：立刻按当前筛选条件挑人跑一轮画像学习。不带参数时自动从聊天库里选人。</li>
                   <li><code>/portrait stop</code>：停止正在跑的画像学习（已在跑的目标不会落半成品）。</li>
                   <li><code>/portrait status</code>：回一条状态——是否启用、自动触发方式、筛选条件、最近一轮学了哪几个人。</li>
-                  <li>只有管理员（ownerQQ）能发；其他人发会被回「画像学习只有主人能指挥」。</li>
+                  <li>只有管理员（配置里的「主人 QQ」）能发；其他人发会被回「画像学习只有主人能指挥」。</li>
                 </ul>
               </DocSection>
 
@@ -1220,10 +1379,14 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
 }
 
 function at(o: any, p: string) { return p ? get(o, p) : o; }
+/** JSON 注释键（`_note` / `_linearNote` 这类"说明文字塞在键里"的写法）：桥运行时不读它。
+ *  【2026-09-18】以前它会被通用卡片当成普通设置项渲染成一个输入框 —— 字段名是 `_linearNote`
+ *  这种英文键名，值是一整段说明，又长又不能改。现在按约定不渲染（说明照样留在 config.json 里）。 */
+function isCommentKey(k: string, v: any) { return k.startsWith('_') && typeof v === 'string'; }
 function keysOf(cfg: any, path: string, only?: string[], filter?: (k: string) => boolean) {
   const v = at(cfg, path);
   if (v === undefined || !isObj(v)) return [];
-  return Object.keys(v).filter((k) => (!only || only.includes(k)) && (!filter || filter(k)));
+  return Object.keys(v).filter((k) => !isCommentKey(k, v[k]) && (!only || only.includes(k)) && (!filter || filter(k)));
 }
 
 function GroupCard({ title, path, blocks, cfg, ch, onHelp, filter, only, desc, children }: {
@@ -1512,19 +1675,28 @@ function StickerCard({ cfg, ch, onHelp, uploadStickers }: {
 
 function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void> }) {
   const v = get(cfg, 'social.tools');
+  // 【2026-09-18】MCP 工具原名（qq_send_message 这种英文标识符）默认**不显示**：
+  // 界面上一律显示中文名；要跟 config.json 里的 social.tools.* 对照时再勾上这个开关。
+  const [showRaw, setShowRaw] = useState(false);
   if (!v || !isObj(v)) return <div className="empty-state">当前配置没有可开关的 MCP 工具</div>;
   const keys = Object.keys(v).sort((a, b) => prettyTool(a).localeCompare(prettyTool(b), 'zh'));
   return (
     <div className="card-stack">
       <div className="card">
-        <div className="card-title">QQ 工具开关（中文名 · MCP 工具原名）</div>
+        <div className="card-title">
+          QQ 工具开关
+          <label className="switch-row" style={{ marginLeft: 'auto', fontWeight: 400, fontSize: 12.5 }}>
+            <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+            <span>显示 MCP 工具原名（对照 config.json 时用）</span>
+          </label>
+        </div>
         <div className="switch-grid">
           {keys.map((k) => (
             <label key={k} className="switch-row" title={LABEL[k] || undefined}>
               <input type="checkbox" checked={!!v[k]} onChange={() => ch('social.tools.' + k)(!v[k])} />
               <span style={{ minWidth: 0 }}>
                 {prettyTool(k)}
-                {TOOL_MCP[k] ? (
+                {showRaw && TOOL_MCP[k] ? (
                   <span style={{
                     color: 'var(--nc-foreground-400)', fontSize: 12,
                     fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace",
@@ -1536,7 +1708,8 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
           ))}
         </div>
         <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginTop: 14 }}>
-          关闭某项即停用对应的 QQ 工具（AI 调用时会被拒绝）；开关不影响人设文本里已有的自然语言规则。点开关左边看不到英文名时，说明该键还没登记映射（开关依旧生效）。
+          关闭某项即停用对应的 QQ 工具（AI 调用时会被拒绝）；开关不影响人设文本里已有的自然语言规则。
+          想按 config.json 里的英文键名逐个核对时，勾上右上角「显示 MCP 工具原名」。
           <br />
           <b style={{ color: 'var(--nc-foreground-300, inherit)' }}>注意：这一组开关<b>不省 token</b></b> —— 工具描述无论如何都会随每次请求发给模型，
           关掉只是"拒绝调用"。要真正少花钱，请用下面那张「工具 schema 精简」卡。
@@ -1600,6 +1773,9 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  // 【2026-09-18】这一屏 77 行以前全是 `qq_send_message` 这种原始工具名（主人要求「一个别留」）。
+  // 现在行标题一律用 MCP_LABEL 里的中文名；原名默认收起，要跟 config.json 的 deny 名单对照时再勾开。
+  const [showRaw, setShowRaw] = useState(false);
 
   const all = Object.keys(TOOL_SCHEMA_CHARS)
     .filter((n) => n.startsWith(SLIM_PREFIX))
@@ -1655,10 +1831,14 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         </span>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
         <button className="btn btn-soft btn-sm" onClick={() => setDeny(SLIM_RECOMMENDED)}>出厂默认名单（21 个，从没用过）</button>
         <button className="btn btn-soft btn-sm" onClick={() => setDeny([])}>全部恢复</button>
         <input className="input" style={{ maxWidth: 220 }} placeholder="筛选工具名…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <label className="switch-row" style={{ marginBottom: 0, fontWeight: 400, fontSize: 12.5 }}>
+          <input type="checkbox" checked={showRaw} onChange={(e) => setShowRaw(e.target.checked)} />
+          <span>显示 MCP 工具原名（排错 / 手改 config.json 时对照用）</span>
+        </label>
       </div>
 
       <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--nc-border-200, #e5e5e5)', borderRadius: 8, padding: 8 }}>
@@ -1670,9 +1850,14 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
               <label key={n} className="switch-row" title={core ? '核心工具：关掉机器人基本就失能了' : undefined}>
                 <input type="checkbox" checked={on} onChange={() => toggle(n)} />
                 <span style={{ minWidth: 0 }}>
-                  <span style={{ fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace", fontSize: 12.5, color: core ? '#c0392b' : undefined }}>
-                    {short(n)}
+                  <span style={{ fontSize: 12.5, color: core ? '#c0392b' : undefined }}>
+                    {mcpLabel(n)}
                   </span>
+                  {showRaw ? (
+                    <span style={{ fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace", color: 'var(--nc-foreground-400)', fontSize: 12, overflowWrap: 'anywhere' }}>
+                      {' · '}{short(n)}
+                    </span>
+                  ) : null}
                   <span style={{ color: 'var(--nc-foreground-400)', fontSize: 12 }}> · {TOOL_SCHEMA_CHARS[n]} 字符</span>
                   {core ? <span style={{ color: '#c0392b', fontSize: 12 }}> · 核心，慎关</span> : null}
                 </span>
@@ -1685,8 +1870,13 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
       <div style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)', marginTop: 10, lineHeight: 1.7 }}>
         只有 <code>mcp__napcat__</code> 系列受这张名单控制；另有两个模型侧工具（<code>todo_write</code> / <code>ask_user_question</code>）
         已经在人设预设里卸载了对应插件，不在这里。<br />
-        本页只影响"注册不注册"；能否<b>调用</b>仍由上面那张「QQ 工具开关」决定。名单里的名字必须与下方的 MCP 原名完全一致。
-        {extraDeny.length > 0 ? <><br />名单里还有 {extraDeny.length} 个当前未注册的名字会被原样保留：{extraDeny.slice(0, 6).join(', ')}{extraDeny.length > 6 ? ' …' : ''}</> : null}
+        本页只影响"注册不注册"；能否<b>调用</b>仍由上面那张「QQ 工具开关」决定。
+        每行显示的是中文名，勾上方的「显示 MCP 工具原名」可以按原名逐字核对 config.json 里的名单。
+        {extraDeny.length > 0 ? (
+          showRaw
+            ? <><br />名单里还有 {extraDeny.length} 个当前未注册的名字会被原样保留：{extraDeny.slice(0, 6).join(', ')}{extraDeny.length > 6 ? ' …' : ''}</>
+            : <><br />名单里还有 {extraDeny.length} 个当前未注册的工具名会被原样保留（勾上「显示 MCP 工具原名」可查看）。</>
+        ) : null}
       </div>
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12, alignItems: 'center' }}>
@@ -1703,20 +1893,25 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
 
 /** 「推理档位」下拉：**不写死低/中/高**（2026-09-12 主人要求）
  *  · 选项就是各服务商**真实的英文档位 id**（off/none/minimal/low/medium/high/xhigh/max…），
- *    只有常见的几档后面带一句中文提示，其余一律原样显示 id；
+ *    【2026-09-18】但下拉里显示的改成**中文名**（英文 id 写在 ⓘ 说明里，随时可查），
+ *    免得界面上又是一串 off/low/xhigh；
  *  · DSH 里已经配好、但不在预设列表里的值（例如某些厂商的 `xhigh`）会直接以**自定义输入框**
  *    回显，不会"显示成空白、一保存就被悄悄改掉"；
  *  · 下面一行显示隔离 DSH 的 settings.yaml 里**现在实际生效**的档位，方便核对。 */
-const EFFORT_PRESETS: Array<{ id: string; hint?: string }> = [
+const EFFORT_PRESETS: Array<{ id: string; hint: string }> = [
   { id: 'off', hint: '关闭思考' },
-  { id: 'none', hint: '同 off' },
-  { id: 'minimal', hint: '最低' },
+  { id: 'none', hint: '同「关闭思考」' },
+  { id: 'minimal', hint: '最低（想得最少）' },
   { id: 'low', hint: '快但粗略' },
   { id: 'medium', hint: '平衡' },
   { id: 'high', hint: '仔细但慢' },
   { id: 'xhigh', hint: '更高（部分服务商不支持）' },
   { id: 'max', hint: '最高（部分服务商不支持）' },
 ];
+/** 档位 id → 中文名。认不出来的值（服务商自定义档位）只能原样显示 —— 那是数据不是键名。 */
+function effortLabel(id: string) {
+  return EFFORT_PRESETS.find((p) => p.id === id)?.hint ?? id;
+}
 function EffortField({ path, val, ch, renderLabel }: {
   path: string; val: string;
   ch: (p: string) => (v: any) => void;
@@ -1727,7 +1922,7 @@ function EffortField({ path, val, ch, renderLabel }: {
   const cur = String(val ?? '');
   const isCustom = custom || (cur !== '' && !presetIds.includes(cur));
   const dshVal = String(DSH_EFFECTIVE.reasoningEffort ?? '');
-  const hint = dshVal ? `DSH 当前生效：${dshVal}` : 'DSH 当前未写死档位（用服务商默认）';
+  const hint = dshVal ? `DSH 当前生效：${effortLabel(dshVal)}` : 'DSH 当前未写死档位（用服务商默认）';
   return (
     <label className="field-row">
       {renderLabel()}
@@ -1742,7 +1937,7 @@ function EffortField({ path, val, ch, renderLabel }: {
           <select className="select" value={cur}
             onChange={(e) => { if (e.target.value === '__custom__') setCustom(true); else ch(path)(e.target.value); }}>
             <option value="">自动探测（跟随 DSH / 服务商默认）</option>
-            {EFFORT_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.id}{p.hint ? `（${p.hint}）` : ''}</option>)}
+            {EFFORT_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.hint}</option>)}
             <option value="__custom__">自定义…（手输档位 id）</option>
           </select>
         )}
@@ -1796,6 +1991,22 @@ function ModelField({ path, val, ch, renderLabel, cfg, vision }: {
   );
 }
 
+/** 【2026-09-18】标签表里没登记的键，自动生成一条说明：写清**桥里的键名**、类型、当前值。
+ *  这样即使配置里冒出一个全新键，界面上也不会出现"顶着英文名的无名字段"。 */
+function unnamedHelp(path: string, val: any): string {
+  const kind = typeof val === 'boolean' ? '开关（true = 开，false = 关）'
+    : typeof val === 'number' ? '数字'
+      : Array.isArray(val) ? '列表（每行一项）'
+        : typeof val === 'string' ? '文本'
+          : '一组设置（下面那一组就是它的子项）';
+  const shown = Array.isArray(val) ? `共 ${val.length} 项`
+    : (val && typeof val === 'object') ? '见下方子项'
+      : String(val);
+  return `这一项是 config.json 里存在的设置，但界面还没给它登记中文名，字段名暂时显示成占位文字。\n`
+    + `桥里的键名：${path}\n类型：${kind}\n当前值：${shown}\n`
+    + `改它之前建议先看「说明文档 · 每一项功能与配置」，或切到「JSON 进阶」页找同名的键。`;
+}
+
 function Field({ path, val, label, ch, onHelp, cfg }: {
   path: string; val: any; label: string;
   ch: (p: string) => (v: any) => void;
@@ -1806,8 +2017,11 @@ function Field({ path, val, label, ch, onHelp, cfg }: {
   // 切服务商时给的提示（"模型列表跟着换了"）
   const [autoMsg, setAutoMsg] = useState('');
   const last = path.split('.').pop() || '';
-  const labelText = LABEL[path] ?? LABEL[last] ?? label;
-  const helpText = HELP[path] ?? HELP[last];
+  const registered = LABEL[path] ?? LABEL[last];
+  const labelText = registered ?? label;              // label 已由 pretty() 兜底成中文占位
+  // 连中文标签都没登记的键：自动配一条「这是哪个键」的最小说明，
+  // 保证界面上不会出现一个查不到出处、还顶着英文名的字段。
+  const helpText = HELP[path] ?? HELP[last] ?? (registered ? undefined : unnamedHelp(path, val));
   const tipText = TIP[path] ?? TIP[last];
   const helpBtn = helpText ? (
     <button type="button" className="icon-btn help-dot" title="点击查看说明"
@@ -1927,7 +2141,7 @@ function Field({ path, val, label, ch, onHelp, cfg }: {
       <div className="field-row full nested">
         {renderLabel()}
         <div className="cfg-fields">
-          {Object.keys(val).map((k) => <Field key={path + '.' + k} path={path + '.' + k} val={val[k]} label={pretty(k)} ch={ch} onHelp={onHelp} cfg={cfg} />)}
+          {Object.keys(val).filter((k) => !isCommentKey(k, val[k])).map((k) => <Field key={path + '.' + k} path={path + '.' + k} val={val[k]} label={pretty(k)} ch={ch} onHelp={onHelp} cfg={cfg} />)}
         </div>
       </div>
     );

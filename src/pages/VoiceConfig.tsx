@@ -48,6 +48,14 @@ interface Props { onBack: () => void }
 
 const SAMPLE_TEXT = '你好呀，我是月亮，这是音色试听。';
 const ROLE_ORDER = ['tts', 'design', 'clone', 'asr'] as const;
+/** 【2026-09-18】四类模型的角色 id（tts / design / clone / asr）的中文名。
+ *  桥返回的 roles[].label 正常都有；万一旧桥没带 label，这里兜底 —— 否则界面上会直接显示
+ *  英文角色 id（tools/audit-ui-labels.mjs 会检查这张表必须覆盖 ROLE_ORDER 里的全部 id）。 */
+const ROLE_LABEL: Record<string, string> = {
+  tts: '语音合成', design: '音色设计', clone: '音色复刻', asr: '语音识别',
+};
+/** 角色 id → 界面显示名（桥给的 label 优先，其次本地兜底，最后才回落到原 id） */
+const roleName = (role: string, label?: string) => label || ROLE_LABEL[role] || role;
 const ROLE_HINT: Record<string, string> = {
   tts: '用官方内置音色说话（默认走这个）',
   design: '用一段文字描述“变”出一个音色，不用样本',
@@ -338,7 +346,7 @@ export default function VoiceConfig({ onBack }: Props) {
                   <select className="input" value={asrLanguage} onChange={(e) => setAsrLanguage(e.target.value)}>
                     <option value="auto">自动判断</option>
                     <option value="zh">中文</option>
-                    <option value="en">English</option>
+                    <option value="en">英文</option>
                   </select>
                 </label>
                 <label className="switch-row">
@@ -424,7 +432,7 @@ export default function VoiceConfig({ onBack }: Props) {
                 const followsTts = role !== 'tts';
                 return (
                   <div key={role} className="lrn-block" style={{ marginBottom: 12 }}>
-                    <div className="lrn-block-title">{meta?.label ?? role}　<span style={{ fontWeight: 400, color: 'var(--nc-foreground-400)' }}>{ROLE_HINT[role]}</span></div>
+                    <div className="lrn-block-title">{roleName(role, meta?.label)}　<span style={{ fontWeight: 400, color: 'var(--nc-foreground-400)' }}>{ROLE_HINT[role]}</span></div>
                     <div className="cfg-fields">
                       <label className="field-row">
                         <span className="f-label">请求地址</span>
@@ -434,7 +442,7 @@ export default function VoiceConfig({ onBack }: Props) {
                           onChange={(e) => setModels({ ...models, [role]: { ...rc, baseUrl: e.target.value } })} />
                       </label>
                       <label className="field-row">
-                        <span className="f-label">API Key</span>
+                        <span className="f-label">接口密钥</span>
                         <input className="input" type="password" autoComplete="new-password"
                           placeholder={saved?.apiKeySet
                             ? `已设置：${saved.apiKeyMasked}（留空=不改）`
@@ -464,7 +472,7 @@ export default function VoiceConfig({ onBack }: Props) {
                             try {
                               const r = await api<any>('/voice/config', { method: 'PUT', body: JSON.stringify({ enabled, clearKeys: [role] }) });
                               if (r?.ok !== true) { setMsg(`清空失败：${pickErr(r)}`); return; }
-                              applyCfg(r); setMsg(`已清空「${meta?.label ?? role}」的密钥`);
+                              applyCfg(r); setMsg(`已清空「${roleName(role, meta?.label)}」的密钥`);
                             } catch (e: any) { setMsg(`清空失败：${pickErr(e)}`); }
                             finally { setBusy(null); }
                           }}>

@@ -92,7 +92,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
                   <div className="field-hint">隔离 DSH Web 端口，默认 10721（桥与一键启动均按此连接；改完要重启 DSH 与桥）。</div>
                 </div>
                 <div className="form-group">
-                  <label className="label">profile（启动配置档）</label>
+                  <label className="label">启动配置档（DSH 的 profile）</label>
                   <select className="input" value={dsh.profile === 'web' ? 'web' : 'web'} onChange={(e) => setDsh({ ...dsh, profile: e.target.value })}>
                     <option value="web">web（标准：官方 DSH Web 界面 + 插件，默认）</option>
                   </select>
@@ -100,11 +100,11 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
                 </div>
               </div>
               <div className="form-group">
-                <label className="label">dsh CLI 路径</label>
+                <label className="label">DSH 命令行路径</label>
                 <input className="input" value={dsh.dshCli} onChange={(e) => setDsh({ ...dsh, dshCli: e.target.value })} />
               </div>
               <div className="form-group">
-                <label className="label">隔离 home（DSH_HOME）</label>
+                <label className="label">隔离主目录（DSH_HOME）</label>
                 <input className="input" value={dsh.isolatedHome} onChange={(e) => setDsh({ ...dsh, isolatedHome: e.target.value })} />
               </div>
             </>
@@ -128,7 +128,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
                     <input className="input" value={n(cmdCfg.quickLogin)} placeholder="如 10001（留空自动探测 / 二维码登录）" onChange={(e) => setCmdCfg({ ...cmdCfg, quickLogin: e.target.value || undefined })} />
                   </div>
                   <div className="form-group">
-                    <label className="label">WebUI 登录 token（登录 6099 网页用）</label>
+                    <label className="label">WebUI 登录令牌（登录 6099 网页用）</label>
                     <input className="input" value={n(cmdCfg.webuiToken, 'truefriend')} placeholder="默认 truefriend" onChange={(e) => setCmdCfg({ ...cmdCfg, webuiToken: e.target.value || 'truefriend' })} />
                   </div>
                 </>
@@ -186,7 +186,7 @@ function NapcatLauncherInfo({ quickLogin, webuiToken }: { quickLogin?: string; w
         <div><code>{info.qr}</code></div>
         <div><code>{info.quick}</code></div>
         <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)' }}>
-          快速登录账号：{info.quickLogin} ｜ WebUI token：{webuiToken || 'truefriend'} ｜ 管理器「启动 NapCat」也会走 VBS 隐藏拉起。
+          快速登录账号：{info.quickLogin} ｜ WebUI 登录令牌：{webuiToken || 'truefriend'} ｜ 管理器「启动 NapCat」也会走 VBS 隐藏拉起。
         </div>
       </div>
     </div>
