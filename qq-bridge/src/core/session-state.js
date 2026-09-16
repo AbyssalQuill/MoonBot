@@ -54,6 +54,29 @@ export function resetVisionModelApplications() { visionModelAppliedSessions.clea
  * 用一个共享 Set 代替互相 import，避免 ESM 循环依赖里的 TDZ 坑。
  */
 export const holdActiveKeys = new Set();
+
+/**
+ * 本回合**模型是否已经发出去过气泡**（2026-09-16 修「思考期间到的消息被塞进下一个唤醒」）。
+ * 用来区分两种"对方在打字"：
+ *   · 模型还在生成、这一轮一条都还没发 → 对话窗口里还没有气泡，"等 ta 打完再回"没有意义
+ *     （等下去只会把这条消息拖过这一轮）→ 立刻注入当前轮；
+ *   · 本回合已经发过气泡（正在连发/打字保持中）→ 才允许短暂延迟后在同一轮内补投。
+ * 三个判据都是"本回合"语义（turn/start 与 turn/end 都会清）：
+ *   · sendToolSucceededSessions —— 本回合 MCP 发送类工具至少成功一次（mux.js 在 tool/result 里 add）；
+ *   · pendingTurnOutbound       —— 本回合 AI 实际发出的文本（turn/start 清空）；
+ *   · st.lastAiReplyAt >= 本回合开始时刻 —— 真的发出过一条（console-server 各发送路径设置）。
+ * 判不准时返回 false（= 还没发过）——按新优先级，"没发过就立刻注入"是安全的一侧。
+ */
+export function turnHasBubble(key, sessionId, st) {
+  try {
+    if (sessionId && sendToolSucceededSessions.has(sessionId)) return true;
+    if (key && (pendingTurnOutbound.get(key) || []).length > 0) return true;
+    const turnStart = sessionId ? Number(TurnStartAt.get(sessionId)) || 0 : 0;
+    if (turnStart > 0 && Number(st?.lastAiReplyAt) >= turnStart) return true;
+  } catch (_) { /* 判据异常 → 当作"还没发过"（宁可立刻注入，也不拖到下一轮） */ }
+  return false;
+}
+
 export const messageMediaStore = new Map(); // key -> Map<messageId/seq, media[]>（一代）/default存会话内
 export const activityWakeCooldown = new Map(); // key -> ts（55 分钟内每个窗口起点只唤醒一次）
 // 静默回合队列（2026-09-06 单模式化后自 social.silentTurns 迁出）：sessionId -> {id,ts}[]。

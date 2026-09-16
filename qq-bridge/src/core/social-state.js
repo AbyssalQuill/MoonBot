@@ -9,11 +9,11 @@ import { log } from '../lib/log.js';
 import { canonicalKey } from '../lib/keys.js';
 import { KNOWN_AGENT_TOKENS } from '../lib/text-safe.js';
 import { sanitizeForwardId } from '../forward.js';
-import { collectors, TurnStartAt, pendingWakeKeys, promptQueues, MAX_MEDIA_COUNT, activeAiTurns, wakeConfigUpdatedKeys, markReadCalledKeys, wakeConfigMissCount, messageMediaStore, activeWaits, queued } from './session-state.js';
+import { collectors, TurnStartAt, pendingWakeKeys, promptQueues, MAX_MEDIA_COUNT, activeAiTurns, wakeConfigUpdatedKeys, markReadCalledKeys, wakeConfigMissCount, messageMediaStore, activeWaits, queued, turnHasBubble } from './session-state.js';
 import { state } from './config.js';
 import { isSessionAllowedInCurrentMode } from './mode.js';
 // 私聊「不抢话」的等待/插话决策（纯函数，见 typing-hold.js）
-import { typingHoldDecision, typingHoldText } from './typing-hold.js';
+import { typingHoldDecision, typingHoldText, STEER_IN_TURN_DEFER_MAX_MS } from './typing-hold.js';
 import { isDirectedAtAi } from '../lib/social-timeline.js';
 import { looksLikeUnfinished } from '../wait.js';
 import { readRoleState } from '../lib/role-access.js';
@@ -847,9 +847,23 @@ export function scheduleWake(key, reason) {
   if (!isReplayWake && key.startsWith('private:')) {
     const decision = typingHoldDecision({ typingUntil: st.peerTypingUntil, since: st.peerTypingSince, cfg: cfgRef });
     if (decision.wait) {
-      const waitMs = Math.min(decision.cfg.holdMaxMs, decision.remainMs + 500);
-      batchMs = Math.max(batchMs, waitMs);
-      log(`[typing] ${typingHoldText(decision, key)}；唤醒窗口 ${(batchMs / 1000).toFixed(1)}s`);
+      // 【2026-09-16 晚 修「思考期间到的消息被塞进下一个唤醒」】会话**正忙（有回合在跑）**时，
+      // 绝不许把唤醒窗口拉过这一轮：一旦拖到回合结束，投递就只能走"完整唤醒"= 下一个唤醒/下一轮。
+      // 线上实测 13:39:59 那条消息就是这么被拖出当前轮的（窗口被拉到 5.2s → 13:40:05 投递时
+      // `[steer] 跳过：没有正在跑的模型回合` → `唤醒 private:***（private）`）。
+      // 有回合在跑时窗口最多顺延 STEER_IN_TURN_DEFER_MAX_MS（在途注入那条路才是正解）；
+      // 模型本回合**一条都还没发出去**时一秒都不等（等下去只是把它拖出这一轮，见 wake-send.js 的 noReplyYet）。
+      const busyNow = isConversationBusy(key, st);
+      const hasBubble = turnHasBubble(key, state.sessions[key], st);
+      const remainMs = decision.remainMs + 500;
+      const waitMs = busyNow
+        ? (hasBubble ? Math.min(remainMs, STEER_IN_TURN_DEFER_MAX_MS) : 0)
+        : Math.min(decision.cfg.holdMaxMs, remainMs);
+      if (waitMs > 0) batchMs = Math.max(batchMs, waitMs);
+      log(`[typing] ${typingHoldText(decision, key)}${busyNow
+        ? `；会话正忙（有回合在跑）→ 唤醒窗口最多顺延 ${(STEER_IN_TURN_DEFER_MAX_MS / 1000).toFixed(1)}s，` +
+          (hasBubble ? '本回合已发过气泡，允许短暂延迟' : '本回合一条都还没发出去，一秒不等、立刻投给在途回合')
+        : ''}；唤醒窗口 ${(batchMs / 1000).toFixed(1)}s`);
     } else if (decision.breakIn) {
       log(`[typing] ${typingHoldText(decision, key)}`);
     }

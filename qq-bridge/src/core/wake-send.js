@@ -16,16 +16,19 @@ import { memeTurnHint } from './send-dice.js';
 // 【2026-09-16 打字窗合并】对方的"正在输入"状态也用来管**在途回合的注入**（不只是唤醒调度）：
 // 主人实测的碎片化就是从这里来的 —— 他连着发两条，桥在两次模型步边界各注入一次，
 // 他看到的对话窗口里就是两个独立的 [Mid-turn] 块（而不是合成一个 2 条的块）。
-import { typingHoldDecision, typingHoldText } from './typing-hold.js';
+// 【2026-09-16 晚 修「思考期间到的消息被塞进下一个唤醒」】判据换成 midTurnSteerGate：
+// 只有"对方在连发 + 本回合已经发过气泡"才允许**短暂**延迟，且必须给补投时刻（同一轮内补投）；
+// "模型还在生成、这一轮一条都还没发出去"一律立刻注入当前轮。
+import { midTurnSteerGate, midTurnSteerText, STEER_IN_TURN_DEFER_MAX_MS } from './typing-hold.js';
 import {
   getSocialState, saveSocialState, social, seenForwardIds,
   cancelReplyCheck, setupSleepTimer, collectFreshWakeMedia, isInSleepWindow,
-  formatParticipation, isConversationBusy,
+  formatParticipation, isConversationBusy, scheduleWake,
 } from './social-state.js';
 import { buildCrossChatBlock } from './crosschat.js';
 import { activityStatusLine } from './activity.js';
 import { armPendingWakeLease, disarmPendingWakeLease } from './turn-guard.js';
-import { wakeConfigMissCount, reverse, pendingWakeKeys, TurnStartAt, collectors, agentRunningSessions, holdActiveKeys } from './session-state.js';
+import { wakeConfigMissCount, reverse, pendingWakeKeys, TurnStartAt, collectors, agentRunningSessions, holdActiveKeys, turnHasBubble } from './session-state.js';
 import { KNOWN_AGENT_TOKENS } from '../lib/text-safe.js';
 import { sanitizeForwardId } from '../forward.js';
 import fs from 'node:fs';
@@ -449,12 +452,92 @@ function deferSteerBatch(st, key, batch) {
  */
 export function clearSteerPending(key, why = 'turn/end') {
   if (!key) return;
+  // 【2026-09-16】回合边界也是"同一轮内补投"的边界：回合都没了，再补投只会走 runningTurn 守卫
+  //   （那一支自己会打"只能留到下一轮"），不如在这里就收掉，别留一个空转的定时器。
+  cancelInTurnRedeliver(key, `回合边界（${why}）`);
   if (pendingSteerSince.delete(key)) {
     log(`[steer] ${key} 回合边界（${why}）时仍有"攒着未投"的批次 → 记账已收（消息仍在未读，交给补发/看门狗）`);
   }
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── 【2026-09-16 晚 修「思考期间到的消息被塞进下一个唤醒」】三条路径 + 同一轮内补投 ─────────────
+// 现场（bridge.log 14:05:39 / 13:39:59）：消息在模型**还在跑这一步**时到达 → 打字闸门判"等" →
+// 在途注入被推迟 → 等到那一轮跑完 → 投递时"没有正在跑的模型回合" → 落回完整唤醒
+// （日志原文：`唤醒 private:***（private）` + `首次唤醒，注入完整 prompt`），也就是"被塞进了下一个唤醒"。
+// 两个缺口都在这里补：
+//   ① 推迟信号没传到调用方（原来非 force 路径返回 false，被读成"塞不进去"→ 落回完整唤醒）；
+//   ② 推迟之后**没有同一轮内的补投路径**（只有 turn-hold 的保持循环/步边界会重试，其余一律等下一次唤醒）。
+/** key -> { timer, attempt }：同一轮内补投的定时器（打字闸门判"短暂延迟"时排一次） */
+const inTurnRedeliverTimers = new Map();
+const IN_TURN_REDELIVER_MAX_ATTEMPTS = 3;   // 补投最多试几次（每次都会被"周期闸"往后推一点，见下）
+
+/** 取消某个会话待办的"同一轮内补投"（已交付 / 回合结束 / 会话重置时都要清）。 */
+export function cancelInTurnRedeliver(key, why = '') {
+  const entry = inTurnRedeliverTimers.get(key);
+  if (!entry) return false;
+  clearTimeout(entry.timer);
+  inTurnRedeliverTimers.delete(key);
+  if (why) log(`[steer] ${key} 取消待办的"同一轮内补投"（${why}）`);
+  return true;
+}
+
+/**
+ * 排一次"同一轮内补投"：打字窗口结束（或短暂延迟上限到点、或本周期闸放开）时再试一次 steer。
+ * 补投失败（回合已结束 / 注入通道返回失败 / 试满次数仍没落地）时**绝不假装成功**：
+ * 留一行"只能留到下一轮（原因）"，消息仍在 unread 里（没标已给），并把唤醒重排一次 —— 任何情况下都不丢消息。
+ */
+function scheduleInTurnRedeliver(key, reason, retryAtMs, attempt = 0) {
+  if (!key) return false;
+  if (inTurnRedeliverTimers.has(key)) return false;   // 同一个打字窗只排一次
+  // 生效时刻 = max(打字窗结束/延迟上限, 本周期闸放开时刻)。周期闸（一次连发只注入一次）没过就投，
+  // 只会被它挡回来（返回 true 但什么都没投）—— 那正是"看起来补投成功、其实没落地"的老坑。
+  const cycAt = Number(steerCycleAt.get(key)) || 0;
+  const cycWindow = holdActiveKeys.has(key) ? STEER_CYCLE_MS : STEER_CYCLE_SHORT_MS;
+  const fireAt = Math.max(Number(retryAtMs) || 0, cycAt ? cycAt + cycWindow : 0);
+  const delay = Math.max(150, Math.min(STEER_IN_TURN_DEFER_MAX_MS + 500, fireAt - Date.now()));
+  const timer = setTimeout(() => {
+    inTurnRedeliverTimers.delete(key);
+    void (async () => {
+      let r = false;
+      try {
+        // allowDefer:false —— 这一投是"打字窗已经结束"的那一投，绝不再被同一个闸门挡回去；
+        // skipHold/noCollect —— 这是**补投**，不是"半路一条一条塞"：批次已经在上面算好了
+        //（打字期间到的消息全在里面），再攒步边界/再等收集窗只会又一次把它拖过去。
+        r = await steerIntoRunningTurn(key, `${reason}:deferRedeliver`, { allowDefer: false, skipHold: true, noCollect: true });
+      } catch (error) {
+        log(`[steer] ${key} 同一轮补投异常：${error?.message ?? error}`);
+      }
+      // ⚠️ `true` 有三种含义（真投出去了 / 本回合已经给过它 / 被周期闸又攒住了），
+      //   必须像 turn-hold 的保持循环那样**验证真的落地了**才算成功，绝不谎报。
+      const stillPending = r === true ? collectMidTurnBatch(getSocialState(key)).length : -1;
+      if (r === true && stillPending === 0) {
+        log(`[steer] ${key} 短暂延迟后注入完成：打字窗结束，这批仍在**同一轮内**注入（不是下一轮）`);
+        return;
+      }
+      const sidNow = state.sessions[key] ? String(state.sessions[key]) : '';
+      const running = !!sidNow && (agentRunningSessions.has(sidNow) || TurnStartAt.has(sidNow) || collectors.has(sidNow));
+      if (r === true && running && attempt + 1 < IN_TURN_REDELIVER_MAX_ATTEMPTS) {
+        // 被周期闸攒住了（本步已经注入过一次）→ 原地再等一个周期，仍在同一轮内，不算失败
+        const nextAt = (Number(steerCycleAt.get(key)) || Date.now()) + (holdActiveKeys.has(key) ? STEER_CYCLE_MS : STEER_CYCLE_SHORT_MS);
+        log(`[steer] ${key} 短暂延迟后注入：这批还没落地（本周期已注入过），原地再等 ${Math.round((nextAt - Date.now()) / 1000)}s 补投（第 ${attempt + 2}/${IN_TURN_REDELIVER_MAX_ATTEMPTS} 次，仍在同一轮内）`);
+        scheduleInTurnRedeliver(key, reason, nextAt, attempt + 1);
+        return;
+      }
+      const why = r === true
+        ? '本周期一直被攒住、这批始终没落地'
+        : (running ? '注入通道返回失败' : '这一轮已经跑完');
+      log(`[steer] ${key} 只能留到下一轮（原因：延后补投未成功、${why}）→ 消息仍在未读，重排一次唤醒兜底`);
+      try { scheduleWake(key, 'typingDeferFallback'); } catch (error) {
+        log(`[steer] ${key} 重排唤醒失败：${error?.message ?? error}（投递看门狗仍会兜底）`);
+      }
+    })();
+  }, delay);
+  timer.unref?.();
+  inTurnRedeliverTimers.set(key, { timer, attempt });
+  return true;
 }
 
 export async function steerIntoRunningTurn(key, reason, opts = {}) {
@@ -539,7 +622,13 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   // 核心守卫：**必须真的有一个模型回合在跑**才允许 steer。
   // "忙"的其它成因（合并窗/投递在途/桥内队列）都不是"回合在跑"，那时 steer 会导致模型收尾不回复 → 吞消息。
   const runningTurn = Boolean(sessionId && (agentRunningSessions.has(sessionId) || TurnStartAt.has(sessionId) || collectors.has(sessionId)));
-  if (!runningTurn) { log(`[steer] 跳过 ${key}：没有正在跑的模型回合（DSH 权威状态 / TurnStartAt / collectors 都说没在跑，"忙"只是合并窗或投递在途）`); return false; }
+  if (!runningTurn) {
+    // 【2026-09-16 三条路径之第三条】**只能留到下一轮**：这一刻确实没有可注入的回合。
+    // 消息**留在 unread 里**（没标已给、不进 turnSteeredSeqs），由唤醒/投递看门狗接管 —— 绝不丢。
+    cancelInTurnRedeliver(key, '回合已经不在跑');   // 已排的同一轮补投没意义了，别让它空转
+    log(`[steer] ${key} 只能留到下一轮（原因：没有正在跑的模型回合 —— DSH 权威状态 / TurnStartAt / collectors 都说没在跑，"忙"只是合并窗或投递在途）→ 这 ${(Array.isArray(st.unread) ? st.unread.length : 0)} 条仍在未读，交给唤醒/看门狗，绝不丢`);
+    return false;
+  }
   if (steerInFlight.get(key)) {
     if (!immediateMode) { log(`[steer] 跳过 ${key}：上一次注入还在飞`); return false; }
     // 即时注入模式下**排队等**，而不是直接失败。实测 21:50:23：保持循环看到 in-flight 就放弃
@@ -584,6 +673,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     // 教训与 §4.7h.2 同源：**一个 boolean 承担不了三种语义**（塞成功 / 已经在手里 / 真失败），
     // 调用方一旦分不清，就会把"已经给过"当成"没给过"——正是 §4.13.3 那条"改这类逻辑先 grep 出所有调用点"。
     log(`[steer] ${key}：这 ${unreadAll.length} 条本回合**已经给过它了**（唤醒已展示 ${alreadyShown.size} 条 / 已注入 ${alreadySteered.size} 条）—— 无需再投，按「已交付」返回 true（防重复投递 → 防重复回复）`);
+    cancelInTurnRedeliver(key);   // 已在模型手里，同一轮内的补投不必再排
     return true;
   }
   // ③-b 【2026-09-16 打字窗合并（主人要求）】"对方还在打字"时**一次都不投**：把这批继续攒着，
@@ -593,25 +683,40 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   // 注入走的是本函数。主人 09-15 实测：他在同一个回合里连发 5 条（15:54:14 / 15:56:03 / 15:56:50 /
   // 15:57:06 / 15:57:46），桥在**每个模型步边界各注入一次** —— 对话窗口里就是 5 个独立的
   // `[Mid-turn] 1 new message(s)` 块，一条一条被处理；他要的是"打字过程里全部入队，最后合并成一次注入"。
-  // 判据与唤醒调度**共用同一份** typingHoldDecision（typing-hold.js），不会出现两套规则漂移：
-  //   · 对方没在打字 → 原行为（步边界发车 / 即时注入）不变；
-  //   · 对方在打字 → 攒着（消息仍在 unread 里、不进 turnSteeredSeqs，所以下个步边界/保持循环还会来取）；
-  //   · 到 holdMaxMs 上限或骰子命中 → breakIn，照旧投（绝不会因为对方打个没完而永远不回）。
-  if (!opts.noTypingGate) {
-    const gate = typingHoldDecision({
+  //
+  // 【2026-09-16 晚 收紧】原来的判据只看"对方在不在打字"，而 QQ 的输入事件不可靠，
+  // social-flow.js 会**用消息本身续上打字窗口**（refreshOnMessageMs，默认 5s）—— 于是**任何一条**消息
+  // 到达时它看着都像"正在输入"，连"模型还在生成、这一轮一条都还没发出去"也被判成"等"，
+  // 而 defer 之后没有同一轮内的补投路径（设计缺口）→ 消息被拖过这一轮 → 下一个唤醒。
+  // 现在换成 midTurnSteerGate（typing-hold.js），三条路径泾渭分明：
+  //   · 模型还在生成、本回合一条都还没发出去（noReplyYet）→ **注入当前轮**，不等；
+  //   · 本回合已经发过气泡 + 对方确实在连发 → **短暂延迟后注入**（≤ STEER_IN_TURN_DEFER_MAX_MS），
+  //     并排一次同一轮内补投（scheduleInTurnRedeliver），打字窗一结束就投；
+  //   · 没有正在跑的回合 / 注入通道失败 → **只能留到下一轮**（由下面 runningTurn 守卫与补投失败分支各打一行）。
+  let gateReason = '';   // 打字闸门的结论（no-reply-yet 时下面的"攒到步边界"要让路，见该处注释）
+  if (!opts.noTypingGate && opts.allowDefer !== false) {
+    const gate = midTurnSteerGate({
       typingUntil: Number(st.peerTypingUntil) || 0,
       // "已等多久"按**最早这条待交付消息的到达时刻**算，跟唤醒调度同一口径
       since: Number(unread[0]?.time) || Date.now(),
       now: Date.now(),
-      cfg: cfgRef?.social?.typing,
+      cfg: cfgRef,   // ⚠️ 必须传**完整配置**（typingCfg 读的是 cfg.social.typing）——
+                     //    原来这里传的是 cfgRef?.social?.typing，typingCfg 于是拿到 undefined，
+                     //    一路回落到 TYPING_DEFAULTS：管理端配的 social.typing.* 在**在途注入**这条路上
+                     //    从来没生效过（日志里恒是"上限 12s / 骰子 0.15"就是这个原因）。
+      // 模型还在生成、本回合**一条都还没发出去** → 不等（对话窗口里都还没有气泡，"不抢话"无从谈起）
+      noReplyYet: !turnHasBubble(key, sessionId, st),
     });
-    if (gate.wait) {
-      log(`[steer] ${key} ${typingHoldText(gate)}：这 ${unread.length} 条继续入队攒着，等 ta 打完**一次**注入（不半路一条一条塞）`);
-      // 保持托管（turn-hold）会话：回 'typing-defer' 让保持循环"继续持有、别关回合"；
-      // 非保持会话：回 false，交给调用方按正常唤醒流程（那条路同样受打字判定约束）。
-      return forced ? 'typing-defer' : false;
+    gateReason = gate.reason;
+    if (gate.action === 'defer') {
+      log(`[steer] ${key} ${midTurnSteerText(gate)}：这 ${unread.length} 条不半路一条一条塞`);
+      // 同一轮内补投：到"打字窗结束/短暂延迟上限"再试一次（非保持会话、busy 分支也走这里）
+      scheduleInTurnRedeliver(key, reason, gate.retryAtMs);
+      // ⚠️ 返回**明确的推迟信号**（不只是 force 路径）：返回 false 会被调用方读成"塞不进去" →
+      //   落回完整唤醒流程。线上实测 14:05:40 就是这么把一条在途消息投成"首次唤醒，注入完整 prompt"的。
+      return 'typing-defer';
     }
-    if (gate.breakIn) log(`[steer] ${key} ${typingHoldText(gate)}（这 ${unread.length} 条照常投）`);
+    log(`[steer] ${key} ${midTurnSteerText(gate)}：这 ${unread.length} 条照常投`);
   }
   // ③ 【2026-09-15 合并注入】保持（turn-hold）托管的会话：**不在这里即时注入**。
   //    理由与不变量见文件顶部 STEER_PENDING_MAX_MS 那段：同一个 step 里注入 N 次 = 模型在同一次思考里
@@ -622,7 +727,12 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   //      · turn-hold.js:flushStepBatch()（mux 观测到 `step/end` = 模型每一步的末尾）。
   //    ⚠️ 只有**保持托管**的会话走这条路：非保持会话没有步边界注入器，攒着只会把答复拖到投递看门狗，
   //       所以那边保持原行为（即时注入 + 时间周期闸）不动。
-  if (!forced && holdEligible) {
+  //    ⚠️⚠️【2026-09-16 晚】**"模型还在生成、这一轮一条都还没发出去"时不走攒批**（gateReason==='no-reply-yet'）：
+  //       主人等着回复、对话窗口里一条气泡都还没有，这时候"攒到步边界"没有合并价值（要合并的连发由下面的
+  //       收集窗 + 周期闸兜住），却把送达时刻押在"步边界一定会来"上 —— 线上实测 14:46:56 那条消息
+  //       撞上一次**28 秒没来步边界**的回合，靠 20s 兜底才投出去（主人看到的就是"不回我"）。
+  //       直接走即时注入：送达时刻与"步边界发车"完全相同（claim 在下一个 step 开端），但不再有这个尾巴。
+  if (!forced && holdEligible && !opts.skipHold && gateReason !== 'no-reply-yet') {
     // 防饥饿兜底（两道，任一成立就不再攒）：
     //   · 已经跨过一个步边界还没被投出去（说明步边界注入器没生效）→ 立刻自己投；
     //   · 攒的时间超过 STEER_PENDING_MAX_MS（事件流/插件整体失效）→ 立刻自己投。
@@ -741,6 +851,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
       //     保护起来（console-server.js:1604），已投出去的若继续留着 = 它们永远清不掉 →
       //     下一轮又被当新未读展示 → 重复回复。
       pendingSteerSince.delete(key);
+      cancelInTurnRedeliver(key);   // 这批已经在模型手里了，同一轮内的补投不用再排
       try {
         const done = new Set(unreadToSend.map((m) => Number(m.seq)).filter((n) => Number.isFinite(n) && n > 0));
         const prevDeferred = Array.isArray(st._steerDeferredSeqs) ? st._steerDeferredSeqs : [];
@@ -966,6 +1077,13 @@ export async function sendWakePrompt(key, reason) {
       steeredNow = await steerIntoRunningTurn(key, reason);
     } catch (error) {
       log(`[steer] ${key} 即时注入抛出异常：${error?.message ?? error}（退回正常唤醒流程）`);
+    }
+    if (steeredNow === 'typing-defer') {
+      // 【2026-09-16 修「思考期间到的消息被塞进下一个唤醒」】明确的"短暂延迟后注入"：
+      // 已经在同一轮内排了补投（打字窗一结束就投），**绝不能**落回完整唤醒流程 ——
+      // 那正是这条 bug 的现场（线上 14:05:40：一条在途消息被投成 `首次唤醒，注入完整 prompt`）。
+      log(`[default] ${key} 短暂延迟后注入（原因：对方正在连发、本回合已发过气泡）：已在同一轮内排了补投，不落回完整唤醒 ${key}（${reason}）`);
+      return;
     }
     if (steeredNow) {
       // 【2026-09-15 合并注入】"true" 现在有三种含义，措辞里都要能看出来，否则排查时分不清：

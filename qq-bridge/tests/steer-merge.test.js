@@ -196,6 +196,11 @@ cfg.social.turnHold.enabled = true;
 stateMod.holdActiveKeys.add(KEY);
 // 骰子写成 0（绝不插话），这样"等"这一支是确定的，不受随机影响
 cfg.social.typing = { enabled: true, holdMaxMs: 12000, refreshOnMessageMs: 5000, breakProbability: 0 };
+// 【2026-09-16 晚 语义收紧（修「思考期间到的消息被塞进下一个唤醒」）】"允许短暂延迟"多了一条前提：
+// **本回合已经发出去过气泡**（= 真的在连发/打字保持中）。模型还在生成、这一轮一条都还没发时，
+// 一律改成"注入当前轮"（对话窗口里都还没有气泡，"不抢话"无从谈起）—— 那一条覆盖在新测试
+// tests/mid-turn-steer.test.js 里。这里按 mux 线上记法补上"本回合已发过气泡"这个前提。
+stateMod.sendToolSucceededSessions.add(SID);
 wakeMod.markSteerCycleStart(KEY, 'step/end');
 const ty1 = push('打字那条：第一条');
 const ty2 = push('打字那条：第二条');
