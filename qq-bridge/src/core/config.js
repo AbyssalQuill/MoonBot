@@ -186,10 +186,25 @@ export function loadConfig() {
         maxLength: 500,
         notifyOwnerOnError: false
       },
+      // 【2026-09-16】上下文与轮换的两个"窗口"旋钮：
+      //   contextWindow = 新会话**首轮**往提示里贴多少条历史；resetWindow = **轮换后首轮**贴多少条。
+      // 两者语义不同（一个是历史窗口大小，一个是"只此一次"的加长窗口），别当成重复项；
+      // 读取处见 wake-send.js：ctxBase = max(6, contextWindow||12)、resetBase = max(ctxBase, resetWindow||24)、
+      // 实际条数 = min(60, resetBase)（轮换首轮）/ min(24, ctxBase)（普通首轮）。
+      // 这里补上缺省值只是为了让"没写过这两个键的旧配置"也有一份明确的默认，
+      // 读取处本来就有 || 兜底，所以改不改行为一致（注意外层 `...(file.social ?? {})` 是浅合并）。
       context: {
-        recentLimit: 100,
-        unreadLimit: 30,
-        contextWindow: 20
+        recentLimit: 100,          // 每会话内存里保留的最近消息条数（超出丢最旧；历史都已落 SQLite，可查）
+        unreadLimit: 30,           // 未读队列上限（超出丢最旧）
+        contextWindow: 20,         // 新会话首轮贴给模型的最近消息条数（普通首轮上限 24）
+        resetWindow: 24            // 轮换后首轮贴给模型的条数（只此一次；取 max(contextWindow, 它)，上限 60）
+      },
+      // 自动轮换（会话上下文换新）：wake-send.js 里 rotateThreshold / prewarmAhead 读的就是这两个键，
+      // 缺省分别是 12 / 3。以前这里没有默认块，全新安装的 config.json 里也就没有这两个键 ——
+      // 管理端「上下文与轮换」卡只画配置里存在的键，于是新人**看不到轮换旋钮**（同一类"旋钮没接线"）。
+      autoReset: {
+        wakeThreshold: 12,         // 累计多少真实来回后换新会话（最小 5）
+        prewarmAhead: 3            // 到阈值前提前几轮预建并预热下一代会话（最小 1）
       },
       ...(file.social ?? {})
     }

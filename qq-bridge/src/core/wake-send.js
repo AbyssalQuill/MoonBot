@@ -1030,7 +1030,14 @@ export async function sendWakePrompt(key, reason) {
   // 只在“用户主动触发”的唤醒（私聊/@/提问/名字/拍一拍/关键词/引导）时执行——
   // 回复检查/概率/主动冒泡等内部唤醒不轮换，避免刚回复完就把上下文清掉、新会话重复回复同一批消息。
   const rotateThreshold = Math.max(5, Number(cfgRef.social?.autoReset?.wakeThreshold) || 12);
-  const prewarmAhead = Math.max(1, Number(cfgRef.social?.autoReset?.prewarmAhead) ?? 3);
+  // 【2026-09-16 修「没在 config.json 里显式写 prewarmAhead，预建预热就永远不触发」】
+  // 原来是 `Math.max(1, Number(...prewarmAhead) ?? 3)`：键不存在时 Number(undefined) = NaN，
+  // 而 `NaN ?? 3` 仍是 NaN（?? 只挡 null/undefined），Math.max(1, NaN) = NaN ——
+  // 于是下面 `count >= rotateThreshold - NaN` 恒为 false，「提前几轮预建新会话」这个旋钮
+  // 在未显式配置时**根本没通电**（管理端标签也是这次一并改准的）。缺省/非法值现在一律回落到 3，
+  // 显式填 0 仍按旧的 Math.max(1, …) 语义取 1。
+  const prewarmRaw = Number(cfgRef.social?.autoReset?.prewarmAhead);
+  const prewarmAhead = Number.isFinite(prewarmRaw) ? Math.max(1, Math.round(prewarmRaw)) : 3;
   const isUserTriggeredWake = /^(private|atMention|question|speaker|nameMention|poke|keyword|bootstrap)$/.test(String(reason).split(':')[0]);
   if (isUserTriggeredWake) {
     const sidNow = state.sessions[key];

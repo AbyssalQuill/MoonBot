@@ -1291,12 +1291,19 @@ export function startConsoleServer() {
           if (merged.feedback.notifyOwnerOnError !== undefined) merged.feedback.notifyOwnerOnError = merged.feedback.notifyOwnerOnError === true;
         }
         // context：数值归一化
+        // 【2026-09-16】加入 resetWindow（轮换后首轮的注入窗口，见 wake-send.js 的 resetBase）：
+        // 它和其它三个键一样是正整数，漏在名单外会让这条接口写进来的值不被归一化
+        //（例如字符串 "24" 也能落盘，前端再读回来就按文本渲染）。
+        // 同时把"非数值时的兜底"从统一写死的 20 改成**与读取处一致的每键缺省**
+        //（recentLimit 100 / unreadLimit 30 / contextWindow 20 / resetWindow 24）——
+        // 以前 recentLimit 传个非数值会被兜成 20，比桥读取处的 100 小一个量级。
         if (body.context && typeof body.context === 'object') {
+          const CONTEXT_DEFAULT = { recentLimit: 100, unreadLimit: 30, contextWindow: 20, resetWindow: 24 };
           merged.context = { ...(current.context ?? {}), ...body.context };
-          for (const k of ['recentLimit', 'unreadLimit', 'contextWindow']) {
+          for (const k of Object.keys(CONTEXT_DEFAULT)) {
             if (merged.context[k] !== undefined) {
               const n = Number(merged.context[k]);
-              merged.context[k] = Number.isFinite(n) ? Math.max(1, Math.round(n)) : current.context?.[k] ?? 20;
+              merged.context[k] = Number.isFinite(n) ? Math.max(1, Math.round(n)) : current.context?.[k] ?? CONTEXT_DEFAULT[k];
             }
           }
         }

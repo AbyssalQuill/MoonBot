@@ -193,7 +193,8 @@
     "context": {
       "recentLimit": 100,
       "unreadLimit": 30,
-      "contextWindow": 16
+      "contextWindow": 16,
+      "resetWindow": 24
     },
     "autoReset": {
       "wakeThreshold": 12,

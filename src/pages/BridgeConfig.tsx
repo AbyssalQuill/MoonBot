@@ -82,15 +82,23 @@ const LABEL: Record<string, string> = {
   proactiveCheckMinMs: '检查下限', proactiveCheckMaxMs: '检查上限', idleWindowMs: '冷场判定', idleRetryProbability: '试探概率',
   idleRetryWaitMs: '试探等待', activeCheckMinMs: '活跃检查下限', activeCheckMaxMs: '活跃检查上限',
   activeReplyDelayMinMs: '回复延迟下限', activeReplyDelayMaxMs: '回复延迟上限', activeDurationEnabled: '活跃持续',
-  activeDurationMinMs: '活跃持续下限', activeDurationMaxMs: '活跃持续上限', contextWindow: '上下文窗口',
+  activeDurationMinMs: '活跃持续下限', activeDurationMaxMs: '活跃持续上限',
   triggerProbability: '触发概率',
   // 主动闲聊卡实际字段（v2 键名）
   checkIntervalMinMs: '群聊检查间隔下限', checkIntervalMaxMs: '群聊检查间隔上限',
   idleThresholdMs: '冷场判定时长', probability: '主动找话题概率',
   privateCheckIntervalMinMs: '私聊检查间隔下限', privateCheckIntervalMaxMs: '私聊检查间隔上限',
   privateProbability: '私聊主动概率',
-  // 上下文 / 轮换
-  recentLimit: '内存最近条数', unreadLimit: '未读上限', wakeThreshold: '唤醒轮换阈值', prewarmAhead: '提前预建预热',
+  // 上下文 / 轮换【2026-09-16 主人问「这个界面 resetWindow 是不是和唤醒轮换阈值一样的、重复了」】
+  //   ① 不是重复项：contextWindow/resetWindow 是「带多少条历史」，wakeThreshold/prewarmAhead 是「聊多少轮换新会话」。
+  //   ② 但它看着像重复：`resetWindow` 以前在 LABEL 里**没有条目**，pretty() 直接回落成原始英文键名
+  //      （见 BridgeConfig 的 pretty()），又和「上下文窗口」平铺在同一张卡里；配置里两个值又常常一样（都 24），
+  //      于是"同一个旋钮写了两遍"的观感完全是界面造成的。
+  //   ③ 现在标签本身就说明"它管什么、什么时候生效"，配合卡内分组（见 GroupCard 的 ① / ② / ③），
+  //      并逐个核对了实际读取点（wake-send.js / social-flow.js / console-server.js），不再名不副实：
+  recentLimit: '每会话内存保留条数', unreadLimit: '未读队列上限',
+  contextWindow: '首轮带入历史条数', resetWindow: '轮换后首轮带入条数',
+  wakeThreshold: '聊多少轮换新会话', prewarmAhead: '提前几轮预建新会话',
   // 表情包 / 等待
   stickerEnabled: '表情包', syncTtlMs: '同步缓存', maxListCount: '列表上限', includeInPrompt: '提示里附带',
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
@@ -195,11 +203,29 @@ const TOOL_MCP: Record<string, string> = {
   recommendedHint: '喂给模型的“潜水/唤醒行为规则”长文本；一般不建议新手改动。',
   activeProbability: '「活跃模式搭话概率」：把某个群/私聊**转成活跃**时用的随机搭话概率（默认 0.3 = 三成）。以前转活跃会沿用潜水那套 0.05（每 20 条才醒一次），看起来跟潜水没区别 —— 这个值就是用来区分两者的：调大=更活跃，调小=更省额度（配合「群每小时唤醒上限」兜底）。',
   preSleepWaitMs: '想潜水前先“静默观察”的窗口时长：窗口内若没人说话就可以安心睡。',
-  wakeThreshold: '同一大会话累计多少轮后自动归档并轮换到“预热的下一代会话”，防上下文膨胀。',
-  prewarmAhead: '到达轮换阈值前提前多少轮预建新会话并预热，让首轮命中缓存、不卡顿。',
-  contextWindow: '唤醒时带入的最近消息条数；越大越懂上下文，但更费 token。',
-  recentLimit: '内存里保留的最近消息条数（超出进 SQLite，仍可查）。',
-  unreadLimit: '未读队列上限。',
+  wakeThreshold: '「聊多少轮换新会话」：同一个会话累计到这么多轮，下一次唤醒就切到新的一代会话（旧会话归档，记忆文件保留、不丢记忆）。'
+    + '计入的只有真实来回：私聊消息 / 被 @ / 被提问 / 被喊名字 / 拍一拍 / 关键词这类**触发唤醒各算 1 轮**，'
+    + '`qq_wait_for_messages` 每取回一批新消息也算 1 轮；回复检查、主动冒泡这类内部唤醒**不计入**'
+    + '（计进去会导致一两小时内上下文被切十几次、机器人频繁失忆）。桥里最小 5，默认 12。'
+    + '它和「轮换后首轮带入条数」是两件事：这条是**换会话的时机**，那条是**换完之后第一轮看多少历史**。',
+  prewarmAhead: '「提前几轮预建新会话」：在到「聊多少轮换新会话」之前这么多轮，桥就把下一代会话建好并预热一次，'
+    + '到点直接切过去，第一轮不卡、还能命中提示缓存。填 1 = 只在最后一轮才建（最省，但轮换那一下稍慢）；'
+    + '填得和轮换阈值一样大 = 第一轮就建（没必要）。默认 3。'
+    + '⚠️ 这条以前在**没写进 config.json** 时是失效的（读取处 `Number(x) ?? 3` 在缺键时算出 NaN，预热分支永远不触发），已修。',
+  contextWindow: '「首轮带入历史条数」：一个新会话的**第一次**唤醒时，往提示里贴最近多少条聊天记录'
+    + '（每个会话只贴这一次，之后各轮只发一行哨兵，不再重贴）。下限 6、普通首轮**上限 24**——'
+    + '填 30 也只按 24 走；想让轮换后的第一轮看得更长，要同时调「轮换后首轮带入条数」。'
+    + '它决定"新会话开局知道多少上下文"，越大越懂但越贵（这段窗口之后每一步都会被重读计价）。桥里默认 12。',
+  resetWindow: '「轮换后首轮带入条数」：会话**轮换之后的第一轮**贴多少条历史，只此一次，之后回到上面那个条数。'
+    + '桥取 `max(首轮带入历史条数, 这个值)`，所以**填得比「首轮带入历史条数」小是完全没效果的**（不是坏了，是不会生效）；上限 60。'
+    + '它和「聊多少轮换新会话」不是同一个东西：这个是**历史窗口的大小**，那个是**轮换的时机**。'
+    + '只有轮换后的第一轮会读它（没轮换过的普通首轮不读这个值，填了也不影响）。桥里默认 24。',
+  recentLimit: '「每会话内存保留条数」：桥在内存里为每个会话留这么多条最近消息，新的进来就把最旧的挤掉。'
+    + '它只决定"桥手头留多少货"——真正贴进提示的条数由上面的「首轮带入历史条数」决定；'
+    + '历史消息本来每条都会落 SQLite，内存里挤掉的照样能用 `qq_get_recent_messages` / `qq_memory_search` 查到。'
+    + '调大更占内存（每个会话一份），一般不用动。桥里默认 100。',
+  unreadLimit: '「未读队列上限」：每个会话内存里最多排这么多条未读，超了丢**最旧**的（不是最新）。'
+    + '重启后从 SQLite 恢复未读时也按这个数取。它不改变"已读/未读"的判定，只限制排队长度。桥里默认 30。',
   mustReplyKeywords: '命中这些词时必须回应（每行一个）。',
   recommendedKeywords: '潜水模式下能把你唤醒的关键词（每行一个）。',
   // —— 等待：回复前的停顿（模拟真人节奏，别让机器人秒回）——
@@ -988,7 +1014,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
                   <li><b>允许/拒绝名单</b>：私聊与群的 QQ 列表，每行一个；拒绝名单优先。</li>
                   <li><b>唤醒 · 潜水 / 活跃</b>：机器人平时潜水，被 @/名字/关键词/提问/戳一戳 或概率触发才醒；可调潜水时长与唤醒概率。</li>
                   <li><b>主动闲聊</b>：冷场（没人说话超过 idleThresholdMs）后按概率主动找话题 / 主动私聊；分群聊与私聊两套间隔与概率。</li>
-                  <li><b>上下文与轮换</b>：单会话累计多少真实回合后归档轮换到新会话（默认 12，提前预热下一代避免首轮卡顿），防止上下文膨胀。</li>
+                  <li><b>上下文与轮换</b>：三组旋钮，各管一件事——①「首轮带入历史条数 / 轮换后首轮带入条数」决定新会话第一轮贴多少条聊天记录（后者只对轮换后的第一轮生效，上限 60，填得比前者小则不生效，默认 24）；②「每会话内存保留条数 / 未读队列上限」只决定桥在内存里留多少（超出的历史仍在 SQLite，可查）；③「聊多少轮换新会话 / 提前几轮预建新会话」决定累计多少真实来回后归档轮换到新会话（默认 12，顺带提前预热下一代避免首轮卡顿），防止上下文膨胀。<b>第①组和第③组不是重复项</b>：前者是历史窗口大小，后者是换会话的时机（细节点每个字段旁的 ⓘ）。</li>
                   <li><b>发送节奏 / 回复停顿</b>：连发条数、条间间隔、回复前停顿——调得像真人打字。</li>
                   <li><b>表情包</b>：用 QQ 收藏表情回消息、自动收藏贴语境的图、上传自定义图库。</li>
                 </ul>
@@ -1148,9 +1174,23 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
 
       <GroupCard title="发送节奏与间隔" path="social.send" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="连发/停顿/字数上限——控制发消息像不像真人打字。" />
-      <GroupCard title="上下文与轮换" blocks={[{ path: 'social.context' }, { path: 'social.autoReset' }]}
+      {/* 【2026-09-17 主人问「resetWindow 是不是和唤醒轮换阈值一样的、重复了」】
+          不是重复项，是以前"看着像重复"：这张卡把 `social.context` 与 `social.autoReset` 的键**平铺成一排**，
+          而 `resetWindow` 在 LABEL 里没有中文名 → 界面上直接显示原始键名，紧挨着「上下文窗口」，
+          两个值在主人的配置里又都是 24 —— 于是像"同一个旋钮写了两遍"。
+          现在按语义分成三组，一眼能看出它们管的是三件事：
+            ① 每次开新会话往提示里贴多少条聊天记录（contextWindow / resetWindow）
+            ② 桥内存里留多少条（recentLimit / unreadLimit，与贴出去的历史无关）
+            ③ 聊多少轮把上下文换成新会话（autoReset）
+          注意：两个 block 用同一个 path（social.context），所以下面 GroupCard 的 key 不能再只用 s.path。 */}
+      <GroupCard title="上下文与轮换"
+        blocks={[
+          { title: '① 每次开新会话，贴给模型多少条历史', path: 'social.context', only: ['contextWindow', 'resetWindow'] },
+          { title: '② 桥内存里保留多少条（跟贴出去的历史无关，只影响桥手头留多少）', path: 'social.context', only: ['recentLimit', 'unreadLimit'] },
+          { title: '③ 聊多少轮自动换新会话（上下文轮换）', path: 'social.autoReset' },
+        ]}
         cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="每轮带多少历史、聊太久自动换新会话，防止记性爆掉。" />
+        desc="三组管三件不同的事，不是重复项：① 决定新会话的第一轮往提示里贴多少条聊天记录（'轮换后首轮带入条数'只对轮换后的第一轮生效，所以它必须填得比'首轮带入历史条数'大才有意义）；② 决定桥在内存里留多少条，省内存用；③ 决定聊多少轮把上下文换成新会话——它是换会话的时机，不是历史条数。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
       <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />
@@ -1208,8 +1248,10 @@ function GroupCard({ title, path, blocks, cfg, ch, onHelp, filter, only, desc, c
       {desc && <div className="cfg-card-desc">{desc}</div>}
       {avail.map((s, i) => {
         const sub = avail.length > 1;
+        // key 必须带上序号：同一个 path 可以出现在两个 block 里（「上下文与轮换」卡的 ① / ② 就是），
+        // 只写 key={s.path} 会撞 key、React 复用错 DOM（历史上这里只写了 path）。
         return (
-          <div key={s.path} className={sub ? 'cfg-block' : undefined}>
+          <div key={s.path + '#' + i} className={sub ? 'cfg-block' : undefined}>
             {sub && s.title && <div className="cfg-block-title">{s.title}</div>}
             <div className="cfg-fields">
               {s.keys.map((k) => (
