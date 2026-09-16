@@ -154,8 +154,20 @@ import { initSendDice } from './core/send-dice.js';
 import { ensureLearningToken } from './core/learning-token.js';
 import {
   initSessionArchiveCore, setSessionArchiveApi, startSessionArchiveTicker,
-  loadArchivedCache,
+  loadArchivedCache, liveSessionIdsOnDisk,
 } from './core/session-archive.js';
+
+/* 【2026-09-16】磁盘上真实存在的会话 id，按 60 秒缓存：事件泵的活跃会话筛选与启动自愈都用它。 */
+let _liveIdsCache = null;
+let _liveIdsAt = 0;
+function liveSessionIdsOnDiskCache() {
+  const now = Date.now();
+  if (!_liveIdsCache || now - _liveIdsAt > 60000) {
+    _liveIdsCache = liveSessionIdsOnDisk();
+    _liveIdsAt = now;
+  }
+  return _liveIdsCache;
+}
 import {
   initSlangNightly,
 } from './core/slang.js';
@@ -361,6 +373,27 @@ async function main() {
   setSessionArchiveApi(api);
   // 活动感知回合看门狗：只在“完全静默”超过该时长（无任何 turn/tool/流式事件）才判定卡死。
   // default 防“忘记设置唤醒条件”：key -> 当前是否等待 AI 处理唤醒回合 / 本回合已更新唤醒配置 / 连续未设置次数
+  /* 【2026-09-16 启动自愈】剔掉指向"磁盘上已经不存在的会话"的映射。
+   * 实测：手动清理过会话目录后，`state/sessions.json` 里还留着旧 id → 事件泵每秒重开一次死会话的
+   * session/follow（日志刷 `follow 流终结 … (error)`，约 280 次/分钟），唤醒投递被拖慢甚至像"不回复"。
+   * 这里对齐一次磁盘，只保留真实存在的会话；顺带把内存 reverse 也建干净。 */
+  let sessionsPruned = 0;
+  try {
+    const alive = liveSessionIdsOnDisk();
+    if (alive.size || Object.keys(state.sessions || {}).length) {
+      for (const [key, sid] of Object.entries(state.sessions || {})) {
+        if (!sid || alive.has(String(sid))) continue;
+        delete state.sessions[key];
+        sessionsPruned += 1;
+      }
+      if (sessionsPruned > 0) {
+        saveState();
+        log(`[state] 清理了 ${sessionsPruned} 个指向已不存在会话的映射（磁盘上只剩 ${alive.size} 个会话），避免事件泵空转`);
+      }
+    }
+  } catch (error) {
+    log(`[state] 会话映射自愈跳过：${error?.message ?? error}`);
+  }
   for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
   // rc.1 无全局 mux：事件泵按活跃会话逐个 open session/follow。把会话集合(正式映射 +
   // 黑话/人格学习者 + 预热备用会话)注册给客户端，pumpMux 每轮拉取并自动订阅/退订。
@@ -368,10 +401,22 @@ async function main() {
     const activeSids = () => {
       const out = [];
       const seen = new Set();
-      for (const sid of reverse.keys()) if (sid && !seen.has(sid)) { seen.add(sid); out.push(sid); }
-      for (const sid of state?.sessions ? Object.values(state.sessions) : []) if (sid && !seen.has(sid)) { seen.add(sid); out.push(sid); }
-      try { for (const sid of learnerSessions ?? []) if (sid && !seen.has(sid)) { seen.add(sid); out.push(sid); } } catch {}
-      try { for (const st of social?.conversations?.values() ?? []) { const bs = st?._standbySessionId; if (bs && !seen.has(bs)) { seen.add(bs); out.push(bs); } } } catch {}
+      // 【2026-09-16】只把"磁盘上确实存在"的会话交给事件泵：死会话会让 follow 反复报错、拖慢唤醒投递。
+      // 磁盘集合按 60 秒缓存一次（会话轮换/归档后自动跟上），拿不到就退回不筛选（宁可不筛也别漏跟）。
+      let alive = null;
+      try {
+        const now = Date.now();
+        if (!activeSids._cache || now - activeSids._cacheAt > 60000) {
+          activeSids._cache = liveSessionIdsOnDiskCache();
+          activeSids._cacheAt = now;
+        }
+        alive = activeSids._cache;
+      } catch { alive = null; }
+      const ok = (sid) => Boolean(sid) && (!alive || alive.size === 0 || alive.has(String(sid)));
+      for (const sid of reverse.keys()) if (ok(sid) && !seen.has(sid)) { seen.add(sid); out.push(sid); }
+      for (const sid of state?.sessions ? Object.values(state.sessions) : []) if (ok(sid) && !seen.has(sid)) { seen.add(sid); out.push(sid); }
+      try { for (const sid of learnerSessions ?? []) if (ok(sid) && !seen.has(sid)) { seen.add(sid); out.push(sid); } } catch {}
+      try { for (const st of social?.conversations?.values() ?? []) { const bs = st?._standbySessionId; if (ok(bs) && !seen.has(bs)) { seen.add(bs); out.push(bs); } } } catch {}
       return out;
     };
     api.setSessionIdSource(activeSids);

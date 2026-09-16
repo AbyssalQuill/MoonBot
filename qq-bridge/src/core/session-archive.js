@@ -196,6 +196,29 @@ export function foreignWorkspaceDirs(sessionsRoot) {
   return out;
 }
 
+/**
+ * 【2026-09-16 体检自愈】磁盘上真实存在的会话 id 集合（本桥所有工作区）。
+ *
+ * 为什么需要：会话目录一旦被手动/自动清理，而桥的 `state/sessions.json`（key→sessionId 映射）
+ * 还留着旧 id，启动时会被读回内存 → 事件泵会**每秒重开一次死会话的 session/follow**，
+ * 日志刷 `[dsh-client] follow 流终结 session-xxx (error)`（实测 ~280 次/分钟），
+ * 唤醒投递跟着变慢甚至看起来"不回复"。启动时用它把死引用剔掉即可根治。
+ */
+export function liveSessionIdsOnDisk(options = {}) {
+  const set = new Set();
+  const root = options.sessionsRoot || dshSessionsDir();
+  if (!root) return set;
+  const dirs = options.allWorkspaces === true ? workspaceSessionDirs(root, { all: true }) : workspaceSessionDirs(root);
+  for (const dir of dirs) {
+    try {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory() && /^session-/.test(e.name)) set.add(e.name);
+      }
+    } catch { /* 单个目录读不到不影响其它 */ }
+  }
+  return set;
+}
+
 export function loadArchivedCache() {
   const data = readJsonSafe(ARCHIVE_STATE_FILE, null);
   archivedLocally.clear();
