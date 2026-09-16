@@ -961,7 +961,7 @@ registerTool(
     message: z.string().optional().describe('Alias of messages (string; kept only for typos). Prefer messages.'),
     images: z.array(z.string()).optional().describe('Absolute local paths of static images (e.g. C:\\\\path\\\\xx.webp; meme/ sticker files work too), one per sent item or a single one. Never send animated GIFs by path - QQ shows a flickering static preview; find those with qq_meme_search (GIF set) or qq_list_stickers and send via qq_send_sticker. Only static png/jpg/webp go by path.'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Message id to quote/reply to (non-zero int, may be negative, optional)'),
-    atUserId: z.union([z.number(), z.string()]).optional().describe('QQ id to @ (group chats; needed for at-mentions). Never hand-write [CQ:at,qq=...] in the message text - it is sent verbatim as garbage. Not together with a quote; do not overuse.'),
+    atUserId: z.union([z.number(), z.string()]).optional().describe('QQ id to @ (group chats; needed for at-mentions). This must be a real person\'s QQ NUMBER - never a messageId: ids you would pass to replyToMessageId are NOT QQ numbers, and mixing them up makes the whole send fail. Never hand-write [CQ:at,qq=...] in the message text - it is sent verbatim as garbage. Not together with a quote; do not overuse.'),
     gapMode: z.enum(['auto', 'fixed', 'byLength']).optional().describe('auto = random (bridge default), fixed = interval, byLength = by text length'),
     gapMs: z.number().optional().describe('Interval for fixed mode (ms)'),
     gaps: z.array(z.number()).optional().describe('Per-message intervals for fixed mode (length = count - 1)')

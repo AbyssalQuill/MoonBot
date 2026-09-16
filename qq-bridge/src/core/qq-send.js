@@ -126,13 +126,18 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
     segments.push({ type: 'reply', data: { id: rid } });
   }
+  let atSegment = null;      // atUserId 推入的 at 段（自愈时要去掉的就是它）
+  let atSpacer = null;       // 紧跟在它后面的那个占位空格段
   if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
     const at = String(atUserId).trim();
     // 只允许正整数 QQ 号，禁止 @all，避免被滥用成 @全体成员
     if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
-    segments.push({ type: 'at', data: { qq: at } });
+    atSegment = { type: 'at', data: { qq: at } };
+    segments.push(atSegment);
     // QQ 规范：@昵称 后跟图片/表情/文本都要用空格隔开（文本走 pushTextWithAtSpace，这里先兜底补一格）
-    segments.push({ type: 'text', data: { text: ' ' } });
+    // 记下引用：自愈去掉 @ 时必须连它一起摘掉，否则消息会以一个莫名的空格开头。
+    atSpacer = { type: 'text', data: { text: ' ' } };
+    segments.push(atSpacer);
   }
   const rawMessage0 = String(message ?? '');
   const tokenLeak = tokenDisclosureIn(rawMessage0);
@@ -277,6 +282,34 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
         if (!res && fetchErr) throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}`);
       } catch (eB64) {
         log(`[send] ${kind}:${id} base64 兜底重发失败: ${eB64?.message ?? eB64}`);
+      }
+    }
+  }
+  /* 【2026-09-16 自愈 · 堵住"双发触发源"的第二层】
+   * atUserId 指向的号 NapCat 解析不出 uid 时（`Get Uid Error`）→ **去掉 @ 段重发一次**：
+   *   · 判据/证据：该错误发生在 uid 解析阶段，**这条消息整体没发出去**。两次真机现场印证过：
+   *     14:12:34 与 14:28:15 两个批次里带 @ 的那条都失败了（日志 `QQ 发送失败: … Get Uid Error`
+   *     + `工具统一发送部分成功 1/2 条`），失败的那条从未进群（social-state.json 的 recentMessages 里
+   *     只有成功那一条），所以去掉 @ 重发**不会**产生重复。
+   *   · 为什么值得做：不修的话"带 @ 发失败"= 整批部分失败 = 模型重发整批 = 已送到的那条被再发一次
+   *     （双发）。降级成"不带 @ 照常发"以后，这一批整体成功，重发这条链就不存在了。
+   *   · 为什么放在这里而不是提前用缓存猜：真号但不在群 / 号码写错这类情况只有 NapCat 说了算；
+   *     config 里没有全量群成员名单（group-cache.js 只缓存群主/管理员），拿缓存猜会误杀普通成员。
+   *   · 只去掉 atUserId 推入的那一段（模型自己写的 [CQ:at,qq=…] 不动），并连同它后面的占位空格一起摘掉。 */
+  const uidErrRe = /Get Uid Error|uid.*(?:not found|invalid)/i;
+  if (atSegment && uidErrRe.test(errText)) {
+    const idxAt = segments.indexOf(atSegment);
+    if (idxAt >= 0) {
+      segments.splice(idxAt, 1);
+      const idxSpacer = atSpacer ? segments.indexOf(atSpacer) : -1;
+      if (idxSpacer >= 0) segments.splice(idxSpacer, 1);
+      log(`[send] ${kind}:${id} atUserId=${atSegment.data.qq} 无法解析成 QQ uid（${errText.trim().slice(0, 40)}）—— 去掉 @ 重发一次（该错误在 uid 解析阶段，这条消息整体没发出去，重发不会重复）`);
+      try {
+        const again = await attemptSend();
+        res = again.res; body = again.body; fetchErr = again.fetchErr;
+        if (!res && fetchErr) throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}`);
+      } catch (eAt) {
+        log(`[send] ${kind}:${id} 去掉 @ 的重发也失败: ${eAt?.message ?? eAt}`);
       }
     }
   }

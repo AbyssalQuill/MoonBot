@@ -176,8 +176,16 @@ import {
   cancelProactiveCheck, setupSleepTimer, scheduleProactiveCheck, setWakeSender,
   formatParticipation, suggestQuietMs, PEER_TYPING_HOLD_MAX_MS, scheduleWake,
   scheduleReplyCheck, buildWakeReminderPrompt,
-  clearSocialTimers, clearAllSocialTimers,
+  clearSocialTimers, clearAllSocialTimers, resetConversationKeepingLedger,
 } from './social-state.js';
+// 出站回复幂等账本（2026-09-16 修「reset 之后同一条回复发了两遍」，事故经过见模块顶部注释）
+import {
+  filterAlreadySentBubbles, noteBatchOutcome, logIdempotencyBlock,
+} from './send-idempotency.js';
+// atUserId 入参体检：模型把 messageId 当 QQ 号传进来时降级为"不带 @"，别让整批失败（双发的触发源）
+import {
+  collectAtUserIdEvidence, judgeAtUserId, logAtUserIdDowngrade, atUserIdDowngradeNote,
+} from '../lib/at-target.js';
 import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder, scheduledTasks,
 } from './scheduler.js';
@@ -1351,6 +1359,7 @@ export function startConsoleServer() {
         sessionPromises.clear();
         clearAllSocialTimers();
         drainAllPromptQueues('default状态已重置');
+        const keysWithCarriedLedger = [];
         for (const key of [...social.conversations.keys()]) {
           const sid = state.sessions[key];
           if (sid) {
@@ -1364,18 +1373,30 @@ export function startConsoleServer() {
           }
           const removed = social.conversations.get(key);
           if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-          social.conversations.delete(key);
+          // 【2026-09-16】不再 `social.conversations.delete(key)` 一刀切：那样会把「已回复账本」
+          // （answeredMessageIds / lastDeliveredSeq / _wakeIntendedSeq / lastUnreadSeq）一起抹掉，
+          // 重置后同一个会话就成了白纸 → 刚回过的内容可能被再回一遍（真机事故「reset 之后重复回复」）。
+          // 这里改成"清会话、留账本"，见 social-state.resetConversationKeepingLedger。
+          const carriedReset = resetConversationKeepingLedger(key);
+          if (!carriedReset) log(`[reset] ${key} 无账本需要保留（该会话此前没有已回复记录）`);
           seenForwardIds.delete(key);
+          keysWithCarriedLedger.push(key);
         }
+        // 重建账本时会顺带重新装配该会话的主动/睡眠定时器；这里再清一次，保住本端点"定时器已清空"的语义。
+        clearAllSocialTimers();
         pendingWakeKeys.clear();
         clearAllPendingWakeLeases();
         wakeConfigUpdatedKeys.clear();
         markReadCalledKeys.clear();
         wakeConfigMissCount.clear();
         social.paused = false;
-        try { atomicWriteJson(SOCIAL_STATE_FILE, { conversations: {} }); } catch (error) { log('重置default状态：写空状态文件失败:', error?.message ?? error); }
-        log('控制台：default AI 状态已重置（会话、定时器、唤醒配置已清空，工具日志保留）');
-        sendJson({ ok: true });
+        /* 【2026-09-16】原来这里写 `{ conversations: {} }` 把状态文件清空——那等于把刚保下来的
+         * 「已回复账本」又在磁盘上抹掉一次（桥一重启，"已回过哪些 id / 交付水位"就全没了，
+         * 重复回复 bug 换个姿势复发）。改成落盘当前内存状态：会话上下文同样清空，
+         * 但账本字段跟着写下去；`social.paused=false` 也一并落盘。 */
+        try { saveSocialState(); } catch (error) { log('重置default状态：写状态文件失败:', error?.message ?? error); }
+        log(`控制台：default AI 状态已重置（会话、定时器、唤醒配置已清空，工具日志保留；${keysWithCarriedLedger.length} 个会话的已回复账本已保留）`);
+        sendJson({ ok: true, keptLedgerKeys: keysWithCarriedLedger.length });
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/social/state') {
@@ -2090,12 +2111,33 @@ export function startConsoleServer() {
             return;
           }
         }
-        const delays = computeGaps(messages, gapMode, gapMs, gaps, sendCfg);
+        /* 【2026-09-16 幂等闸门 · 修「reset 之后同一条回复发了两遍」】
+         * 现场：14:12:34 整批 ["喵什么喵","又不是猫娘"] 因为 atUserId 传错只成功 1 条
+         * （「又不是猫娘」14:12:36 真的进群了，messageId 1275818397），工具返回 ok:false；
+         * 模型于是把整批重发 → 14:12:49/50「又不是猫娘」第二次进群。
+         * 这里在**发送之前**把"上一批已经真的投递成功"的气泡摘掉：只补发失败的那几条，
+         * 正常新回复（上一批是成功的）不经过这条路，不会被误杀。见 send-idempotency.js。 */
+        // ⚠️ 这里**不能**用本段稍后才声明的 `now`（`const now = Date.now()` 在 computeGaps 之后）：
+        // 写成 `..., now)` 会在发送端点里直接 TDZ `ReferenceError`。判重窗口是分钟级，两处时钟差几毫秒无所谓。
+        const idem = filterAlreadySentBubbles(key, messages, Date.now());
+        if (idem.skipped.length) {
+          logIdempotencyBlock(key, idem, '上一批发送部分失败，这是模型重发整批');
+          appendActivity(`${key} [send] 幂等挡下重复气泡 ${idem.skipped.length} 条：${idem.skipped.map((s) => String(s.text).slice(0, 20)).join('、')}`);
+          if (!idem.kept.length) {
+            sendJson({
+              ok: true, key, sent: 0, failed: 0, skipped: idem.skipped.length,
+              note: '这些气泡上一批已经真的发出去了（那一批里失败的是别的条），本次不再重复发送；请直接收尾，不要重发。'
+            });
+            return;
+          }
+        }
+        const sendList = idem.kept.map((x) => x.text);
+        const delays = computeGaps(sendList, gapMode, gapMs, gaps, sendCfg);
         // 先做发送频率检查并预占额度，再解析引用目标，避免未限流的引用查询打爆 OneBot。
         const st = getSocialState(key);
         const now = Date.now();
         // 防循环回复：① 90 秒内重复发送相同/高度相似文本 → 拦截；② 60 秒内发送调用 ≥3 次 → 拦截（疑似单回合循环连发）
-        const firstSendText = Array.isArray(messages) ? String(messages[0] ?? '') : String(messages ?? '');
+        const firstSendText = Array.isArray(sendList) ? String(sendList[0] ?? '') : String(sendList ?? '');
         const prevSend = lastSendDedup.get(key);
         if (prevSend && now - prevSend.at < 90000 && firstSendText && isDuplicateSendText(prevSend.text, firstSendText)) {
           cancelReplyCheck(key);
@@ -2116,12 +2158,12 @@ export function startConsoleServer() {
         const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
         const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
         const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-        if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
+        if ((maxPerMinute > 0 && recentMinute + sendList.length > maxPerMinute) || (maxPerHour > 0 && recentHour + sendList.length > maxPerHour)) {
           sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
           return;
         }
         // 先预占发送额度，避免并发绕过限频
-        for (let i = 0; i < messages.length; i++) st.sendTimes.push(now);
+        for (let i = 0; i < sendList.length; i++) st.sendTimes.push(now);
         if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
         let quotedInfo = null;
         let actualReplyToMessageId = replyToMessageId;
@@ -2129,7 +2171,7 @@ export function startConsoleServer() {
           const resolved = await resolveReplyTarget(st, kind, id, String(replyToMessageId).trim());
           if (!resolved) {
             // 引用解析失败：回滚已预占的发送额度
-            for (let i = 0; i < messages.length; i++) {
+            for (let i = 0; i < sendList.length; i++) {
               const idx = st.sendTimes.indexOf(now);
               if (idx >= 0) st.sendTimes.splice(idx, 1);
             }
@@ -2140,9 +2182,26 @@ export function startConsoleServer() {
           quotedInfo = resolved.info;
           actualReplyToMessageId = resolved.messageId;
         }
+        /* 【2026-09-16 触发源拦截】atUserId 被传成 messageId 时**不要报错**（报错=整批部分失败=模型重发整批=双发），
+         * 而是降级为"不带 @"照常发，并打一行明确日志 + 把这件事回执给模型，让它下一轮别再这么传。
+         * 判据只有一条：这个值是否等于本会话近期真实出现过的 messageId（位数/量级在本机完全重叠，不能当判据，
+         * 见 lib/at-target.js 顶部实测数据）。真 QQ 号（含短号）一律照常 @。 */
+        const atJudge = judgeAtUserId(atUserId, collectAtUserIdEvidence(st));
+        let atUserIdEffective = atUserId;
+        let atNote = '';
+        let atDropped = null;
+        if (!atJudge.ok) {
+          atUserIdEffective = null;
+          logAtUserIdDowngrade(key, atJudge);
+          atNote = atUserIdDowngradeNote(atJudge);
+          atDropped = { atUserId: atJudge.id, reason: atJudge.reason };
+          appendActivity(`${key} [send] atUserId=${atJudge.id} 降级为不带 @ 发送（${atJudge.reason}）`);
+        }
         try {
-          const sentMessages = await sendMessages(key, messages, delays, actualReplyToMessageId, atUserId, images);
+          const sentMessages = await sendMessages(key, sendList, delays, actualReplyToMessageId, atUserIdEffective, images);
           recordSentMessages(key, sentMessages);
+          // 整批成功 → 了结上一批的部分失败状态（此后不再做任何重发过滤，正常新回复畅通）。
+          noteBatchOutcome(key, { attempted: sendList, delivered: sentMessages, failed: [] }, now);
           st.lastAiReplyAt = now;
           st.lastActionAt = now;
           st.wakeConfig.noActionCount = 0;
@@ -2151,17 +2210,17 @@ export function startConsoleServer() {
           const callNow = sendCallTimes.get(key) || [];
           callNow.push(now);
           sendCallTimes.set(key, callNow.filter((t) => now - t < 60000));
-          log(`[default] 工具统一发送 ${key}: 成功 ${sentMessages.length}/${messages.length} 条`);
-          appendActivity(`${key} [default] 工具统一发送：成功 ${sentMessages.length}/${messages.length} 条`);
+          log(`[default] 工具统一发送 ${key}: 成功 ${sentMessages.length}/${sendList.length} 条`);
+          appendActivity(`${key} [default] 工具统一发送：成功 ${sentMessages.length}/${sendList.length} 条`);
           if (sentMessages.length > 0) scheduleReplyCheck(key);
-          const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
+          const burstHint = sendList.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
           // 软提醒（lint）必须与发送结果隔离：消息已成功发出，lint 任何异常都不能把 ok 改写成失败，
           // 否则模型看到"发送失败"会换参数重发 → 撞重复拦截 → 主人其实已收到一条。
           let spaceWarn;
           let splitWarn;
           try {
-            spaceWarn = findCjkSpaceWarning(messages);
-            splitWarn = findSplitBoundaryWarning(messages);
+            spaceWarn = findCjkSpaceWarning(sendList);
+            splitWarn = findSplitBoundaryWarning(sendList);
           } catch (eLint) {
             log(`[send] 发送后质量软提醒异常（不影响发送结果）: ${eLint?.message ?? eLint}`);
           }
@@ -2171,23 +2230,47 @@ export function startConsoleServer() {
           const autoQuoted = (Array.isArray(sentMessages) ? sentMessages : [])
             .map((x, i) => (x && x.quoted ? { bubble: i + 1, quotedId: String(x.quoted) } : null))
             .filter(Boolean);
-          sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, ...(autoQuoted.length ? { autoQuoted } : {}), ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
+          sendJson({
+            ok: true, key, sent: sentMessages.length, failed: sendList.length - sentMessages.length, delays, quoted: quotedInfo,
+            ...(idem.skipped.length ? { dedupSkipped: idem.skipped.length } : {}),
+            ...(atDropped ? { atUserIdDropped: atDropped } : {}),
+            ...(autoQuoted.length ? { autoQuoted } : {}),
+            // atNote 与 burstHint 共用 hint 字段：两个都有时合并，别让后者把 atUserId 的回执吞掉
+            ...((atNote || burstHint) ? { hint: [atNote, burstHint].filter(Boolean).join(' ') } : {}),
+            ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {})
+          });
         } catch (error) {
           if (error?.sent?.length) {
             recordSentMessages(key, error.sent);
-            log(`[default] 工具统一发送部分成功 ${error.sent.length}/${messages.length} 条，已记录已发消息`);
+            log(`[default] 工具统一发送部分成功 ${error.sent.length}/${sendList.length} 条，已记录已发消息`);
+          }
+          /* 【2026-09-16】把"这一批里真的发出去了哪几条"记进幂等账本：模型看到 ok:false 后重发整批时，
+           * 这些气泡会被挡下（只补发失败的那几条）。以前这里不记账，是「同一条回复进群两遍」的直接缺口：
+           * 现场 14:12:36 部分成功 1/2 之后，14:12:47 整批重发把已经送到的那条又发了一次。 */
+          const idemNote = noteBatchOutcome(key, {
+            attempted: sendList,
+            delivered: Array.isArray(error?.sent) ? error.sent : [],
+            failed: [1]
+          }, now);
+          if (idemNote.delivered > 0) {
+            log(`[send-idempotency] ${key} 部分失败：已把 ${idemNote.delivered} 条真的送到的气泡记进幂等账本`
+              + `（本次失败 ${Math.max(0, sendList.length - idemNote.delivered)} 条）——模型重发整批时只补发没送到的，不再重复已送到的`);
           }
           log('[send] 统一发送失败栈:', error?.stack ? error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | ') : (error?.message || String(error)));
           // 失败/未发出的消息回滚预占的发送额度，避免假 429。
           const sentCount = Array.isArray(error?.sent) ? error.sent.length : 0;
-          const failedCount = Math.max(0, messages.length - sentCount);
+          const failedCount = Math.max(0, sendList.length - sentCount);
           for (let i = 0; i < failedCount; i++) {
             const idx = st.sendTimes.indexOf(now);
             if (idx >= 0) st.sendTimes.splice(idx, 1);
           }
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
           saveSocialState();
-          sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          sendJson({
+            ok: false,
+            error: (error?.message ?? String(error)) + (idemNote.delivered > 0 ? '（本次已送达的气泡已登记，重发时只会补发没送出去的那几条，请勿整批重发）' : ''),
+            sent: sentCount
+          }, 500);
         }
         return;
       }
@@ -4629,6 +4712,29 @@ export function startConsoleServer() {
         // 若声明在 try 内，失败分支会先抛 ReferenceError，预占的额度永远不会回滚（假 429）。
         const st = getSocialState(key);
         const now = Date.now();
+        // 【2026-09-16 幂等闸门】与批量端点同一套账：上一批部分失败后模型拿这条旧正文再发一次 → 挡下（见 send-idempotency.js）。
+        const idemOne = filterAlreadySentBubbles(key, [message], now);
+        if (idemOne.skipped.length) {
+          logIdempotencyBlock(key, idemOne, '上一批发送部分失败，这是模型把已送出的那条再发一次');
+          appendActivity(`${key} [send] 幂等挡下重复的已发消息：${String(message).slice(0, 40)}`);
+          sendJson({
+            ok: true, key, sent: 0, failed: 0, skipped: idemOne.skipped.length,
+            note: '这条上一批已经真的发出去了，本次不再重复发送；请直接收尾，不要重发。'
+          });
+          return;
+        }
+        // 【2026-09-16 触发源拦截】同批量端点：atUserId 像是 messageId → 降级为不带 @ 发送（不报错、不整批失败）
+        const atJudgeOne = judgeAtUserId(atUserId, collectAtUserIdEvidence(st));
+        let atUserOne = atUserId;
+        let atNoteOne = '';
+        let atDroppedOne = null;
+        if (!atJudgeOne.ok) {
+          atUserOne = null;
+          logAtUserIdDowngrade(key, atJudgeOne);
+          atNoteOne = atUserIdDowngradeNote(atJudgeOne);
+          atDroppedOne = { atUserId: atJudgeOne.id, reason: atJudgeOne.reason };
+          appendActivity(`${key} [send] atUserId=${atJudgeOne.id} 降级为不带 @ 发送（${atJudgeOne.reason}）`);
+        }
         try {
           const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
           const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
@@ -4649,8 +4755,9 @@ export function startConsoleServer() {
           }
           st.sendTimes.push(now);
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-          const sentMessages = await sendMessages(key, [message], [], actualReplyToMessageId, atUserId);
+          const sentMessages = await sendMessages(key, [message], [], actualReplyToMessageId, atUserOne);
           recordSentMessages(key, sentMessages);
+          noteBatchOutcome(key, { attempted: [message], delivered: sentMessages, failed: [] }, now);
           if (dupText) lastSendDedup.set(key, { text: dupText, at: now });
           st.lastAiReplyAt = now;
           st.lastActionAt = now;
@@ -4659,12 +4766,17 @@ export function startConsoleServer() {
           log(`[send] ${url.pathname} ${key}: 成功 ${sentMessages.length}/1 条`);
           appendActivity(`${key} [send] 成功 ${sentMessages.length}/1 条：${message.slice(0, 80)}`);
           if (sentMessages.length > 0) scheduleReplyCheck(key);
-          sendJson({ ok: true, key, sent: sentMessages.length, failed: sentMessages.length ? 0 : 1, quoted: quotedInfo });
+          sendJson({
+            ok: true, key, sent: sentMessages.length, failed: sentMessages.length ? 0 : 1, quoted: quotedInfo,
+            ...(atDroppedOne ? { atUserIdDropped: atDroppedOne, hint: atNoteOne } : {})
+          });
         } catch (error) {
           if (error?.sent?.length) {
             recordSentMessages(key, error.sent);
             log(`[send] ${url.pathname} ${key} 部分成功 ${error.sent.length}/1 条，已记录已发消息`);
           }
+          // 单条端点同样登记（异常里若带着已发条目，模型重发同一条时会被幂等闸门挡下）
+          noteBatchOutcome(key, { attempted: [message], delivered: Array.isArray(error?.sent) ? error.sent : [], failed: [1] }, now);
           log('[send] 统一发送失败栈:', error?.stack ? error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | ') : (error?.message || String(error)));
           // 失败/未发出的消息回滚预占的发送额度，避免假 429。
           const sentCount = Array.isArray(error?.sent) ? error.sent.length : 0;
@@ -4716,7 +4828,11 @@ export function startConsoleServer() {
         wakeConfigMissCount.delete(key);
         const removed = social.conversations.get(key);
         if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-        social.conversations.delete(key);
+        // 【2026-09-16】清上下文但保留「已回复账本」：重置后同一批消息不再被当成没回过而重复回复。
+        const carriedSingle = resetConversationKeepingLedger(key);
+        if (!carriedSingle) log(`[reset] ${key} 无账本需要保留（该会话此前没有已回复记录）`);
+        // 重建账本会重新装配该会话的定时器；本端点的语义是"清完等下次唤醒重建"，所以再清一次。
+        clearSocialTimers(key);
         seenForwardIds.delete(key);
         saveSocialState();
         saveState();
@@ -4759,7 +4875,13 @@ export function startConsoleServer() {
         for (const st of social.conversations.values()) {
           if (st?.agentToken) KNOWN_AGENT_TOKENS.delete(st.agentToken);
         }
-        social.conversations.clear();
+        /* 【2026-09-16】"清空工作区"同样是 reset 家族的一员，一样会把「已回复账本」抹掉。
+         * 这里逐个会话走"清状态、留账本"，避免清空工作区之后同一批历史消息被重新回一遍。 */
+        let keptLedger = 0;
+        for (const key of [...social.conversations.keys()]) {
+          if (resetConversationKeepingLedger(key)) keptLedger += 1;
+        }
+        clearAllSocialTimers(); // 重建账本会重新装配定时器；本端点语义是"全清"，再清一次
         saveSocialState();
         state.sessions = {};
         reverse.clear();
@@ -4770,8 +4892,8 @@ export function startConsoleServer() {
         toolCallNames.clear();
         saveState();
         try { fs.writeFileSync(ACTIVITY_LOG, ''); } catch {}
-        log(`控制台：已清空 QQ 聊天工作区（归档 ${archivedCount} 个会话，映射与活动日志已清空）`);
-        sendJson({ ok: true, archivedCount });
+        log(`控制台：已清空 QQ 聊天工作区（归档 ${archivedCount} 个会话，映射与活动日志已清空；${keptLedger} 个会话的已回复账本已保留）`);
+        sendJson({ ok: true, archivedCount, keptLedgerKeys: keptLedger });
         return;
       }
       // ── 重启桥接（守护模式下 5 秒后自动拉起） ──────────────────────────────

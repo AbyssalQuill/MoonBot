@@ -18,6 +18,8 @@ import { isDirectedAtAi } from '../lib/social-timeline.js';
 import { looksLikeUnfinished } from '../wait.js';
 import { readRoleState } from '../lib/role-access.js';
 import { bjMinutes, parseClockMin } from '../lib/time.js';
+// 会话重置时"必须跨着重置活下来"的已回复账本（真机事故见本文件 resetConversationKeepingLedger 注释）
+import { carryReplyLedger } from './send-idempotency.js';
 
 let cfgRef = null;
 /** main 启动时调用：注入 cfg（此后不再变） */
@@ -453,6 +455,42 @@ export function getSocialState(key) {
     setupSleepTimer(key);
   }
   return st;
+}
+
+// ── 会话重置：清会话状态，但**保住「已回复账本」** ────────────────────────────────
+// 【2026-09-16 真机事故「reset 之后会重复回复一次」】
+//   所有 reset 路径（控制台 /api/session/reset、/api/social/reset、/api/workspace/reset、
+//   聊天里发 /reset 或 /new、卡死隔离）原来都是 `social.conversations.delete(key)` 一刀切。
+//   被删掉的**不只是**会话上下文，还有四样"这个会话已经处理到哪了"的账：
+//     · answeredMessageIds  「确实被回复过」的消息 id 集合
+//     · lastDeliveredSeq   已交给模型的最高 seq（投递水位 / 等待工具基线）
+//     · _wakeIntendedSeq   桥打算交付的最高 seq（投递看门狗水位）
+//     · lastUnreadSeq      本地 seq 计数器（appendSocialMessage 用它 +1）
+//   现场证据：private 会话 reset 前 hold 记的是 baselineSeq=63，reset 后立刻变成 baselineSeq=1；
+//   group 会话 reset 前 steer 记的是 seq=1756，reset 后 social-state.json 里只剩 lastDeliveredSeq=5。
+//   账本一没，同一个会话在重置后就成了"白纸"：旧消息的分发水位归零、已回复过的 id 也不认识了，
+//   于是新会话可能把刚回过的内容再回一遍（重复回复）。同时 `_justAutoReset` 提示也随对象一起没了，
+//   模型连"刚换上下文、别重答旧话题"这句都没有。
+//
+//   修法：换成"先快照账本 → 删旧状态 → 立刻把账本写回新状态"。
+//   ⚠️ 踩过的坑（必须同生同死）：**只保水位不保 seq 计数器是更严重的误杀**——重置后新消息的 seq
+//   会从 1 重新数，而 lastDeliveredSeq 还停在 63，看门狗/注入去重会把这些新消息全判成"已交付"，
+//   机器人从此装死不回。所以这四项永远一起搬（见 send-idempotency.js 的 REPLY_LEDGER_FIELDS）。
+export function resetConversationKeepingLedger(key) {
+  const canonical = canonicalKey(key);
+  if (!canonical) return null;
+  const prev = social.conversations.get(canonical) || null;
+  social.conversations.delete(canonical);
+  if (!prev) return null;
+  const carried = carryReplyLedger(prev);
+  if (!carried || !carried.carried.length) return null;
+  // 重建一份干净的会话状态，只把账本写回去（其余 wakeConfig/unread/令牌全部按全新会话走）。
+  const st = getSocialState(canonical);
+  Object.assign(st, carried.patch);
+  saveSocialState();
+  log(`[reset] ${canonical} 会话已重置，保留已回复账本（${carried.carried.join('、')}）`
+    + `——重置前后同一批消息不会因为账本丢失被重新唤醒重复回复`);
+  return carried;
 }
 
 // 从持久化文件加载 social 状态（重启恢复）

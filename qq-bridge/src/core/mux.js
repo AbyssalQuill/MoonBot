@@ -157,7 +157,7 @@ import {
   cancelProactiveCheck, setupSleepTimer, scheduleProactiveCheck, setWakeSender,
   formatParticipation, suggestQuietMs, PEER_TYPING_HOLD_MAX_MS, scheduleWake,
   scheduleReplyCheck, buildWakeReminderPrompt,
-  clearSocialTimers, clearAllSocialTimers,
+  clearSocialTimers, clearAllSocialTimers, resetConversationKeepingLedger,
 } from './social-state.js';
 import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder,
@@ -383,7 +383,13 @@ export async function handleIncoming(kind, id, event, cfgRef) {
         wakeConfigMissCount.delete(key);
         const removed = social.conversations.get(key);
         if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-        social.conversations.delete(key);
+        // 【2026-09-16 /reset · /new 也是 reset 家族】原来直接 delete 会把「已回复账本」
+        // （answeredMessageIds / lastDeliveredSeq / _wakeIntendedSeq / lastUnreadSeq）一起抹掉，
+        // 重置后刚回过的内容可能又被回一遍（真机事故「reset 之后重复回复」）。
+        // 改成"清会话、留账本"，见 social-state.resetConversationKeepingLedger。
+        const carriedCmd = resetConversationKeepingLedger(key);
+        if (!carriedCmd) log(`[reset] ${key} 无账本需要保留（该会话此前没有已回复记录）`);
+        clearSocialTimers(key); // 重建账本会重新装配定时器；本命令语义是"清完等下次唤醒重建"
         seenForwardIds.delete(key);
         saveSocialState();
         saveState();
