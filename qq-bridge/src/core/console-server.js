@@ -72,6 +72,8 @@ import { noteMemeSent } from './send-dice.js';
 import { acquireLock, releaseLock } from './runtime.js';
 import { enqueueSend, currentSendChain, cancelKeyedSends, cancelAllKeyedSends } from './send-chain.js';
 import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
+// 音乐分享的"卡片 → 原生卡片 → 链接"降级梯子（纯编排逻辑，media 域导出，可离线单测）
+import { sendMusicCardWithFallback } from './media.js';
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from '../lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from '../lib/social-timeline.js';
 import { createMediaDomain } from './media.js';
@@ -200,11 +202,12 @@ let apiRef = null;
 let botRef = null;
 let sendRich = null;
 let musicSearch = null;
+let buildMusicCard = null;   // media 域提供：音乐卡片字段由桥解析拼好（含封面归一化 + 降级梯子）
 let writeLastMode = null;
 export function initConsoleCore(cfg) { cfgRef = cfg; }
 export function setConsoleApi(api) { apiRef = api; }
 export function setConsoleBot(bot) { botRef = bot; }
-export function setConsoleMedia(rich, music) { sendRich = rich; musicSearch = music; }
+export function setConsoleMedia(rich, music, card) { sendRich = rich; musicSearch = music; if (typeof card === 'function') buildMusicCard = card; }
 export function setConsoleLastModeSink(fn) { writeLastMode = fn; }
 let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔保护（原 main 局部）
 
@@ -2959,18 +2962,20 @@ export function startConsoleServer() {
         if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
         // 按类型校验并构建消息段
         let seg = null;
+        let musicPlan = null;   // buildMusicCard 的产物：primary / native / link 三段降级梯子
         const require = (v, msg) => { if (v === undefined || v === null || String(v).trim() === '') throw new Error(msg); };
         try {
           if (type === 'music') {
             // NapCat 4.18 原生支持音乐卡片：music 段由 NapCat 调 musicSignUrl 生成 Ark。
-            // 网易云等平台（163/kugou/kuwo/migu）签名服务可用，直接走 NapCat 原生；
-            // QQ 音乐平台 ss.xingzhige 已关闭 id 解析（返回"关闭id解析功能"），桥接层改为
-            // 自造 com.tencent.structmsg + meta.music Ark（data 传 JSON 字符串，NapCat json 段直发）。
+            // 【2026-09-16 修「手机端封面空白」】网易云不再把 id 直接丢给签名服务：带 id 时签名服务自己解析封面，
+            // 给的是**未缩尺寸的原图**（现场实测一张 4.4MB），手机端加载不出来就是白框（电脑端正常）。
+            // 现在由 media 域的 buildMusicCard 先解析歌名/歌手/封面/音频，封面统一 https + 300×300 再拼卡片；
+            // 模型只给 musicType + musicId，不许手写卡片字段（手写封面 URL 是白框的老坑）。
+            // QQ 音乐平台 ss.xingzhige 已关闭 id 解析（返回"关闭id解析功能"），继续走官方分享链接文本。
             const mt = String(body.musicType ?? body.mt ?? 'qq').trim();
             const mid = body.musicId !== undefined && body.musicId !== null ? String(body.musicId) : '';
             const title = String(body.title ?? '').trim();
             const artist = String(body.content ?? body.singer ?? body.artist ?? '').trim();
-            const cover = String(body.image ?? '').trim();
             if (mt === 'qq' && mid) {
               // QQ 音乐：无可靠外部签名服务（ss.xingzhige 已关闭 qq id 解析；自造 Ark 会收端"版本过低/超时"），
               // 改用 QQ 官方标准分享链接文本——与真人"分享歌曲到QQ"完全一致：新版客户端自动渲染卡片，
@@ -2990,7 +2995,35 @@ export function startConsoleServer() {
               // 直接走文本发送，不走下方 rich 通道
               sendJson({ ok: true, key, type: 'music', sent: sentMsg.length, failed: 0, platform: 'qq', share: true, title });
               return;
+            } else if (mid && typeof buildMusicCard === 'function') {
+              // 网易云等平台：卡片字段全部由桥解析拼好，模型只给 id
+              try {
+                musicPlan = await buildMusicCard(mt, mid, {
+                  title,
+                  artist,
+                  musicUrl: String(body.musicUrl ?? body.url ?? '').trim(),
+                  image: String(body.image ?? '').trim(),
+                  audio: String(body.audio ?? '').trim()
+                });
+                seg = musicPlan.primary;
+              } catch (cardBuildError) {
+                // 构建/解析失败也不能让"分享"整体失败：
+                //  · NapCat 认 id 的平台（163/qq/kugou/kuwo/migu）→ 退回原生 id 卡片（老行为）；
+                //  · 其它（custom 等）→ 没有可用卡片形态，直接走链接兜底（若调用方给了 musicUrl）。
+                const murl2 = String(body.musicUrl ?? body.url ?? '').trim();
+                log(`[rich] 音乐卡片构建失败(platform=${mt}) ${key}: ${cardBuildError?.message ?? cardBuildError}`);
+                if (/^(163|qq|kugou|kuwo|migu)$/.test(mt)) {
+                  musicPlan = null;
+                  seg = { type: 'music', data: { type: mt, id: mid } };
+                } else if (murl2) {
+                  musicPlan = { title, primary: null, native: null, link: `${title ? title + ' ' : ''}${murl2}`, note: '卡片构建失败，已直接发链接' };
+                  seg = null;
+                } else {
+                  throw cardBuildError;
+                }
+              }
             } else {
+              // 未注入卡片构建器（旧装配/测试）或没给 id：保持原行为，字段原样透传
               const murl = String(body.musicUrl ?? body.url ?? '').trim();
               const data = { type: mt };
               if (mid) { data.id = mid; }
@@ -3046,11 +3079,32 @@ export function startConsoleServer() {
           }
           st.sendTimes.push(now);
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-          const sent = await sendRich(key, seg, { replyToMessageId: actualReplyToMessageId, atUserId });
+          // 【降级梯子】卡片发不出去时**必须**还能退回链接：音乐分享不能因为签名服务/NapCat 出问题就整体失败。
+          // 顺序：primary（桥拼卡片）→ native（NapCat 原生 id 卡片，老行为）→ link（官方分享链接纯文本，走文本通道）。
+          const ladder = await sendMusicCardWithFallback({
+            key,
+            plan: musicPlan,
+            seg,
+            options: { replyToMessageId: actualReplyToMessageId, atUserId },
+            sendRichFn: sendRich,
+            sendText: async (text) => {
+              // 兜底走 send-message 文本通道（与 QQ 音乐分享同一条路，同样进会话历史/审计）
+              const sentMsg = await sendMessages(key, [text]);
+              recordSentMessages(key, sentMsg);
+              return { messageId: sentMsg?.[0]?.messageId ?? null };
+            }
+          });
+          const sent = { messageId: ladder.messageId };
+          const sentSeg = ladder.seg;
+          const sentCard = ladder.card;
+          if (sentCard !== 'primary') {
+            log(`[rich] 音乐卡片降级 card=${sentCard} ${key}（${ladder.degradedFrom?.message ?? '无卡片段'}）`);
+          }
           const cardTitle = (type === 'json' || type === 'music')
-            ? String(body.title || body.musicTitle || '').trim()
-            : (seg?.data?.title ? String(seg.data.title) : '');
-          const label = `[卡片:${type === 'json' ? 'music' : type}${cardTitle ? ' ' + cardTitle.slice(0, 20) : ''}]`;
+            ? String(body.title || body.musicTitle || musicPlan?.title || seg?.data?.title || '').trim()
+            : (sentSeg?.data?.title ? String(sentSeg.data.title) : '');
+          const degraded = sentCard === 'link' ? '（已降级为链接）' : sentCard === 'native' ? '（原生卡片）' : '';
+          const label = `[卡片:${type === 'json' ? 'music' : type}${cardTitle ? ' ' + cardTitle.slice(0, 20) : ''}${degraded}]`;
           st.recentMessages.push({
             messageId: sent.messageId ? String(sent.messageId) : null,
             sender: '我',
@@ -3064,7 +3118,7 @@ export function startConsoleServer() {
             hasMedia: false,
             forwardIds: [],
             hasForward: false,
-            rich: { type, ...(seg.data ? { data: JSON.stringify(seg.data).slice(0, 300) } : {}) },
+            rich: { type, ...(sentSeg?.data ? { data: JSON.stringify(sentSeg.data).slice(0, 300) } : {}) },
             time: Date.now()
           });
           const recentLimit = Number(cfgRef.social?.context?.recentLimit) || 100;
@@ -3080,7 +3134,16 @@ export function startConsoleServer() {
           saveSocialState();
           scheduleReplyCheck(key);
           log(`[rich] 工具发送卡片 ${key}: ${label}`);
-          sendJson({ ok: true, key, type, sent: 1, failed: 0, quoted: quotedInfo });
+          sendJson({
+            ok: true,
+            key,
+            type,
+            sent: 1,
+            failed: 0,
+            quoted: quotedInfo,
+            // 音乐卡片：告诉模型实际发出去的是哪种形态（card=link 表示已自动退回纯链接，别再补发链接）
+            ...(musicPlan ? { music: { card: sentCard, title: musicPlan.title, note: musicPlan.note, link: musicPlan.link } } : {})
+          });
         } catch (error) {
           const st = getSocialState(key);
           const idx = st.sendTimes.indexOf(now);

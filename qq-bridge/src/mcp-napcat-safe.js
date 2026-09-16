@@ -2491,18 +2491,18 @@ if (cfg.social?.tools?.sendForward !== false) {
 if (cfg.social?.tools?.sendRich !== false) {
   registerTool(
     'qq_send_rich',
-    'Send native rich interactive cards: music (native on NapCat 4.18; recommended after qq_music_search: type=music with musicType=163 (NetEase) / qq (QQ Music) plus musicId, so the recipient can tap to play), contact (contact card), dice/rps (dice / rock-paper-scissors).',
+    'Send native rich interactive cards: music, contact (contact card), dice/rps (dice / rock-paper-scissors). MUSIC: pass ONLY type=music + musicType=163 + musicId=<the NetEase song id from qq_music_search> - the bridge resolves title/artist/cover/audio itself and builds the whole card (https cover + 300x300 thumbnail, the shape that renders on mobile QQ as well); if the card cannot be sent the bridge automatically falls back to the official song link and the result says music.card=link. NEVER hand-write card fields (image/title/audio/url): a hand-written cover is exactly what makes mobile QQ show a blank card. musicType=qq (QQ Music) is sent as the official share link - the client renders that card itself.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      type: z.enum(['music', 'contact', 'dice', 'rps']).describe('Card type: music (netease: real card, QQ Music: official share link, both playable), contact=contact card, dice, rps=rock-paper-scissors'),
-      musicType: z.enum(['qq', '163', 'kugou', 'migu', 'kuwo', 'custom']).optional().describe('musicType: 163=NetEase, qq=QQ Music, kugou/kuwo/migu=other platforms, custom=custom (163/qq recommended)'),
-      musicId: z.union([z.number(), z.string()]).optional().describe('Platform music id: 163=song id, qq=songmid'),
-      musicUrl: z.string().optional().describe('Required when musicType=custom: click-through URL'),
-      audio: z.string().optional().describe('custom audio URL (optional)'),
-      title: z.string().optional().describe('Song title (for custom)'),
-      image: z.string().optional().describe('custom cover image URL (required)'),
-      content: z.string().optional().describe('Artist/description (for custom)'),
+      type: z.enum(['music', 'contact', 'dice', 'rps']).describe('Card type: music (NetEase real card / QQ Music official share link), contact=contact card, dice, rps=rock-paper-scissors'),
+      musicType: z.enum(['qq', '163', 'kugou', 'migu', 'kuwo', 'custom']).optional().describe('musicType: 163=NetEase (real music card, built by the bridge), qq=QQ Music (official share link), kugou/kuwo/migu/custom=other platforms (custom needs musicUrl+image, last resort)'),
+      musicId: z.union([z.number(), z.string()]).optional().describe('Platform music id: 163=song id from qq_music_search, qq=songmid. This is the ONLY music field you normally pass.'),
+      musicUrl: z.string().optional().describe('Only for musicType=custom/kugou/kuwo/migu: the click-through song URL.'),
+      audio: z.string().optional().describe('Only for custom platforms - leave empty for 163 (the bridge resolves it).'),
+      title: z.string().optional().describe('LEAVE EMPTY for 163/qq - the bridge reads the real title itself. Only for custom platforms.'),
+      image: z.string().optional().describe('LEAVE EMPTY for 163/qq - the bridge picks a mobile-safe https 300x300 cover (a hand-written cover is the #1 cause of a blank cover on mobile QQ). Only for custom platforms, and even then the bridge upgrades http to https and adds the size param.'),
+      content: z.string().optional().describe('Artist/description - custom platforms only.'),
       contactType: z.enum(['qq', 'group']).optional().describe('Contact card type'),
       contactId: z.union([z.number(), z.string()]).optional().describe('Contact QQ number or group number'),
       result: z.union([z.number(), z.string()]).optional().describe('dice/rps result (optional)'),
@@ -2547,7 +2547,7 @@ if (cfg.social?.tools?.sendRich !== false) {
 if (cfg.social?.tools?.musicSearch !== false) {
   registerTool(
     'qq_music_search',
-    'Search songs (overseas-reachable NetEase music.163.com / QQ Music c.y.qq.com); returns platform/title/artist/album/link/cover per song. To share music, search first then send a music card via qq_send_rich music type (type=163 passes the NetEase id, type=qq passes songmid; NapCat hooks a local signing service so it sends directly); for old clients fall back to a cover image plus the song-link text.',
+    'Search songs (overseas-reachable NetEase music.163.com / QQ Music c.y.qq.com); returns platform/title/artist/album/link/cover per song (NetEase covers are resolved to https + a 300x300 thumbnail, so they load on mobile too). TO SHARE A SONG: pick a result and call qq_send_rich with ONLY {type:"music", musicType:"163", musicId:"<the NetEase id>"} - the bridge resolves the fields and builds the card; if the card cannot be sent it automatically sends the official song link instead and the result says music.card=link. So never hand-write card JSON or cover URLs, and never send both the card and the link for the same song. QQ Music results (platform=qqmusic) are shared as a normal text link - QQ renders that card itself.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),

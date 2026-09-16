@@ -340,8 +340,9 @@ async function main() {
   setSteerSender(steerIntoRunningTurn);
   if (typeof steerIntoRunningTurn === 'function') log('[steer] 已注册「在途回合注入」(session/prompt mode:steer)');
   else log('[steer] 注册失败：steerIntoRunningTurn 不是函数（导入异常）');
-  const { sendRich, musicSearch } = createMediaDomain(cfg);
-  setConsoleMedia(sendRich, musicSearch);
+  // buildMusicCard 也交给管理端/工具链路：音乐卡片的字段解析与降级梯子都放在 media 域里（唯一实现）
+  const { sendRich, musicSearch, buildMusicCard } = createMediaDomain(cfg);
+  setConsoleMedia(sendRich, musicSearch, buildMusicCard);
 
   if (!cfg.allow.private.length && !cfg.allow.groups.length && cfg.allowAllWhenEmpty) {
     log('⚠️  白名单为空且 allowAllWhenEmpty=true：将转发所有私聊/群聊消息给 agent');
