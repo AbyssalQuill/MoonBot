@@ -640,6 +640,13 @@ export function noteVoiceSent(key) {
 /**
  * 唤醒提示词里的一行语音数据（英文，与 preset 的英文指令框架一致）。
  * 语音未启用时返回 ''（一字符都不注入）。
+ *
+ * 【2026-09-16 修「我设了自定义音色，它却一直用内置冰糖」】主人 09-16 报：默认音色已经设成自建的
+ * 「20岁女大音色」，发出来的还是冰糖。查日志与工具调用记录，根因是**模型自己显式传了内置音色**：
+ *   04:17:44 [voice] 语音合成 完成：14 字 → 21336 字节（音色=冰糖）
+ * 提示词里只有 HIT 那一支会带音色名，MISS 支不带 → 模型在"主人让我多说语音"这种场景下自己挑了一个
+ * 它认识的内置音色（冰糖）。现在**两支都把默认音色名带上**，并在 preset/工具描述里明确：
+ *   省略 voice = 用主人配的默认音色；除非有人点名要某个音色，否则不要自己指定。
  */
 export function voiceTurnHint(key) {
   const cfg = voiceConfig();
@@ -650,10 +657,10 @@ export function voiceTurnHint(key) {
   const voiceName = findCustomVoice(rawDef)?.name ?? rawDef;
   const cap = Math.min(60, Number(cfg.maxChars) || 60);
   if (hit) {
-    return `[Voice] dice HIT (p=${p}, voice=${voiceName}): you MAY mix ONE short voice bubble into this turn's reply - text is still the carrier, never voice instead of the answer, never the same words twice, under ${cap} chars.\n`;
+    return `[Voice] dice HIT (p=${p}, default voice=${voiceName}): you MAY mix ONE short voice bubble into this turn's reply - text is still the carrier, never voice instead of the answer, never the same words twice, under ${cap} chars.\n`;
   }
   const why = cooling ? 'cooldown' : 'dice MISS';
-  return `[Voice] ${why} (p=${p})${p <= 0 ? ' voice off' : ''}: text only this turn unless someone explicitly asks you to speak or sing.\n`;
+  return `[Voice] ${why} (p=${p}, default voice=${voiceName})${p <= 0 ? ' voice off' : ''}: text only this turn unless someone explicitly asks you to speak or sing (when they do, OMIT the voice field so the default above is used).\n`;
 }
 
 // ── 发送：把音频作为 QQ 语音发出去 ───────────────────────────────────────────

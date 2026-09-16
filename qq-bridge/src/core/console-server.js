@@ -4839,6 +4839,20 @@ export function startConsoleServer() {
             const lib = voiceMod.listVoices();
             const want = String(body.voice ?? '').trim();
             const hit = want ? lib.custom.find((v) => v.id === want || v.name === want) : null;
+            // 【2026-09-16 主人报「我设了自定义音色却一直用内置冰糖」】根因是模型自己显式传了内置音色。
+            // 这里把"显式指定覆盖了主人默认音色"这件事**如实记一条日志**，以后一眼能看出来；
+            // 真正的修正靠提示词（唤醒正文每轮都带 default voice=<主人设的那个>）+ preset/工具描述。
+            try {
+              const cfgNow = voiceMod.voiceConfig?.() ?? {};
+              const curDefault = String(cfgNow.defaultVoice ?? '').trim();
+              if (want && curDefault && want !== curDefault) {
+                const hitDef = (lib.custom || []).find((v) => v.id === curDefault || v.name === curDefault);
+                const builtin = (lib.builtin || []).some((v) => v.id === want || v.name === want);
+                if (builtin && hitDef) {
+                  log(`[voice] 注意：模型显式指定了内置音色「${want}」，覆盖了主人配置的默认音色「${hitDef.name || curDefault}」（提示词里已写明默认音色，若仍反复出现说明模型没照办）`);
+                }
+              }
+            } catch { /* 仅日志，不影响发送 */ }
             const text = String(body.text ?? '').trim();
             const r = hit
               ? await voiceMod.synthesizeWithSavedVoice(text, hit.id, { style: body.style, format: body.format })

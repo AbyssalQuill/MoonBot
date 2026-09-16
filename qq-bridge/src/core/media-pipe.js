@@ -69,7 +69,11 @@ export async function fetchOneBotImage(media) {
   // 优先使用 OneBot get_image 获取网关侧信息；只有 file 是安全缓存文件名时才允许交给网关。
   if (media.kind === 'image' && media.file && isProbablySafeImageFileRef(media.file)) {
     try {
-      const info = await botRef.getImage({ file: String(media.file) }, { timeoutMs: 12000 });
+      /* 【2026-09-16】NapCat 侧内核下载图片有时会超时（主人桌面 napcat.log 里的
+       * `Timeout: NTEvent NodeIKernelMsgService/downloadRichMedia`）——那是 NapCat 去 QQ CDN 拉文件失败。
+       * 以前这里要等满 12 秒才会落到"直接用消息段 URL 自己抓"这条兜底上，一张图就把唤醒拖十几秒。
+       * 现在 6 秒就放弃 get_image，马上走 URL 直连（桥自己抓通常更快，也不受 QQ 客户端下载队列影响）。 */
+      const info = await botRef.getImage({ file: String(media.file) }, { timeoutMs: 6000 });
       const obj = info && typeof info === 'object' ? info : {};
       const base64 = base64FromMaybe(obj.data) || base64FromMaybe(obj.base64) || base64FromMaybe(obj.file);
       if (base64) {
