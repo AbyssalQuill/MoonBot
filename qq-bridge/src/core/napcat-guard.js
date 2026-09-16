@@ -319,7 +319,17 @@ export async function guardTick(force = false) {
     if (loginNow && loginNow.ok && loginNow.isLogin === false) {
       const reason = `探针连续 ${st.consecutiveFails} 次失败，且 NapCat 显示未登录（${loginNow.loginPhase || '未知阶段'}）：需要人工扫码/完成验证`;
       log(`[napcat-guard] ${reason} —— 重启救不了，只报警不出手`);
-      st.alert = { ts: nowIso(), level: 'needs-login', reason, qrPath: await exportQrFresh() };
+      // 【2026-09-16 踩坑】这里**只在刚进入 needs-login 状态时换一次二维码**，之后保持不动。
+      // 原因：QQ 的登录码约两分钟失效，而每换一张上一张立刻作废 —— 守护每分钟重导一张的话，
+      // 用户"打开图片→拿起手机扫"这几秒里码已经作废，手机上只会提示登录失败。
+      // 所以：进来时给一张新的，之后不再动它；要新码由用户显式点（管理端按钮 / 桌面脚本）。
+      const alreadyAlerted = st.alert?.level === 'needs-login' && st.alert?.qrPath;
+      st.alert = {
+        ts: alreadyAlerted ? st.alert.ts : nowIso(),
+        level: 'needs-login',
+        reason,
+        qrPath: alreadyAlerted ? st.alert.qrPath : await exportQrFresh()
+      };
       writeState(st);
       return guardStatus();
     }

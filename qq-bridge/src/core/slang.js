@@ -587,6 +587,50 @@ export function slangStopNow() {
 }
 
 /**
+ * 【2026-09-16】黑话学习的"状态机"快照：给管理端显示"现在到底进行到哪一步"。
+ * 为什么要有它：以前界面只有"立即学习/停止"两个按钮，点了之后**看不出学习跑到哪、
+ * 是在提取还是在研究、还是排队**，只能干等；而且很容易误以为"点了没反应"。
+ * 这里的字段全部来自模块内的真实运行态，不猜测：
+ *   phase: disabled（学习开关关着）/ extracting（批量提取+研究在跑）/ stopping（收到停止请求，等当前分块结束）
+ *          / queued（有排队任务，还没开始）/ researching（有候选正在研究会话里分析，属提取之后的阶段）
+ *          / ready（学习会话在、当前空闲）/ idle（没有会话也没任务）
+ */
+export function slangLearningState() {
+  let live = { ok: false };
+  let enabled = false;
+  let lastLearnAtMs = 0;
+  try {
+    live = readLearningConfig();
+    enabled = resolveNightlyEnabled(live);
+    lastLearnAtMs = resolveLastLearnAtMs(live);
+  } catch { /* 读配置失败按"未开启"呈现，别让状态接口本身报错 */ }
+  const researching = slangResearchingIds.size;
+  let phase = 'idle';
+  if (!enabled) phase = 'disabled';
+  else if (learnInFlight) phase = slangStopRequested ? 'stopping' : 'extracting';
+  else if (queuedSlangOps > 0) phase = 'queued';
+  else if (researching > 0) phase = 'researching';
+  else if (slangLearnerSessionId) phase = 'ready';
+  const counts = { candidate: 0, confirmed: 0, rejected: 0, total: slangEntries.length };
+  for (const e of slangEntries) {
+    if (e?.status === SLANG_STATUS.CONFIRMED) counts.confirmed += 1;
+    else if (e?.status === SLANG_STATUS.REJECTED) counts.rejected += 1;
+    else counts.candidate += 1;
+  }
+  return {
+    phase,
+    enabled,
+    inFlight: learnInFlight,
+    queuedOps: queuedSlangOps,
+    stopRequested: slangStopRequested,
+    researching,
+    learnerSessionActive: Boolean(slangLearnerSessionId),
+    lastLearnAtMs,
+    counts
+  };
+}
+
+/**
  * 核心批量学习（B/C 共用，参数带 sinceTsMs；必须在 queueSlangTask 串行链内执行）：
  * 1) 新架构：桥不再拉群消息；每次触发只确保「首轮任务说明」已注入，然后发一句本轮提醒，
  *    由学习会话自行调用 qq_learning_corpus（读 SQLite chat_messages）拉取 (since, now] 语料并统一分析

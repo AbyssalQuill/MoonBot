@@ -710,7 +710,14 @@ export function startConsoleServer() {
       if (req.method === 'GET' && url.pathname === '/api/slang') {
         const status = url.searchParams.get('status') || '';
         const list = status ? slangEntries.filter((e) => e.status === status) : slangEntries;
-        sendJson({ entries: list, config: cfgRef.slang });
+        // 【2026-09-16】附带"学习状态机"快照（phase/inFlight/queuedOps/researching/lastLearnAtMs/counts），
+        // 供管理端把"现在到哪一步了"显示清楚；老桥没有这个导出时字段为 null，前端按"拿不到"处理即可。
+        let learning = null;
+        try {
+          const slangMod = await import('../core/slang.js');
+          if (typeof slangMod.slangLearningState === 'function') learning = slangMod.slangLearningState();
+        } catch { learning = null; }
+        sendJson({ entries: list, config: cfgRef.slang, learning });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/slang') {
