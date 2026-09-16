@@ -180,6 +180,10 @@ async function gateImage(buffer, mimeType, label) {
   return { ok: false, reason: checked.reason };
 }
 
+/* 【2026-09-16】占位文案要**明确告诉模型"这张图没到你手上"**：
+ * 以前只写 `[图片（获取失败）]`，模型容易顺着上下文"脑补"图里有什么（主人报的"看图乱猜"）。
+ * 现在占位文案直接把规则写进去：看不到就如实说、不要猜内容、也不要描述样子。 */
+const MEDIA_PLACEHOLDER_HINT = '—— 这张图没能投递给你，看不到就如实说"图没加载出来"，不要猜内容';
 export async function resolveOneMedia(media) {
   if (!media || typeof media !== 'object') return { ok: false, fallbackText: '' };
   if (media.kind === 'face') {
@@ -187,7 +191,7 @@ export async function resolveOneMedia(media) {
     if (face.buffer) {
       const g = await gateImage(face.buffer, face.mimeType || 'image/png', `表情#${media.faceId ?? ''}`);
       if (g.ok) return { ok: true, face: true, buffer: g.buffer, mimeType: g.mimeType, faceText: face.text || '' };
-      return { ok: false, fallbackText: `${face.text || `[表情#${media.faceId}]`}（尺寸过大，已跳过）` };
+      return { ok: false, fallbackText: `${face.text || `[表情#${media.faceId}]`}（尺寸过大，已跳过${MEDIA_PLACEHOLDER_HINT}）` };
     }
     return { ok: false, fallbackText: face.text || `[表情#${media.faceId}]` };
   }
@@ -195,9 +199,9 @@ export async function resolveOneMedia(media) {
   if (img?.buffer) {
     const g = await gateImage(img.buffer, img.mimeType || 'image/jpeg', '图片');
     if (g.ok) return { ok: true, face: false, buffer: g.buffer, mimeType: g.mimeType };
-    return { ok: false, fallbackText: `[图片（尺寸过大已跳过：${g.reason}）]` };
+    return { ok: false, fallbackText: `[图片（尺寸过大已跳过：${g.reason}）${MEDIA_PLACEHOLDER_HINT}]` };
   }
-  return { ok: false, fallbackText: `[图片（获取失败）]` };
+  return { ok: false, fallbackText: `[图片（获取失败）${MEDIA_PLACEHOLDER_HINT}]` };
 }
 
 export async function resolveMediaList(mediaList) {
