@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log } from '../lib/log.js';
-import { STATE_DIR } from '../lib/paths.js';
+import { ROOT, STATE_DIR } from '../lib/paths.js';
 import { atomicWriteJson, readJsonSafe } from '../lib/json-fs.js';
 import { state } from './config.js';
 import { social } from './social-state.js';
@@ -64,12 +64,30 @@ export function sessionWorkspaceDir() {
 /** 归一化：只留字母数字并小写。用于把 DSH 的目录 slug 与真实路径对齐。 */
 const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+/** 「本桥工作区」的 slug 前缀：`<state 目录>`（不含最后一段）。
+ *  主聊天是 state/agents，学习任务是 state/slang-agent、state/persona-agent……
+ *  它们**同属本桥**，都该被巡检归档；而 `--C-Users-...--`（本机桌面跑测试留下的）
+ *  `--D-MoonBot-...--` 这类别的机器的残留**不属于**这里，绝不能碰。 */
+export function bridgeWorkspaceSlugPrefix() {
+  return norm(path.dirname(sessionWorkspaceDir()));
+}
+
+/** 这个工作区目录名是不是"本桥的"（主工作区或它的兄弟工作区）。 */
+export function isBridgeWorkspaceSlug(name) {
+  const n = norm(name);
+  if (!n) return false;
+  const exact = norm(sessionWorkspaceDir());
+  if (n === exact) return true;
+  const prefix = bridgeWorkspaceSlugPrefix();
+  return Boolean(prefix) && n.startsWith(prefix);
+}
+
 /** 该 sessions 根下是否存在「本桥工作区」对应的 slug 目录（只留字母数字后比较）。 */
-function hasWorkspaceSlug(sessionsRoot, wanted = norm(sessionWorkspaceDir())) {
-  if (!sessionsRoot || !wanted) return false;
+function hasWorkspaceSlug(sessionsRoot) {
+  if (!sessionsRoot) return false;
   try {
     for (const e of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
-      if (e.isDirectory() && norm(e.name) === wanted) return true;
+      if (e.isDirectory() && isBridgeWorkspaceSlug(e.name)) return true;
     }
   } catch { /* 读不到就当没有 */ }
   return false;
@@ -93,6 +111,16 @@ export function dshSessionsCandidates() {
     out.push(s);
   };
   const managerDir = path.join(process.env.USERPROFILE || process.env.HOME || '', '.qq-bridge-manager');
+  /* 【2026-09-16 修「归档器在服务器上一直空转」】
+   * 实测（服务端）：归档器状态里 `sessionsRoot: null` —— 它只会看"管理器 config.json 里的隔离 home"和
+   * `DSH_HOME`，而服务器上桥的环境变量是 `QQB_DSH_HOME=/root/.dsh`（见 start-bridge.sh），
+   * 两个都不匹配 → 每 10 分钟空跑一次、日志里只有"已启用"那一行，
+   * 于是 `--root-qq-bridge-state-*--` 下的旧会话一直堆积（还混着本机残留的工作区）。
+   * 现在把桥自己的环境变量和项目内隔离 home 都作为候选。 */
+  // 0) 桥自己的 home（服务器部署靠这个：QQB_DSH_HOME=$HOME/.dsh）
+  if (process.env.QQB_DSH_HOME) push(path.join(String(process.env.QQB_DSH_HOME), 'sessions'));
+  if (process.env.DSH_ISOLATED_HOME) push(path.join(String(process.env.DSH_ISOLATED_HOME), 'sessions'));
+  try { push(path.join(ROOT, '.runtime', 'dsh-isolated-home', 'sessions')); } catch {}
   // 1) 管理器 config.json 里记录的隔离 home：桥正是跟这个实例说话，最权威
   try {
     const mgrCfg = JSON.parse(fs.readFileSync(path.join(managerDir, 'config.json'), 'utf8').replace(/^\uFEFF/, ''));
@@ -126,28 +154,42 @@ export function dshSessionsDir() {
     if (fs.existsSync(cand)) return cand;
   }
   const candidates = dshSessionsCandidates();
-  const wanted = norm(sessionWorkspaceDir());
   for (const root of candidates) {
-    if (hasWorkspaceSlug(root, wanted)) return root;
+    if (hasWorkspaceSlug(root)) return root;
   }
   return candidates[0] ?? null;
 }
 
 /**
- * 匹配「QQ 聊天」工作区对应的会话目录集合。
- * DSH 把工作区路径编码成 `--D-MoonBot-resources-...-agents--` 这种 slug，
+ * 匹配「本桥」的工作区会话目录集合（主聊天 + 黑话/人格学习工作区）。
+ * DSH 把工作区路径编码成 `--root-qq-bridge-state-agents--` 这种 slug，
  * 这里用「只留字母数字」的归一化比较，避免复刻它的编码规则（规则一变就失效）。
+ * 只认 `<state 目录>` 前缀下的工作区 ⇒ 本机桌面跑测试留下的 `--C-Users-...--` /
+ * `--D-MoonBot-...--` 那种残留永远不会被当成"本桥工作区"。
  * @param {string} sessionsRoot
- * @param {{all?: boolean}} [opts] all=true 时返回 sessions 下**全部**工作区目录（一次性清理用）
+ * @param {{all?: boolean}} [opts] all=true 时返回 sessions 下**全部**工作区目录（一次性清理残留用）
  */
 export function workspaceSessionDirs(sessionsRoot, opts = {}) {
   if (!sessionsRoot) return [];
-  const wanted = norm(sessionWorkspaceDir());
   const out = [];
   try {
     for (const e of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
-      if (!opts.all && (!wanted || norm(e.name) !== wanted)) continue;
+      if (!opts.all && !isBridgeWorkspaceSlug(e.name)) continue;
+      out.push(path.join(sessionsRoot, e.name));
+    }
+  } catch {}
+  return out;
+}
+
+/** 【2026-09-16】列出**不属于本桥**的工作区目录（本机残留/别的实例），供一次性清理用。 */
+export function foreignWorkspaceDirs(sessionsRoot) {
+  if (!sessionsRoot) return [];
+  const out = [];
+  try {
+    for (const e of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      if (isBridgeWorkspaceSlug(e.name)) continue;
       out.push(path.join(sessionsRoot, e.name));
     }
   } catch {}
@@ -352,11 +394,15 @@ export function stopSessionArchiveTicker() {
 export function sessionArchiveStatus() {
   const o = sessionArchiveOptions();
   const sessionsRoot = dshSessionsDir();
+  const bridgeDirs = sessionsRoot ? workspaceSessionDirs(sessionsRoot) : [];
+  const foreign = sessionsRoot ? foreignWorkspaceDirs(sessionsRoot) : [];
   return {
     ...o,
     workspaceDir: sessionWorkspaceDir(),
     sessionsRoot,
-    workspaceSessionDirs: sessionsRoot ? workspaceSessionDirs(sessionsRoot) : [],
+    workspaceSessionDirs: bridgeDirs,
+    // 【2026-09-16】本机/别的实例留下的工作区目录（不在本桥 state 前缀下）：一次性清理用
+    foreignWorkspaceDirs: foreign.map((p) => path.basename(p)),
     archivedLocally: archivedLocally.size,
     running
   };
