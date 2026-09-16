@@ -4099,6 +4099,8 @@ app.post('/api/voice/test', (req, res) => proxyToBridgeConsole(req, res, { path:
 /* 黑话库批量审批（管理端弹窗的三个批量按钮）：桥侧端点早就有了，管理端此前没有转发，
  * 于是界面上的「批量通过 / 批量拒收 / 批量分析」会 404。这里按同路径补三条 POST 代理。 */
 app.post('/api/slang/batch-confirm', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/batch-confirm', method: 'POST', body: req.body ?? {} }));
+/* 黑话删除（单条也走这条，传一个 id 的数组）：管理端「学习」页每条黑话的删除入口要用 */
+app.post('/api/slang/batch-delete', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/batch-delete', method: 'POST', body: req.body ?? {} }));
 app.post('/api/slang/batch-reject', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/batch-reject', method: 'POST', body: req.body ?? {} }));
 app.post('/api/slang/research', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/slang/research', method: 'POST', body: req.body ?? {}, timeoutMs: 60000 }));
 /* 人格学习：审批修正 / 结合原人设完善（fuse 要跑一轮模型，所以超时放宽到 3 分钟）/ 覆盖机器人人设 */
@@ -4143,6 +4145,38 @@ function bridgeUnreachableText(scope, base, detail) {
 }
 
 /** 取某一侧桥控制台的用量报告；失败回 { ok:false, error }，绝不抛 */
+/* 【2026-09-16 修】服务端断开后，服务端那部分消耗要**继续计入合计**。
+ * 症状：服务器一停（或 SSH 断开、Bridge 隧道不在），token-report 的 remote 就取不到，
+ * 合计立刻只剩本机 —— 于是"总消耗"看起来凭空掉了一大截，用户以为服务端的用量丢了。
+ * 事实是：服务端停着就不会再产生消耗，**上一次同步到的数字依然是准确的**（只是不再增长）。
+ * 所以这里把每次成功取到的服务端报告缓存到 ~/.qq-bridge-manager，取不到时回退用它，
+ * 并明确标成"上次同步"（remoteStale/remoteAt），不冒充实时值。 */
+const REMOTE_TOKEN_CACHE_FILE = join(CONFIG_DIR, 'last-remote-token-report.json');
+function readRemoteTokenCache() {
+  try { return JSON.parse(readFileSync(REMOTE_TOKEN_CACHE_FILE, 'utf-8')); } catch { return null; }
+}
+function writeRemoteTokenCache(server, report) {
+  try {
+    writeFileSync(REMOTE_TOKEN_CACHE_FILE, JSON.stringify({
+      serverId: server?.id ?? '', serverName: server?.name ?? '', host: server?.host ?? '', at: Date.now(), report,
+    }, null, 2));
+  } catch { /* 缓存写失败不影响本次响应 */ }
+}
+/** 取可用的缓存：换了服务器（activeServerId 与缓存不一致）就不复用，避免把 A 机器的用量算到 B 头上。 */
+function remoteTokenCacheFor(server) {
+  const c = readRemoteTokenCache();
+  if (!c || !isObj(c.report)) return null;
+  if (server?.id && c.serverId && c.serverId !== server.id) return null;
+  return c;
+}
+function fmtCacheTime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '未知时间';
+  const d = new Date(n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 async function fetchTokenReportFrom(base, token, timeoutMs = 15000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -4195,7 +4229,7 @@ function mergeTokenReports(a, b) {
 app.get('/api/learning/token-report', async (_req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
-  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null };
+  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null, remoteStale: false, remoteAt: 0 };
 
   // ① 本机那份：永远保留（哪怕服务器连上了）——以前 SSH 模式把这块整个吞掉了
   try {
@@ -4207,12 +4241,25 @@ app.get('/api/learning/token-report', async (_req, res) => {
     out.localReason = bridgeUnreachableText('local', getLocalBridgeTarget().base, String(e?.message || e));
   }
 
-  // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因
+  // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因。
+  //    取不到时（未连接 / 隧道不在 / 请求失败）回退到**上一次成功同步的服务端报告**：
+  //    服务端停着不会再消耗，那份数字仍然准确，只是不再增长 —— 否则合计会突然只剩本机。
   const rt = resolveRemoteBridgeTarget();
+  const useRemoteCache = (prefix) => {
+    const c = remoteTokenCacheFor(connected);
+    if (!c) return false;
+    out.remote = c.report;
+    out.remoteStale = true;
+    out.remoteAt = c.at;
+    out.remoteServer = { id: c.serverId, name: c.serverName, host: c.host };
+    out.remoteReason = `${prefix}，显示上次同步到的服务端用量（${fmtCacheTime(c.at)}），仍计入合计`;
+    return true;
+  };
   if (!rt) {
-    out.remoteReason = (connected && sshConnections.has(connected.id))
+    const why = (connected && sshConnections.has(connected.id))
       ? '服务器已连接，但 Bridge 隧道不在（重新连接一次 SSH 即可）'
       : '未连接服务器';
+    if (!useRemoteCache(why)) out.remoteReason = why;
   } else {
     try {
       const token = await getRemoteBridgeToken(rt.server, rt.conn);
@@ -4220,9 +4267,14 @@ app.get('/api/learning/token-report', async (_req, res) => {
       if (r.ok) {
         out.remote = r.report;
         out.remoteServer = { id: rt.server.id, name: rt.server.name, host: rt.server.host };
-      } else out.remoteReason = bridgeUnreachableText('remote', rt.base, r.error);
+        writeRemoteTokenCache(rt.server, r.report);
+      } else {
+        const why = bridgeUnreachableText('remote', rt.base, r.error);
+        if (!useRemoteCache(why)) out.remoteReason = why;
+      }
     } catch (e) {
-      out.remoteReason = bridgeUnreachableText('remote', rt.base, String(e?.message || e));
+      const why = bridgeUnreachableText('remote', rt.base, String(e?.message || e));
+      if (!useRemoteCache(why)) out.remoteReason = why;
     }
   }
 

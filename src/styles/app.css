@@ -365,8 +365,13 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-status-hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--nc-foreground-400); }
 .lrn-block-refresh { margin-left: auto; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
-/* 最后一栏里的列表不再限高：限高会在卡片被左卡拉高时在底部留下一块死空白 */
-.lrn-status-block-fill .lrn-status-scroll { max-height: none; }
+/* 【2026-09-16 主人要求】最下面那一栏（画像学习）**限高 + 内部纵向滚动**：
+   以前这里是 max-height:none，群友档案一多就把这一栏（连带整张右卡，因为 .lrn-grid 是 stretch）
+   无限拉高，页面得一路滚到底才能看到别的区块。现在内容区固定在 300px 内自己滚，
+   标题「画像学习」和右上角「刷新」在滚动区之外，始终留在可见处（头部固定、内容区滚动）。 */
+.lrn-status-block-fill .lrn-status-scroll { max-height: 300px; }
+/* 画像学习栏固定头部（标题与刷新按钮之外的两行摘要）：不随下面档案区一起滚 */
+.lrn-portrait-head { flex: 0 0 auto; margin-top: 2px; padding: 0 2px; }
 /* 悬停动效：与主页那几张启动卡一致（微微抬起 + 阴影 + 边框变亮） */
 .lrn-status-row { cursor: pointer; transition: box-shadow .2s, transform .2s, border-color .2s; }
 .lrn-status-row:hover { transform: translateY(-2px); border-color: hsl(339.33 90% 70.39% / .9); box-shadow: 0 6px 16px hsl(339.13 92% 9% / .10); }
@@ -414,6 +419,48 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-slang-row .lrn-status-main { flex: 1 1 auto; min-width: 0; }
 .lrn-slang-row .lrn-pick { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 3px; cursor: pointer; accent-color: var(--nc-primary-500); }
 .lrn-slang-row.is-selected { border-color: var(--nc-primary-500); background: hsl(339.33 90% 98.5%); box-shadow: 0 0 0 1px hsl(339.33 90% 80.39% / .7); }
+/* 已确认的词条只读：没有勾选框，也不该有"可点选"的手型 */
+.lrn-slang-row.is-readonly { cursor: default; }
+.lrn-slang-row.is-readonly:hover { transform: none; }
+/* 占位：已确认行没有复选框，用它撑出与未确认行一样的左侧缩进 */
+.lrn-pick-none { display: inline-block; flex: 0 0 auto; width: 16px; margin-top: 3px; }
+.lrn-slang-del { margin-left: 8px; flex: none; }
+/* 黑话库的两组（已确认 / 未确认） */
+.lrn-slang-group { display: flex; flex-direction: column; gap: 8px; }
+.lrn-slang-group-h {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 2px 2px 0; font-size: 12.5px; font-weight: 800; color: var(--nc-foreground-700);
+}
+.lrn-slang-group-n { font-weight: 600; color: var(--nc-foreground-500); }
+.lrn-slang-group-hint { margin-left: auto; font-weight: 400; font-size: 11.5px; color: var(--nc-foreground-400); }
+/* 「已拒收」那组是可点的折叠头 */
+.lrn-slang-group-h-btn { cursor: pointer; border-radius: 8px; padding: 2px 4px 0; }
+.lrn-slang-group-h-btn:hover { background: hsl(339.13 92% 97% / .8); }
+.lrn-slang-group-h-btn:focus-visible { outline: 2px solid var(--nc-primary-500); outline-offset: 1px; }
+.lrn-slang-group-h-btn .lrn-slang-group-hint { color: var(--nc-primary-600); }
+
+/* 黑话「学习状态机」一行：平时浅色；进行中（提取/研究/排队/停止中）加呼吸高亮 + 转圈 */
+.lrn-learn-state {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 7px 10px; border-radius: var(--nc-radius-m);
+  border: 1px dashed hsl(339.33 90% 88% / .95); background: hsl(339.13 92% 98.4% / .7);
+  font-size: 12px; line-height: 1.6; color: var(--nc-foreground-500);
+}
+.lrn-learn-state.is-active {
+  border-style: solid; border-color: hsl(339.33 90% 70.39% / .8); background: hsl(339.13 92% 96.8%);
+  animation: lrnLearnPulse 1.6s ease-in-out infinite;
+}
+.lrn-learn-state.is-off { opacity: .92; }
+/* 拿不到 learning 快照（旧桥 / 读取失败）：中性灰，明确表示"没有状态可用"，不显示任何阶段 */
+.lrn-learn-state.is-unknown { border-style: solid; border-color: var(--nc-divider); background: var(--nc-content2); }
+.lrn-learn-state.is-unknown .lrn-learn-note { color: var(--nc-foreground-400); }
+.lrn-learn-state.is-unknown .btn { margin-left: auto; flex: none; }
+@keyframes lrnLearnPulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(339.33 90% 60.41% / .20); }
+  50% { box-shadow: 0 0 0 5px hsl(339.33 90% 60.41% / 0); }
+}
+@media (prefers-reduced-motion: reduce) { .lrn-learn-state.is-active { animation: none; } }
+.lrn-learn-note { flex: 1 1 240px; min-width: 0; }
 
 /* 区块内分组 */
 .lrn-block { }

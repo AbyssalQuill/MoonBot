@@ -359,17 +359,87 @@ export interface OwnerProfileResp {
 }
 
 export const getLearningGraph = () => api<GraphData>('/learning/graph');
+/** 一条黑话词条（桥的 state/slang.json 里的一条；字段以桥侧 slang-learner 的 upsertSlangEntry 为准） */
+export interface SlangEntry {
+  id?: string;
+  content?: string;
+  meaning?: string;
+  usage?: string;
+  example?: string;
+  risk?: string;
+  /** candidate | confirmed | rejected（桥侧 SLANG_STATUS） */
+  status?: string;
+  /** 出现次数 */
+  count?: number;
+  /** 来源：manual / 群会话 key 等 */
+  source?: string;
+  /** 研究会话明确确认（confirmed:true + 有含义 + risk 非 high）后桥侧**自动**转 confirmed 时打的标 */
+  autoConfirmed?: boolean;
+  confirmedAt?: string;
+  updatedAt?: string;
+  addedAt?: string;
+  evidence?: Array<{ key?: string; sender?: string; text?: string; time?: number }>;
+}
+/** 黑话学习状态机的阶段（**桥侧已确认的契约，前端只做展示映射**）：
+ *  disabled=学习开关关着 · extracting=正在批量提取+研究 · stopping=收到停止请求，等当前分块结束 ·
+ *  queued=有排队任务 · researching=有候选正在研究会话里分析 · ready=学习会话在、当前空闲 ·
+ *  idle=没有会话也没有任务 */
+export type SlangLearnPhase = 'disabled' | 'extracting' | 'stopping' | 'queued' | 'researching' | 'ready' | 'idle';
+/** 桥侧「学习状态机」快照：`GET /api/slang` 回包里的 `learning`（管理端 `GET /api/learning/slang-library` 即转发此条）。
+ *  **老桥 / 接口失败时该字段可能是 null** —— 前端必须按"拿不到状态"降级显示，不能报错、也不能显示假状态。 */
+export interface SlangLearningState {
+  phase: SlangLearnPhase;
+  /** 黑话学习总开关是否开着 */
+  enabled: boolean;
+  /** 是否有学习任务正在跑 */
+  inFlight: boolean;
+  /** 已排队未开始的任务数 */
+  queuedOps: number;
+  /** 是否收到过停止请求（等当前分块结束） */
+  stopRequested: boolean;
+  /** 正在研究（分析含义）的候选条数 */
+  researching: number;
+  /** 学习会话是否已建立 */
+  learnerSessionActive: boolean;
+  /** 上次学习水位（毫秒时间戳，0 = 还没学过） */
+  lastLearnAtMs: number;
+  /** 黑话库构成（与 entries 同一份数据；可直接当两个分组的标题计数，未确认 = candidate） */
+  counts: { candidate: number; confirmed: number; rejected: number; total: number };
+}
+/** 黑话库回包（桥 /api/slang：{ entries, config, learning }；learning 可能为 null） */
+export interface SlangLibraryResp {
+  ok?: boolean;
+  error?: string;
+  entries?: SlangEntry[];
+  config?: Record<string, unknown>;
+  learning?: SlangLearningState | null;
+  /** 兼容回包被包一层的情况 */
+  result?: SlangLibraryResp;
+  data?: SlangLibraryResp;
+}
 /** 黑话库（桥的 state/slang.json，经管理端代理） */
-export const getSlangLibrary = () => api<any>('/learning/slang-library');
-/** 黑话库**批量手动审批**（管理端同名路径转发到桥控制台）：
- *   · batch-confirm / batch-reject：body { ids: string[] } → { ok, confirmedCount|rejectedCount, skippedCount?, skipped? }
- *   · research：body { ids: string[] } → { ok, count }（**只对候选生效**，已确认/已拒收的会被桥侧过滤掉） */
+export const getSlangLibrary = () => api<SlangLibraryResp>('/learning/slang-library');
+/** 黑话库**批量审批 / 删除**（管理端同名路径转发到桥控制台，body 一律 `{ ids: string[] }`）：
+ *   · batch-confirm：只对 **candidate 且 meaning 非空** 的条目生效，其余跳过并回
+ *     `{ ok, confirmedCount, skippedCount, skipped:[{id,content?,reason}] }`。
+ *     【2026-09-16】管理端「黑话库」弹窗**不再调它**：研究会话明确确认后桥侧会自动把候选转成 confirmed
+ *     （slang.js 里 autoConfirmed 那段），人工批量通过是多余的，「批量通过」按钮已按主人要求删除。
+ *     单个确认若要恢复，走的是桥侧 `POST /api/slang/:id/confirm`（管理端目前**没有**转发这条）。
+ *   · batch-reject：`{ ok, rejectedCount }`（不再参与查询，可留档不删）。
+ *   · research：只对候选生效（已确认/已拒收会被桥侧过滤掉）→ `{ ok, count }`。
+ *   · batch-delete：**只按 ids 删** → `{ ok, removedCount }`；一条都匹配不到时桥回
+ *     `404 { ok:false, error:'没有匹配到要删除的黑话' }`（前端必须给出提示，不能静默）。
+ *     桥那条路由**还支持** `{ status:'confirmed' }` 整批删，但界面上**故意不暴露**这个口子
+ *     （需求是"单条可删"）—— 所以这个函数只接受 ids，传不出 status。 */
 export const slangBatchConfirm = (ids: string[]) =>
   api<BridgeResp>('/slang/batch-confirm', { method: 'POST', body: JSON.stringify({ ids }) });
 export const slangBatchReject = (ids: string[]) =>
   api<BridgeResp>('/slang/batch-reject', { method: 'POST', body: JSON.stringify({ ids }) });
 export const slangResearch = (ids: string[]) =>
   api<BridgeResp>('/slang/research', { method: 'POST', body: JSON.stringify({ ids }) });
+/** 删黑话。**单条删除就传一个 id 的数组**（`[id]`）；界面上只走这条路，不按 status 整批删。 */
+export const slangBatchDelete = (ids: string[]) =>
+  api<BridgeResp>('/slang/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) });
 /** 单人**完整**画像资料（直读 memory.db，不做截断） */
 export const getPersonProfile = (uid: string) => api<any>(`/learning/profile?uid=${encodeURIComponent(uid)}`);
 export const getOwnerProfile = () => api<OwnerProfileResp>('/learning/owner-profile');

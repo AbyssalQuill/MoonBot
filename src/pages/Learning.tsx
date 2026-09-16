@@ -2,12 +2,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import NumInput from '../components/NumInput';
 import {
   getLearningConfig, saveLearningConfig, slangAction, personaAction, personaApply, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
-  reconcileTokens, slangBatchConfirm, slangBatchReject, slangResearch,
+  reconcileTokens, slangBatchReject, slangResearch, slangBatchDelete,
 } from '../api';
+import type { SlangEntry, SlangLearnPhase, SlangLearningState } from '../api';
 import {
   ArrowLeft, Save, Play, Square, RefreshCw, Loader2, AlertTriangle,
   Activity, TrendingUp, Users, Clock3, Zap, BarChart3, Wallet, RotateCcw, BookOpen, Scale,
-  Check, X, Search, Wand2,
+  Check, X, Search, Wand2, Trash2,
 } from 'lucide-react';
 
 interface Props { onBack: () => void; }
@@ -164,6 +165,44 @@ function normStatus(r: any): PItem[] {
   }));
 }
 
+/* ---------- 黑话「学习状态机」（只用桥返回的 learning 快照，不做派生猜测） ---------- */
+const SLANG_PHASES: SlangLearnPhase[] = ['disabled', 'extracting', 'stopping', 'queued', 'researching', 'ready', 'idle'];
+/** 桥侧 GET /api/slang 的 learning 快照归一化。
+ *  契约（桥侧已确认）：字段缺失/类型飘忽一律给安全默认值；**phase 不认识时整体判为"拿不到"（返回 null）**，
+ *  绝不退化成某个默认阶段 —— 显示一个假状态比不显示更糟。 */
+function normSlangLearning(raw: any): SlangLearningState | null {
+  const phase = String(raw?.phase ?? '') as SlangLearnPhase;
+  if (!SLANG_PHASES.includes(phase)) return null;
+  const c = isObj(raw?.counts) ? raw.counts : {};
+  return {
+    phase,
+    enabled: raw?.enabled !== false,
+    inFlight: raw?.inFlight === true,
+    queuedOps: num(raw?.queuedOps),
+    stopRequested: raw?.stopRequested === true,
+    researching: num(raw?.researching),
+    learnerSessionActive: raw?.learnerSessionActive === true,
+    lastLearnAtMs: num(raw?.lastLearnAtMs),
+    counts: {
+      candidate: num(c.candidate),
+      confirmed: num(c.confirmed),
+      rejected: num(c.rejected),
+      total: num(c.total),
+    },
+  };
+}
+/** 每个 phase 的文案（**照桥侧确认的语义映射，不改含义**）+ 徽章样式。
+ *  只有 extracting / researching 是"进行中样式"（转圈 + 呼吸高亮），其余是静态徽章。 */
+const SLANG_PHASE_UI: Record<SlangLearnPhase, { label: string; cls: string; note: string; active?: boolean }> = {
+  disabled: { label: '已关闭', cls: 'badge badge-soft', note: '黑话学习总开关没开（enabled=false）：桥侧会跳过所有黑话学习' },
+  extracting: { label: '学习中（提取+研究）', cls: 'badge badge-warn', note: '正在批量提取语料并研究候选，本轮跑完自动落库', active: true },
+  stopping: { label: '正在停止…', cls: 'badge badge-soft', note: '已收到停止请求，等当前分块结束就收尾（已经学到的不会丢）' },
+  queued: { label: '排队中', cls: 'badge badge-info', note: '有已排队还没开始的任务在等前面的跑完' },
+  researching: { label: '分析中（研究）', cls: 'badge badge-warn', note: '有候选正在研究会话里分析含义，拿到含义后桥侧会自动转成「已确认」', active: true },
+  ready: { label: '空闲（随时可开始）', cls: 'badge badge-success', note: '学习会话已经建好，当前没有任务，随时可以再学一轮' },
+  idle: { label: '空闲', cls: 'badge badge-soft', note: '没有学习会话、也没有任务，等下一次定时或手动学习触发' },
+};
+
 /** HH:MM 时间输入归一化。
  *  踩过的坑：中文输入法下打 ":" 常常出的是**全角「：」**（以及全角数字），
  *  原来的过滤 `[^0-9:]` 会把它直接吃掉 → 表现为"这个框输不了冒号"。这里先把全角转半角再过滤。 */
@@ -179,7 +218,14 @@ export default function Learning({ onBack }: Props) {
   const [cfg, setCfg] = useState<any>(null);
   const [loadErr, setLoadErr] = useState<string>('');
   const [msg, setMsg] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  // 【2026-09-16 修「按钮串台」】以前整页只有一个 busy，黑话区与人格区共用，于是：
+  //   ① 两个区块的「保存配置」是**同一个 handler**（body 里 slang + persona 一起提交）→ 点黑话区的保存会连带写人格配置；
+  //   ② busy === 'save' 时两处的保存按钮**同时转圈**，busy !== null 时两区的按钮一起变灰 → 视觉上"两个都在跑"；
+  //   ③ 画像区（PortraitLearnBlock）自带一套同名 busy，又完全不受这里约束 → 黑话学习还在跑时还能再点画像立即学习，
+  //      两个学习并行跑，看起来就是"点一个、另一个也一起跑"。
+  //   现在拆成互不影响的三套：黑话 slangBusy / 人格 personaBusy / 画像（子组件内部自管）。
+  const [slangBusy, setSlangBusy] = useState<string | null>(null);
+  const [personaBusy, setPersonaBusy] = useState<string | null>(null);
 
   // 表单草稿（与 cfg 分离，避免 typing 直接改源对象）
   const [slgEnabled, setSlgEnabled] = useState(true);
@@ -323,72 +369,117 @@ export default function Learning({ onBack }: Props) {
 
   // 黑话库弹窗
   const [slangOpen, setSlangOpen] = useState(false);
-  const [slangEntries, setSlangEntries] = useState<any[]>([]);
+  const [slangEntries, setSlangEntries] = useState<SlangEntry[]>([]);
   const [slangErr, setSlangErr] = useState('');
   const [slangQ, setSlangQ] = useState('');
-  // 黑话库批量审批：勾选的词条 id（只认当前可见列表里勾上的那些）+ 进行中的动作 + 弹窗内结果提示
+  // 黑话库批量审批：勾选的词条 id（只认当前可见的**未确认**列表里勾上的那些）+ 进行中的动作 + 弹窗内结果提示
   const [slangSel, setSlangSel] = useState<string[]>([]);
-  const [slangBusy, setSlangBusy] = useState<string>('');
+  // 黑话库弹窗自己的 busy（批量拒收/分析/删除），与页面左卡那套 slangBusy 完全分开
+  const [slangLibBusy, setSlangLibBusy] = useState<string>('');
   const [slangNote, setSlangNote] = useState('');
+  // 「已拒收」那一组默认折起来（它既不进「已确认」也不进「未确认」，但数据不能丢，想看就点开）
+  const [slangShowRejected, setSlangShowRejected] = useState(false);
+  // 黑话「学习状态机」快照（GET /api/slang 的 learning，桥侧 slangLearningState()）；老桥没有该字段时为 null
+  const [slangLearn, setSlangLearn] = useState<SlangLearningState | null>(null);
   // 画像学习状态（右卡「画像学习」栏；来源 portraitAction('status')，与人格状态共用 60 秒静默轮询）
   const [ptStatus, setPtStatus] = useState<any>(null);
   const [ptErr, setPtErr] = useState('');
 
   const openSlangLib = async () => {
     setSlangOpen(true); setSlangErr(''); setSlangNote('');
-    if (slangEntries.length) { void loadSlangLib(true); return; }
-    await loadSlangLib();
+    await refreshSlangLib(!!slangEntries.length);
   };
-  const loadSlangLib = async (quiet = false) => {
+  /** 取黑话库：**同一次请求**既拿到词条，也拿到桥侧「学习状态机」快照（learning）。
+   *  页面上那行「学习中」状态就靠它 —— 用桥的真实运行态，不是前端猜的。 */
+  const refreshSlangLib = async (quiet = false) => {
     try {
-      const r: any = await getSlangLibrary();
-      const list: any[] = Array.isArray(r?.entries) ? r.entries
+      const r = await getSlangLibrary();
+      const list: SlangEntry[] = Array.isArray(r?.entries) ? r.entries
         : (Array.isArray(r?.result?.entries) ? r.result.entries : (Array.isArray(r?.data?.entries) ? r.data.entries : []));
       setSlangEntries(list);
+      setSlangLearn(isObj(r?.learning) ? normSlangLearning(r.learning) : null);
       // 列表重取后，把已经不存在的勾选丢掉（否则「已选 N 条」会算进幽灵词条）
       setSlangSel((prev) => (prev.length ? prev.filter((id) => list.some((e) => String(e?.id ?? '') === id)) : prev));
       setSlangErr('');
-    } catch (e: any) {
-      if (!quiet) setSlangErr(String(e?.message ?? e));
+    } catch (e) {
+      if (!quiet) setSlangErr(String((e as Error)?.message ?? e));
     }
   };
 
-  /** 黑话库批量操作：confirm = 批量通过 / reject = 批量拒收 / research = 批量分析（桥侧只研究候选词条）。
+  /** 黑话库批量操作：reject = 批量拒收 / research = 批量分析（桥侧只研究候选词条）。
+   *  【2026-09-16】「批量通过」已按主人要求去掉：研究会话明确确认后桥侧会自动转 confirmed（slang.js 里
+   *  autoConfirmed 那段），人工批量通过是多余的。这里只留拒收与分析两条。
    *  动作完成后按最新状态重取列表，并把结果同时写进页面提示条与弹窗内提示（弹窗盖着页面，只有前者看不见）。 */
-  const slangBatch = async (kind: 'confirm' | 'reject' | 'research', ids: string[]) => {
-    if (slangBusy) return;
-    if (!ids.length) { setSlangNote('请先勾选要处理的词条'); return; }
-    const label = kind === 'confirm' ? '批量通过' : kind === 'reject' ? '批量拒收' : '批量分析';
-    setSlangBusy(kind);
+  const slangBatch = async (kind: 'reject' | 'research', ids: string[]) => {
+    if (slangLibBusy) return;
+    if (!ids.length) { setSlangNote('请先勾选要处理的词条（只有「未确认」那一组的候选能勾选）'); return; }
+    const label = kind === 'reject' ? '批量拒收' : '批量分析';
+    setSlangLibBusy(kind);
     setSlangNote(`${label}：已提交 ${ids.length} 条，等待桥侧回执…`);
     try {
-      const r: any = kind === 'confirm' ? await slangBatchConfirm(ids)
-        : kind === 'reject' ? await slangBatchReject(ids)
-          : await slangResearch(ids);
+      const r: any = kind === 'reject' ? await slangBatchReject(ids) : await slangResearch(ids);
       const e = firstErr(r);
       if (e) { const t = `${label}失败：${e}`; setMsg(t); setSlangNote(t); return; }
       const res = unwrap(r);
-      let text: string;
-      if (kind === 'confirm') {
-        const done = num(res.confirmedCount);
-        const skip = num(res.skippedCount);
-        const skipped: any[] = Array.isArray(res.skipped) ? res.skipped : [];
-        const why = skipped.length
-          ? `（跳过：${skipped.slice(0, 3).map((s: any) => `${String(s?.content ?? s?.id ?? '')}——${String(s?.reason ?? '')}`).join('；')}${skipped.length > 3 ? ' …' : ''}）`
-          : '';
-        text = `批量通过：已确认 ${done} 条${skip ? `，跳过 ${skip} 条${why}` : ''}`;
-      } else if (kind === 'reject') {
-        text = `批量拒收：已拒收 ${num(res.rejectedCount)} 条`;
-      } else {
-        text = `批量分析：已提交 ${num(res.count)} 条候选词条的研究任务（桥侧后台串行跑，完成后自动补释义）`;
-      }
+      const text = kind === 'reject'
+        ? `批量拒收：已拒收 ${num(res.rejectedCount)} 条`
+        : `批量分析：已提交 ${num(res.count)} 条候选词条的研究任务（桥侧后台串行跑，完成后自动补释义；研究会话确认后自动转「已确认」）`;
       setMsg(text); setSlangNote(text);
       setSlangSel([]);
-      await loadSlangLib(true);
+      await refreshSlangLib(true);
     } catch (err: any) {
       const t = `${label}失败：${apiErrText(err)}`;
       setMsg(t); setSlangNote(t);
-    } finally { setSlangBusy(''); }
+    } finally { setSlangLibBusy(''); }
+  };
+
+  /** 删除单条黑话（**已确认和未确认都能删**）：走桥侧 `POST /api/slang/batch-delete`，body `{ ids: [id] }`。
+   *  接口契约（已与桥侧 console-server.js:763-789 对齐）：
+   *    · 成功 → `{ ok: true, removedCount: N }`；
+   *    · 一条都匹配不到 → 桥回 `404 { ok:false, error:'没有匹配到要删除的黑话' }`；
+   *    · 桥那条路由**还支持** `{ status:'confirmed' }` 整批删 —— 界面上**故意不暴露**这个口子
+   *      （需求是"单条可删"），所以这里永远只传 ids、且只传一个。
+   *  删除不可逆、且会让机器人再也查不到这条词，所以先 confirm 把后果写清楚；任何失败都在页面上给出提示，绝不静默。 */
+  const deleteSlang = async (e: SlangEntry) => {
+    if (slangLibBusy) return;
+    const id = String(e?.id ?? '');
+    const word = String(e?.content ?? '').trim() || '(这条词条)';
+    if (!id) { setSlangNote('这条词条没有 id（桥侧旧数据），删不掉'); return; }
+    const ok = window.confirm(
+      `确定删除黑话「${word}」吗？\n\n`
+      + `· 删除后不可恢复\n`
+      + `· 机器人将不再用这条黑话（qq_slang_query 查库里再也查不到它）\n`
+      + `· 只是想让它暂时不生效、又想留档的话，用「批量拒收」更合适`,
+    );
+    if (!ok) return;
+    setSlangLibBusy(`del:${id}`);
+    setSlangNote(`正在删除「${word}」…`);
+    try {
+      const r: any = await slangBatchDelete([id]);
+      const err = firstErr(r);
+      if (err) {
+        // 桥侧「一条都匹配不到」回的是 404，而管理端代理把桥的 404 统一改写成 code='bridge-stale'、
+        // 文案"目标桥版本过旧或未连接" —— 对"这条词已经不在了"这种正常结果来说很误导。
+        // 按契约把话说明白：两种可能都写出来，不猜死是哪一种。
+        const stale = r?.code === 'bridge-stale' && /404/.test(String(r?.detail ?? ''));
+        const why = stale
+          ? '桥侧没有匹配到这条词条（大概已经被删掉了）。若确认它还在，请检查桥是否为最新版本（该接口不在旧桥上）'
+          : err;
+        const t = `删除「${word}」失败：${why}`;
+        setMsg(t); setSlangNote(t);
+        return;
+      }
+      const removed = num(unwrap(r).removedCount);
+      const t = removed > 0
+        ? `已删除黑话「${word}」（删除后不可恢复，机器人不再用这条黑话）`
+        : `删除「${word}」失败：桥侧回执 removedCount=0，没有匹配到这条词条（可能已被别处删掉）`;
+      setMsg(t); setSlangNote(t);
+      if (removed > 0) setSlangSel((prev) => prev.filter((x) => x !== id));
+      await refreshSlangLib(true);
+    } catch (err: any) {
+      const t = `删除「${word}」失败：${apiErrText(err)}`;
+      setMsg(t); setSlangNote(t);
+    } finally { setSlangLibBusy(''); }
   };
 
   const qqs = qqListOf(qqText);
@@ -451,24 +542,40 @@ const clampHrs = (v: any): number => {
     }
   };
 
-  // 进页拉一次配置、人格状态与画像学习状态；状态区只读，无手动刷新按钮 → 60 秒静默轮询
+  // 进页拉一次配置、人格状态、画像学习状态与黑话库（含学习状态机）；状态区只读，无手动刷新按钮 → 60 秒静默轮询
   useEffect(() => {
-    loadConfig(); refreshStatus(); refreshPortrait();
-    const iv = setInterval(() => { refreshStatus(true); refreshPortrait(true); }, 60000);
+    loadConfig(); refreshStatus(); refreshPortrait(); refreshSlangLib(true);
+    const iv = setInterval(() => { refreshStatus(true); refreshPortrait(true); refreshSlangLib(true); }, 60000);
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const doBusy = (key: string, fn: () => Promise<void>) => async () => {
-    if (busy) return;
-    setBusy(key); setMsg(null);
-    try { await fn(); } finally { setBusy(null); }
-  };
+  /** 「黑话立即学习」进行中时把轮询加快到 5 秒：桥侧 phase 会一路 extracting → researching → ready 地变，
+   *  60 秒一次看不出"跑到哪一步了"。请求本身回来（slangBusy 复位）就结束这个快轮询，不影响上面那条 60 秒的。 */
+  useEffect(() => {
+    if (slangBusy !== 'learn') return;
+    const iv = setInterval(() => { void refreshSlangLib(true); }, 5000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slangBusy]);
 
-  const save = doBusy('save', async () => {
-    // ⚠️ 只提交**可编辑**字段：桥侧 PUT 有白名单，`slang.lastLearnAtMs` / `persona.lastRunAtMs` /
-    //    `portrait.*` 由模块自己维护，整包回传会被 400 拒绝（"slang 不支持字段：lastLearnAtMs"就是这么来的）。
-    const body: any = {
+  /** 区块级 busy 包装：**同一区块内**防重复点击，且只影响本区块的按钮与 loading。
+   *  修「按钮串台」的关键：黑话区与人格区从此各用各的 state，点一边不会把另一边也点着、点灰。 */
+  const busyRunner = (set: (v: string | null) => void, cur: string | null) =>
+    (key: string, fn: () => Promise<void>) => async () => {
+      if (cur) return;
+      set(key); setMsg(null);
+      try { await fn(); } finally { set(null); }
+    };
+  const slangRun = busyRunner(setSlangBusy, slangBusy);
+  const personaRun = busyRunner(setPersonaBusy, personaBusy);
+
+  /** 只提交**黑话**这一块的字段（⚠️ 桥侧 PUT 有白名单：`slang.lastLearnAtMs` / `persona.lastRunAtMs` /
+   *  `portrait.*` 由模块自己维护，整包回传会被 400 拒绝 —— "slang 不支持字段：lastLearnAtMs" 就是这么来的）。
+   *  【2026-09-16】以前黑话区与人格区共用同一个 save（body 里 slang + persona 一起发），
+   *  点「黑话定时学习」里的保存按钮会连带把人格配置也写一遍 —— 这就是「按钮串台」的一半。现在拆开。 */
+  const saveSlang = slangRun('save', async () => {
+    const r = await saveLearningConfig({
       slang: {
         enabled: slgEnabled,
         timeHHMM: normHHMM(slgTime) || '00:00',
@@ -477,6 +584,17 @@ const clampHrs = (v: any): number => {
         autoIntervalEnabled: slgIntv,
         autoIntervalHours: clampHrs(slgIntvHours),
       },
+    });
+    const e = firstErr(r);
+    if (e) { setMsg(`保存失败：${e}`); return; }
+    setMsg('黑话学习配置已保存');
+    await loadConfig();
+    await refreshSlangLib(true);   // 只刷新黑话侧（含学习状态机），不碰人格 / 画像
+  });
+
+  /** 只提交**人格**这一块的字段 */
+  const savePersona = personaRun('save', async () => {
+    const r = await saveLearningConfig({
       persona: {
         enabled: perEnabled,
         targetQQ: qqs,
@@ -484,33 +602,40 @@ const clampHrs = (v: any): number => {
         autoIntervalHours: clampHrs(perIntvHours),
         timeHHMM: normHHMM(perTime),      // 每日定时（留空=不定时）
       },
-    };
-    const r = await saveLearningConfig(body);
+    });
     const e = firstErr(r);
     if (e) { setMsg(`保存失败：${e}`); return; }
-    setMsg('学习配置已保存'); await loadConfig(); await refreshStatus(true);
+    setMsg('人格学习配置已保存');
+    await loadConfig();
+    await refreshStatus(true);
   });
 
-  const learnSlang = doBusy('slang', async () => {
+  /** 「黑话立即学习」：**只打这一条桥接口**。桥侧这个请求会一直挂到本轮提取跑完才回，
+   *  所以它是"现在正在提取"的最强真实信号；跑完后再取一次黑话库+学习状态机（研究可能还在后台继续）。
+   *  【2026-09-16】这里以前还会顺手 refreshStatus(true)（人格状态），而右卡「画像学习」栏的数据源正是
+   *  同一份 persona status（pOtherRows）——于是点完黑话学习，画像学习那一栏也跟着刷新，看着像"画像学习也跑了"。
+   *  现在只刷黑话侧，黑话的按钮就只触发黑话的东西。 */
+  const learnSlang = slangRun('learn', async () => {
     const r = await slangAction('learn');
     const e = firstErr(r);
     if (e) { setMsg(`失败：${e}`); return; }
     const res = unwrap(r);
     const text = pick('message', 'msg', 'detail')(res) || pick('message', 'msg', 'detail')(r);
     setMsg(text ? `黑话学习：${text}` : '已受理「黑话立即学习」：从上次学习点/今日 0 点起提取并研究，完成后置学习标记');
-    await refreshStatus(true);
+    await refreshSlangLib(true);
   });
 
-  const stopSlang = doBusy('slang-stop', async () => {
+  const stopSlang = slangRun('stop', async () => {
     const r = await slangAction('stop');
     const e = firstErr(r);
     if (e) { setMsg(`失败：${e}`); return; }
     const res = unwrap(r);
     const text = pick('message', 'msg', 'detail')(res) || pick('message', 'msg', 'detail')(r);
     setMsg(text ? `黑话学习：${text}` : '已请求停止进行中的黑话学习/研究任务');
+    await refreshSlangLib(true);
   });
 
-  const startPersona = doBusy('persona', async () => {
+  const startPersona = personaRun('start', async () => {
     const r = await personaAction('start', qqs.length ? qqs : undefined);
     const e = firstErr(r);
     if (e) { setMsg(`学习启动失败：${e}`); return; }
@@ -523,7 +648,7 @@ const clampHrs = (v: any): number => {
     await refreshStatus(true);
   });
 
-  const stopPersona = doBusy('persona-stop', async () => {
+  const stopPersona = personaRun('stop', async () => {
     const r = await personaAction('stop');
     const e = firstErr(r);
     if (e) { setMsg(`失败：${e}`); return; }
@@ -534,6 +659,17 @@ const clampHrs = (v: any): number => {
   });
 
   const lastLearnAt = isObj(cfg?.slang) ? num(cfg.slang.lastLearnAtMs) : 0;
+
+  /** 学习阶段：**只用桥返回的 learning 快照**。learning 为 null（旧桥 / 本次读取失败）时这里是 null，
+   *  界面走"状态不可用"降级分支 —— 不派生、不猜一个阶段出来假装知道。 */
+  const slangPhase = slangLearn ? SLANG_PHASE_UI[slangLearn.phase] : null;
+  /** 分组计数：优先用桥的 `learning.counts`（就是黑话库的真实构成）；拿不到 learning 时按 entries 的真实
+   *  status 自己算 —— 两者是同一份数据，用哪个都行。rejected 单独一组，不并进另外两组、也不丢。 */
+  const slangCounts = useMemo(() => {
+    if (slangLearn) return slangLearn.counts;
+    const by = (st: string) => slangEntries.filter((e) => String(e?.status ?? '') === st).length;
+    return { candidate: by('candidate'), confirmed: by('confirmed'), rejected: by('rejected'), total: slangEntries.length };
+  }, [slangLearn, slangEntries]);
 
   return (
     <div className="page cute-ui">
@@ -564,7 +700,7 @@ const clampHrs = (v: any): number => {
                 <div className="lrn-error">
                   <AlertTriangle size={15} />
                   <div style={{ flex: 1 }}>{loadErr}<div className="lrn-error-detail">学习接口来自桥侧新版本：请先更新并启动桥接（本地或远端），且该桥需支持 /api/learning-config 等学习 API。</div></div>
-                  <button className="btn btn-sm btn-danger" disabled={busy !== null} onClick={() => { setLoadErr(''); loadConfig(); }}>
+                  <button className="btn btn-sm btn-danger" disabled={slangBusy !== null || personaBusy !== null} onClick={() => { setLoadErr(''); loadConfig(); }}>
                     <RefreshCw size={13} /> 重试
                   </button>
                 </div>
@@ -573,6 +709,47 @@ const clampHrs = (v: any): number => {
                   {/* 黑话定时学习 */}
                   <div className="lrn-block">
                     <div className="lrn-block-title">黑话定时学习</div>
+                    {/* ——— 学习中状态机：数据源就是桥 GET /api/slang 的 learning 快照（null = 拿不到） ——— */}
+                    {slangPhase ? (
+                      <>
+                        <div className={`lrn-learn-state${slangPhase.active ? ' is-active' : ''}${slangLearn?.phase === 'disabled' ? ' is-off' : ''}`}>
+                          {slangPhase.active
+                            ? <Loader2 size={13} className="spin" />
+                            : slangLearn?.phase === 'disabled' ? <AlertTriangle size={13} /> : <Activity size={13} />}
+                          <span className={slangPhase.cls}>{slangPhase.label}</span>
+                          <span className="lrn-learn-note">{slangPhase.note}</span>
+                        </div>
+                        <div className="lrn-status-meta" style={{ marginTop: 4 }}>
+                          <span>
+                            <Clock3 size={13} /> 上次学习：{num(slangLearn?.lastLearnAtMs) > 0 ? bjClock(num(slangLearn?.lastLearnAtMs)) : '还没学过'}
+                          </span>
+                          <span>黑话库：{slangCounts.total} 条 · 已确认 {slangCounts.confirmed} · 未确认 {slangCounts.candidate}{slangCounts.rejected > 0 ? ` · 已拒收 ${slangCounts.rejected}` : ''}</span>
+                          {num(slangLearn?.queuedOps) > 0 && <span>排队 {num(slangLearn?.queuedOps)} 个任务</span>}
+                          {num(slangLearn?.researching) > 0 && <span>分析中的候选 {num(slangLearn?.researching)} 条</span>}
+                          {slangLearn?.stopRequested === true && <span>已收到停止请求</span>}
+                          {slangLearn?.learnerSessionActive === true && <span>学习会话已建立</span>}
+                        </div>
+                      </>
+                    ) : (
+                      /* 拿不到状态（旧桥没有 learning 字段 / 这次读取失败）：明确说"拿不到"，
+                         不显示任何学习阶段 —— 假状态比没状态更糟。黑话库本身照常可看可改。 */
+                      <>
+                        <div className="lrn-learn-state is-unknown">
+                          <AlertTriangle size={13} />
+                          <span className="badge badge-soft">学习状态不可用</span>
+                          <span className="lrn-learn-note">
+                            桥这次没有返回 learning 快照（旧版桥，或这次读取失败）。这里不显示学习阶段，免得显示一个假状态；
+                            黑话库本身照常可看、可改、可删。
+                          </span>
+                          <button type="button" className="btn btn-sm" disabled={slangBusy !== null} onClick={() => refreshSlangLib()}>
+                            <RefreshCw size={12} /> 重新读取
+                          </button>
+                        </div>
+                        <div className="lrn-status-meta" style={{ marginTop: 4 }}>
+                          <span>黑话库：{slangCounts.total} 条 · 已确认 {slangCounts.confirmed} · 未确认 {slangCounts.candidate}{slangCounts.rejected > 0 ? ` · 已拒收 ${slangCounts.rejected}` : ''}</span>
+                        </div>
+                      </>
+                    )}
                     <div className="cfg-fields">
                       <label className="switch-row">
                         <input type="checkbox" checked={slgEnabled} onChange={(e) => setSlgEnabled(e.target.checked)} />
@@ -610,14 +787,14 @@ const clampHrs = (v: any): number => {
                         : <><Clock3 size={13} /> 尚未执行过定时学习</>}
                     </div>
                     <div className="lrn-actions">
-                      <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={save}>
-                        {busy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
+                      <button className="btn btn-primary btn-sm" disabled={slangBusy !== null} onClick={saveSlang}>
+                        {slangBusy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
                       </button>
-                      <button className="btn btn-soft-primary btn-sm" disabled={busy !== null} onClick={learnSlang}>
-                        {busy === 'slang' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 黑话立即学习
+                      <button className="btn btn-soft-primary btn-sm" disabled={slangBusy !== null} onClick={learnSlang}>
+                        {slangBusy === 'learn' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 黑话立即学习
                       </button>
-                      <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={stopSlang}>
-                        {busy === 'slang-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
+                      <button className="btn btn-outline-danger btn-sm" disabled={slangBusy !== null} onClick={stopSlang}>
+                        {slangBusy === 'stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
                       </button>
                       <button className="btn btn-sm" onClick={openSlangLib} title="看已经学到的黑话词条（含含义/使用例/出现次数）">
                         <BookOpen size={14} /> 黑话库{slangEntries.length ? `（${slangEntries.length}）` : ''}
@@ -658,14 +835,14 @@ const clampHrs = (v: any): number => {
                         onChange={(e) => setQqText(e.target.value)} />
                     </div>
                     <div className="lrn-actions">
-                      <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={save}>
-                        {busy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
+                      <button className="btn btn-primary btn-sm" disabled={personaBusy !== null} onClick={savePersona}>
+                        {personaBusy === 'save' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存配置
                       </button>
-                      <button className="btn btn-soft-primary btn-sm" disabled={busy !== null} onClick={startPersona}>
-                        {busy === 'persona' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 人格立即学习
+                      <button className="btn btn-soft-primary btn-sm" disabled={personaBusy !== null} onClick={startPersona}>
+                        {personaBusy === 'start' ? <Loader2 size={14} className="spin" /> : <Play size={14} />} 人格立即学习
                       </button>
-                      <button className="btn btn-outline-danger btn-sm" disabled={busy !== null} onClick={stopPersona}>
-                        {busy === 'persona-stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
+                      <button className="btn btn-outline-danger btn-sm" disabled={personaBusy !== null} onClick={stopPersona}>
+                        {personaBusy === 'stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} 停止学习
                       </button>
                     </div>
                   </div>
@@ -928,19 +1105,22 @@ const clampHrs = (v: any): number => {
                   // 画像学习自己记录过、但库里还没有档案的目标（刚跑完还没落库）：单独列一行，不假装有资料
                   const ptOnlyUids = ptList.map((x: any) => String(x?.uid ?? '')).filter((u) => u && !pOtherRows.some((r) => String(r.uid) === u));
                   return (
-                    <div className="lrn-status-list lrn-status-scroll">
-                      <div className="lrn-status-meta">
+                    <>
+                      {/* 【2026-09-16 主人要求】标题、刷新按钮与这两行摘要**留在滚动区外**（头部固定），
+                          只有下面的档案列表限高滚动 —— 画像学习这一栏不再把整张卡无限拉高。 */}
+                      <div className="lrn-status-meta lrn-portrait-head">
                         <Clock3 size={13} /> 上次自动学习：{num(ptCfg.lastRunAtMs) > 0 ? bjClock(num(ptCfg.lastRunAtMs)) : '尚未跑过'}
                         {' · '}进行中 {ptLearning} 个
                         {ptLast.length > 0 && <> · 最近一轮目标 {ptLast.length} 个</>}
                         {ptCfg.enabled === false && <span className="badge badge-soft">已停用</span>}
                         {ptStatus?.running === true && <span className="badge badge-warn">正在跑</span>}
                       </div>
-                      <div className="lrn-status-meta">
+                      <div className="lrn-status-meta lrn-portrait-head">
                         取样窗口 {winDays} 天 · 最少发言 {num(ptCfg.minMessages)} 条 · 单轮最多 {num(ptCfg.maxTargets)} 个目标
                         {ptCfg.autoIntervalEnabled === true ? ` · 每 ${num(ptCfg.autoIntervalHours)} 小时自动一次` : ''}
                         {ptTime ? ` · 每日定时 ${ptTime}` : ''}
                       </div>
+                      <div className="lrn-status-list lrn-status-scroll">
                       {/* 名单外的档案（含"以前学过的那些群友"）全部列在这一栏：点一条**展开/收起**完整资料，
                           展示字段与上面人格学习栏一致，但**没有**英文人设正文与「覆盖机器人人设」——
                           人设只能来自目标名单。 */}
@@ -985,7 +1165,8 @@ const clampHrs = (v: any): number => {
                           最近一轮画像学习到过 {ptOnlyUids.length} 个人但还没落下档案：{ptOnlyUids.slice(0, 12).join('、')}{ptOnlyUids.length > 12 ? ' …' : ''}
                         </div>
                       )}
-                    </div>
+                      </div>
+                    </>
                   );
                 })()}
               </div>
@@ -993,7 +1174,9 @@ const clampHrs = (v: any): number => {
             </div>
           </div>
 
-          {/* ============ 黑话库弹窗（搜索 / 刷新 / 状态徽章不变，新增勾选 + 批量通过·拒收·分析） ============ */}
+          {/* ============ 黑话库弹窗：分「已确认 / 未确认（候选）/ 已拒收」三组（已拒收默认折叠）；
+              只有未确认的行能勾选；每条都有删除入口（二次确认）；
+              【2026-09-16】已去掉「批量通过」（研究会话确认后桥侧自动转 confirmed） ============ */}
           {slangOpen && (() => {
             const kw = slangQ.trim().toLowerCase();
             const list = slangEntries
@@ -1005,18 +1188,80 @@ const clampHrs = (v: any): number => {
             const badge = (st: string) => (st === 'confirmed'
               ? <span className="badge badge-success">已确认</span>
               : st === 'rejected' ? <span className="badge badge-soft">已拒收</span> : <span className="badge badge-warn">候选</span>);
-            // 勾选只认「当前可见（过了搜索）列表」里的那些，避免看搜索词换了还留在选择里
-            const idOf = (e: any): string => String(e?.id ?? '');
+            const idOf = (e: SlangEntry): string => String(e?.id ?? '');
             const selSet = new Set(slangSel);
-            const visIds = list.map(idOf).filter(Boolean);
+            // 【2026-09-16】按 **status 的真实取值** 分组（桥侧只可能是 candidate / confirmed / rejected 三种）：
+            //   · 已确认 = confirmed（含研究会话自动转过来的 autoConfirmed）；
+            //   · 未确认 = candidate —— 也就是桥侧 counts.candidate，两组标题计数直接对齐这份数据；
+            //   · rejected 既不进"已确认"也不进"未确认"，单独折成第三组（默认收起）——
+            //     不能丢数据，但也不能让它污染上面两组的计数语义。勾选框只出现在「未确认（候选）」这一组。
+            const confirmedList = list.filter((e) => String(e?.status ?? '') === 'confirmed');
+            const candidateList = list.filter((e) => String(e?.status ?? '') === 'candidate');
+            const rejectedList = list.filter((e) => String(e?.status ?? '') === 'rejected');
+            // 勾选只认「当前可见（过了搜索）的候选」里的那些，避免搜完词还留着幽灵勾选
+            const visIds = candidateList.map(idOf).filter(Boolean);
             const selIds = visIds.filter((id) => selSet.has(id));
-            const selCand = list.filter((e) => selSet.has(idOf(e)) && String(e?.status ?? '') === 'candidate').length;
             const allSel = visIds.length > 0 && selIds.length === visIds.length;
+            /** 标题计数用桥的 counts（拿不到就按 entries 算，同一份数据）；搜索时额外标出当前命中的条数 */
+            const cnt = (n: number, hit: number) => `${n} 条${kw ? `（当前命中 ${hit}）` : ''}`;
             const toggle = (id: string) => {
               if (!id) return;
               setSlangSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
             };
-            const act = (kind: 'confirm' | 'reject' | 'research') => { void slangBatch(kind, selIds); };
+            const act = (kind: 'reject' | 'research') => { void slangBatch(kind, selIds); };
+            /** 一行词条。selectable=true 只有「未确认（候选）」那一组 —— 其余组只读展示 + 删除入口。 */
+            const rowOf = (e: SlangEntry, idx: number, selectable: boolean) => {
+              const ev = Array.isArray(e?.evidence) ? e.evidence : [];
+              const id = idOf(e);
+              const picked = !!id && selSet.has(id);
+              const st = String(e?.status ?? '');
+              return (
+                <div
+                  className={`lrn-status-row lrn-slang-row${picked ? ' is-selected' : ''}${selectable ? '' : ' is-readonly'}`}
+                  key={id || `slang-${st || 'x'}-${idx}`}
+                  title={selectable
+                    ? (id ? (picked ? '点一下取消选择' : '点一下选择这一条') : '这条词条没有 id，无法勾选（桥侧旧数据）')
+                    : st === 'rejected'
+                      ? '已拒收的黑话：只读展示（不再参与查询，可留档）；不想留档就点右边的「删除」'
+                      : '已确认的黑话：只读展示（研究会话确认后桥侧会自动转成已确认，不需要人工批量通过）'}
+                  onClick={selectable ? (evt) => { if ((evt.target as HTMLElement)?.tagName === 'INPUT') return; toggle(id); } : undefined}
+                >
+                  {selectable
+                    ? <input type="checkbox" className="lrn-pick" checked={picked} disabled={!id}
+                        aria-label={`选择词条 ${String(e?.content ?? '')}`} onChange={() => toggle(id)} />
+                    : <span className="lrn-pick-none" aria-hidden="true" />}
+                  <div className="lrn-status-main">
+                    <div className="lrn-status-uid">
+                      <b>{String(e?.content ?? '(空)')}</b>
+                      {badge(st)}
+                      {e?.autoConfirmed === true && (
+                        <span className="badge badge-info" title="研究会话明确确认（confirmed:true + 有含义 + 风险不高）后由桥自动转为已确认">自动确认</span>
+                      )}
+                      <span className="lrn-status-caret">出现 {num(e?.count)} 次 · {String(e?.source ?? '')}</span>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-danger lrn-slang-del"
+                        disabled={!!slangLibBusy || !id}
+                        title={id ? '删除这条黑话（会二次确认；删除后机器人不再用这条黑话）' : '这条词条没有 id，删不掉（桥侧旧数据）'}
+                        onClick={(evt) => { evt.stopPropagation(); void deleteSlang(e); }}
+                      >
+                        {slangLibBusy === `del:${id}` ? <Loader2 size={12} className="spin" /> : <Trash2 size={12} />} 删除
+                      </button>
+                    </div>
+                    {String(e?.meaning ?? '').trim()
+                      ? <div className="lrn-status-preview">{String(e.meaning)}</div>
+                      : <div className="lrn-status-preview" style={{ opacity: .65 }}>（还没有释义：达到出现次数阈值后会自动研究补齐，也可以勾上它点「批量分析」）</div>}
+                    {String(e?.usage ?? '').trim() && <div className="lrn-dk">用法：{String(e.usage)}</div>}
+                    {String(e?.example ?? '').trim() && <div className="lrn-dk">例句：{String(e.example)}</div>}
+                    {ev.length > 0 && (
+                      <div className="lrn-dk">
+                        原话：{ev.slice(0, 2).map((x) => `「${String(x?.text ?? '').slice(0, 40)}」`).join(' ')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            };
             return (
               <div className="pfp-mask" onClick={() => setSlangOpen(false)}>
                 <div className="pfp-modal" onClick={(e) => e.stopPropagation()}>
@@ -1024,11 +1269,13 @@ const clampHrs = (v: any): number => {
                     <div>
                       <div className="pfp-title">黑话库</div>
                       <div className="pfp-sub">
-                        共 {slangEntries.length} 条{kw ? ` · 命中 ${list.length} 条` : ''} · 确认后不会每轮注入聊天，机器人需要时会自己查黑话库
+                        共 {slangCounts.total} 条 · 已确认 {slangCounts.confirmed} 条 · 未确认 {slangCounts.candidate} 条
+                        {slangCounts.rejected > 0 ? ` · 已拒收 ${slangCounts.rejected} 条` : ''}
+                        {kw ? ` · 命中 ${list.length} 条` : ''} · 确认后不会每轮注入聊天，机器人需要时会自己查黑话库
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 8 }}>
-                      <button className="btn btn-sm" disabled={!!slangBusy} onClick={() => loadSlangLib()}><RefreshCw size={13} /> 刷新</button>
+                      <button className="btn btn-sm" disabled={!!slangLibBusy} onClick={() => refreshSlangLib()}><RefreshCw size={13} /> 刷新</button>
                       <button className="btn btn-sm" onClick={() => setSlangOpen(false)}>关闭</button>
                     </div>
                   </div>
@@ -1036,34 +1283,29 @@ const clampHrs = (v: any): number => {
                   <div className="lrn-slang-tools">
                     <input className="input" placeholder="搜词条 / 含义 / 例句…" value={slangQ} onChange={(e) => setSlangQ(e.target.value)} />
                     <div className="lrn-batch-bar">
-                      <span className="lrn-batch-count">
-                        已选 {selIds.length} 条{selCand > 0 ? `（其中候选 ${selCand} 条）` : ''}
-                      </span>
-                      <button className="btn btn-sm" disabled={!visIds.length || allSel} onClick={() => setSlangSel((prev) => [...new Set([...prev, ...visIds])])}>全选</button>
-                      <button className="btn btn-sm" disabled={!visIds.length} onClick={() => setSlangSel((prev) => {
+                      <span className="lrn-batch-count">已选 {selIds.length} 条候选</span>
+                      <button type="button" className="btn btn-sm" disabled={!visIds.length || allSel} onClick={() => setSlangSel((prev) => [...new Set([...prev, ...visIds])])}>全选未确认</button>
+                      <button type="button" className="btn btn-sm" disabled={!visIds.length} onClick={() => setSlangSel((prev) => {
                         const s = new Set(prev);
                         for (const id of visIds) { if (s.has(id)) s.delete(id); else s.add(id); }
                         return [...s];
                       })}>反选</button>
-                      <button className="btn btn-sm" disabled={!slangSel.length} onClick={() => setSlangSel([])}>清空选择</button>
+                      <button type="button" className="btn btn-sm" disabled={!slangSel.length} onClick={() => setSlangSel([])}>清空选择</button>
                       <span className="lrn-batch-spacer" />
-                      <button className="btn btn-primary btn-sm" disabled={!!slangBusy || !selIds.length}
-                        onClick={() => act('confirm')} title="把选中的候选词条标记为已确认（桥侧只确认候选、且必须有含义，其余会被跳过）">
-                        {slangBusy === 'confirm' ? <Loader2 size={13} className="spin" /> : <Check size={13} />} 批量通过
-                      </button>
-                      <button className="btn btn-outline-danger btn-sm" disabled={!!slangBusy || !selIds.length}
+                      <button type="button" className="btn btn-outline-danger btn-sm" disabled={!!slangLibBusy || !selIds.length}
                         onClick={() => act('reject')} title="把选中词条标为已拒收（不再参与查询，可留档不删）">
-                        {slangBusy === 'reject' ? <Loader2 size={13} className="spin" /> : <X size={13} />} 批量拒收
+                        {slangLibBusy === 'reject' ? <Loader2 size={13} className="spin" /> : <X size={13} />} 批量拒收
                       </button>
-                      <button className="btn btn-soft-primary btn-sm" disabled={!!slangBusy || !selIds.length}
+                      <button type="button" className="btn btn-soft-primary btn-sm" disabled={!!slangLibBusy || !selIds.length}
                         onClick={() => act('research')} title="对选中的候选词条触发一次研究分析（桥侧后台串行跑，完成后补上含义/用法/例句）">
-                        {slangBusy === 'research' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} 批量分析
+                        {slangLibBusy === 'research' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} 批量分析
                       </button>
                     </div>
                     <div className="lrn-slang-note">
                       确认的含义：这个词条「已入库、有含义、可被查到」。黑话默认不注入唤醒提示词（桥侧 injectIntoPrompt 默认关闭），
-                      机器人遇到不认识的词时会自己调用 qq_slang_query 工具按需查库；只有「已确认 + 填了含义」的词条才查得到，
-                      所以「批量通过」会跳过缺含义的候选——可以先「批量分析」补释义再通过。
+                      机器人遇到不认识的词时会自己调用 qq_slang_query 工具按需查库，所以只有「已确认 + 填了含义」的词条才查得到。
+                      候选的释义由「批量分析」交给研究会话补齐，<b>研究会话明确确认后桥侧会自动转成「已确认」</b>
+                      （slang.js 里的 autoConfirmed 那段），因此这里不再提供「批量通过」。删除是不可恢复的，想留档就改用「批量拒收」。
                     </div>
                     {slangNote && <div className="lrn-slang-result">{slangNote}</div>}
                   </div>
@@ -1075,36 +1317,52 @@ const clampHrs = (v: any): number => {
                         {slangEntries.length === 0 ? '还没有学到任何词条：点「黑话立即学习」跑一轮，或等定时学习到点。' : '没有匹配的词条。'}
                       </div>
                     )}
-                    {list.map((e, idx) => {
-                      const ev: any[] = Array.isArray(e?.evidence) ? e.evidence : [];
-                      const id = idOf(e);
-                      const picked = !!id && selSet.has(id);
-                      return (
-                        <div className={`lrn-status-row lrn-slang-row${picked ? ' is-selected' : ''}`} key={id || idx}
-                          title={id ? (picked ? '点一下取消选择' : '点一下选择这一条') : '这条词条没有 id，无法勾选（桥侧旧数据）'}
-                          onClick={(evt) => { if ((evt.target as HTMLElement)?.tagName === 'INPUT') return; toggle(id); }}>
-                          <input type="checkbox" className="lrn-pick" checked={picked} disabled={!id}
-                            aria-label={`选择词条 ${String(e?.content ?? '')}`} onChange={() => toggle(id)} />
-                          <div className="lrn-status-main">
-                            <div className="lrn-status-uid">
-                              <b>{String(e?.content ?? '(空)')}</b>
-                              {badge(String(e?.status ?? ''))}
-                              <span className="lrn-status-caret">出现 {num(e?.count)} 次 · {String(e?.source ?? '')}</span>
+                    {!slangErr && list.length > 0 && (
+                      <>
+                        {/* ——— 已确认（只读；标题计数 = 桥 learning.counts.confirmed） ——— */}
+                        <div className="lrn-slang-group">
+                          <div className="lrn-slang-group-h">
+                            <Check size={13} /> 已确认
+                            <span className="lrn-slang-group-n">{cnt(slangCounts.confirmed, confirmedList.length)}</span>
+                            <span className="lrn-slang-group-hint">只读 · 研究会话确认后桥侧自动转为已确认，不需要人工批量通过</span>
+                          </div>
+                          {confirmedList.length > 0
+                            ? confirmedList.map((e, i) => rowOf(e, i, false))
+                            : <div className="pfp-empty">{kw ? '没有命中的已确认词条。' : '这一组暂时是空的：还没有词条被确认（候选被研究会话确认、并给出含义后会自动进到这里）。'}</div>}
+                        </div>
+                        {/* ——— 未确认（= 候选，可勾选；标题计数 = 桥 learning.counts.candidate） ——— */}
+                        <div className="lrn-slang-group">
+                          <div className="lrn-slang-group-h">
+                            <AlertTriangle size={13} /> 未确认
+                            <span className="lrn-slang-group-n">{cnt(slangCounts.candidate, candidateList.length)}</span>
+                            <span className="lrn-slang-group-hint">可勾选后「批量分析 / 批量拒收」；每条也都能单独删除</span>
+                          </div>
+                          {candidateList.length > 0
+                            ? candidateList.map((e, i) => rowOf(e, i, true))
+                            : <div className="pfp-empty">{kw ? '没有命中的未确认词条。' : '没有未确认的词条：候选都已经确认入库、机器人按需查得到了。'}</div>}
+                        </div>
+                        {/* ——— 已拒收：既不进"已确认"也不进"未确认"，单独折一组（默认收起），数据不丢 ——— */}
+                        {(rejectedList.length > 0 || slangCounts.rejected > 0) && (
+                          <div className="lrn-slang-group">
+                            <div className="lrn-slang-group-h lrn-slang-group-h-btn" role="button" tabIndex={0}
+                              onClick={() => setSlangShowRejected((v) => !v)}
+                              onKeyDown={(evt) => { if (evt.key === 'Enter' || evt.key === ' ') { evt.preventDefault(); setSlangShowRejected((v) => !v); } }}
+                              title="已拒收的词条不再参与查询，可留档；不想留档就展开后逐条删除">
+                              <X size={13} /> 已拒收
+                              <span className="lrn-slang-group-n">{cnt(slangCounts.rejected, rejectedList.length)}</span>
+                              <span className="lrn-slang-group-hint">
+                                既不进「已确认」也不进「未确认」（桥侧 status=rejected）· {slangShowRejected ? '点一下收起 ▾' : '点一下展开 ▸'}
+                              </span>
                             </div>
-                            {String(e?.meaning ?? '').trim()
-                              ? <div className="lrn-status-preview">{String(e.meaning)}</div>
-                              : <div className="lrn-status-preview" style={{ opacity: .65 }}>（还没有释义：达到出现次数阈值后会自动研究补齐，也可以勾上它点「批量分析」）</div>}
-                            {String(e?.usage ?? '').trim() && <div className="lrn-dk">用法：{String(e.usage)}</div>}
-                            {String(e?.example ?? '').trim() && <div className="lrn-dk">例句：{String(e.example)}</div>}
-                            {ev.length > 0 && (
-                              <div className="lrn-dk">
-                                原话：{ev.slice(0, 2).map((x) => `「${String(x?.text ?? '').slice(0, 40)}」`).join(' ')}
-                              </div>
+                            {slangShowRejected && (
+                              rejectedList.length > 0
+                                ? rejectedList.map((e, i) => rowOf(e, i, false))
+                                : <div className="pfp-empty">{kw ? '没有命中的已拒收词条。' : '这一组暂时是空的。'}</div>
                             )}
                           </div>
-                        </div>
-                      );
-                    })}
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1977,7 +2235,9 @@ function PortraitLearnBlock() {
         {msg && <span className="lrn-updated">{msg}</span>}
       </div>
 
-      <div className="lrn-status-list" style={{ marginTop: 10 }}>
+      {/* 【2026-09-16】这一块也**限高 + 内部纵向滚动**：画像学习的目标一多，状态区以前会把左卡一路撑高。
+          标题与上面那排操作按钮（保存配置 / 画像立即学习 / 停止学习）留在滚动区外，始终可见。 */}
+      <div className="lrn-status-list" style={{ marginTop: 10, maxHeight: 180, overflowY: 'auto' }}>
         <div className="lrn-status-meta">
           <Clock3 size={13} /> 上次自动学习：{num(status?.config?.lastRunAtMs) > 0 ? bjClock(num(status?.config?.lastRunAtMs)) : '尚未跑过'}
           {' · '}进行中 {LEARNING} 个
