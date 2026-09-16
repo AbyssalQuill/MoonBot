@@ -157,6 +157,9 @@ export async function napcatTokenStatus() {
     mismatch: { http: false, ws: false, webui: false },
     // 【2026-09-16】顺带把"NapCat 到底登没登录 QQ"查出来：这是"机器人不回复"排查的第一分叉。
     login: null,
+    // 【2026-09-16 强化 NapCat 连接】桥→NapCat 这条链路自己的诊断（连上没有 / 多久没下行 / 重连过几次）。
+    // 与 login 一起构成"不回复"的完整判据：桥聋了（connection.connected=false） vs QQ 掉登录态（login.isLogin=false）。
+    connection: null,
     notes: []
   };
   if (!dir) {
@@ -190,6 +193,16 @@ export async function napcatTokenStatus() {
   }
   if (out.login && out.login.ok && !out.login.isLogin) {
     out.notes.push('⚠️ NapCat 目前**没有登录 QQ**（需要去管理端首页 → NapCat WebUI 扫码）。会话/快速登录信息都在数据卷里，正常重启不会掉登录态；如果反复要扫码，先按 README/交接文档的"保登录"一节排查。');
+  }
+  // 桥→NapCat 的连接诊断（最近一个 OneBot 客户端）
+  try {
+    const { napcatClientStats } = await import('../lib/onebot-ws.js');
+    out.connection = napcatClientStats();
+  } catch (error) {
+    out.connection = { error: String(error?.message ?? error) };
+  }
+  if (out.connection && out.connection.everOpened && out.connection.connected === false) {
+    out.notes.push('⚠️ 桥现在**没有连着 NapCat**（已断开，正在按退避重连；最长 10 秒一次）。若长时间不恢复，看桥日志里的 `NapCat 错误` 与 `[napcat-login]` 两行。');
   }
   return out;
 }

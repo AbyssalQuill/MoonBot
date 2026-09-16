@@ -132,6 +132,47 @@ console.log('== NapCat WS 判死即重建 ==');
   pass += 1;
 }
 
+// ⑥ 【2026-09-16 强化 NapCat 连接】主动探活：安静一段时间就 get_status，没回就立刻判死重建
+{
+  class SilentWS extends FakeWS {
+    send(data) { SilentWS.sent.push(String(data)); /* 故意什么都不回：模拟"链路还在、NapCat 侧已经不响应"的假死 */ }
+  }
+  SilentWS.sent = [];
+  const prevWS = globalThis.WebSocket;
+  globalThis.WebSocket = SilentWS;
+  const before = SilentWS.instances.length;
+  const c = new OneBotWsClient({
+    url: 'ws://127.0.0.1:3001', accessToken: 'tok',
+    heartbeatProbeMs: 300, heartbeatWatchdogMs: 60000, heartbeatProbeTimeoutMs: 700, heartbeatTickMs: 150,
+  });
+  await c._openOnce();
+  const opened = c._ws;
+  assert.ok(opened, '先连上一条');
+  await sleep(3000);                       // 300ms 静默 → 探活 → 700ms 超时 → 判死重连
+  const probes = SilentWS.sent.filter((s) => s.includes('get_status')).length;
+  assert.ok(probes >= 1, `应发出过 get_status 探活（实际 ${probes}）`);
+  assert.notEqual(c._ws, opened, '探活失败后必须换连接（立刻判死重建，不等看门狗）');
+  assert.ok(SilentWS.instances.length >= before + 2, '应当已经新建了连接');
+  c.dispose();
+  globalThis.WebSocket = prevWS;
+  console.log(`  PASS 探活：${probes} 次 get_status 无响应 → 立刻判死重建`);
+  pass += 1;
+}
+
+// ⑦ stats()：诊断快照（管理端卡片就靠它）
+{
+  const c = new OneBotWsClient({ url: 'ws://127.0.0.1:3001', accessToken: 'tok' });
+  await c._openOnce();
+  const st = c.stats();
+  assert.equal(typeof st.connected, 'boolean');
+  assert.equal(st.everOpened, true);
+  assert.equal(typeof st.reconnects, 'number');
+  assert.equal(st.url, 'ws://127.0.0.1:3001');
+  c.dispose();
+  console.log('  PASS stats() 提供连接诊断（connected / lastActivityAgoMs / reconnects）');
+  pass += 1;
+}
+
 try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* Windows 占用忽略 */ }
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  pass=${pass} fail=${fail}`);
 process.exit(fail === 0 ? 0 : 1);

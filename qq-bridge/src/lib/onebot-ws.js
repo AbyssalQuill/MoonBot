@@ -12,7 +12,16 @@ const RECONNECT_BASE_MS = 1500;
 // 而且连续失败时退避会一直停在 30 秒 —— 实测出现"账号已重新登好、桥却还在刷 NapCat 错误"的状态，
 // 直到手动重启桥才接上。封顶降到 10 秒：代价只是失败时多几次握手，收益是几秒内自动接回。
 const RECONNECT_MAX_MS = 10000;
-const HEARTBEAT_WATCHDOG_MS = 90000; // 无任何下行（含心跳/事件）超时即视为假死
+/* 【2026-09-16 强化 NapCat 连接】
+ * ① 看门狗 90s → 45s：NapCat 正常每 5 秒会推一次心跳(meta_event)，45 秒没有任何下行就已经不正常了，
+ *    90 秒纯属让"聋掉"多存在一倍时间。
+ * ② 新增**主动探活**：安静超过 20 秒就主动问一句 `get_status`（8 秒超时）。
+ *    回应了就说明链路真的活着（同时刷新活跃时间，避免误判）；没回应就立刻判死重建 ——
+ *    原来的看门狗要等满 45/90 秒，现在最坏 ~28 秒就恢复。 */
+const HEARTBEAT_WATCHDOG_MS = 45000;
+const HEARTBEAT_PROBE_MS = 20000;   // 安静超过它就去探活
+const HEARTBEAT_PROBE_TIMEOUT_MS = 8000;
+const HEARTBEAT_TICK_MS = 5000;     // 探活检查的节拍
 const CONNECT_TIMEOUT_MS = 15000;
 const SEND_TIMEOUT_MS = 20000;
 const OUTBOX_MAX = 200;
@@ -22,9 +31,17 @@ export function qqTextSeg(s) {
   return { type: 'text', data: { text: String(s ?? '') } };
 }
 
+/* 【2026-09-16 强化 NapCat 连接】把最近一个客户端的连接诊断暴露出来，
+ * 供桥的控制台 / 管理端卡片显示"桥→NapCat 到底连上没有、多久没动静、重连过几次"。 */
+let lastClientRef = null;
+export function napcatClientStats() {
+  try { return lastClientRef?.stats?.() ?? null; } catch { return null; }
+}
+
 export class OneBotWsClient extends EventEmitter {
   constructor(opts = {}) {
     super();
+    lastClientRef = this;
     this.url = String(opts.url ?? '');
     this.accessToken = opts.accessToken || '';
     this.reconnect = opts.reconnect !== false;
@@ -40,6 +57,13 @@ export class OneBotWsClient extends EventEmitter {
     this._lastActivityAt = 0;
     this._outbox = [];
     this._reconnectAttempts = 0;
+    this._reconnects = 0;                 // 累计成功重连次数（诊断用）
+    this._heartbeatTimer = null;
+    // 探活参数可被构造选项覆盖（测试里把它调小，避免等 20 秒）
+    this.heartbeatProbeMs = Number(opts.heartbeatProbeMs) > 0 ? Number(opts.heartbeatProbeMs) : HEARTBEAT_PROBE_MS;
+    this.heartbeatWatchdogMs = Number(opts.heartbeatWatchdogMs) > 0 ? Number(opts.heartbeatWatchdogMs) : HEARTBEAT_WATCHDOG_MS;
+    this.heartbeatProbeTimeoutMs = Number(opts.heartbeatProbeTimeoutMs) > 0 ? Number(opts.heartbeatProbeTimeoutMs) : HEARTBEAT_PROBE_TIMEOUT_MS;
+    this.heartbeatTickMs = Number(opts.heartbeatTickMs) > 0 ? Number(opts.heartbeatTickMs) : HEARTBEAT_TICK_MS;
     this._sub = { private: [], group: [], notify: [], noticeAll: [], friendRequest: [] };
     this._openResolve = null;
     this._openReject = null;
@@ -138,6 +162,7 @@ export class OneBotWsClient extends EventEmitter {
         clearTimeout(timer);
         this._connecting = false;
         this._reconnectAttempts = 0;
+        if (this._everOpened) this._reconnects += 1;   // 只统计"重连成功"，首次不算
         this._lastActivityAt = Date.now();
         if (!this._everOpened) {
           this._everOpened = true;
@@ -147,6 +172,7 @@ export class OneBotWsClient extends EventEmitter {
           this.emit('open');
         }
         this._startWatchdog();
+        this._startHeartbeat();
         this._flushOutbox();
         resolve();
       };
@@ -157,6 +183,7 @@ export class OneBotWsClient extends EventEmitter {
         // 的那条连接。不挡住的话会把**新连接**上正在等待的 action 全部 reject、还多发一次 close 事件。
         if (this._ws !== ws) return;
         this._connecting = false;
+        this._stopHeartbeat();
         const reason = new Error(`NapCat 连接已关闭 code=${info?.code ?? '?'}`);
         this._rejectPending(reason);
         this.emit('close', { code: info?.code ?? 1006, reason: info?.reason ?? '' });
@@ -218,7 +245,7 @@ export class OneBotWsClient extends EventEmitter {
     this._stopWatchdog();
     this._watchdog = setInterval(() => {
       if (this._closed) return;
-      if (this._lastActivityAt && Date.now() - this._lastActivityAt > HEARTBEAT_WATCHDOG_MS) {
+      if (this._lastActivityAt && Date.now() - this._lastActivityAt > this.heartbeatWatchdogMs) {
         this._emitError(new Error('NapCat 心跳超时（假死），强制重建连接'));
         // 【2026-09-16 修「又不回复了」】原实现这里只 `this._ws?.close(4001)` 就完事，靠 onclose 里那句
         // `_scheduleReconnect()` 把连接接回来。实测（服务器 09-16 00:33 那次）：undici 的 WebSocket 在
@@ -232,6 +259,53 @@ export class OneBotWsClient extends EventEmitter {
     this._watchdog.unref?.();
   }
   _stopWatchdog() { if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; } }
+
+  /**
+   * 【2026-09-16】主动探活：安静超过 heartbeatProbeMs 就发一条 `get_status`。
+   * - 回包 → 链路确实活着（顺带刷新活跃时间，避免看门狗误判）；
+   * - 8 秒没回 → 立刻判死重建（不等看门狗那 45 秒）。
+   */
+  _startHeartbeat() {
+    this._stopHeartbeat();
+    this._heartbeatTimer = setInterval(() => {
+      if (this._closed) return;
+      const ws = this._ws;
+      if (!ws || ws.readyState !== 1) return;              // 没开着的话看门狗/重连逻辑负责
+      if (this._heartbeatInFlight) return;
+      const idle = Date.now() - (this._lastActivityAt || 0);
+      if (idle < this.heartbeatProbeMs) return;
+      this._heartbeatInFlight = true;
+      this._raw('get_status', {}, this.heartbeatProbeTimeoutMs).then(() => {
+        this._lastActivityAt = Date.now();
+        this._heartbeatInFlight = false;
+      }).catch((error) => {
+        this._heartbeatInFlight = false;
+        if (this._closed || this._ws !== ws) return;
+        this._emitError(new Error(`NapCat 探活失败（${String(error?.message ?? error)}），强制重建连接`));
+        this._forceReconnect('heartbeat probe failed');
+      });
+    }, this.heartbeatTickMs);
+    this._heartbeatTimer.unref?.();
+  }
+  _stopHeartbeat() { if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; } }
+
+  /** 连接诊断快照（控制台 / 管理端卡片用）。 */
+  stats() {
+    const ws = this._ws;
+    return {
+      url: this.url,
+      connected: Boolean(ws && ws.readyState === 1),
+      readyState: ws ? ws.readyState : -1,
+      everOpened: Boolean(this._everOpened),
+      lastActivityAgoMs: this._lastActivityAt ? Date.now() - this._lastActivityAt : null,
+      reconnects: this._reconnects,
+      reconnectAttempts: this._reconnectAttempts,
+      outbox: this._outbox.length,
+      pending: this._pending.size,
+      heartbeatProbeMs: this.heartbeatProbeMs,
+      watchdogMs: this.heartbeatWatchdogMs,
+    };
+  }
 
   /**
    * 【2026-09-16】把当前 socket 判死并**直接**排一次重连（不等 close 事件）。
@@ -265,6 +339,7 @@ export class OneBotWsClient extends EventEmitter {
   dispose() {
     this._closed = true;
     this._stopWatchdog();
+    this._stopHeartbeat();
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
     this._rejectPending(new Error('客户端已主动关闭'));
     try { this._ws?.close(1000, 'bye'); } catch {}
@@ -288,12 +363,13 @@ export class OneBotWsClient extends EventEmitter {
     if (dropped > 0) console.log(`[onebot-ws] outbox 跳过 ${dropped} 条已超时条目(避免断线补发双发)`);
   }
 
-  _raw(action, params) {
+  _raw(action, params, timeoutMs) {
     if (this._closed) return Promise.reject(new Error('客户端已关闭'));
     const echo = `qqb_${Date.now().toString(36)}_${(this._seq += 1)}`;
     const ws = this._ws;
+    const waitMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : this.sendTimeoutMs;
     const p = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this._pending.delete(echo); reject(new Error(`${action} 响应超时`)); }, this.sendTimeoutMs);
+      const timer = setTimeout(() => { this._pending.delete(echo); reject(new Error(`${action} 响应超时`)); }, waitMs);
       this._pending.set(echo, { resolve, reject, timer });
     });
     const trySend = () => {

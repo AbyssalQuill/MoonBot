@@ -22,6 +22,12 @@ interface NapStatus {
   mismatch?: { http?: boolean; ws?: boolean };
   /** 【2026-09-16】NapCat 自己的 QQ 登录态（"不回复"排查的第一分叉：要扫码 vs 桥聋了） */
   login?: { ok?: boolean; isLogin?: boolean; online?: boolean; nick?: string; uin?: string; loginPhase?: string; coreReady?: boolean; error?: string };
+  /** 【2026-09-16 强化 NapCat 连接】桥→NapCat 这条链路自己的诊断（连上没有 / 多久没下行 / 重连过几次） */
+  connection?: {
+    url?: string; connected?: boolean; readyState?: number; everOpened?: boolean;
+    lastActivityAgoMs?: number | null; reconnects?: number; outbox?: number; pending?: number;
+    heartbeatProbeMs?: number; watchdogMs?: number; error?: string;
+  };
   notes?: string[];
 }
 
@@ -92,6 +98,9 @@ export default function NapcatTokensCard() {
   };
 
   const mismatch = Boolean(st?.mismatch?.http || st?.mismatch?.ws);
+  // 【2026-09-16】连接诊断用 any 取一层：TS 在 `st.connection ? … : (access .error)` 的 else 分支里
+  // 会把类型收窄成 never（可选属性访问报 TS2339），这里明确放宽，避免构建被卡。
+  const conn: any = st?.connection;
   const rowStyle = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const };
 
   return (
@@ -134,6 +143,30 @@ export default function NapcatTokensCard() {
               )
             ) : (
               <span>查不到（{st.login?.error || 'NapCat 没起来 / WebUI 不可达'}）</span>
+            )}
+            <br />
+            {/* 【2026-09-16 强化 NapCat 连接】桥这条链路自己健康与否：连上没有、多久没下行、重连过几次 */}
+            桥 → NapCat 连接：
+            {conn ? (
+              conn.connected ? (
+                <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
+                  ✅ 已连接（
+                  {typeof conn.lastActivityAgoMs === 'number'
+                    ? `最近一次收到下行 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒前`
+                    : '刚连上'}
+                  {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}）
+                </span>
+              ) : (
+                <span style={{ color: 'var(--nc-danger-600)' }}>
+                  ⚠️ 未连接（正在按退避重连，最长 10 秒一次）
+                  {typeof conn.lastActivityAgoMs === 'number'
+                    ? `，已 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒没收到下行`
+                    : ''}
+                  {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}
+                </span>
+              )
+            ) : (
+              <span>查不到（{(conn && conn.error) || '桥刚启动/未暴露统计'}）</span>
             )}
             {mismatch && (
               <>
