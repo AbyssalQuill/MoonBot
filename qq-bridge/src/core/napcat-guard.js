@@ -78,7 +78,7 @@ function writeState(s) {
 
 /** 把当前二维码抓一份出来给管理端看/下载（人不在服务器边上时，这是唯一的救命路径）。 */
 export async function qrSnapshot() {
-  const p = exportQr();
+  const p = await exportQrFresh();
   if (!p) return { ok: false, error: '容器里暂时没有二维码（没在等登录，或 docker cp 失败）' };
   try {
     const buf = fs.readFileSync(p);
@@ -147,6 +147,48 @@ function exportQr() {
   } catch { return null; }
 }
 
+// 【2026-09-16 实测】NapCat 在"等扫码"状态下**不会**自己换二维码：实测容器里那张码挂了 40 分钟没变，
+// 而 QQ 的登录码大约两分钟就失效 —— 也就是说"直接把现有文件拷出来给人扫"，很可能给的是一张废码。
+// NapCat 的 WebUI 有 RefreshQRCode 接口可以主动要一张新的，这里在导出前先要一次（带频率限制）。
+async function refreshQrViaWebui() {
+  const dir = napcatConfigDir();
+  if (!dir) return { ok: false, error: '找不到 NapCat 配置目录' };
+  const w = readJsonSafe(path.join(dir, 'webui.json'), null);
+  const token = String(w?.token ?? '');
+  const port = String(w?.port ?? 6099);
+  if (!token) return { ok: false, error: '读不到 webui.json 的 token' };
+  const hash = crypto.createHash('sha256').update(`${token}.napcat`).digest('hex');
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hash }), signal: AbortSignal.timeout(8000)
+    });
+    const j = await res.json().catch(() => null);
+    const cred = String(j?.data?.Credential ?? '');
+    if (!cred) return { ok: false, error: 'WebUI 登录没返回 Credential' };
+    const r2 = await fetch(`http://127.0.0.1:${port}/api/QQLogin/RefreshQRCode`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${cred}` }, body: '{}', signal: AbortSignal.timeout(10000)
+    });
+    const j2 = await r2.json().catch(() => null);
+    const ok = Number(j2?.code) === 0;
+    return { ok, error: ok ? '' : JSON.stringify(j2).slice(0, 160) };
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
+}
+
+/** 导出二维码：先尝试让 NapCat 换一张新的（60 秒内不重复要），拿不到就退回现有文件。 */
+export async function exportQrFresh() {
+  const st = readState();
+  const since = Date.now() - (Number(st.lastQrRefreshAt) || 0);
+  if (since > 60000) {
+    const r = await refreshQrViaWebui();
+    st.lastQrRefreshAt = Date.now();
+    writeState(st);
+    if (!r.ok) log(`[napcat-guard] 让 NapCat 换新二维码失败（继续用现有那张）：${r.error}`);
+  }
+  return exportQr();
+}
+
 function restartContainer(reason) {
   const grace = Number(guardCfg().restartGraceSec) || 60;
   log(`[napcat-guard] 重启容器 ${containerName()}（-t ${grace}）：${reason}`);
@@ -185,7 +227,7 @@ export async function healNapcatSession(reason = '手动触发') {
     log(`[napcat-guard] 自愈成功（${Math.round(waitedMs / 1000)}s）：${rec.detail}`);
     return { healed: true, detail: `探针恢复（${rec.detail}）`, waitedMs, login };
   }
-  const qr = exportQr();
+  const qr = await exportQrFresh();
   log(`[napcat-guard] 自愈未能恢复（${Math.round(waitedMs / 1000)}s）：${rec.detail}；二维码 ${qr ? '已导出到 ' + qr : '导出失败'}`);
   return { healed: false, detail: `重启后仍探不通：${rec.detail}${qr ? '（二维码已导出，可在管理端查看/下载）' : ''}`, waitedMs, login, qrPath: qr };
 }
@@ -277,7 +319,7 @@ export async function guardTick(force = false) {
     if (loginNow && loginNow.ok && loginNow.isLogin === false) {
       const reason = `探针连续 ${st.consecutiveFails} 次失败，且 NapCat 显示未登录（${loginNow.loginPhase || '未知阶段'}）：需要人工扫码/完成验证`;
       log(`[napcat-guard] ${reason} —— 重启救不了，只报警不出手`);
-      st.alert = { ts: nowIso(), level: 'needs-login', reason, qrPath: exportQr() };
+      st.alert = { ts: nowIso(), level: 'needs-login', reason, qrPath: await exportQrFresh() };
       writeState(st);
       return guardStatus();
     }
@@ -300,7 +342,7 @@ export async function guardTick(force = false) {
     if (healsLastHour(st) >= Number(cfg.maxHealsPerHour) && !force) {
       const reason = `一小时内已自愈 ${healsLastHour(st)} 次，停止自动重启以免打转`;
       log(`[napcat-guard] ${reason}`);
-      const qr = exportQr();
+      const qr = await exportQrFresh();
       st.alert = { ts: nowIso(), level: 'giveup', reason, qrPath: qr };
       writeState(st);
       return guardStatus();
@@ -325,7 +367,7 @@ export async function guardTick(force = false) {
         ts: nowIso(),
         level: needsHuman ? 'needs-login' : 'failed',
         reason: needsHuman ? `${res.detail}；NapCat 当前未登录（${after?.loginPhase || '未知'}），需要人工扫码/完成验证` : res.detail,
-        qrPath: res.qrPath ?? exportQr()
+        qrPath: res.qrPath ?? await exportQrFresh()
       };
     }
     writeState(st2);
