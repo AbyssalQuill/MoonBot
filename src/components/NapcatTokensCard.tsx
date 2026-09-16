@@ -7,14 +7,19 @@ import {
 } from '../api';
 
 /**
- * NapCat 鉴权令牌卡（WebUI / HTTP / WS）
+ * NapCat 三张卡：① 鉴权令牌（WebUI / HTTP / WS） ② 会话守护 ③ 免扫码回退登录
  *
- * 【为什么单独做一张卡】管理端原来只是把令牌存在**桥的 config.json** 里（桥"期望"用哪个），
+ * 【为什么令牌要单独说】管理端原来只是把令牌存在**桥的 config.json** 里（桥"期望"用哪个），
  * NapCat 自己的配置（webui.json / onebot11*.json）从来没被改过 —— 于是：
  *   · 新令牌写进去没有用，NapCat 照样收默认 truefriend（旧令牌能进 WebUI）；
  *   · 桥拿着新令牌去连 NapCat，反而是 401/连不上。
- * 这张卡做的是"把令牌真正写进 NapCat + 重启容器 + 复验（新令牌能过、旧令牌被拒）"，
+ * 令牌卡做的是"把令牌真正写进 NapCat + 重启容器 + 复验（新令牌能过、旧令牌被拒）"，
  * 顺手把桥 config.json 的期望值对齐，并把结果如实显示出来（不含任何明文令牌）。
+ *
+ * 【为什么拆成三张卡】主人反馈"掺杂到一起了"：令牌 / 会话守护 / 免扫码回退登录是三件事，
+ * 混在一张卡里三处标题各说各话。现在各自一张卡、各自的标题与说明、各自的底，互不掺杂；
+ * 请求与功能一个字都没变（同一个 GET/POST，只是重新归位到对应的卡里）。
+ * 三张卡的渲染条件与拆分前完全一致：令牌那份读失败时，后两张卡跟以前一样不渲染。
  */
 interface NapStatus {
   ok?: boolean;
@@ -172,7 +177,7 @@ export default function NapcatTokensCard() {
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
-    // 同一张卡、同一个刷新按钮：令牌现状与会话守护一起刷新（守护那份失败不拖垮令牌那份）
+    // 同一次刷新：令牌现状与会话守护一起刷新（守护那份失败不拖垮令牌那份）
     await loadGuard();
   }, [loadGuard]);
 
@@ -311,89 +316,154 @@ export default function NapcatTokensCard() {
   const needsLogin = isNeedsLogin(guard?.alert);
 
   return (
-    <div className="card">
-      <div className="card-title">
-        <KeyRound size={17} /> NapCat 鉴权令牌（WebUI / HTTP / WS）
-        <span className="lrn-updated">写进 NapCat 自己的配置并重启，不只是改桥里的期望值</span>
+    /* 三张卡各自独立成块（card-stack = 页面既有的竖排叠卡容器），不再共用一张卡的底 */
+    <div className="card-stack">
+      {/* ============ 卡 1/3：NapCat 鉴权令牌（WebUI / HTTP / WS） ============
+          只放令牌：现状展示 → 填入/对齐 → 写入并重启。守护与回退登录都不在这张卡里。 */}
+      <div className="card">
+        <div className="card-title">
+          <KeyRound size={17} /> NapCat 鉴权令牌（WebUI / HTTP / WS）
+          <span className="lrn-updated">写进 NapCat 自己的配置并重启，不只是改桥里的期望值</span>
+        </div>
+
+        {err ? (
+          <div className="lrn-error">
+            <AlertTriangle size={15} />
+            <div style={{ flex: 1 }}>{err}</div>
+            <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => void load()}><RefreshCw size={13} /> 重试</button>
+          </div>
+        ) : !st ? (
+          <div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取 NapCat 令牌现状…</div>
+        ) : (
+          <>
+            <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
+              配置文件：<code>{st.dir || '（未找到）'}</code>　容器：<code>{st.container || 'napcat'}</code>
+              {st.files?.onebot?.length ? <>　涉及文件：{st.files.onebot.join('、')}</> : null}
+              <br />
+              NapCat 磁盘现状：WebUI <code>{st.napcat?.webui || '（空）'}</code>　HTTP <code>{st.napcat?.http || '（空）'}</code>　WS <code>{st.napcat?.ws || '（空）'}</code>
+              <br />
+              桥配置期望值：HTTP <code>{st.bridge?.http || '（空）'}</code>　WS <code>{st.bridge?.ws || '（空）'}</code>
+              <br />
+              {/* 【2026-09-16】登录态是"机器人不回复"排查的第一分叉：要扫码 / 还是桥的连接断了 */}
+              QQ 登录态：
+              {st.login?.ok ? (
+                st.login.isLogin ? (
+                  <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
+                    ✅ 已登录{st.login.online ? '、在线' : ''}
+                    {st.login.nick ? `（${st.login.nick}${st.login.uin ? ' · ' + st.login.uin : ''}）` : ''}
+                  </span>
+                ) : (
+                  <span style={{ color: 'var(--nc-danger-600)' }}>
+                    ⚠️ 未登录 —— 需要去管理端首页 → NapCat WebUI 扫码
+                  </span>
+                )
+              ) : (
+                <span>查不到（{st.login?.error || 'NapCat 没起来 / WebUI 不可达'}）</span>
+              )}
+              <br />
+              {/* 【2026-09-16 强化 NapCat 连接】桥这条链路自己健康与否：连上没有、多久没下行、重连过几次 */}
+              桥 → NapCat 连接：
+              {conn ? (
+                conn.connected ? (
+                  <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
+                    ✅ 已连接（
+                    {typeof conn.lastActivityAgoMs === 'number'
+                      ? `最近一次收到下行 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒前`
+                      : '刚连上'}
+                    {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}）
+                  </span>
+                ) : (
+                  <span style={{ color: 'var(--nc-danger-600)' }}>
+                    ⚠️ 未连接（正在按退避重连，最长 10 秒一次）
+                    {typeof conn.lastActivityAgoMs === 'number'
+                      ? `，已 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒没收到下行`
+                      : ''}
+                    {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}
+                  </span>
+                )
+              ) : (
+                <span>查不到（{(conn && conn.error) || '桥刚启动/未暴露统计'}）</span>
+              )}
+              {mismatch && (
+                <>
+                  <br />
+                  <span style={{ color: 'var(--nc-danger-600)' }}>
+                    ⚠️ 两者不一致 —— 这正是"改了令牌却没生效"的原因：桥拿着新令牌去连，NapCat 只认旧的。
+                    点下面「用桥里现有的令牌写入」让两边一致，或自己填好新令牌点「写入上面填的令牌」。
+                  </span>
+                </>
+              )}
+            </div>
+
+            <div className="cfg-fields">
+              <label className="field-row">
+                <span className="f-label">WebUI 登录令牌（6099）</span>
+                <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
+                  placeholder="留空 = 不改；填了就写进 webui.json（旧令牌立即失效）"
+                  value={webui} onChange={(e) => setWebui(e.target.value)} />
+              </label>
+              <label className="field-row">
+                <span className="f-label">HTTP 令牌（3000）</span>
+                <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
+                  placeholder="留空 = 不改；填了就写进 onebot11*.json 的 httpServers"
+                  value={http} onChange={(e) => setHttp(e.target.value)} />
+              </label>
+              <label className="field-row">
+                <span className="f-label">WS 令牌（3001）</span>
+                <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
+                  placeholder="留空 = 不改；填了就写进 onebot11*.json 的 websocketServers"
+                  value={ws} onChange={(e) => setWs(e.target.value)} />
+              </label>
+              <label className="switch-row">
+                <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} />
+                <span>写完重启 NapCat 容器（推荐）</span>
+                <em>NapCat 启动时才读配置；不重启则新令牌要等下次启动才生效。重启用 <code>docker restart -t 60</code>（给 30 秒宽限，避免掉登录态）</em>
+              </label>
+            </div>
+
+            <div className="lrn-actions" style={rowStyle}>
+              <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void apply(false)}>
+                {busy ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} 写入上面填的令牌{restart ? '并重启' : ''}
+              </button>
+              <button className="btn btn-soft-primary btn-sm" disabled={busy || !st?.bridge?.http}
+                title="不手抄令牌：直接用桥配置里现有的 HTTP/WS 令牌去写 NapCat（WebUI 也用它），让三处一致"
+                onClick={() => void apply(true)}>
+                {busy ? <Loader2 size={14} className="spin" /> : <KeyRound size={14} />} 用桥里现有的令牌写入
+              </button>
+              <button className="btn btn-sm" disabled={busy} onClick={() => void load()}><RefreshCw size={13} /> 刷新现状</button>
+              <button className="btn btn-sm" onClick={() => setShow((v) => !v)}>
+                {show ? <EyeOff size={13} /> : <Eye size={13} />} {show ? '隐藏输入' : '显示输入'}
+              </button>
+            </div>
+            {msg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{msg}</div>}
+
+            <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75, marginTop: 6 }}>
+              两种用法：<b>直接在上面填</b>三个令牌（想给 WebUI / HTTP / WS 设不同值就用这个）；
+              或者点 <b>用桥里现有的令牌写入</b> —— 不用手抄，直接把桥配置里那两个令牌写进 NapCat，
+              并让 WebUI 也用桥的令牌，三处一次对齐（最省事，推荐先试这个）。
+              令牌只允许 4~64 位的字母/数字/符号（不能有空格、引号、中文）；写入前自动备份到同目录 <code>_bak-&lt;时间&gt;</code>。
+              WebUI 令牌改完后，管理端首页/服务端入口里那些 NapCat 链接会<b>自动带新令牌</b>（它们每次从服务端读 webui.json，不是写死的）。
+              <br />
+              <b>重启 NapCat 不会掉登录态</b>：QQ 的会话存在数据卷 <code>napcat-qq</code> 里，登录票据在
+              <code>webui.json</code> 同目录的 <code>napcat_&lt;QQ&gt;.json</code>；容器起来后 NapCat 按
+              <code>ACCOUNT=&lt;QQ&gt;</code> <b>自动快速登录</b>，不需要重新扫码。我们已经把重启宽限统一成
+              <code>-t 60</code>（宽限太短会被硬杀）。真正会让它掉登录的只有：① 在别处登录同一个 QQ（手机/电脑）；
+              ② 手动 <code>docker rm</code> 掉容器或用不同的挂载重建（数据卷没带上的话）。
+            </div>
+          </>
+        )}
       </div>
 
-      {err ? (
-        <div className="lrn-error">
-          <AlertTriangle size={15} />
-          <div style={{ flex: 1 }}>{err}</div>
-          <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => void load()}><RefreshCw size={13} /> 重试</button>
-        </div>
-      ) : !st ? (
-        <div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取 NapCat 令牌现状…</div>
-      ) : (
+      {!err && st && (
         <>
-          <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
-            配置文件：<code>{st.dir || '（未找到）'}</code>　容器：<code>{st.container || 'napcat'}</code>
-            {st.files?.onebot?.length ? <>　涉及文件：{st.files.onebot.join('、')}</> : null}
-            <br />
-            NapCat 磁盘现状：WebUI <code>{st.napcat?.webui || '（空）'}</code>　HTTP <code>{st.napcat?.http || '（空）'}</code>　WS <code>{st.napcat?.ws || '（空）'}</code>
-            <br />
-            桥配置期望值：HTTP <code>{st.bridge?.http || '（空）'}</code>　WS <code>{st.bridge?.ws || '（空）'}</code>
-            <br />
-            {/* 【2026-09-16】登录态是"机器人不回复"排查的第一分叉：要扫码 / 还是桥的连接断了 */}
-            QQ 登录态：
-            {st.login?.ok ? (
-              st.login.isLogin ? (
-                <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
-                  ✅ 已登录{st.login.online ? '、在线' : ''}
-                  {st.login.nick ? `（${st.login.nick}${st.login.uin ? ' · ' + st.login.uin : ''}）` : ''}
-                </span>
-              ) : (
-                <span style={{ color: 'var(--nc-danger-600)' }}>
-                  ⚠️ 未登录 —— 需要去管理端首页 → NapCat WebUI 扫码
-                </span>
-              )
-            ) : (
-              <span>查不到（{st.login?.error || 'NapCat 没起来 / WebUI 不可达'}）</span>
-            )}
-            <br />
-            {/* 【2026-09-16 强化 NapCat 连接】桥这条链路自己健康与否：连上没有、多久没下行、重连过几次 */}
-            桥 → NapCat 连接：
-            {conn ? (
-              conn.connected ? (
-                <span style={{ color: 'var(--nc-success-600, #16a34a)' }}>
-                  ✅ 已连接（
-                  {typeof conn.lastActivityAgoMs === 'number'
-                    ? `最近一次收到下行 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒前`
-                    : '刚连上'}
-                  {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}）
-                </span>
-              ) : (
-                <span style={{ color: 'var(--nc-danger-600)' }}>
-                  ⚠️ 未连接（正在按退避重连，最长 10 秒一次）
-                  {typeof conn.lastActivityAgoMs === 'number'
-                    ? `，已 ${Math.max(0, Math.round(conn.lastActivityAgoMs / 1000))} 秒没收到下行`
-                    : ''}
-                  {conn.reconnects ? `，累计重连 ${conn.reconnects} 次` : ''}
-                </span>
-              )
-            ) : (
-              <span>查不到（{(conn && conn.error) || '桥刚启动/未暴露统计'}）</span>
-            )}
-            {mismatch && (
-              <>
-                <br />
-                <span style={{ color: 'var(--nc-danger-600)' }}>
-                  ⚠️ 两者不一致 —— 这正是"改了令牌却没生效"的原因：桥拿着新令牌去连，NapCat 只认旧的。
-                  点下面「用桥里现有的令牌写入」让两边一致，或自己填好新令牌点「写入上面填的令牌」。
-                </span>
-              </>
-            )}
-          </div>
-
-          {/* ===== 【2026-09-16】NapCat 会话守护（桥侧每 60 秒 get_rkey 探活，连续失败自动重启容器） =====
+          {/* ============ 卡 2/3：NapCat 会话守护 ============
+              桥侧每 60 秒 get_rkey 探活，连续失败自动重启容器。
               为什么要在管理端露出来：QQ 把登录态作废时 NapCat 可能**一条错都不报**，
               WebUI 上 isLogin/online 还是 true，消息却发不出去 —— 当天静默了 50 分钟没人发现。
-              这里只做"看得见 + 两个开关"，探活与自愈都在桥侧跑；挂载时 GET 一次，不轮询。 */}
-          <div className="lrn-divider" />
-          <div className="lrn-status-block">
-            <div className="card-title" style={{ marginBottom: 8 }}>
-              <Activity size={16} /> NapCat 会话守护
+              这张卡只放守护自己的东西：状态机 / 探针 / 自愈次数与开关 / 立即自愈 / 二维码。 */}
+          <div className="card">
+            <div className="card-title">
+              <Activity size={17} /> NapCat 会话守护
               <span className="lrn-updated">每 {Math.max(1, Math.round(Number(guard?.probeIntervalMs ?? 60000) / 1000))} 秒用 get_rkey 探活，连续失败自动重启容器</span>
             </div>
 
@@ -455,7 +525,7 @@ export default function NapcatTokensCard() {
                             ? '用手机 QQ 扫下面的码即可恢复登录。'
                             : '需要重新扫码才能登录。'}
                           二维码文件在 <code>{guard.alert.qrPath || qr?.path || '（桥还没导出）'}</code>
-                          （NapCat WebUI 里也能看到），或在下面配置「免扫码回退登录」。
+                          （NapCat WebUI 里也能看到），或在下面那张「免扫码回退登录」卡里配一次回退口令。
                         </div>
                       )}
 
@@ -515,15 +585,6 @@ export default function NapcatTokensCard() {
                   </label>
                 </div>
 
-                {/* 没配免扫码回退登录时，自愈重启后有概率掉登录态、需要人工扫码 —— 必须提前说 */}
-                {guard?.passwordFallback?.configured === false && (
-                  <div className="lrn-note">
-                    <AlertTriangle size={13} />
-                    <span>未配置免扫码回退登录，自愈重启后可能需要重新扫码</span>
-                    {guard?.passwordFallback?.error ? <span>　（{guard.passwordFallback.error}）</span> : null}
-                  </div>
-                )}
-
                 <div className="lrn-actions" style={rowStyle}>
                   <button className="btn btn-primary btn-sm" disabled={guardBusy || healing} onClick={() => void healNow()}>
                     {healing ? <Loader2 size={14} className="spin" /> : <Siren size={14} />} {healing ? '自愈进行中…' : '立即自愈'}
@@ -537,12 +598,12 @@ export default function NapcatTokensCard() {
             )}
           </div>
 
-          {/* ===== 【2026-09-16】免扫码回退登录：把 QQ 密码算成 md5 写进容器环境变量，
-              容器重建后会用它自动登录，自愈重启就不必人工扫码。明文只随请求发送。 ===== */}
-          <div className="lrn-divider" />
-          <div className="lrn-status-block">
-            <div className="card-title" style={{ marginBottom: 8 }}>
-              <Lock size={16} /> 免扫码回退登录
+          {/* ============ 卡 3/3：免扫码回退登录 ============
+              把 QQ 密码算成 md5 写进容器环境变量，容器重建后会用它自动登录，自愈重启就不必人工扫码。
+              明文只随请求发送。这张卡只有密码输入 + 配置按钮 + 说明。 */}
+          <div className="card">
+            <div className="card-title">
+              <Lock size={17} /> 免扫码回退登录
               <span className="lrn-updated">
                 {guard?.passwordFallback?.configured ? '已配置（容器环境变量里已有回退口令）' : '未配置'}
               </span>
@@ -555,6 +616,16 @@ export default function NapcatTokensCard() {
               执行过程约 <b>20~60 秒不可用</b>，<b>登录态不会丢</b>（QQ 会话与登录票据都在数据卷里）。
               {guard?.passwordFallback?.configured === false && '（当前未配置，这也是自愈重启后可能要重新扫码的原因）'}
             </div>
+
+            {/* 没配回退登录时的提醒（从守护卡挪过来：说的就是"这张卡没配"） */}
+            {guard?.passwordFallback?.configured === false && (
+              <div className="lrn-note">
+                <AlertTriangle size={13} />
+                <span>未配置免扫码回退登录，自愈重启后可能需要重新扫码</span>
+                {guard?.passwordFallback?.error ? <span>　（{guard.passwordFallback.error}）</span> : null}
+              </div>
+            )}
+
             <div className="cfg-fields">
               <label className="field-row">
                 <span className="f-label">QQ 密码（仅用于算 md5 写入容器环境变量）</span>
@@ -573,62 +644,6 @@ export default function NapcatTokensCard() {
               </button>
             </div>
             {pwMsg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{pwMsg}</div>}
-          </div>
-
-          <div className="cfg-fields">
-            <label className="field-row">
-              <span className="f-label">WebUI 登录令牌（6099）</span>
-              <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
-                placeholder="留空 = 不改；填了就写进 webui.json（旧令牌立即失效）"
-                value={webui} onChange={(e) => setWebui(e.target.value)} />
-            </label>
-            <label className="field-row">
-              <span className="f-label">HTTP 令牌（3000）</span>
-              <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
-                placeholder="留空 = 不改；填了就写进 onebot11*.json 的 httpServers"
-                value={http} onChange={(e) => setHttp(e.target.value)} />
-            </label>
-            <label className="field-row">
-              <span className="f-label">WS 令牌（3001）</span>
-              <input className="input" type={show ? 'text' : 'password'} autoComplete="new-password"
-                placeholder="留空 = 不改；填了就写进 onebot11*.json 的 websocketServers"
-                value={ws} onChange={(e) => setWs(e.target.value)} />
-            </label>
-            <label className="switch-row">
-              <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} />
-              <span>写完重启 NapCat 容器（推荐）</span>
-              <em>NapCat 启动时才读配置；不重启则新令牌要等下次启动才生效。重启用 <code>docker restart -t 60</code>（给 30 秒宽限，避免掉登录态）</em>
-            </label>
-          </div>
-
-          <div className="lrn-actions" style={rowStyle}>
-            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void apply(false)}>
-              {busy ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} 写入上面填的令牌{restart ? '并重启' : ''}
-            </button>
-            <button className="btn btn-soft-primary btn-sm" disabled={busy || !st?.bridge?.http}
-              title="不手抄令牌：直接用桥配置里现有的 HTTP/WS 令牌去写 NapCat（WebUI 也用它），让三处一致"
-              onClick={() => void apply(true)}>
-              {busy ? <Loader2 size={14} className="spin" /> : <KeyRound size={14} />} 用桥里现有的令牌写入
-            </button>
-            <button className="btn btn-sm" disabled={busy} onClick={() => void load()}><RefreshCw size={13} /> 刷新现状</button>
-            <button className="btn btn-sm" onClick={() => setShow((v) => !v)}>
-              {show ? <EyeOff size={13} /> : <Eye size={13} />} {show ? '隐藏输入' : '显示输入'}
-            </button>
-          </div>
-          {msg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{msg}</div>}
-
-          <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75, marginTop: 6 }}>
-            两种用法：<b>直接在上面填</b>三个令牌（想给 WebUI / HTTP / WS 设不同值就用这个）；
-            或者点 <b>用桥里现有的令牌写入</b> —— 不用手抄，直接把桥配置里那两个令牌写进 NapCat，
-            并让 WebUI 也用桥的令牌，三处一次对齐（最省事，推荐先试这个）。
-            令牌只允许 4~64 位的字母/数字/符号（不能有空格、引号、中文）；写入前自动备份到同目录 <code>_bak-&lt;时间&gt;</code>。
-            WebUI 令牌改完后，管理端首页/服务端入口里那些 NapCat 链接会<b>自动带新令牌</b>（它们每次从服务端读 webui.json，不是写死的）。
-            <br />
-            <b>重启 NapCat 不会掉登录态</b>：QQ 的会话存在数据卷 <code>napcat-qq</code> 里，登录票据在
-            <code>webui.json</code> 同目录的 <code>napcat_&lt;QQ&gt;.json</code>；容器起来后 NapCat 按
-            <code>ACCOUNT=&lt;QQ&gt;</code> <b>自动快速登录</b>，不需要重新扫码。我们已经把重启宽限统一成
-            <code>-t 60</code>（宽限太短会被硬杀）。真正会让它掉登录的只有：① 在别处登录同一个 QQ（手机/电脑）；
-            ② 手动 <code>docker rm</code> 掉容器或用不同的挂载重建（数据卷没带上的话）。
           </div>
         </>
       )}

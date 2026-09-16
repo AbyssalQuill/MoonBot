@@ -34,8 +34,8 @@ interface VoiceCfg {
   maxCacheFiles?: number;
   asrLanguage?: string;
   asrAutoTranscribe?: boolean;
-  /** 主动发语音的节奏：概率（0~1）+ 同一会话冷却（毫秒） */
-  send?: { probability?: number; cooldownMs?: number };
+  /** 主动发语音的节奏：概率（0~1）+ 同一会话冷却（毫秒）+ 全语音发送模式 */
+  send?: { probability?: number; cooldownMs?: number; allVoice?: boolean };
   usage?: { day: string; chars: number; calls: number; cacheHits: number; asrCalls: number };
   roles?: { role: string; label: string; defaultModel: string }[];
   presets?: { tokenPlanCn: string; official: string };
@@ -82,6 +82,9 @@ export default function VoiceConfig({ onBack }: Props) {
   const [cacheEnabled, setCacheEnabled] = useState(true);
   const [probPct, setProbPct] = useState(20);      // 主动发语音概率（百分数，界面友好；桥上按 0~1 存）
   const [coolMin, setCoolMin] = useState(10);      // 语音冷却（分钟）
+  /** 【全语音发送模式】send.allVoice：打开后机器人的回复一律以语音发出（发不发由桥侧决定，本页只读写配置）。
+   *  旧数据没有这个字段时按 false（普通模式）显示，不报错。 */
+  const [allVoice, setAllVoice] = useState(false);
   const [asrLanguage, setAsrLanguage] = useState('auto');
   const [models, setModels] = useState<Record<string, { baseUrl: string; model: string; apiKey: string }>>({});
 
@@ -111,6 +114,8 @@ export default function VoiceConfig({ onBack }: Props) {
     setCacheEnabled(c.cacheEnabled !== false);
     setProbPct(Math.round((Number(c.send?.probability ?? 0.2) || 0) * 100));
     setCoolMin(Math.round((Number(c.send?.cooldownMs ?? 600000) || 0) / 60000));
+    // 全语音发送模式：**缺失/非布尔一律按 false**（旧配置没有 send.allVoice = 普通模式），不报错
+    setAllVoice(c.send?.allVoice === true);
     setAsrLanguage(String(c.asrLanguage ?? 'auto'));
     const m: Record<string, { baseUrl: string; model: string; apiKey: string }> = {};
     for (const r of ROLE_ORDER) {
@@ -147,8 +152,12 @@ export default function VoiceConfig({ onBack }: Props) {
         enabled, defaultVoice, style: style.trim(), format,
         maxChars: Number(maxChars) || 120, dailyChars: Number(dailyChars) || 0,
         cacheEnabled, asrLanguage,
-        // 主动发语音的节奏：界面上是百分数与分钟，桥侧存 0~1 的概率与毫秒冷却
-        send: { probability: Math.max(0, Math.min(100, Number(probPct) || 0)) / 100, cooldownMs: Math.max(0, Number(coolMin) || 0) * 60000 },
+        // 主动发语音的节奏：界面上是百分数与分钟，桥侧存 0~1 的概率与毫秒冷却；allVoice = 全语音发送模式
+        send: {
+          probability: Math.max(0, Math.min(100, Number(probPct) || 0)) / 100,
+          cooldownMs: Math.max(0, Number(coolMin) || 0) * 60000,
+          allVoice,
+        },
         models: Object.fromEntries(ROLE_ORDER.map((r) => [r, {
           baseUrl: models[r]?.baseUrl ?? '', model: models[r]?.model ?? '',
           // 只把用户真正输入的密钥传上去，留空 = 保持原密钥
@@ -157,7 +166,10 @@ export default function VoiceConfig({ onBack }: Props) {
       };
       const r = await api<VoiceCfg>('/voice/config', { method: 'PUT', body: JSON.stringify(patch) });
       if ((r as any)?.ok !== true) { setMsg(`保存失败：${pickErr(r)}`); return; }
-      applyCfg(r);
+      // 【兼容旧桥】回包若没带 send.allVoice（老桥不认识这个字段，只回它认识的字段），
+      // 就按刚提交的值显示，别让开关"自己弹回关"；带了 allVoice 则一律以桥回的为准。
+      const echoed = r?.send;
+      applyCfg(typeof echoed?.allVoice === 'boolean' ? r : { ...r, send: { ...(echoed ?? {}), allVoice } });
       setMsg('语音配置已保存（桥侧立即生效，不需要重启）');
     } catch (e: any) {
       setMsg(`保存失败：${pickErr(e)}`);
@@ -346,6 +358,21 @@ export default function VoiceConfig({ onBack }: Props) {
                     onChange={(e) => setCoolMin(Math.max(0, Number(e.target.value) || 0))} />
                   <em>同一个会话刚发过语音后，这段时间内不再抽中（防连发刷屏）</em>
                 </label>
+                {/* 全语音发送模式（send.allVoice）：只做配置读写与提示，真正的"一律发语音"由桥侧实现 */}
+                <label className="switch-row">
+                  <input type="checkbox" checked={allVoice} onChange={(e) => setAllVoice(e.target.checked)} />
+                  <span>全语音发送模式</span>
+                  <em>打开后机器人的回复<b>一律以语音发出</b>（不再发文字）；关掉就回到上面的「概率 + 冷却」那套规则。改完记得点「应用配置」</em>
+                </label>
+                {allVoice && (
+                  <div className="lrn-inline-note" style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'flex-start', lineHeight: 1.7 }}>
+                    <Volume2 size={13} style={{ flex: 'none', marginTop: 2 }} />
+                    <span>
+                      全语音会<b>明显增加语音合成消耗</b>（每日合成字数有上限，见上面的「每日合成字数上限」）；
+                      某一句话合成失败时会<b>自动退回文字</b>发出，不会把回复吞掉。
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="lrn-inline-note">
                 <Clock3 size={13} />
