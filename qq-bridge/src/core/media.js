@@ -387,7 +387,13 @@ export function createMediaDomain(cfg) {
       id: mid,
       title: givenTitle,
       artist: givenArtist,
-      cover: normalizeCoverUrl(opts?.cover ?? opts?.image),
+      /* 【2026-09-19 关键修正】**调用方传进来的封面不能放进 `cover`**。
+       * 原来 `cover` 一开始就等于 opts.image，于是 buildMusicCard 里"桥解析的优先"其实还是先拿到它，
+       * 排序白做（实测故意传一张错的，卡片用的还是错的那张）。
+       * 现在分开：`cover` = 聚合站按 songmid/歌名回检匹配出来的（可信），
+       * `coverExplicit` = 调用方传的（只兜底）。 */
+      cover: '',
+      coverExplicit: normalizeCoverUrl(opts?.cover ?? opts?.image),
       audio: '',
       url: fallbackUrl,
       via: ''
@@ -441,8 +447,6 @@ export function createMediaDomain(cfg) {
          * 卡片的 preview 就指向一张不存在的图 → 没封面。
          * 所以：只有调用方没给封面时，才用聚合站的那张。 */
         if (!out.cover) out.cover = normalizeCoverUrl(pick.cover) || out.cover;
-        // 聚合站那张也留着当"备选"：两个来源的封面都会间歇性 404，最后交给 firstWorkingImage 探活挑一张
-        out.coverAlt = normalizeCoverUrl(pick.cover) || '';
         out.url = String(pick.link || fallbackUrl);
         out.audio = normalizeMediaUrl(pick.music_url);
         out.via = `secapi/${String(pick.quality || '').trim()}`;
@@ -486,8 +490,12 @@ export function createMediaDomain(cfg) {
        * 所以这里把 `opts.image` 提到第一优先，桥自己解析出来的封面只当兜底 ——
        * 与旧注释里"不许模型手写封面 URL"相反，现在是**硬规则：必须传 image**（工具描述里已写死）。 */
       const explicitCover = String(opts?.image ?? '').trim();
-      // 和 QQ 音乐一样：两个来源都可能间歇性 404，探活挑一张真能取到的
-      const cover = await firstWorkingImage([explicitCover, song.cover]);
+      /* 【2026-09-19 主人反馈「封面都有但都没对——点进去的封面不同」】
+       * 真因是**模型把别的消息里的封面 URL 抄过来了**（会话历史里堆着我发的测试卡，
+       * 它就照着抄），于是卡片挂的是另一首歌的封面。
+       * 所以优先级改回来：**桥自己解析出来的封面优先**，模型的 `image` 只当最后一档兜底。
+       * 探测（firstWorkingImage）照旧 —— 它能同时解决"y.gtimg.cn 间歇性 404"。 */
+      const cover = await firstWorkingImage([song.cover, explicitCover]);
       const title = song?.title || givenTitle || '网易云音乐';
       const artist = song?.artist || givenArtist || '';
       const link = `${title}${artist ? ' ' + artist : ''} https://music.163.com/#/song?id=${pid}`;
@@ -556,7 +564,10 @@ export function createMediaDomain(cfg) {
       }
       const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
       const qqExplicitCover = String(opts?.image ?? '').trim();
-      const qqCover = await firstWorkingImage([qqExplicitCover, song.cover, song.coverAlt]);
+      /* **桥自己解析的那张优先**（聚合站按 songmid/歌名回检匹配过，肯定是这首歌的），
+       * 调用方传的 `image` 只兜底 —— 它是从聊天记录里别的卡片抄来的话就gg了（主人实测"封面不对"就是这么来的）。
+       * `song.coverExplicit` 是解析器专门留的"调用方传的那张"（不能和 song.cover 混）。 */
+      const qqCover = await firstWorkingImage([song.cover, song.coverExplicit, qqExplicitCover]);
       const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(qqCover) };
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
