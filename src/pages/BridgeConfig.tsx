@@ -1677,7 +1677,7 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
   const v = get(cfg, 'social.tools');
   // 【2026-09-18】MCP 工具原名（qq_send_message 这种英文标识符）默认**不显示**：
   // 界面上一律显示中文名；要跟 config.json 里的 social.tools.* 对照时再勾上这个开关。
-  const [showRaw, setShowRaw] = useState(false);
+  const [showRaw, setShowRaw] = useState(true);
   if (!v || !isObj(v)) return <div className="empty-state">当前配置没有可开关的 MCP 工具</div>;
   const keys = Object.keys(v).sort((a, b) => prettyTool(a).localeCompare(prettyTool(b), 'zh'));
   return (
@@ -1773,9 +1773,10 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
-  // 【2026-09-18】这一屏 77 行以前全是 `qq_send_message` 这种原始工具名（主人要求「一个别留」）。
-  // 现在行标题一律用 MCP_LABEL 里的中文名；原名默认收起，要跟 config.json 的 deny 名单对照时再勾开。
-  const [showRaw, setShowRaw] = useState(false);
+  // 【2026-09-19 主人改主意】原来这一屏行标题只有中文名、原始工具名默认收起（当时要求「一个别留」），
+  // 现在要求**把原工具名加回来** —— 所以 showRaw 默认勾上：中文名 + `qq_xxx` 原名并排显示。
+  // 对照 config.json 的 deny 名单时也终于不用再手动勾一次了。
+  const [showRaw, setShowRaw] = useState(true);
 
   const all = Object.keys(TOOL_SCHEMA_CHARS)
     .filter((n) => n.startsWith(SLIM_PREFIX))
