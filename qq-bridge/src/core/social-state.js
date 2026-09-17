@@ -292,6 +292,8 @@ export function saveSocialState() {
         _undeliveredAt: Number(st._undeliveredAt) || 0,
         sessionToolCalls: Number(st.sessionToolCalls) || 0,
         _promptInjected: st._promptInjected === true,
+        /* 【2026-09-19 修「对话中途也注入首轮提示词」】这个字段必须落盘，理由见下面默认值那行的注释。 */
+        _promptOverrideStamp: (typeof st._promptOverrideStamp === 'string' && st._promptOverrideStamp) ? st._promptOverrideStamp : '',
         _standbySessionId: st._standbySessionId || null,
         _standbyWarming: st._standbyWarming === true,
         _mediaAttachedSeq: Number(st._mediaAttachedSeq) || 0,
@@ -426,6 +428,16 @@ export function getSocialState(key) {
       _mediaAttachedSeq: 0, // 最近一次唤醒已附图覆盖到的最高消息 seq（防同一批图反复附）
       _promptSessionId: null, // 最近一次完整 prompt 注入时对应的 DSH sessionId（会话重建/DSH 重启后强制重新注入）
       _promptInjected: false, // 首次完整 prompt 是否已注入（持久化：避免桥重启后对同一长驻会话重复全量注入）
+      /* 【2026-09-19 修「对话中途也注入首轮提示词」· 线上实测】
+       * `wake-send.js` 用「人设/发言规则文件的 mtime:size」当版本号：注入完整 prompt 时把版本号记进
+       * `_promptOverrideStamp`，下次唤醒比较，**不一样就重新注入**（人设保存后立即生效的机制）。
+       * 但这个字段**从来没被持久化**（serialize / load / 默认值三处都没有）→ 落盘再读回来永远是 ''，
+       * 于是 `ovStamp !== ''` 恒成立 → **每次唤醒都走"人设已更新"分支**、把 `_promptInjected` 打回 false，
+       * 下一轮又变成"首次唤醒，注入完整 prompt"。
+       * 现场证据：`persona.md` / `speech-rules.md` 的 mtime 一直停在 09-16（文件根本没动），
+       * 而 bridge.log 里「人设/发言规则已更新 → 重新注入完整 prompt」在 16:08~17:57 之间刷了 12 次，
+       * 且 state 里所有会话都**没有** `_promptOverrideStamp` 这个字段。 */
+      _promptOverrideStamp: '', // 注入完整 prompt 时的人设文件版本号（mtime:size），人设一变就重新注入
       _standbySessionId: null, // 已预建并预热的"下一代会话"id（轮换时直接切换）
       _standbyWarming: false, // 预热创建/请求进行中标记（防重入）
       lastActionAt: 0,
@@ -538,6 +550,8 @@ export function loadSocialState() {
           _undeliveredAt: Number(val._undeliveredAt) || 0,
           sessionToolCalls: Number(val.sessionToolCalls) || 0,
           _promptInjected: val._promptInjected === true,
+          // 【2026-09-19】读回来也要认这个字段，否则重启后它又变回 undefined → 又触发"人设已更新"。
+          _promptOverrideStamp: (typeof val._promptOverrideStamp === 'string' && val._promptOverrideStamp) ? val._promptOverrideStamp : '',
           _standbySessionId: (typeof val._standbySessionId === 'string' && val._standbySessionId) ? val._standbySessionId : null,
           _standbyWarming: val._standbyWarming === true,
           _mediaAttachedSeq: Number(val._mediaAttachedSeq) || 0,
