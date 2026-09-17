@@ -452,19 +452,22 @@ export function createMediaDomain(cfg) {
       }
       const data = {
         type: '163',
-        /* 【2026-09-19 实测·修「点开卡片弹『将要访问』中转页」】
+        /* 【2026-09-19 实测·「将要访问」到底是什么】
          * 主人拿同一首歌点了 5 种链接形态，结论很干净：
          *   A https://music.163.com/#/song?id=X           → 弹
          *   B https://music.163.com/song?id=X             → 弹
          *   C https://y.music.163.com/m/song?id=X         → 弹
          *   D https://music.163.com/song/media/outer/…    → 弹
          *   E https://m701.music.126.net/…/xxx.mp3?vuutv= → **不弹**
-         * 也就是 QQ 只给**网页**盖那层安全页，**直链媒体文件不盖**（直接在播放器里播）。
-         * 所以卡片的 `url`（= 点卡片本体打开的那个）也指到直链去了。
-         * 代价：直链带 `vuutv` 口令，理论上会过期 —— 但实测同一首歌两次解析（间隔 20 分钟）
-         * 路径**完全一致**且仍能 206 取到，路径里的时间戳是编码时间不是签名时间，实践上够稳。
-         * 想换回"打开歌曲页"：`social.send.neteaseJumpUrl = 'page'`。 */
-        url: String(cfg?.social?.send?.neteaseJumpUrl ?? 'direct').trim().toLowerCase() === 'page' ? song.url : (song.audio || song.url),
+         * 也就是 QQ 只给**网页**盖那层安全页，**直链媒体文件不盖**（直接进播放器）。
+         * 而且官方从网易云 App 分享出来的真卡，jumpUrl 用的就是 C 那种手机页 ——
+         * **说明真卡一样弹，这不是我们引入的问题**。
+         *
+         * 【2026-09-19 主人定稿】**默认改回歌曲页**（`url = song.url`）：
+         * 弹一下中转页可以接受，但直链带 `vuutv` 口令、理论上会过期，
+         * 而卡片是永久留在聊天记录里的 —— 稳定 > 少点一下。
+         * 想改成直链（不弹中转页、直接播）：`social.send.neteaseJumpUrl = 'direct'`。 */
+        url: String(cfg?.social?.send?.neteaseJumpUrl ?? 'page').trim().toLowerCase() === 'direct' ? (song.audio || song.url) : song.url,
         audio: song.audio,
         title,
         image: await ensureQqHostedImage(cover)
