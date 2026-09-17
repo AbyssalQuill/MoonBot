@@ -351,6 +351,30 @@ function silentWavBuffer(ms = 300, sampleRate = 8000) {
 
 const MODE_LABEL = { tts: '语音合成', design: '音色设计', clone: '音色复刻' };
 
+/* ── 【2026-09-18 二修「每次发都音色不同」】"音色锚点"必须与回复内容无关 ────────────────
+ * §11.3 的冻结（design 音色 → 冻一段音频 → 之后都走 clone）已经把"每次现设计一个音色"解决了，
+ * 线上日志也确实全是 `音色复刻 / 音色=样本复刻`（= m 已经是 clone，冻结生效）。但主人仍听出漂移，
+ * 因为剩下的这条链路里还有两件事：
+ *   ① 冻结用的那一段音频是**某一条回复的朗读** —— 它短（一两秒到几秒）、而且带着那句话的情绪
+ *      （疑问/惊叹/撒娇都被念进音色里）。零样本复刻里参考越短越糊，说话人嵌入估计得越不准。
+ *   ② 官方文档明确说**合成文本会左右音色**：`_diag/mimo-tts-guide.md:601`
+ *      「Synthetic text should match the voice tone ... to achieve the best results」。
+ *      也就是说"音色"不是只由参考样本决定的常量，当前这句话也是条件之一。
+ * 两条叠加的结果：每条回复都是不同文本，而锚点又太弱压不住，于是模型每次都重新采样出一个
+ * 略有偏差的说话人 → 听感就是"每次像不同的人、有轻微漂移"。
+ *
+ * 修法（保守、不动任何配置语义）：锚点改成**一段固定文本**的合成结果 —— 与"这条回复说了什么"完全无关、
+ * 长度足够、情绪中性。这样每条消息送出去的参考样本字节完全一致，模型只需要把当前这句话套进同一个音色。
+ * 锚点只在一个音色第一次被锚定时生成一次（`rebuildFixedAnchor`），之后终身复用；失败则退回老行为。
+ * 请求里没有任何可以钉死采样的旋钮（seed/temperature 都不在文档的 audio 字段里，见 `_diag/mimo-tts-api.md`），
+ * 所以"把参考样本做到最强、最一致"是桥侧唯一能做的稳定化手段。
+ */
+const ANCHOR_TEXT = '你好呀，我是你设置的那个音色。今天天气还不错，风不大，路上的人也慢慢多了起来。要是你愿意的话，就跟我说说今天遇到的事吧，我会认真听的。';
+/** 冻结点上的来源标记：fixed-text = 用上面这段固定文本设计出来的**强锚点**；其余（含历史遗留）都是弱锚点 */
+const ANCHOR_TAG_FIXED = 'fixed-text';
+/** 每个进程里"已经尝试重建过锚点"的音色 id —— 重建失败也不再每条消息都重试（否则等于每条都换音色） */
+const anchorRebuildTried = new Set();
+
 /**
  * 合成语音 → 本地音频文件。
  * @param {object} [cfg] 显式传入的生效配置（省略 = 现读 state/voice-config.json）。
@@ -375,6 +399,9 @@ export async function synthesize({
   // 内置音色 id 发给服务端 → 400 Unknown voice（可用音色只有那 9 个内置的）。
   // 现在统一在合成入口解析：设计型改走 design（用它的描述），复刻型改走 clone（读它的样本）。
   let resolvedVoice = String(voice || '').trim();
+  // 这次合成用的到底是"哪一种音色来源" + 具体是哪个文件：**只进日志**，是线上定位音色漂移的唯一证据
+  let voiceSrc = '';
+  let voiceRefPath = '';
   // 【2026-09-18】本音色是从音色库里的**描述型自建音色**解析来的，记一下 —— 合成成功后要把它冻结
   let designRec = null;
   if (m === 'tts') {
@@ -384,17 +411,34 @@ export async function synthesize({
       if (hit?.kind === 'clone' && hit.samplePath && fs.existsSync(hit.samplePath)) {
         m = 'clone';
         wantSample = fs.readFileSync(hit.samplePath).toString('base64');
+        voiceSrc = '音色库复刻样本';
+        voiceRefPath = hit.samplePath;
         resolvedVoice = '';
       } else if (hit?.kind === 'design' && hit.description) {
         // 【2026-09-18】冻结过就按 clone 走同一个锚点（音色才稳），没冻结才现设计
         const frozen = frozenSampleOf(hit);
         if (frozen) {
           m = 'clone';
-          wantSample = fs.readFileSync(frozen).toString('base64');
+          /* 【2026-09-18 二修】老锚点（frozenFrom 不是 fixed-text）是"某一条回复的音频"，是弱锚点：
+           * 它短、还带着那句话的情绪，而服务端会把**当前文本**也算进音色条件里（见 ANCHOR_TEXT 上方说明），
+           * 于是每条不同文本都会把它拉出一点偏差 —— 这就是冻结生效之后仍在漂的那部分。
+           * 这里补一次重建：换成固定锚点文本；重建成功立刻就用新的，失败/已试过就继续用旧锚点。
+           * 重建是"一次性"的（进程内 anchorRebuildTried + 落库 frozenFrom 双重去重），
+           * 绝不会退化成"每条消息都重新设计一个音色"。 */
+          let anchorPath = frozen;
+          let anchorFrom = String(hit.frozenFrom ?? 'reply-audio');
+          if (anchorFrom !== ANCHOR_TAG_FIXED) {
+            const rebuilt = await rebuildFixedAnchor(hit, { cfg, format });
+            if (rebuilt) { anchorPath = rebuilt; anchorFrom = ANCHOR_TAG_FIXED; }
+          }
+          wantSample = fs.readFileSync(anchorPath).toString('base64');
+          voiceSrc = `冻结样本(${anchorFrom})`;
+          voiceRefPath = anchorPath;
           resolvedVoice = '';
         } else {
           m = 'design';
           wantDesc = hit.description;
+          voiceSrc = '现设计（文字描述）';
           resolvedVoice = '';
           designRec = hit;
         }
@@ -405,6 +449,7 @@ export async function synthesize({
     }
   }
   const fmt = DEFAULT_FORMATS.has(String(format || cfg.format)) ? String(format || cfg.format) : 'mp3';
+  if (!voiceSrc) voiceSrc = m === 'clone' ? '调用方传入样本' : (m === 'design' ? '现设计（文字描述）' : '内置音色');
   const roleCfg = roleConfig(m, cfg);
   const useVoice = m === 'clone' ? wantSample.trim() : String(resolvedVoice || cfg.defaultVoice || 'mimo_default').trim();
   if (m === 'clone' && !useVoice) throw new Error('音色复刻需要音频样本（mp3/wav 的 base64）');
@@ -412,6 +457,19 @@ export async function synthesize({
   // 复刻模型要求 audio.voice 是 DataURL（裸 base64 会被 400 拒），这里统一归一化
   const cloneVoice = m === 'clone' ? toVoiceDataUrl(useVoice) : '';
   const styleText = String(style || cfg.style || '').trim();
+
+  /* 【2026-09-18 修「音色抖动」的关键日志】每次合成到底用了哪种模式、哪个参考样本、样本哈希是多少。
+   * 线上连发三条语音，看这行就知道该怎么定论：
+   *   · `样本sha1=` 三条完全一样 → 送出去的参考样本字节一致，"音色被换掉"这条排除，
+   *     漂移只可能来自服务端按当前文本重新采样（见 ANCHOR_TEXT 那段说明）；
+   *   · `样本sha1=` 会变 / 反复出现"模式=design" → 锚点没被复用（重建或丢失），那才是桥侧的问题。
+   * 顺带把 `样本文件=` 打成完整路径，"是不是同一个文件"一眼可判。 */
+  if (m === 'clone') {
+    const anchorBuf = Buffer.from(String(useVoice).replace(/^data:[^,]+,/, ''), 'base64');
+    log(`[voice] 合成请求：模式=clone（音色复刻）样本来源=${voiceSrc} 样本sha1=${crypto.createHash('sha1').update(anchorBuf).digest('hex').slice(0, 16)} 样本=${anchorBuf.length}字节${voiceRefPath ? ` 样本文件=${voiceRefPath}` : ''} 风格=${styleText || '（无）'} 文本=${clean.length}字`);
+  } else {
+    log(`[voice] 合成请求：模式=${m}（${MODE_LABEL[m]}）音色=${useVoice}（${voiceSrc}）描述hash=${wantDesc.trim() ? descHashOf(wantDesc.trim()) : '（无）'} 风格=${styleText || '（无）'} 文本=${clean.length}字`);
+  }
 
   const messages = [];
   if (m === 'design') messages.push({ role: 'user', content: wantDesc.trim() });
@@ -457,8 +515,29 @@ export async function synthesize({
   /* 【2026-09-18 修「音色小幅漂移」】第一次按描述设计出来的音色，立刻把这段音频冻成参考样本，
    * 之后每次合成都会走 clone 复用同一个锚点 —— 否则每次都是"重新设计一个音色"，必然轻微漂移。
    * 放在这里（而不是只放在 synthesizeWithSavedVoice）是因为全语音模式走的是 synthesize({text,cfg})
-   * 这条直路，冻结必须在合成入口就发生。 */
-  if (designRec) freezeDesignVoice(designRec, filePath, log);
+   * 这条直路，冻结必须在合成入口就发生。
+   *
+   * 【2026-09-18 二修】锚点**不能再是"这条回复的音频"**：那条音频短、还带着这句话的情绪，
+   * 而服务端又把当前文本算进音色条件（见 ANCHOR_TEXT 上方说明）→ 弱锚点压不住，每条文本都把它拉偏一点。
+   * 所以顺序改成：
+   *   ① 先用**固定锚点文本**设计一段，冻成强锚点（与回复内容无关、长度足够、情绪中性）；
+   *   ② 这一段合成不出来（额度/网络/接口拒绝）时，退回老行为：把本次这条回复的音频冻成锚点。
+   * 两个分支都只在"这个音色第一次被锚定"时发生一次（designRec 仅在这条直路上非空），之后终身复用。 */
+  if (designRec) {
+    let frozenPath = '';
+    try {
+      const anchor = await synthesize({
+        text: ANCHOR_TEXT, mode: 'design', description: designRec.description, format: fmt, cfg
+      });
+      if (anchor?.filePath && fs.existsSync(anchor.filePath)) {
+        frozenPath = freezeDesignVoice(designRec, anchor.filePath, log, ANCHOR_TAG_FIXED);
+      }
+    } catch (e) {
+      // 只影响"锚点的质量"，绝不影响这条消息能不能发出去（音频此时已经落盘）
+      log(`[voice] 固定锚点文本合成失败（退回用本次回复的音频当锚点）：${e?.message ?? e}`);
+    }
+    if (!frozenPath) freezeDesignVoice(designRec, filePath, log, 'reply-audio');
+  }
   bumpUsage({ chars: clean.length, calls: 1 });
   pruneCache(dir, Math.max(20, Number(cfg.maxCacheFiles) || 300));
   const ms = Date.now() - t0;
@@ -575,7 +654,12 @@ export function listVoices() {
       description: v.description ?? '',
       sampleBytes: Number(v.sampleBytes) || 0,
       hasSample: Boolean(v.samplePath && fs.existsSync(v.samplePath)),
-      createdAt: v.createdAt ?? ''
+      createdAt: v.createdAt ?? '',
+      // 【2026-09-18】锚点状态：管理端「语音」页看一眼就知道这个音色的参考样本是什么时候、按哪种方式冻的
+      // （fixed-text = 固定锚点文本，音色最稳；reply-audio = 某条回复的音频，属弱锚点，下次合成会自动重建）
+      frozenAt: v.frozenAt ?? '',
+      frozenFrom: v.frozenFrom ?? '',
+      hasFrozen: Boolean(frozenSampleOf(v))
     }))
   };
 }
@@ -667,8 +751,10 @@ function frozenSampleOf(v) {
   } catch { return null; }
 }
 
-/** 把一次 design 合成的音频冻成该音色的参考样本（音色锚点）；失败只记日志，不影响本次合成 */
-function freezeDesignVoice(rec, audioPath, logFn = log) {
+/** 把一次 design 合成的音频冻成该音色的参考样本（音色锚点）；失败只记日志，不影响本次合成。
+ *  @param {string} from 锚点来源标记：ANCHOR_TAG_FIXED = 固定锚点文本（强）；'reply-audio' = 某条回复的音频（弱）
+ *  @returns {string|false} 成功返回锚点文件路径（真值，老调用方按布尔用也没问题），失败返回 false */
+function freezeDesignVoice(rec, audioPath, logFn = log, from = 'reply-audio') {
   try {
     if (!rec?.id || !audioPath || !fs.existsSync(audioPath)) return false;
     const ext = path.extname(audioPath).replace(/^\./, '') || 'mp3';
@@ -681,12 +767,44 @@ function freezeDesignVoice(rec, audioPath, logFn = log) {
     target.frozenSamplePath = frozenPath;
     target.frozenDescHash = descHashOf(target.description);
     target.frozenAt = new Date().toISOString();
+    // 记下来源：下次合成看到不是 fixed-text 就知道这个锚点还是"某条回复的音频"，值得重建一次（见 rebuildFixedAnchor）
+    target.frozenFrom = from;
     atomicWriteJson(VOICE_LIB_FILE, lib);
-    logFn?.(`[voice] 音色「${target.name}」已冻结参考样本 —— 之后每次都用它当锚点，音色不会再漂`);
-    return true;
+    // 日志带上完整路径与来源：线上排查音色漂移时，"锚点到底是哪个文件、谁冻的"必须一眼可见
+    logFn?.(`[voice] 音色「${target.name}」已冻结参考样本（来源=${from}）：${frozenPath}（${fs.statSync(frozenPath).size} 字节）`);
+    return frozenPath;
   } catch (e) {
     logFn?.(`[voice] 冻结参考样本失败（不影响本次合成，下次还会重新设计）：${e?.message ?? e}`);
     return false;
+  }
+}
+
+/**
+ * 给一个 design 型音色补上"强锚点"：用**固定锚点文本**（ANCHOR_TEXT）现设计一段并冻住。
+ * 为什么值得多花这一次合成：锚点一旦是"某条回复的音频"，音色就会随每条文本漂（见 ANCHOR_TEXT 上方说明）；
+ * 换成固定文本后，每条消息送出去的参考样本字节完全一致。
+ *
+ * 去重（关键，否则会退化成"每条都换音色"）：
+ *   · 进程内 `anchorRebuildTried`：同一个音色一个进程只试一次，失败也不每条重试；
+ *   · 落库 `frozenFrom = fixed-text`：成功之后（含桥重启后）都不再重建。
+ * @returns {Promise<string>} 可用的锚点路径；没重建（或失败）返回 ''，调用方继续用旧锚点
+ */
+async function rebuildFixedAnchor(rec, { cfg = null, format = '' } = {}) {
+  const id = String(rec?.id ?? '');
+  if (!id || anchorRebuildTried.has(id)) return '';
+  anchorRebuildTried.add(id);
+  try {
+    const r = await synthesize({
+      text: ANCHOR_TEXT, mode: 'design', description: rec.description, format, cfg
+    });
+    if (!r?.filePath || !fs.existsSync(r.filePath)) return '';
+    const frozenPath = freezeDesignVoice(rec, r.filePath, log, ANCHOR_TAG_FIXED);
+    if (!frozenPath) return '';
+    log(`[voice] 音色「${rec.name}」的参考样本已换成固定锚点文本（${ANCHOR_TEXT.length} 字 → ${path.basename(r.filePath)}）：之后每条回复都用同一段样本，音色不再随文本漂`);
+    return frozenPath;
+  } catch (e) {
+    log(`[voice] 固定锚点重建失败（继续用旧样本当锚点，不会每条都换音色）：${e?.message ?? e}`);
+    return '';
   }
 }
 
@@ -710,23 +828,13 @@ export async function synthesizeWithSavedVoice(text, voiceId, { style = '', form
     return { ...r, voiceName: v.name, frozen: true };
   }
 
-  // 第一次：按描述设计，成功后立刻把结果冻成参考样本（下次起就走上面那条 clone 路径）
+  // 第一次：按描述设计（这条消息本身仍按老行为发出来），然后给这个音色补一个**固定文本**的强锚点
   const r = await synthesize({ text, mode: 'design', description: v.description, style, format });
   try {
-    if (r?.filePath && fs.existsSync(r.filePath)) {
-      const ext = path.extname(r.filePath).replace(/^\./, '') || 'mp3';
-      const frozenPath = path.join(sampleDir(), `frozen-${v.id}.${ext}`);
-      fs.copyFileSync(r.filePath, frozenPath);
-      // 重新读一遍库再写，避免覆盖期间别处的改动
-      const lib2 = loadVoiceLib();
-      const rec = lib2.voices.find((x) => x.id === v.id);
-      if (rec) {
-        rec.frozenSamplePath = frozenPath;
-        rec.frozenDescHash = descHashOf(rec.description);
-        rec.frozenAt = new Date().toISOString();
-        atomicWriteJson(VOICE_LIB_FILE, lib2);
-        log(`[voice] 音色「${rec.name}」已冻结参考样本（${frozenPath}）—— 之后每次都用它当锚点，音色不会再漂`);
-      }
+    // 没有可用锚点时才重建；重建成功就落库，失败退回老行为（把这次设计出来的音频冻成弱锚点）
+    if (!frozenSampleOf(v)) {
+      const built = await rebuildFixedAnchor(v, { format });
+      if (!built && r?.filePath && fs.existsSync(r.filePath)) freezeDesignVoice(v, r.filePath, log, 'reply-audio');
     }
   } catch (e) {
     // 冻结失败不影响这次合成（只是下次还会重新设计）
@@ -744,7 +852,10 @@ export function unfreezeVoice(id) {
   delete v.frozenSamplePath;
   delete v.frozenDescHash;
   delete v.frozenAt;
+  delete v.frozenFrom;
   atomicWriteJson(VOICE_LIB_FILE, lib);
+  // 允许本进程里立刻再重建一次（否则解冻后要等重启桥才会重新锚定）
+  anchorRebuildTried.delete(String(v.id));
   log(`[voice] 音色「${v.name}」已解冻，下次合成会重新设计音色`);
   return { ok: true };
 }

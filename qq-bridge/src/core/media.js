@@ -184,6 +184,13 @@ export function createMediaDomain(cfg) {
   /** 外部图 → QQ 图床 URL（失败就原样返回，绝不让卡片因此发不出去）。 */
   async function ensureQqHostedImage(url) {
     const src = String(url ?? '').trim();
+    /* 【2026-09-19 紧急回退】这套"封面先搬 QQ 图床"上线后主人反馈**更糟了**：
+     * 网易云/QQ音乐卡封面变成**都没有**，网易云连播放都点不动。
+     * 当初的对照实验只能证明"对照B 那条卡的 preview 字段是 qq.ugcimg.cn"，
+     * **证明不了手机端就一定会显示** —— 我又拿"电脑端能看见"当了真，这次直接翻车。
+     * 所以默认关掉，回到改动前"直接用外部封面 URL"的行为；要再试必须
+     * `social.send.qqHostedCover = true` 显式打开，并且先在手机上验证过再谈默认。 */
+    if (cfg?.social?.send?.qqHostedCover !== true) return src;
     if (!src || isQqHosted(src)) return src;
     if (qqHostedCache.has(src)) return qqHostedCache.get(src);
     try {
@@ -412,14 +419,20 @@ export function createMediaDomain(cfg) {
       } catch (error) {
         log(`[music-card] 网易云解析失败，退回 NapCat 原生卡片(id=${pid}): ${error?.message ?? error}`);
       }
+      /* 【2026-09-19 主人定稿】**封面走调用方传进来的 `image`**。
+       * 主人实测：同一个 musicId，**传了 image 封面就正常**，没传就空白（手机端尤其明显）。
+       * 所以这里把 `opts.image` 提到第一优先，桥自己解析出来的封面只当兜底 ——
+       * 与旧注释里"不许模型手写封面 URL"相反，现在是**硬规则：必须传 image**（工具描述里已写死）。 */
+      const explicitCover = String(opts?.image ?? '').trim();
+      const cover = explicitCover || song.cover;
       const title = song?.title || givenTitle || '网易云音乐';
       const artist = song?.artist || givenArtist || '';
       const link = `${title}${artist ? ' ' + artist : ''} https://music.163.com/#/song?id=${pid}`;
       const native = { type: 'music', data: { type: '163', id: pid } };
-      if (!song?.cover || !song?.audio) {
+      if (!cover || !song?.audio) {
         return { title, primary: native, native: null, link, note: '解析不到封面/音频，退回 NapCat 原生 163 卡片' };
       }
-      const data = { type: '163', url: song.url, audio: song.audio, title, image: await ensureQqHostedImage(song.cover) };
+      const data = { type: '163', url: song.url, audio: song.audio, title, image: await ensureQqHostedImage(cover) };
       if (artist) data.singer = artist;
       return {
         title,
