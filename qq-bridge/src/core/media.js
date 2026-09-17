@@ -257,21 +257,39 @@ export function createMediaDomain(cfg) {
   }
 
   /**
-   * 音频直链：走网易云官方"外链播放"端点，跟随 302 拿 CDN 直链，再统一升 https。
-   * 直链里带时间戳会过期（和 NapCat 原生卡片的 musicUrl 一样），https 化只是让它不再被手机端按明文拦；
-   * 拿不到 Location 就退回外链端点本身（https，客户端自己跟 302）。
+   * 音频直链：**先走第三方聚合（meting），官方那个外链端点已经死了**。
+   *
+   * 【2026-09-19 修「模型发的网易云音乐点不动播放」】
+   * 线上实测：网易云官方的外链播放端点 `music.163.com/song/media/outer/url?id=<id>.mp3`
+   * **现在对所有歌都恒返回 `302 → http://music.163.com/404`**（连《晴天》这种老歌都一样），
+   * 而旧代码是"拿到 Location 就直接用"，于是卡片里写进去的 `musicUrl` 就是那个 `/404` —— 播放按钮点了没反应。
+   * （cookies/referer 都试过，无效；这不是我们代码写错，是对方把这条路关了。）
+   *
+   * 现在能用的：`https://api.injahow.cn/meting/?server=netease&type=url&id=<id>`
+   * —— 实测 302 到 `https://m701.music.126.net/…/<hash>.mp3?vuutv=…` 的真 CDN 直链（跟到底 200 audio/mpeg）。
+   *
+   * 所以流程改成：**逐个候选，只接受"看起来是真媒体"的 Location**（不是 `/404`、不是 null），
+   * 一个都拿不到就退回 meting 端点本身（https，客户端自己跟 302）—— **绝不再把 `/404` 写进卡片**。
    */
   async function neteaseAudioUrl(id) {
-    const outer = `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(id)}.mp3`;
-    try {
-      const res = await fetch(outer, { redirect: 'manual', headers: NETEASE_HEADERS, signal: AbortSignal.timeout(8000) });
-      const loc = res.headers.get('location');
-      try { await res.body?.cancel(); } catch {}
-      if (loc) return normalizeMediaUrl(loc);
-    } catch (error) {
-      log(`[music-resolve] 音频直链解析失败，退回官方外链端点: ${error?.message ?? error}`);
+    const official = `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(id)}.mp3`;
+    const meting = `https://api.injahow.cn/meting/?server=netease&type=url&id=${encodeURIComponent(id)}`;
+    const usable = (u) => /^https?:\/\//i.test(u) && !/music\.163\.com\/404/i.test(u) && !/\/404(\?|$)/i.test(u);
+    for (const src of [meting, official]) {
+      try {
+        const res = await fetch(src, { redirect: 'manual', headers: NETEASE_HEADERS, signal: AbortSignal.timeout(8000) });
+        const loc = res.headers.get('location');
+        try { await res.body?.cancel(); } catch {}
+        if (loc && usable(loc)) {
+          if (src === official) log('[music-resolve] 音频直链来自网易云官方外链端点（该端点对多数歌已返回 404，能用就用）');
+          return normalizeMediaUrl(loc);
+        }
+        if (loc) log(`[music-resolve] ${src === official ? '官方外链端点' : 'meting'} 给的不是可用直链（${String(loc).slice(0, 60)}），换下一个候选`);
+      } catch (error) {
+        log(`[music-resolve] 音频直链候选失败（${src.slice(0, 40)}…）：${error?.message ?? error}`);
+      }
     }
-    return outer;
+    return meting;
   }
 
   /** 单曲解析：卡片字段全部由桥侧拿到，模型只给 platform + id */
