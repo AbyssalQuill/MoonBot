@@ -1508,6 +1508,10 @@ app.get('/api/state', async (req, res) => {
     i.error = phaseInfo(i.id).error || '';
     i.loggedIn = loggedIn;
   }
+  /* 【2026-09-17 单点登录互斥 L3】本机与服务端**同时**有 NapCat 在线 = 同一个 QQ 号两处登录，
+   * 腾讯会判"已在另一台终端登录"互相踢。这里把风险如实报给界面，让它红着提示一句。 */
+  const dualNapcat = !!(napRt.reachable && r.remoteStatus && r.remoteStatus.napcat && r.remoteStatus.napcat.running);
+  if (dualNapcat) mlog('[single-login] 检测到本机与服务端 NapCat 同时在线（同一账号两处登录，会互踢）');
   // 回环地址对齐到「浏览器当前用的主机名」，保证内嵌 iframe 与父页面同站（见 alignHost 注释）
   const host = req.hostname || '127.0.0.1';
   const instances = [dshRt, napRt, brRt].map((i) => ({ ...i, url: alignHost(i.url, host) }));
@@ -1523,7 +1527,7 @@ app.get('/api/state', async (req, res) => {
       inSeconds: Math.max(0, Math.round((reconnectState.nextAt - Date.now()) / 1000)),
       reason: reconnectState.reason,
     } : null,
-    // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / docker napcat / 桥进程，
+    // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / NapCat(systemd 或 docker) / 桥进程，
     // 与本机那三个实例**分开两处**展示，绝不混在一张卡上（主人 2026-09-14 要求）。
     remoteStatus: r.remoteStatus ?? null,
     instances,
@@ -1531,6 +1535,7 @@ app.get('/api/state', async (req, res) => {
     // 安装树里，所以装在 Program Files（用户级进程写不进去）或 OneDrive 等同步盘（SQLite 会被反复同步、
     // 有损坏风险）时，必须提前告诉用户 —— 这正是"拿给别人装"最容易踩的两个坑。
     warnings: installLocationWarnings(),
+    dualNapcat,
   });
 });
 
@@ -1566,10 +1571,83 @@ app.get('/api/open', async (req, res) => {
   res.json({ success: svc.reachable, url: svc.url, reachable: svc.reachable, mode: r.mode, name: svc.name, scope: svc.scope ?? 'local', iframeBlocked: !!svc.iframeBlocked, iframeBlockReason: svc.iframeBlockReason || '' });
 });
 
+/* ------------------------------------------------------------------ */
+/* 单点登录互斥：同一个 QQ 号不能同时挂在本机与服务端两个端点            */
+/* ------------------------------------------------------------------ */
+/* 【2026-09-17 主人要求】"链接服务端的时候不要点击启动同时拉起两个登录"。
+ *
+ * 实测踩到的完整链路：管理端刚开窗、/api/state 还没回来的那一两秒里，首页 serverMode 还是 false，
+ * 卡片语义退回"本机"——这时点「启动」拉起来的是**本机** OneKey NapCat；紧接着状态到了、再点一次，
+ * 这次才走服务端。于是同一个 QQ 号两处同时登录，腾讯判定"已在另一台终端登录"，两边互踢，
+ * 表现就是主人说的"又不回复了"。
+ *
+ * 所以这里加**后端硬闸门**（不管前端怎么点、也不管是谁调的接口）：
+ *   · 服务端 NapCat 在线时，本机 NapCat 一律拒绝启动；
+ *   · 反过来要启/重启服务端 NapCat 时，先把本机那份停掉（服务端是生产端点）。
+ * 探测走已有的 remoteStatusCache（状态轮询一直在刷），缓存冷了才多花一次 SSH 往返。 */
+async function activeServerConn () {
+  try {
+    const cfg = loadConfig();
+    const sid = cfg.activeServerId;
+    if (!sid) return null;
+    const server = (cfg.servers || []).find((s) => s.id === sid);
+    if (!server) return null;
+    const conn = sshConnections.get(sid);
+    if (!conn) return null;
+    return { server, conn, sid };
+  } catch { return null; }
+}
+
+/** 服务端 NapCat 是否在线；拿不到状态时 known=false（未知就不拦人，避免误伤） */
+async function remoteNapcatRunning () {
+  const ctx = await activeServerConn();
+  if (!ctx) return { known: false, running: false, serverName: "" };
+  const name = ctx.server.name || ctx.sid;
+  try {
+    const st = await getRemoteServerStatus(ctx.server, ctx.conn, { force: false, timeoutMs: 6000 });
+    if (!st || st.ok === false) return { known: false, running: false, serverName: name };
+    return { known: true, running: !!(st.napcat && st.napcat.running), serverName: name };
+  } catch { return { known: false, running: false, serverName: name }; }
+}
+
+/** 本机 NapCat 是否在跑（进程或端口任一命中即算） */
+async function localNapcatRunning () {
+  try {
+    const dirs = napcatManagedDirs(runtimes.get("napcat-local"));
+    if (dirs.length && countNapcatProcs(dirs) > 0) return true;
+    return await probePort(instancePort("napcat-local", loadConfig()));
+  } catch { return false; }
+}
+
+/** 启服务端 NapCat 之前：把本机那份停掉（返回与 sshExecCapture 同形状的结果，可直接当 plan 的一步） */
+async function stopLocalNapcatBeforeRemote () {
+  if (!(await localNapcatRunning())) return { ok: true, out: "本机 NapCat 未运行，无需处理" };
+  mlog("[single-login] 服务端即将接管 QQ 登录，先停掉本机 NapCat（避免同一账号两处互踢）");
+  const r = await stopInstance("napcat-local");
+  setPhase("napcat-local", r.success ? "idle" : "failed", r.success ? {} : { error: r.message });
+  return {
+    ok: r.success,
+    out: r.success ? "已停掉本机 NapCat（单点登录互斥）" : r.message,
+    error: r.success ? "" : r.message,
+  };
+}
+
+const DUAL_LOGIN_HINT = "同一个 QQ 号两处同时登录会被腾讯判为「已在另一台终端登录」并互相踢下线。要改用本机登录，请先在服务端 NapCat 卡片点「停止」。";
+
+
 // 本机实例：启动 / 停止 / 重启
 const startDispatcher = async (id, cfg) => {
   if (id === 'dsh-isolated') return startIsolatedDsh(cfg.instances.dshIsolated);
-  if (id === 'napcat-local') return startNapcatLocal(cfg.instances.napcatLocal);
+  if (id === 'napcat-local') {
+    /* 【2026-09-17 单点登录互斥 L1】服务端 NapCat 在线时拒绝启动本机 NapCat。
+     * 这是唯一能在"前端状态还没加载完就点了启动"这条竞态里兜住的地方（见上方注释）。 */
+    const remote = await remoteNapcatRunning();
+    if (remote.running) {
+      mlog(`[single-login] 拦截本机 NapCat 启动：服务端 NapCat 在线（${remote.serverName}）`);
+      return { success: false, message: `已阻止启动本机 NapCat：服务端（${remote.serverName}）的 NapCat 正在运行。${DUAL_LOGIN_HINT}` };
+    }
+    return startNapcatLocal(cfg.instances.napcatLocal);
+  }
   if (id === 'bridge-local') return startBridgeLocal(cfg.instances.bridgeLocal);
   return { success: false, message: `未知实例: ${id}` };
 };
@@ -2523,9 +2601,10 @@ app.post('/api/ssh/remove-stack', async (req, res) => {
     steps.push({ step: '停止桥进程', ok: k.ok, msg: k.ok ? (k.out || '已执行') : k.error });
     const sv = await sshExecCapture(conn, "for svc in dsh-web dsh-polyfill; do systemctl disable --now \"$svc\" >/dev/null 2>&1 && echo \"disabled $svc\" || echo \"none $svc\"; done", 120000);
     steps.push({ step: '停用 dsh-web / dsh-polyfill', ok: sv.ok, msg: sv.ok ? (sv.out || '已执行') : sv.error });
-    const dc = await sshExecCapture(conn, "docker rm -f napcat >/dev/null 2>&1 && echo container-removed || echo no-container", 120000);
-    steps.push({ step: '删除 docker 容器 napcat', ok: dc.ok, msg: dc.ok ? (dc.out || '已执行') : dc.error });
-    const mv = await sshExecCapture(conn, "ts=$(date +%Y%m%d-%H%M%S); dest=/root/qq-bridge-removed-$ts; mkdir -p \"$dest\"; moved=''; for d in /root/qq-bridge /root/.dsh /root/napcat /root/dsh-polyfill; do [ -e \"$d\" ] && { mv \"$d\" \"$dest/\" && moved=\"$moved $d\"; }; done; if [ -n \"$moved\" ]; then echo \"moved:$moved -> $dest\"; else echo NOTHING-MOVED; fi", 300000);
+    // 【2026-09-17】原生部署下没有容器了，优先移除 systemd 服务，没有才回退删容器
+    const dc = await sshExecCapture(conn, "if systemctl cat napcat.service >/dev/null 2>&1; then systemctl disable --now napcat >/dev/null 2>&1 && echo systemd-service-removed || echo no-napcat-service; else docker rm -f napcat >/dev/null 2>&1 && echo container-removed || echo no-container; fi", 120000);
+    steps.push({ step: '移除 NapCat（systemd 服务/docker 容器）', ok: dc.ok, msg: dc.ok ? (dc.out || '已执行') : dc.error });
+    const mv = await sshExecCapture(conn, "ts=$(date +%Y%m%d-%H%M%S); dest=/root/qq-bridge-removed-$ts; mkdir -p \"$dest\"; moved=''; for d in /root/qq-bridge /root/.dsh /root/napcat /opt/napcat /root/dsh-polyfill; do [ -e \"$d\" ] && { mv \"$d\" \"$dest/\" && moved=\"$moved $d\"; }; done; if [ -n \"$moved\" ]; then echo \"moved:$moved -> $dest\"; else echo NOTHING-MOVED; fi", 300000);
     steps.push({ step: '移动目录到回收目录', ok: mv.ok, msg: mv.ok ? (mv.out || '已执行') : mv.error });
     res.json({ success: steps.length > 0 && steps.every((x) => x.ok), steps });
   } catch (e) {
@@ -2534,6 +2613,27 @@ app.post('/api/ssh/remove-stack', async (req, res) => {
     try { conn?.end(); } catch {}
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* NapCat 控制：systemd 优先、docker 兜底                                */
+/* ------------------------------------------------------------------ */
+/* 【2026-09-17】这台服务器上的 NapCat 原来跑在 mlikiowa/napcat-docker 容器里，
+ * 管理端所有 NapCat 动作都写死 docker start/stop/restart napcat。现在 NapCat 已经改成
+ * **原生 systemd 服务**（官方 Linux QQ 3.2.33-52892 + /opt/napcat，unit = napcat.service），
+ * 机器上的 docker 数据也清掉腾磁盘了，于是点「启动」直接报
+ *   Cannot connect to the Docker daemon at unix:///var/run/docker.sock
+ *
+ * 这里不写死任何一边：**先看有没有 napcat.service，有就走 systemd，没有才回退 docker**，
+ * 于是新老两种部署能用同一套管理端。
+ *
+ * 输出格式刻意保持 「名字::状态」（Up / Exited 开头）不变 ——
+ * /api/ssh/service 的成败判定（upRe/downRe）和 parseRemoteStatus() 都按这个正则解析，别动。 */
+const NC_STATE_LINE = 'if systemctl cat napcat.service >/dev/null 2>&1; then st=$(systemctl is-active napcat 2>/dev/null); case "$st" in active) echo "napcat::Up (systemd active)";; *) echo "napcat::Exited (systemd ${st:-unknown})";; esac; else docker ps -a --filter name=napcat --format "{{.Names}}::{{.Status}}" 2>/dev/null || true; fi';
+/** 生成 NapCat 启停命令；act = start | stop | restart */
+function napcatCtlCommand (act) {
+  const dockerAct = act === 'start' ? 'docker start napcat' : `docker ${act} -t 60 napcat`;
+  return `if systemctl cat napcat.service >/dev/null 2>&1; then systemctl ${act} napcat 2>&1; sleep 6; ${NC_STATE_LINE}; else ${dockerAct} 2>&1; sleep 6; ${NC_STATE_LINE}; fi`;
+}
 
 /* 远端整套启停：服务器卡片上的「启动Bot / 终止Bot」。
  * 顺序有依赖，所以分步跑并逐步回报：启动 DSH → NapCat → 桥；终止 桥 → NapCat → DSH。
@@ -2557,7 +2657,11 @@ app.post('/api/ssh/stack', async (req, res) => {
     // 老命令 `systemctl start dsh-web dsh-polyfill` 会打印 "Unit not found" 并回 rc=5（看着像启动失败，
     // 其实 dsh-web 已经起来了）。改成"有 unit 才启"。
     ['启动 DSH (dsh-web)', 'systemctl start dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl start dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 3; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 120000],
-    ['启动 NapCat 容器', 'docker start napcat 2>&1; sleep 6; docker ps --filter name=napcat --format "{{.Names}} {{.Status}} {{.Ports}}"', 120000],
+    /* 【2026-09-17 单点登录互斥 L2】服务端接管 QQ 登录前，先把本机那份停掉：
+     * 同一个号两处同时在线，腾讯会判"已在另一台终端登录"，两边互相踢。
+     * 这一步是本机动作（不是远端命令），所以直接把函数放进 plan —— 执行循环已支持。 */
+    ['停止本机 NapCat（单点登录互斥）', stopLocalNapcatBeforeRemote, 0],
+    ['启动 NapCat', napcatCtlCommand('start'), 180000],
     ['启动 QQ 桥', "if pgrep -f 'node src/bridge[.]js' >/dev/null; then echo already-running; else cd /root/qq-bridge && rm -f state/bridge.lock && if [ -f start-bridge.sh ]; then setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null & else setsid nohup node src/bridge.js >state/bridge-nohup.log 2>&1 < /dev/null & fi; sleep 6; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING; fi", 90000],
     // 【2026-09-15 主人反馈"点了启动Bot但 Core 没起来"】真正决定机器人能不能干活的是"桥有没有连上 NapCat"：
     // 进程在 ≠ 能收消息（QQ 掉登录/等扫码时，桥会一直重试、控制台也可能还没起）。这一步把实情摆出来，
@@ -2567,7 +2671,7 @@ app.post('/api/ssh/stack', async (req, res) => {
   ];
   const stopPlan = [
     ['停止 QQ 桥', "pkill -f 'node src/bridge[.]js' 2>/dev/null; pkill -f 'start-bridge[.]sh' 2>/dev/null; sleep 2; pgrep -f 'node src/bridge[.]js' >/dev/null && echo still-running || echo stopped", 60000],
-    ['停止 NapCat 容器', 'docker stop -t 60 napcat 2>&1 || true', 120000],
+    ['停止 NapCat', napcatCtlCommand('stop'), 180000],
     ['停止 DSH', 'systemctl stop dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl stop dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 60000],
   ];
   const plan = action === 'start' ? startPlan : stopPlan;
@@ -2575,7 +2679,8 @@ app.post('/api/ssh/stack', async (req, res) => {
     conn = await connectOne(server);
     steps.push({ step: '连接服务器', ok: true, msg: `已连接 ${server.username || ''}@${server.host}` });
     for (const [stepName, cmd, timeout] of plan) {
-      const r = await sshExecCapture(conn, cmd, timeout);
+      // 动作项可以直接给一个函数（本机动作，如"停掉本机 NapCat"）—— 不一定是远端命令字符串
+      const r = typeof cmd === 'function' ? await cmd() : await sshExecCapture(conn, cmd, timeout);
       steps.push({ step: stepName, ok: r.ok, msg: r.ok ? (r.out || '已执行') : r.error });
       if (!r.ok) break;
     }
@@ -2625,9 +2730,9 @@ app.post('/api/ssh/service', async (req, res) => {
        * docker 默认 10 秒宽限就发 SIGKILL —— QQ 客户端来不及保存登录态，**下次启动就又要扫码**
        * （实测 10:30/10:33 两次 stop 之后 NapCat 都出了二维码）。这里统一给 30 秒宽限，
        * 让它正常退场、把会话写回 napcat-qq 卷，重启后能自动快速登录。 */
-      if (a === 'stop') return `docker stop -t 60 napcat 2>&1; sleep 3; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
-      if (a === 'restart') return `docker restart -t 60 napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
-      return `docker start napcat 2>&1; sleep 5; docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}'`;
+      /* 2026-09-17 起由 napcatCtlCommand() 现探测 systemd/docker；
+       * systemd 侧 napcat.service 的 TimeoutStopSec 已放大到 45 秒，同样保证 QQ 正常退场写回会话。 */
+      return napcatCtlCommand(a);
     }
     // bridge
     if (a === 'stop') return bridgeStop;
@@ -2639,6 +2744,10 @@ app.post('/api/ssh/service', async (req, res) => {
   const temp = !conn;
   try {
     if (!conn) conn = await connectOne(server);
+    /* 【2026-09-17 单点登录互斥 L2】启/重启服务端 NapCat 之前，先把本机那份停掉，
+     * 否则同一个 QQ 号两处登录会互踢（这也是"点了启动反而掉线"的经典成因）。 */
+    const preStop = (comp === 'napcat' && (act === 'start' || act === 'restart')) ? await stopLocalNapcatBeforeRemote() : null;
+    if (preStop && !preStop.ok) mlog(`[single-login] 停本机 NapCat 未完全成功：${preStop.error || preStop.out}`);
     const r = await sshExecCapture(conn, cmdOf(comp, act), 120000);
     remoteStatusCache.delete(sid);            // 动作后现场状态作废，下次 /api/state 重新取
     const out = (r.out || '').trim();
@@ -2648,7 +2757,8 @@ app.post('/api/ssh/service', async (req, res) => {
     const upRe = /dsh-web=active|::Up |bridge-started/;
     const downRe = /dsh-web=inactive|::Exited|^stopped$/;
     const okFlag = r.ok && (act === 'stop' ? downRe.test(tail) : upRe.test(tail));
-    res.json({ ok: okFlag, component: comp, action: act, out, message: r.ok ? (tail || '已执行') : (r.error || '远程命令失败') });
+    const preNote = preStop && preStop.ok ? `（${preStop.out}）` : '';
+    res.json({ ok: okFlag, component: comp, action: act, out, message: (r.ok ? (tail || '已执行') : (r.error || '远程命令失败')) + preNote });
   } catch (e) {
     res.json({ ok: false, message: String(e?.message ?? e) });
   } finally {
@@ -3583,7 +3693,7 @@ function resolveBridgeTarget() {
 /* ================================================================== */
 /* 【2026-09-14 主人要求】连上服务器后要能在界面上看到**服务端**的真实运行状态：
  *   DSH  = systemctl is-active dsh-web
- *   NapCat = docker ps（Up/Exited）+ 3000/3001/6099 端口
+ *   NapCat = systemctl is-active napcat（或回退 docker ps）→ 归一成 Up/Exited + 3000/3001/6099 端口
  *   桥   = pgrep -f 'node src/bridge[.]js' + 3100
  * 实现要点：
  *   · 一条组合命令 + 分段标记（@@XXX），只走**一次** exec（ssh2 的 exec 只是新开一条 channel，
@@ -3638,7 +3748,8 @@ function buildRemoteStatusCommand(server) {
     'systemctl is-active dsh-web 2>/dev/null || echo unknown',
     'systemctl is-enabled dsh-web 2>/dev/null || echo unknown',
     "echo '@@DOCKER'",
-    "docker ps -a --filter name=napcat --format '{{.Names}}::{{.Status}}' 2>/dev/null || true",
+    // 【2026-09-17】NapCat 已是原生 systemd 服务：段名保持 @@DOCKER 不动 parser，内容是「systemd 优先」
+    NC_STATE_LINE,
     "echo '@@PORTS'",
     portLoop,
     "echo '@@BRIDGEPROC'",
@@ -3650,7 +3761,7 @@ function buildRemoteStatusCommand(server) {
     // 日志末尾往往还有别的行，所以取"尾部若干行里最后一次出现的 token="，不是死盯最后一行。
     'for f in /root/.dsh/dsh-web.log "$HOME/.dsh/dsh-web.log"; do [ -f "$f" ] && { tail -n 400 "$f" | grep -oE "token=[A-Za-z0-9_.-]+" | tail -n 1 | cut -d= -f2; break; }; done',
     "echo '@@NAPCATWEBUI'",
-    'for f in /root/napcat/config/webui.json "$HOME/napcat/config/webui.json" /app/napcat/config/webui.json; do [ -f "$f" ] && { grep -oE \'"token"[[:space:]]*:[[:space:]]*"[^"]*"\' "$f" | head -n 1 | sed -E \'s/.*:[[:space:]]*"([^"]*)"/\\1/\'; break; }; done',
+    'for f in /opt/napcat/config/webui.json /root/napcat/config/webui.json "$HOME/napcat/config/webui.json" /app/napcat/config/webui.json; do [ -f "$f" ] && { grep -oE \'"token"[[:space:]]*:[[:space:]]*"[^"]*"\' "$f" | head -n 1 | sed -E \'s/.*:[[:space:]]*"([^"]*)"/\\1/\'; break; }; done',
     "echo '@@END'",
   ].join('\n');
 }
@@ -3675,7 +3786,7 @@ function parseRemoteStatus(out, server) {
   const dshActive = first('DSH') || 'unknown';
   const dshEnabled = (lines('DSH')[1] || 'unknown');
 
-  // docker 段：只认 `名字::状态` 这种行（docker 不存在时这里是空/报错文本，不解析）
+  // 容器段：只认 `名字::状态` 这种行（原生部署下由 systemctl 归一成同样形状；取不到时是空文本，不解析）
   const containers = lines('DOCKER').map((l) => {
     const i = l.indexOf('::');
     return i > 0 ? { name: l.slice(0, i).trim(), status: l.slice(i + 2).trim() } : null;

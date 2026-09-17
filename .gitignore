@@ -66,3 +66,7 @@ tsconfig.tsbuildinfo
 /qq-bridge/tools/manifest-*.json
 /qq-bridge/tools/*.before-compress.js
 /qq-bridge/tools/wl-group-*.json
+
+# ---- 本机构建工具残留（2026-09-17）：仓库用 npm，这两个是本地 pnpm 跑出来的，不进版本管理 ----
+pnpm-lock.yaml
+pnpm-workspace.yaml

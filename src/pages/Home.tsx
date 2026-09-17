@@ -90,6 +90,11 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
 
   const inst = (id: SvcId) => state?.instances.find((i) => i.id === id);
 
+  /* 【2026-09-17 单点登录互斥 L3】state 还没回来的那一两秒里 serverMode 是 false，卡片语义会退回"本机"——
+   * 这时点「启动」拉起的是本机 NapCat；紧接着状态到了再点一次又去拉服务端 → 同一个 QQ 号两处登录互踢。
+   * 所以在拿到第一份 state 之前，所有动作按钮一律禁用（宁可多等一下，也不要拉出第二个登录）。 */
+  const stateReady = !!state;
+
   /** 统一动作入口：启动/停止/重启都走它，按钮 busy 只覆盖请求本身，
    *  之后的状态由服务端 phase（App 每 1.2~3 秒轮询）接管 —— 这样"启动中"会一直显示到真正就绪。 */
   const doAction = async (id: SvcId, action: 'start' | 'stop' | 'restart') => {
@@ -218,10 +223,18 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
         );
       })()}
 
+      {/* 【2026-09-17 单点登录互斥】本机和服务端同时有 NapCat 在线 —— 同一个 QQ 号两处登录会被腾讯互踢，显著提示 */}
+      {(state as any)?.dualNapcat && (
+        <div className="notice-bar" style={{ maxWidth: 720, margin: '0 auto 12px', textAlign: 'left', borderColor: '#e5484d', color: '#b42318', background: '#fff5f5' }}>
+          ⚠️ 本机和服务端的 NapCat 同时在跑。同一个 QQ 号两处登录会被腾讯判为「已在另一台终端登录」，两边互相踢下线。
+          请只保留一个：点上面「一键启动整套（服务端）」（管理器会先停掉本机那份），或去服务端卡片点「停止」。
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
-        <button className="btn btn-primary" style={{ padding: '8px 26px', fontSize: 15, borderRadius: 12 }} disabled={allBusy} onClick={actAll} data-genui-primary-action>
+        <button className="btn btn-primary" style={{ padding: '8px 26px', fontSize: 15, borderRadius: 12 }} disabled={allBusy || !stateReady} onClick={actAll} data-genui-primary-action>
           {allBusy ? <Loader2 size={16} className="spin" style={{ verticalAlign: -2, marginRight: 8 }} /> : <Rocket size={16} style={{ verticalAlign: -2, marginRight: 8 }} />}
-          {allBusy ? '正在一键启动整套…' : (sshConn ? '一键启动整套（服务端）' : '一键启动整套（NapCat → DSH → 桥）')}
+          {!stateReady ? '加载中…' : allBusy ? '正在一键启动整套…' : (sshConn ? '一键启动整套（服务端）' : '一键启动整套（NapCat → DSH → 桥）')}
         </button>
       </div>
 
@@ -278,8 +291,8 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
                     >{acting === `${t.id}:stop` ? <Loader2 size={16} className="spin" /> : <Square size={15} />}</button>
                   </>
                 ) : (
-                  <button className="btn btn-primary btn-block" disabled={busy === t.id} onClick={startAct}>
-                    {busy === t.id ? <><Loader2 size={16} className="spin" /> {isRemote ? '下发中…' : '启动中…'}</> : phase === 'failed' ? '重试启动' : (isRemote ? '启动服务端' : '启动')}
+                  <button className="btn btn-primary btn-block" disabled={busy === t.id || !stateReady} onClick={startAct}>
+                    {!stateReady ? '加载中…' : busy === t.id ? <><Loader2 size={16} className="spin" /> {isRemote ? '下发中…' : '启动中…'}</> : phase === 'failed' ? '重试启动' : (isRemote ? '启动服务端' : '启动')}
                   </button>
                 )}
                 <button className="icon-btn" title="配置" onClick={() => onOpenConfig(t.id)}><Settings size={17} /></button>

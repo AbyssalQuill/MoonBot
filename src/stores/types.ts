@@ -66,6 +66,8 @@ export interface ManagerState {
   reconnecting?: { serverId: string; attempt: number; inSeconds: number; reason?: string } | null;
   /** 安装位置体检（装在 Program Files / 同步盘等风险位置的提醒；正常安装为空） */
   warnings?: string[];
+  /** 【2026-09-17】本机与服务端同时有 NapCat 在线（同一个 QQ 号两处登录，会被腾讯互踢）；界面要显著提醒 */
+  dualNapcat?: boolean;
 }
 
 export interface LocalInstance {
