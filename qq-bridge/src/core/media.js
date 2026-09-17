@@ -398,7 +398,13 @@ export function createMediaDomain(cfg) {
       if (pick) {
         out.title = String(pick.title || givenTitle);
         out.artist = String(pick.singer || givenArtist);
-        out.cover = normalizeCoverUrl(pick.cover) || out.cover;
+        /* 【2026-09-19 修「QQ音乐卡又不带封面」】**调用方传了封面就别用聚合站返回的那个顶掉它**。
+         * 主人定的硬规则是"封面以传入的 image 为准"（实测传了才有封面），但这里原来无条件用
+         * `pick.cover` 覆盖，而聚合站给的是 `y.gtimg.cn/music/photo_new/T002R300x300M000<albummid>.jpg`
+         * —— 这个模板**实测会 404**（同一模板的 URL 取不到图），一旦它替换掉调用方那张好图，
+         * 卡片的 preview 就指向一张不存在的图 → 没封面。
+         * 所以：只有调用方没给封面时，才用聚合站的那张。 */
+        if (!out.cover) out.cover = normalizeCoverUrl(pick.cover) || out.cover;
         out.url = String(pick.link || fallbackUrl);
         out.audio = normalizeMediaUrl(pick.music_url);
         out.via = `secapi/${String(pick.quality || '').trim()}`;
@@ -510,7 +516,8 @@ export function createMediaDomain(cfg) {
         };
       }
       const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
-      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(song.cover) };
+      const qqExplicitCover = String(opts?.image ?? '').trim();
+      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(qqExplicitCover || song.cover) };
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
       return {
