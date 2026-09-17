@@ -181,6 +181,42 @@ export function createMediaDomain(cfg) {
     try { return /(^|\.)(qpic\.cn|qq\.com|ugcimg\.cn)$/i.test(new URL(u).hostname); } catch { return false; }
   }
 
+  /**
+   * 封面候选逐个探活：返回**第一个真能取到的**（200 + `image/*`）。
+   *
+   * 【2026-09-19 修「QQ音乐卡封面时好时坏」】
+   * 两个来源的封面都会坏，而且是**间歇性**的：
+   *   · `qq_music_search` 按 albummid 拼的 `y.gtimg.cn/music/photo_new/T002R300x300M000<albummid>.jpg`
+   *     —— 同一个 URL 实测**前一次 404 text/plain、几分钟后 200 image/jpeg**（CDN 边缘/防盗链级别的不稳定）；
+   *   · 聚合站 secapi 返回的封面是同一个模板的**另一个 albummid**，同样会坏。
+   * 所以"谁优先"这种规则没有意义 —— **必须探活**：谁真能取到就用谁。
+   * 全部探不到就等 800ms 再探一轮（抖动多半是瞬时的），最后兜底返回第一个候选
+   * （绝不能因为"封面探不到"就让整张卡片发不出去）。
+   */
+  async function firstWorkingImage(candidates) {
+    const list = [...new Set(candidates.map((u) => String(u ?? '').trim()).filter(Boolean))];
+    if (!list.length) return '';
+    for (let round = 0; round < 2; round += 1) {
+      for (const u of list) {
+        try {
+          const res = await fetch(u, {
+            headers: { 'user-agent': 'Mozilla/5.0', range: 'bytes=0-128' },
+            signal: AbortSignal.timeout(6000)
+          });
+          const ct = String(res.headers.get('content-type') || '');
+          try { res.body?.cancel(); } catch {}
+          if ((res.ok || res.status === 206) && /^image\//i.test(ct)) return u;
+          log(`[cover] 候选封面取不到（${res.status} ${ct.slice(0, 20)}），换下一个：${u.slice(0, 90)}`);
+        } catch (error) {
+          log(`[cover] 候选封面探测异常（${error?.message ?? error}）：${u.slice(0, 90)}`);
+        }
+      }
+      if (round === 0) await sleep(800);
+    }
+    log(`[cover] 所有候选封面都探不到，兜底用第一个：${list[0].slice(0, 90)}`);
+    return list[0];
+  }
+
   /** 外部图 → QQ 图床 URL（失败就原样返回，绝不让卡片因此发不出去）。 */
   async function ensureQqHostedImage(url) {
     const src = String(url ?? '').trim();
@@ -405,6 +441,8 @@ export function createMediaDomain(cfg) {
          * 卡片的 preview 就指向一张不存在的图 → 没封面。
          * 所以：只有调用方没给封面时，才用聚合站的那张。 */
         if (!out.cover) out.cover = normalizeCoverUrl(pick.cover) || out.cover;
+        // 聚合站那张也留着当"备选"：两个来源的封面都会间歇性 404，最后交给 firstWorkingImage 探活挑一张
+        out.coverAlt = normalizeCoverUrl(pick.cover) || '';
         out.url = String(pick.link || fallbackUrl);
         out.audio = normalizeMediaUrl(pick.music_url);
         out.via = `secapi/${String(pick.quality || '').trim()}`;
@@ -448,7 +486,8 @@ export function createMediaDomain(cfg) {
        * 所以这里把 `opts.image` 提到第一优先，桥自己解析出来的封面只当兜底 ——
        * 与旧注释里"不许模型手写封面 URL"相反，现在是**硬规则：必须传 image**（工具描述里已写死）。 */
       const explicitCover = String(opts?.image ?? '').trim();
-      const cover = explicitCover || song.cover;
+      // 和 QQ 音乐一样：两个来源都可能间歇性 404，探活挑一张真能取到的
+      const cover = await firstWorkingImage([explicitCover, song.cover]);
       const title = song?.title || givenTitle || '网易云音乐';
       const artist = song?.artist || givenArtist || '';
       const link = `${title}${artist ? ' ' + artist : ''} https://music.163.com/#/song?id=${pid}`;
@@ -517,7 +556,8 @@ export function createMediaDomain(cfg) {
       }
       const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
       const qqExplicitCover = String(opts?.image ?? '').trim();
-      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(qqExplicitCover || song.cover) };
+      const qqCover = await firstWorkingImage([qqExplicitCover, song.cover, song.coverAlt]);
+      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(qqCover) };
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
       return {
