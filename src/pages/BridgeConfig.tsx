@@ -186,7 +186,7 @@ const TOOL_LABEL: Record<string, string> = {
   setStickerRemark: '改表情备注', stickerNote: '表情备注', collectSticker: '收藏表情', getSelfImage: '我的图片',
   getFileContent: '读文件内容', sendQqFace: '发 QQ 表情', faceList: 'QQ 表情列表', memorySearch: '搜聊天记录',
   historyDelete: '删聊天记录', historyClear: '清空记录', sendDocx: '发 Word 文档', sendRich: '发卡片消息',
-  musicSearch: '搜歌', globalOverview: '全局总览', scheduleMessage: '定时发消息', withdrawMessage: '撤回消息',
+  musicSearch: '搜歌', videoSearch: '看/搜视频', imageSearch: '联网找图发图', globalOverview: '全局总览', scheduleMessage: '定时发消息', withdrawMessage: '撤回消息',
   sendForward: '合并转发', like: '点赞', proactiveSend: '主动私聊', getGroupOwner: '查群主',
   getGroupMembers: '查成员', adminSet: '管理设置', whitelist: '白名单', blacklist: '拉黑',
   profileSet: '改档案', profileQuery: '查档案', qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间', sendQzone: '发说说', memeSearch: '搜表情包',
@@ -217,7 +217,7 @@ const TOOL_MCP: Record<string, string> = {
   collectSticker: 'qq_collect_sticker', getSelfImage: 'qq_get_self_image', getFileContent: 'qq_get_file_content',
   sendQqFace: 'qq_send_qq_face', faceList: 'qq_face_list', memorySearch: 'qq_memory_search',
   historyDelete: 'qq_history_delete', historyClear: 'qq_history_clear', sendDocx: 'qq_send_docx',
-  sendRich: 'qq_send_rich', musicSearch: 'qq_music_search', globalOverview: 'qq_global_overview',
+  sendRich: 'qq_send_rich', musicSearch: 'qq_music_search', videoSearch: 'qq_video_parse / qq_video_search', imageSearch: 'qq_image_search / qq_send_image', globalOverview: 'qq_global_overview',
   scheduleMessage: 'qq_schedule_message / qq_schedule_list / qq_schedule_cancel',
   withdrawMessage: 'qq_withdraw_message', sendForward: 'qq_send_forward',
   qzone: 'qq_qzone_view / qq_qzone_comment / qq_qzone_like / qq_qzone_reply_comment / qq_send_qzone',
@@ -254,7 +254,7 @@ const MCP_LABEL: Record<string, string> = {
   qq_sticker_note: '写表情备注', qq_collect_sticker: '收藏表情', qq_get_self_image: '取我的图片',
   qq_get_file_content: '读文件内容', qq_send_qq_face: '发 QQ 表情', qq_face_list: 'QQ 表情列表',
   qq_history_delete: '删聊天记录', qq_history_clear: '清空聊天记录', qq_send_docx: '发 Word 文档',
-  qq_send_rich: '发卡片消息', qq_music_search: '搜歌', qq_global_overview: '全局总览',
+  qq_send_rich: '发卡片消息', qq_music_search: '搜歌', qq_video_parse: '看视频链接（B站/抖音）', qq_video_search: '搜视频', qq_image_search: '联网找图', qq_send_image: '联网找图并发送', qq_global_overview: '全局总览',
   qq_schedule_message: '定时发消息', qq_schedule_list: '定时消息列表', qq_schedule_cancel: '取消定时消息',
   qq_withdraw_message: '撤回消息', qq_send_forward: '合并转发', qq_like: '点赞',
   qq_proactive_send: '主动私聊', qq_get_group_owner: '查群主', qq_get_group_members: '查群成员',
@@ -284,8 +284,8 @@ function mcpLabel(fullName: string) {
   model: '主对话模型。留空由 DSH 默认决定。',
   visionModel: '识图（多模态）模型，用于带图片消息的会话。留空时自动使用上面的主模型——请保证主模型是多模态的（默认已是）。',
   reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。'
-    + '下拉里显示的是中文名，对应的英文档位 id（也是写进 DSH settings.yaml 的值）依次是：'
-    + '关闭思考=off、同「关闭思考」=none、最低=minimal、快但粗略=low、平衡=medium、仔细但慢=high、更高=xhigh、最高=max。',
+    + '下拉里每项都是「英文档位 id · 中文说明」——英文 id 就是真正写进 DSH settings.yaml 的值，保留它是为了配置和文件能对上号：'
+    + 'off=关闭思考、none=同「关闭思考」、minimal=最低、low=快但粗略、medium=平衡、high=仔细但慢、xhigh=更高、max=最高。',
   launcherPath: '仅在你手动拉 QQ 网关时使用；本项目 NapCat 已内置并由管理端拉起，一般保持留空。',
   homeDir: '网关侧可写目录（容器映射等），本地 NapCat 一般不需要。',
   allowProcessControl: '是否允许 DSH 内的 agent 自动启停本机 QQ 网关。请仅在完全信任时开启。',
@@ -1908,9 +1908,12 @@ const EFFORT_PRESETS: Array<{ id: string; hint: string }> = [
   { id: 'xhigh', hint: '更高（部分服务商不支持）' },
   { id: 'max', hint: '最高（部分服务商不支持）' },
 ];
-/** 档位 id → 中文名。认不出来的值（服务商自定义档位）只能原样显示 —— 那是数据不是键名。 */
+/** 档位 id → 显示名。**英文 id 一定保留在前面**（2026-09-18 主人要求："low/high/max/xhigh 那些字带上别删除，这样清晰"）——
+ *  之前只显示中文名（"快但粗略"），配置和 DSH 的 settings.yaml 对不上号，改完不知道写进去的是什么。
+ *  认不出来的值（服务商自定义档位）只能原样显示 —— 那是数据不是键名。 */
 function effortLabel(id: string) {
-  return EFFORT_PRESETS.find((p) => p.id === id)?.hint ?? id;
+  const hit = EFFORT_PRESETS.find((p) => p.id === id);
+  return hit ? `${id} · ${hit.hint}` : id;
 }
 function EffortField({ path, val, ch, renderLabel }: {
   path: string; val: string;
@@ -1937,7 +1940,7 @@ function EffortField({ path, val, ch, renderLabel }: {
           <select className="select" value={cur}
             onChange={(e) => { if (e.target.value === '__custom__') setCustom(true); else ch(path)(e.target.value); }}>
             <option value="">自动探测（跟随 DSH / 服务商默认）</option>
-            {EFFORT_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.hint}</option>)}
+            {EFFORT_PRESETS.map((p) => <option key={p.id} value={p.id}>{`${p.id} · ${p.hint}`}</option>)}
             <option value="__custom__">自定义…（手输档位 id）</option>
           </select>
         )}

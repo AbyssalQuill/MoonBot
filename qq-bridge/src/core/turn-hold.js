@@ -30,12 +30,15 @@
 //   3. **绝不在这里标读**：steer 不碰 unread，只有模型真的发出回复后回合结束的 mux 钩子才清。
 //      DSH 的 cancel() 会 inbox.clear()，塞进去没被领会的会在中断时消失 —— 靠 unread 兜底。
 //   4. 回合内来回计数写进 rotateTurns，到 maxExchanges 放行关回合，下一轮唤醒由既有轮换切会话。
+//      **【2026-09-19 补】**上面这句是原来的设计假设，线上证明它不成立：轮换判定只存在于
+//      wake-send 的"会话不忙"那条路，而保持循环让会话一直是忙的 → 计数涨过阈值却没人检查，
+//      轮换永远等不到。现在保持循环自己也会看阈值（`rotationDue()`），到点主动放行关回合。
 //   5. 同一会话单飞（activeHolds），防止两处同时 steer → 重复注入。
 //   6. 每个提前返回都留日志 —— 这个功能吃过四次"静默失败"的亏。
 import { log } from '../lib/log.js';
 import { getSocialState, saveSocialState } from './social-state.js';
 import { reverse, TurnStartAt, collectors, holdActiveKeys } from './session-state.js';
-import { steerIntoRunningTurn, markSteerCycleStart, collectMidTurnBatch } from './wake-send.js';
+import { steerIntoRunningTurn, markSteerCycleStart, collectMidTurnBatch, rotationDue, markRotatePending } from './wake-send.js';
 import { touchTurnGuardsByKey } from './turn-guard.js';
 
 const POLL_MS = 200;
@@ -118,14 +121,14 @@ export async function handleTurnHold({ sessionId, turn, cfg, shouldAbort }) {
   // 【2026-09-15 合并注入】顺带把"步边界时刻"记进 wake-send（合并注入的防饥饿兜底要用它）。
   markSteerCycleStart(key, 'turn-stopping 钩子');
   try {
-    return await holdLoop({ key, sid, st, turn, t, shouldAbort });
+    return await holdLoop({ key, sid, st, turn, t, cfg, shouldAbort });
   } finally {
     activeHolds.delete(key);
     holdActiveKeys.delete(key);
   }
 }
 
-async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
+async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
   const now = () => Date.now();
   const maxExchanges = Math.max(1, Math.round(Number(t.maxExchanges) || 24));
   const idleCloseMs = Math.max(1000, Math.round(Number(t.idleCloseMs) || 1800000));
@@ -163,6 +166,19 @@ async function holdLoop({ key, sid, st, turn, t, shouldAbort }) {
   while (true) {
     if (shouldAbort && shouldAbort()) return finish('client-gone');
     if (!TurnStartAt.has(sid) && !collectors.has(sid)) return finish('turn-gone');
+    /* 【2026-09-19 修「会话轮换永远不触发」】
+     * `noteExchange()` 每记一次来回就给 `rotateTurns` +1（**上下文真正膨胀的就是这里**），
+     * 但轮换判定过去只存在于 wake-send 的"会话不忙"那条路上 —— 而保持循环恰恰让会话一直是"忙"的，
+     * 于是计数涨过阈值却从来没人在看（线上实测 rotateTurns=20 / 阈值 15，`[rotate]` 一条日志都没有）。
+     * 现在：阈值一到就**不再保持**，主动放行关回合；回合关掉之后，
+     * 下一条消息落地时 isConversationBusy=false → wake-send 的轮换块正常执行。
+     * 消息不会丢：没被 steer 的都还在 unread 里，投递看门狗 / 下一次唤醒会取。 */
+    const rd = rotationDue(key, st, cfg);
+    if (rd.due) {
+      markRotatePending(st, true);
+      log(`[hold] ${key} rotateTurns=${rd.count}/${rd.threshold} 已到轮换阈值 → 不再保持，放行关回合（下一条消息落地时执行会话轮换）`);
+      return finish('rotate-threshold');
+    }
     if (1 + exchanges >= maxExchanges) return finish('max-exchanges');
     if (now() - lastActivity >= idleCloseMs) return finish('idle');
     if (now() - totalStartedAt >= maxWaitMs) return finish('max-wait');
@@ -286,6 +302,13 @@ export async function flushStepBatch({ key, sid, turn, cfg } = {}) {
     return false;
   }
   log(`[hold] ${k} 步边界发车（step/end）：把这 ${batch.length} 条合成一个 [Mid-turn] 注入（不是半路一条一条塞）…`);
+  // 【2026-09-19】轮换阈值到了就别再往这一步里塞：否则回合继续跑，轮换下一轮还是轮不到。
+  const rdStep = rotationDue(k, st, cfg);
+  if (rdStep.due) {
+    markRotatePending(st, true);
+    log(`[hold] ${k} 步边界发车跳过：rotateTurns=${rdStep.count}/${rdStep.threshold} 已到轮换阈值 → 这一步不注入，先让回合收尾（这 ${batch.length} 条留在未读，轮换后由下一轮唤醒取）`);
+    return false;
+  }
   let ok = false;
   let errText = '';
   try {

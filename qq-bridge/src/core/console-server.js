@@ -74,6 +74,10 @@ import { enqueueSend, currentSendChain, cancelKeyedSends, cancelAllKeyedSends } 
 import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
 // 音乐分享的"卡片 → 原生卡片 → 链接"降级梯子（纯编排逻辑，media 域导出，可离线单测）
 import { sendMusicCardWithFallback } from './media.js';
+// 【2026-09-17】视频平台（bilibili / 抖音…）：链接识别 + 多路降级取信息 + 拼卡片 + 关键词搜视频。
+// 这个模块是纯函数、不依赖 cfg，所以直接 import，不走 setConsoleMedia 那套注入
+// （注入点被 bridge.js / dsh-watch.js / mux.js 三处调用，动签名容易漏改）。
+import { resolveVideo, buildVideoCard, videoSearch, parseVideoUrl, extractVideoUrls, fetchMiniAppArk } from './video.js';
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from '../lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from '../lib/social-timeline.js';
 import { createMediaDomain } from './media.js';
@@ -3053,6 +3057,9 @@ export function startConsoleServer() {
         // 按类型校验并构建消息段
         let seg = null;
         let musicPlan = null;   // buildMusicCard 的产物：primary / native / link 三段降级梯子
+        let videoPlan = null;   // buildVideoCard 的产物：同构的降级梯子（视频卡片）
+        let locTextAfter = '';  // 位置卡片：图片/卡片发完后再补一条"地点文字 + 地图链接"
+        let locMode = '';       // 位置卡片实际用的模式（tuwen/map/native），回执里如实告诉模型
         const require = (v, msg) => { if (v === undefined || v === null || String(v).trim() === '') throw new Error(msg); };
         try {
           if (type === 'music') {
@@ -3068,23 +3075,41 @@ export function startConsoleServer() {
             const artist = String(body.content ?? body.singer ?? body.artist ?? '').trim();
             if (mt === 'qq' && mid) {
               // QQ 音乐：无可靠外部签名服务（ss.xingzhige 已关闭 qq id 解析；自造 Ark 会收端"版本过低/超时"），
-              // 改用 QQ 官方标准分享链接文本——与真人"分享歌曲到QQ"完全一致：新版客户端自动渲染卡片，
-              // 旧版显示为可点开的分享链接。搜索工具已返回 title/cover；此文本由 send-message 通道发出。
+              // 【2026-09-18 改】先试**桥拼卡片**：secapi.top 能直接给到可播放直链（不需要 key），
+              // 拿得到就发真音乐卡（media.js 的 buildMusicCard 会校验 songmid 对得上，配错歌宁可不发）；
+              // 拿不到（没有直链/封面，或歌名对不上）才退回下面的 QQ 官方分享链接文本 —— 与真人"分享歌曲到QQ"一致：
+              // 新版客户端自动渲染卡片，旧版显示为可点开的分享链接。降级梯子不变。
               if (!title) throw new Error('QQ 音乐分享需要 title（歌名，qq_music_search 返回）');
-              const shareUrl = `https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=20080008&hosteuin=null&songmid=${mid}&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare`;
-              const shareText = `${title}${artist ? ' ' + artist : ''} ${shareUrl}`;
-              // 复用 send-message 文本通道发送（走记录/审计），记录为卡片语义
-              const sentMsg = await sendMessages(key, [shareText]);
-              recordSentMessages(key, sentMsg);
-              const stMc = getSocialState(key);
-              stMc.lastAiReplyAt = Date.now();
-              stMc.lastActionAt = Date.now();
-              stMc.wakeConfig.noActionCount = 0;
-              saveSocialState();
-              seg = { type: '_shareText', data: { title, url: shareUrl } };
-              // 直接走文本发送，不走下方 rich 通道
-              sendJson({ ok: true, key, type: 'music', sent: sentMsg.length, failed: 0, platform: 'qq', share: true, title });
-              return;
+              if (typeof buildMusicCard === 'function') {
+                try {
+                  const qqPlan = await buildMusicCard('qq', mid, {
+                    title,
+                    artist,
+                    image: String(body.image ?? '').trim(),
+                    musicUrl: String(body.musicUrl ?? body.url ?? '').trim()
+                  });
+                  if (qqPlan?.primary) { musicPlan = qqPlan; seg = qqPlan.primary; }
+                  else log(`[rich] QQ 音乐未能生成卡片 ${key}: ${qqPlan?.note ?? '无卡片形态'} —— 改发官方分享链接文本`);
+                } catch (qqErr) {
+                  log(`[rich] QQ 音乐卡片构建失败 ${key}: ${qqErr?.message ?? qqErr} —— 改发官方分享链接文本`);
+                }
+              }
+              if (!seg) {
+                const shareUrl = `https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=20080008&hosteuin=null&songmid=${mid}&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare`;
+                const shareText = `${title}${artist ? ' ' + artist : ''} ${shareUrl}`;
+                // 复用 send-message 文本通道发送（走记录/审计），记录为卡片语义
+                const sentMsg = await sendMessages(key, [shareText]);
+                recordSentMessages(key, sentMsg);
+                const stMc = getSocialState(key);
+                stMc.lastAiReplyAt = Date.now();
+                stMc.lastActionAt = Date.now();
+                stMc.wakeConfig.noActionCount = 0;
+                saveSocialState();
+                seg = { type: '_shareText', data: { title, url: shareUrl } };
+                // 直接走文本发送，不走下方 rich 通道
+                sendJson({ ok: true, key, type: 'music', sent: sentMsg.length, failed: 0, platform: 'qq', share: true, title });
+                return;
+              }
             } else if (mid && typeof buildMusicCard === 'function') {
               // 网易云等平台：卡片字段全部由桥解析拼好，模型只给 id
               try {
@@ -3124,6 +3149,163 @@ export function startConsoleServer() {
               if (body.audio) data.audio = String(body.audio);
               seg = { type: 'music', data };
             }
+          } else if (type === 'video') {
+            /* 【2026-09-17】视频卡片（bilibili / 抖音 / 快手 / 小红书 / 微博 / YouTube）。
+             * 与音乐卡片同一原则：**模型只给链接**，标题/UP主/封面/时长/播放量全部由桥解析拼好，
+             * 不许模型手写卡片字段（手写封面 URL 就是手机端白框的老坑）。
+             * 解析失败也绝不让"分享"整体失败：退化成"标题（若有）+ 纯链接"，至少能点开。 */
+            const vurl = String(body.videoUrl ?? body.url ?? '').trim();
+            require(vurl, '视频卡片需要 videoUrl（bilibili / 抖音 的链接或 BV 号）');
+            try {
+              const info = await resolveVideo(vurl);
+              videoPlan = buildVideoCard(info, { title: String(body.title ?? '').trim(), url: String(info.url || vurl) });
+              /* 【2026-09-18 第八批 · 纠正上一轮的结论】B 站原生小程序卡片**做得到**。
+               * 桥直接问 NapCat 的 `get_mini_app_ark` 要一张**QQ 服务端现场签发**的 Ark
+               * （`app=com.tencent.miniapp_01`、`view=view_8C8E89…`、`url=m.q.qq.com/a/s/<hash>`、
+               *  `config.token=<签名>`），跟主人从 B 站分享进来的真卡**逐字段同款** —— 见 video.js 的
+               * `fetchMiniAppArk` 注释（那里有线上复测的完整返回）。
+               * 所以第一优先改成小程序卡；拿不到才退回原来的「封面图 + 分享文案」。 */
+              const ark = await fetchMiniAppArk(info, { httpUrl: cfgRef?.napcat?.httpUrl, token: cfgRef?.napcat?.accessToken });
+              if (ark) {
+                videoPlan.primary = ark;
+                videoPlan.style = 'miniapp';
+                videoPlan.note = `B 站原生小程序卡片（NapCat get_mini_app_ark，Ark 与 token 由 QQ 服务端签发）`;
+                seg = ark;
+              } else if (videoPlan.style === 'share' && info?.cover) {
+                /* 兜底形态（原来的最终形态）：封面图负责"像个卡片"，文案里的链接负责能点开。 */
+                seg = { type: 'image', data: { file: info.cover } };
+                videoPlan.coverSent = true;
+              } else {
+                seg = videoPlan.primary;
+              }
+            } catch (e) {
+              const title = String(body.title ?? '').trim();
+              log(`[rich] 视频卡片解析失败 ${key}: ${e?.message ?? e}`);
+              videoPlan = {
+                title,
+                primary: null,
+                native: null,
+                link: `${title ? title + ' ' : ''}${vurl}`,
+                note: `解析失败（${e?.message ?? e}），已退化为纯链接`
+              };
+              seg = null;
+            }
+          } else if (type === 'location') {
+            /* 【2026-09-19 修「位置卡片根本发不出去」】
+             * 上一轮以为"位置卡片实测通过"，其实**从来没真的发出去过**。读 NapCat 源码（4.18.28）：
+             *   packages/napcat-onebot/api/msg.ts:924
+             *     [OB11MessageDataType.location]: async () => ({
+             *       elementType: ElementType.SHARELOCATION, elementId: '',
+             *       shareLocationElement: { text: '测试', ext: '' },      // ← text/ext 全是写死的
+             *     }),
+             * 也就是说 **lat/lon/title/content 全部被丢弃**，发出去的是一个 text='测试'、ext='' 的哑元素。
+             * 线上复核也印证了：同一条 location 段用 get_friend_msg_history 回读，段列表是**空的**（`[]`），
+             * NapCat 连自己发出去的位置都解析不回来。
+             *
+             * 所以默认改成 `map` 模式：**静态地图图片 + 地点文字 + 地图链接** ——
+             * 图由 NapCat 下载后当普通图片发给 QQ（对方不用自己联网取图），文字和链接都能点，
+             * 这是"确定能看到东西"的形态。想要 QQ 原生位置气泡，得先给 NapCat 打补丁把 text/ext
+             * 透传过去（我们有构建链，但那要重启 NapCat），把 locationMode 设成 `native` 即可切回。
+             * 配置：social.send.locationMode = 'map'（默认）| 'native'，或环境变量 QQBRIDGE_LOCATION_MODE。 */
+            require(body.lat, '位置卡片需要 lat（纬度）');
+            require(body.lon, '位置卡片需要 lon（经度）');
+            const lat = Number(body.lat);
+            const lon = Number(body.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+              throw new Error('lat/lon 不是合法经纬度（lat -90~90，lon -180~180）');
+            }
+            const locTitle = String(body.locTitle ?? body.title ?? '').trim();
+            const locContent = String(body.locContent ?? body.content ?? '').trim();
+            locMode = String(process.env.QQBRIDGE_LOCATION_MODE ?? cfgRef?.social?.send?.locationMode ?? 'tuwen').trim().toLowerCase();
+            /* 地图图片：有高德 key 就用高德官方静态图，没有就用实测可用的一张（见下）。 */
+            const amapKey = String(process.env.AMAP_KEY ?? cfgRef?.social?.send?.amapKey ?? '').trim();
+            const mapImg = amapKey
+              ? `https://restapi.amap.com/v3/staticmap?location=${lon},${lat}&zoom=16&size=600*400&scale=2&markers=mid,,A:${lon},${lat}&key=${encodeURIComponent(amapKey)}`
+              : `https://static-maps.yandex.ru/1.x/?ll=${lon},${lat}&z=16&size=600,400&l=map&pt=${lon},${lat},pm2rdm`;
+            /* 【2026-09-19 第十一批】主人要求"位置卡默认改成发腾讯地图小程序"。
+             *
+             * 先说清楚做不到的那部分：主人从 QQ 分享进来的那张腾讯地图卡（`incoming-cards.jsonl` 里有）是
+             *   {"app":"com.tencent.miniapp.lua","view":"miniapp","bizsrc":"miniapp.nativeshare",
+             *    "prompt":"[微信小程序]腾讯地图",
+             *    "meta":{"miniapp":{"tag":"微信小程序","title":"腾讯地图","source":"腾讯地图",
+             *      "sourcelogo":"https://miniapp.gtimg.cn/generated-icon/wx7643d5f831302ab0.png",
+             *      "jumpUrl":"https://m.q.qq.com/a/s/101a907383cf58f545e2f406fca8f5fb", …}},
+             *    "config":{"token":"3d36f6c85f64e828e45bf79784c5d5a5",…}}
+             * —— 它是**微信小程序转发进来的卡**，`m.q.qq.com/a/s/<hash>` 和 `config.token` 都是分享那一刻
+             * 服务端签发、**指向那个具体地点**的，换坐标没法复用。`get_mini_app_ark` 也救不了：
+             * 它走 `LightAppSvc.mini_app_share.AdaptShareInfo`，只认 **QQ 小程序**的 appId+versionId
+             * （实测拿高德的 appId 100571486 去调直接回 `jsonContent` undefined）。
+             *
+             * 所以做的是"**看起来就是腾讯地图那张卡**"的图文卡：来源角标(腾讯地图)+官方图标+
+             * 腾讯地图跳转链接+地图缩略图。`social.send.locationApp='amap'` 可切回高德身份。 */
+            const locApp = String(process.env.QQBRIDGE_LOCATION_APP ?? cfgRef?.social?.send?.locationApp ?? 'tencent').trim().toLowerCase();
+            const tencentLink = `https://apis.map.qq.com/uri/v1/marker?marker=coord:${lat},${lon};title:${encodeURIComponent(locTitle || '位置')}&referer=moonbot`;
+            const amapLink = `https://uri.amap.com/marker?position=${lon},${lat}&coordinate=gaode&callnative=1${locTitle ? `&name=${encodeURIComponent(locTitle)}` : ''}`;
+            const mapLink = locApp === 'amap' ? amapLink : tencentLink;
+            const locLine = `地点：${locTitle || `${lat},${lon}`}${locContent ? `\n${locContent}` : ''}\n${mapLink}`;
+            if (locMode === 'native') {
+              seg = {
+                type: 'location',
+                data: { lat: String(lat), lon: String(lon), title: locTitle, content: locContent }
+              };
+            } else if (locMode === 'map') {
+              /* 静态地图图片 + 地点文字 + 地图链接 —— 一定看得见的形态。
+               * 实测这台 VPS 上无 key 能用的是 yandex static（200 image/png）；
+               * staticmap.openstreetmap.de 超时、maps.wikimedia.org 403、高德 restapi 无 key 返回 INVALID_USER_KEY。
+               * 图是**服务器侧**抓取后由 NapCat 上传给 QQ 的，所以对方网络环境不影响。 */
+              seg = { type: 'image', data: { file: mapImg } };
+              locTextAfter = locLine;
+            } else {
+              /* 【2026-09-19 第十批】默认 `tuwen`：发**高德地图那条"图文/富文本"卡片**。
+               * 形态不是我猜的 —— 是主人 16:33 从高德分享进 QQ 时，桥在
+               * `state/incoming-cards.jsonl` 里抓到的**原始卡片**（逐字段照抄）：
+               *
+               *   {"app":"com.tencent.tuwen.lua","bizsrc":"qqconnect.sdkshare",
+               *    "config":{"ctime":1789662714,"forward":1,"token":"<32位签名>","type":"normal"},
+               *    "extra":{"app_type":1,"appid":100571486,"msg_seq":…,"uin":1736784911},
+               *    "meta":{"news":{"app_type":1,"appid":100571486,"ctime":…,"desc":"高德地图",
+               *            "jumpUrl":"https://surl.amap.com/fnlA5Augeq","preview":"<QQ图床>",
+               *            "tag":"高德","tagIcon":"https://p.qpic.cn/qqconnect/0/app_100571486_…",
+               *            "title":"天安门广场","uin":1736784911}},
+               *    "prompt":"[分享]天安门广场","ver":"0.0.0.1","view":"news"}
+               *
+               * 关键收获：**app 是 `com.tencent.tuwen.lua`（图文），不是上一轮手写失败的那个
+               * `com.tencent.structmsg`** —— 同一个 `view=news`，app 名换了才是新版 QQ 认的那套。
+               * appid=100571486 就是高德地图在 QQ 里的应用号；tagIcon 用它官方的图标
+               * （p.qpic.cn/qqconnect/0/app_100571486_…，QQ 自己的 CDN）。
+               *
+               * `token` 那张卡里是分享方签的，我们签不出来 → 用同格式的随机 32 位十六进制顶上；
+               * 万一 QQ 校验它，卡片会被拒 —— 所以下面同时补一条「地点 + 高德链接」的文字，
+               * **保证信息一定到得了**（卡片能渲染的话这条只是重复一次，主人确认后可以去掉）。 */
+              const ctime = Math.floor(Date.now() / 1000);
+              const hex = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+              const news = {
+                app_type: 1,
+                appid: 100571486,
+                ctime,
+                desc: locContent || (locApp === 'amap' ? '高德地图' : '腾讯地图'),
+                jumpUrl: mapLink,
+                preview: mapImg,
+                tag: locApp === 'amap' ? '高德' : '腾讯地图',
+                // 腾讯地图那个图标就是它自家分享卡里的 sourcelogo（miniapp.gtimg.cn/generated-icon/wx7643…）
+                tagIcon: locApp === 'amap'
+                  ? 'https://p.qpic.cn/qqconnect/0/app_100571486_1599210280/100?max-age=2592000&t=0'
+                  : 'https://miniapp.gtimg.cn/generated-icon/wx7643d5f831302ab0.png',
+                title: locTitle || `${lat},${lon}`
+              };
+              const card = {
+                app: 'com.tencent.tuwen.lua',
+                bizsrc: 'qqconnect.sdkshare',
+                config: { ctime, forward: 1, token: hex(), type: 'normal' },
+                extra: { app_type: 1, appid: 100571486 },
+                meta: { news },
+                prompt: `[分享]${locTitle || '位置'}`.slice(0, 60),
+                ver: '0.0.0.1',
+                view: 'news'
+              };
+              seg = { type: 'json', data: { data: JSON.stringify(card) } };
+              locTextAfter = locLine;
+            }
           } else if (type === 'contact') {
             const ct = String(body.contactType ?? body.contact_type ?? '').trim();
             if (!['qq', 'group'].includes(ct)) throw new Error('contactType 仅支持 qq/group');
@@ -3136,7 +3318,7 @@ export function startConsoleServer() {
             require(body.data, `${type} 卡片需要 data（json 对象/字符串 或 xml 字符串）`);
             seg = { type, data: typeof body.data === 'string' ? { data: body.data } : body.data };
           } else {
-            throw new Error('不支持的卡片类型（仅 music/contact/dice/rps/json/xml）');
+            throw new Error('不支持的卡片类型（仅 music/video/contact/location/dice/rps/json/xml）');
           }
         } catch (error) {
           sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
@@ -3173,7 +3355,7 @@ export function startConsoleServer() {
           // 顺序：primary（桥拼卡片）→ native（NapCat 原生 id 卡片，老行为）→ link（官方分享链接纯文本，走文本通道）。
           const ladder = await sendMusicCardWithFallback({
             key,
-            plan: musicPlan,
+            plan: musicPlan ?? videoPlan,
             seg,
             options: { replyToMessageId: actualReplyToMessageId, atUserId },
             sendRichFn: sendRich,
@@ -3187,13 +3369,40 @@ export function startConsoleServer() {
           const sent = { messageId: ladder.messageId };
           const sentSeg = ladder.seg;
           const sentCard = ladder.card;
-          if (sentCard !== 'primary') {
-            log(`[rich] 音乐卡片降级 card=${sentCard} ${key}（${ladder.degradedFrom?.message ?? '无卡片段'}）`);
+          /* 【2026-09-18】视频走"封面图 + 分享文案"两条：图已经发出去了，再把链接补一条，
+           * 否则对方只看到一张图、点不开。这一步失败不影响整体成功（图已经送到了）。 */
+          if (videoPlan?.coverSent && sentCard === 'primary') {
+            try {
+              const linkMsg = await sendMessages(key, [videoPlan.link]);
+              recordSentMessages(key, linkMsg);
+              log(`[rich] 视频卡片已补发分享链接（封面图已送达）${key}`);
+            } catch (e) {
+              log(`[rich] 视频分享链接补发失败（封面图已送达，不影响）${key}: ${e?.message ?? e}`);
+            }
           }
-          const cardTitle = (type === 'json' || type === 'music')
-            ? String(body.title || body.musicTitle || musicPlan?.title || seg?.data?.title || '').trim()
+          /* 位置卡片（map 模式）：地图图片已送达，再补一条"📍 地点 + 地图链接"。
+           * 补发失败不影响整体成功（图已经在对方那了）。 */
+          if (locTextAfter && sentCard === 'primary') {
+            try {
+              const locMsg = await sendMessages(key, [locTextAfter]);
+              recordSentMessages(key, locMsg);
+              log(`[rich] 位置卡片已补发地点文字+地图链接 ${key}`);
+            } catch (e) {
+              log(`[rich] 位置文字补发失败（地图图片已送达，不影响）${key}: ${e?.message ?? e}`);
+            }
+          }
+          // 视频默认走"官方分享链接"（见 video.js 顶部注释：手写 json 卡会被新版 QQ 判"版本太低"），
+          // 所以对视频来说 link 形态是**预期**而不是降级；只有音乐/其它真正"卡片发失败退到链接"才算降级。
+          const intendedShare = sentCard === 'link' && videoPlan?.style === 'share';
+          if (sentCard !== 'primary' && !intendedShare) {
+            log(`[rich] ${type} 卡片降级 card=${sentCard} ${key}（${ladder.degradedFrom?.message ?? '无卡片段'}）`);
+          }
+          const cardTitle = (type === 'json' || type === 'music' || type === 'video')
+            ? String(body.title || body.musicTitle || musicPlan?.title || videoPlan?.title || seg?.data?.title || '').trim()
             : (sentSeg?.data?.title ? String(sentSeg.data.title) : '');
-          const degraded = sentCard === 'link' ? '（已降级为链接）' : sentCard === 'native' ? '（原生卡片）' : '';
+          const degraded = sentCard === 'link'
+            ? (intendedShare ? '（官方分享链接）' : '（已降级为链接）')
+            : sentCard === 'native' ? '（原生卡片）' : '';
           const label = `[卡片:${type === 'json' ? 'music' : type}${cardTitle ? ' ' + cardTitle.slice(0, 20) : ''}${degraded}]`;
           st.recentMessages.push({
             messageId: sent.messageId ? String(sent.messageId) : null,
@@ -3232,7 +3441,11 @@ export function startConsoleServer() {
             failed: 0,
             quoted: quotedInfo,
             // 音乐卡片：告诉模型实际发出去的是哪种形态（card=link 表示已自动退回纯链接，别再补发链接）
-            ...(musicPlan ? { music: { card: sentCard, title: musicPlan.title, note: musicPlan.note, link: musicPlan.link } } : {})
+            ...(musicPlan ? { music: { card: sentCard, title: musicPlan.title, note: musicPlan.note, link: musicPlan.link } } : {}),
+            // 视频卡片：同上（card=link 就是已经替你发了链接，别再补一条）
+            ...(videoPlan ? { video: { card: sentCard, title: videoPlan.title, platform: videoPlan.platform, note: videoPlan.note, link: videoPlan.link } } : {}),
+            // 位置卡片：告诉模型实际发出去的形态（tuwen = 高德图文卡；map = 地图图片 + 地点文字/链接；native = QQ 原生位置气泡）
+            ...(locTextAfter ? { location: { mode: locMode, text: locTextAfter } } : {})
           });
         } catch (error) {
           const st = getSocialState(key);
@@ -3261,6 +3474,41 @@ export function startConsoleServer() {
           sendJson({ ok: true, ...data });
         } catch (error) {
           sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+        }
+        return;
+      }
+      /* 【2026-09-17】视频链接解析（MCP qq_video_parse）：
+       * "主人甩了个 B 站/抖音链接过来" 时先看内容再说话 —— 标题/UP主/时长/播放量/封面。
+       * 只读、不发送；解析失败也不要当场编内容，把 error 原样给模型，让它说"我看不到这条"。 */
+      if (req.method === 'GET' && url.pathname === '/api/social/video-parse') {
+        const key = String(url.searchParams.get('key') ?? '').trim();
+        const target = String(url.searchParams.get('url') ?? '').trim();
+        if (!key || !target) { sendJson({ ok: false, error: 'key 和 url 不能为空' }, 400); return; }
+        if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
+        if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+        if (req.headers['x-agent-token'] && !ToolEnabled('videoSearch')) { sendJson({ ok: false, error: '工具未启用：qq_video_parse' }, 403); return; }
+        try {
+          const info = await resolveVideo(target);
+          sendJson({ ok: true, video: info });
+        } catch (error) {
+          sendJson({ ok: false, error: `视频解析失败：${error?.message ?? String(error)}`, degraded: error?.degraded === true, url: target }, 200);
+        }
+        return;
+      }
+      /* 【2026-09-17】按关键词搜视频（MCP qq_video_search）：找片子/找资料用；只读。 */
+      if (req.method === 'GET' && url.pathname === '/api/social/video-search') {
+        const key = String(url.searchParams.get('key') ?? '').trim();
+        const q = String(url.searchParams.get('q') ?? '').trim();
+        const limit = Math.min(20, Math.max(1, Number(url.searchParams.get('limit')) || 8));
+        if (!key || !q) { sendJson({ ok: false, error: 'key 和 q 不能为空' }, 400); return; }
+        if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
+        if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+        if (req.headers['x-agent-token'] && !ToolEnabled('videoSearch')) { sendJson({ ok: false, error: '工具未启用：qq_video_search' }, 403); return; }
+        try {
+          const data = await videoSearch(q, { limit });
+          sendJson({ ok: true, ...data });
+        } catch (error) {
+          sendJson({ ok: false, error: `视频搜索失败：${error?.message ?? String(error)}` }, 200);
         }
         return;
       }
@@ -3859,7 +4107,23 @@ export function startConsoleServer() {
           sendJson({ ok: true, key: k, token: String(st?.agentToken ?? ''), source: 'active-turn' });
           return;
         }
-        sendJson({ ok: false, reason: active.length ? 'ambiguous' : 'no-active-turn', active }, 409);
+        /* 【2026-09-18 修「qq_image_search 之类还是报缺 key/token」】
+         * 多个会话同时在途时旧实现直接回 ambiguous → MCP 包装层补不上 key/token →
+         * 返回那句"缺 key/token"，工具整个失败（主人就踩到了：只传 query 调找图）。
+         * 现在按「最近有活动」挑一个：lastAiSeenAt / lastAiReplyAt / lastIncomingAt 取最新。
+         * 仍然把 ambiguous 的事实带回去（source=PICKED-newest-<n>），调用方可以据此提示"我按最近的会话猜的"。 */
+        if (active.length > 1) {
+          const score = (k) => {
+            const st = social.conversations.get(k) || {};
+            return Math.max(Number(st.lastAiSeenAt) || 0, Number(st.lastAiReplyAt) || 0, Number(st.lastIncomingAt) || 0, 0);
+          };
+          const picked = active.slice().sort((a, b) => score(b) - score(a))[0];
+          const st = social.conversations.get(picked);
+          log(`[current-turn] ${active.length} 个会话在途，按最近活动挑中 ${picked}（其余：${active.filter((x) => x !== picked).join(', ')}）`);
+          sendJson({ ok: true, key: picked, token: String(st?.agentToken ?? ''), source: `PICKED-newest-of-${active.length}`, active });
+          return;
+        }
+        sendJson({ ok: false, reason: 'no-active-turn', active }, 409);
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/social/check-send') {

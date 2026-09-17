@@ -15,6 +15,12 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
 import { napcatImageFileArg } from './lib/napcat-file.js';
+// 【2026-09-18】联网找图：图片搜索引擎（Bing/百度）+ SSRF 安全下载。
+// 两者都是纯函数模块，直接 import；下载复用 safe-fetch（禁内网、限字节、校验真是图片）。
+import { searchImages } from './lib/image-search.js';
+import { pixivSearch, pixivImageCandidates, parsePixivId, pixivPageUrl } from './lib/pixiv.js';
+import { safeFetchBuffer } from './safe-fetch.js';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -210,6 +216,8 @@ async function onebot(action, params = {}) {
   }
   const body = await res.json();
   if (body.status !== 'ok' || body.retcode !== 0) {
+    // EventChecker Failed = 已送达未确认（见 lib/onebot-delivery.js）：不报失败、不重试。
+    if (isDeliveredUnconfirmed(onebotErrText(body))) return deliveredUnconfirmedResult();
     throw new Error(`OneBot ${action} 失败: retcode=${body.retcode} ${body.wording ?? ''}`);
   }
   return body.data;
@@ -349,23 +357,34 @@ const MISSING_ARG_HINT = '缺 key/token：唤醒正文第一行就是 `[Token] <
       rest[i] = async (...args) => {
         // ② 补齐缺的 key/token
         const callArgs = (args[0] && typeof args[0] === 'object') ? args[0] : {};
-        const missingKey = (hasKeyField || hasTokenField) && (callArgs.key === undefined || callArgs.key === null || callArgs.key === '');
-        const missingToken = (hasKeyField || hasTokenField) && (callArgs.token === undefined || callArgs.token === null || callArgs.token === '');
-        if (hasKeyField || hasTokenField) {
-          if (missingKey || missingToken) {
-            const got = await resolveMissingSession(missingKey ? '' : String(callArgs.key));
-            if (got && !got.error) {
-              if (missingKey && got.key) callArgs.key = got.key;
-              if (missingToken && got.token) callArgs.token = got.token;
-              console.error(`[napcat-safe] ${name} 缺 ${[missingKey ? 'key' : '', missingToken ? 'token' : ''].filter(Boolean).join('/')}，已按会话补齐（${got.source || 'fallback'}）: ${callArgs.key}`);
-            } else {
-              console.error(`[napcat-safe] ${name} 缺 key/token 且无法推断：${got?.error ?? 'unknown'}`);
-              return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
-            }
-          }
-          if (!callArgs.key || !callArgs.token) {
+        /* 【2026-09-18 修「qq_schedule_message 明明传了 key 还报缺 key/token」】
+         * 旧写法把两个字段**绑在一起**判断（`hasKeyField || hasTokenField`），于是对
+         * "只声明 token、不声明 key"的工具（qq_schedule_message / qq_schedule_list / qq_schedule_cancel
+         * 这些用 targetKey 的）会得出 `missingKey = true` —— 因为 zod 解析会把 schema 里
+         * **没声明的 `key` 字段直接剥掉**，处理器拿到的 args[0].key 永远是 undefined。
+         * 结果：模型照提示传了 key，包装层却认为它没传 → 去问桥"当前在途会话" → 手动测试时没有
+         * 在途回合 → 回一句"缺 key/token"，调用整个失败。
+         * 现在**两个字段各判各的**：没声明 key 的工具根本不检查 key，只检查 token。 */
+        const missingKey = hasKeyField && (callArgs.key === undefined || callArgs.key === null || callArgs.key === '');
+        const missingToken = hasTokenField && (callArgs.token === undefined || callArgs.token === null || callArgs.token === '');
+        if (missingKey || missingToken) {
+          const got = await resolveMissingSession(missingKey ? '' : String(callArgs.key ?? ''));
+          if (got && !got.error) {
+            if (missingKey && got.key) callArgs.key = got.key;
+            if (missingToken && got.token) callArgs.token = got.token;
+            console.error(`[napcat-safe] ${name} 缺 ${[missingKey ? 'key' : '', missingToken ? 'token' : ''].filter(Boolean).join('/')}，已按会话补齐（${got.source || 'fallback'}）: ${callArgs.key || '(仅 token)'}`);
+          } else if (missingToken) {
+            // token 补不上就没法鉴权，只能让模型照着提示重来
+            console.error(`[napcat-safe] ${name} 缺 token 且无法推断：${got?.error ?? 'unknown'}`);
             return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
+          } else {
+            // 只缺 key（工具自己声明了 key）：补不上就**放行**，让工具自己按 token 推导目标会话 ——
+            // 这比以前直接拒绝强得多（qq_schedule_* 就是这么工作的）。
+            console.error(`[napcat-safe] ${name} 缺 key，交由工具按 token 推导：${got?.error ?? 'unknown'}`);
           }
+        }
+        if ((hasKeyField && !callArgs.key) || (hasTokenField && !callArgs.token)) {
+          return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
         }
         // ③ 重复失败短路（见上方常量说明）
         const key = failureKey(name, callArgs);
@@ -381,7 +400,13 @@ const MISSING_ARG_HINT = '缺 key/token：唤醒正文第一行就是 `[Token] <
         try {
           if (res && res.isError) {
             const text = String(res.content?.[0]?.text ?? '').replace(/\s+/g, ' ').slice(0, 200);
-            if (!TRANSIENT_RE.test(text)) { recentFailures.set(key, { at: Date.now(), text }); pruneFailures(); }
+            /* 【2026-09-18】参数类错误**不记进"重复失败短路"**。
+             * 主人踩到的：位置卡片第一次漏传 lat/lon → 报"位置卡片需要 lat（纬度）"→ 被记成重复失败 →
+             * 第二次**改对了参数**也被短路拦住，回一句"这个调用刚刚已经失败过…别用完全相同参数再试"。
+             * 参数错本来就是"改一下就能过"的，挡住重试纯属帮倒忙。 */
+            const paramErr = /不能为空|需要 lat|需要 lon|缺少|必须|格式应为|格式错误|仅支持|不支持|不是合法|too (?:small|big)/i.test(text);
+            if (!TRANSIENT_RE.test(text) && !paramErr) { recentFailures.set(key, { at: Date.now(), text }); pruneFailures(); }
+            else if (paramErr) recentFailures.delete(key);
           } else if (res) {
             recentFailures.delete(key);
           }
@@ -703,6 +728,7 @@ registerTool(
   'Schedule a one-time or repeating message: at the trigger time it auto-sends message to the targetKey session. at = ISO time string (e.g. 2026-09-02T08:00:00+08:00) or ms timestamp, or delayMs = ms from now; repeatMs > 0 repeats every repeatMs ms. Use for remind me at 8pm / message someone tomorrow / remind me every weekend; targetKey may be another session (the current session token works). Tell the user it is set; list and cancel via qq_schedule_list / qq_schedule_cancel.',
   {
     token: z.string().describe('Session token (from wake prompt)'),
+    key: z.string().optional().describe('Same as targetKey - accepted as an alias so a copied [Key] line works verbatim; usually omit and pass targetKey'),
     targetKey: z.string().optional().describe('Session key to send to (defaults to current session)'),
     message: z.string().describe('Message content to send when scheduled'),
     at: z.string().optional().describe('Trigger time: ISO string (e.g. 2026-09-02T08:00:00+08:00) or ms/s timestamp'),
@@ -710,9 +736,10 @@ registerTool(
     repeatMs: z.number().optional().describe('Repeat interval in ms; 0 or omitted = one-shot'),
     sourceKey: z.string().optional().describe('Initiating session key (derived from token by default; usually omit)')
   },
-  async ({ token, targetKey, message, at, delayMs, repeatMs, sourceKey }) => {
+  async ({ token, key, targetKey, message, at, delayMs, repeatMs, sourceKey }) => {
     try {
-      const body = { targetKey: targetKey || '', message, repeatMs: repeatMs || 0, sourceKey: sourceKey || '' };
+      // key 是 targetKey 的别名（2026-09-18）：模型偶尔会把唤醒正文里的 [Key] 行原样传进来
+      const body = { targetKey: targetKey || key || '', message, repeatMs: repeatMs || 0, sourceKey: sourceKey || '' };
       if (at) body.at = at;
       else if (delayMs) body.delayMs = delayMs;
       const data = await agentApi('/api/social/schedule', { method: 'POST', body: JSON.stringify(body), headers: { 'x-agent-token': token } });
@@ -1829,7 +1856,7 @@ registerTool(
 
 registerTool(
   'qq_send_voice',
-  'Send a spoken (voice) message to a QQ session: the text is synthesized into real speech with the configured voice and sent as a QQ voice bubble. Use it ONLY when a voice is actually wanted (the owner or the conversation asks you to speak / sing / say it out loud, or the session is in a voice mood) - normal replies stay text, and voice is not a substitute for answering. text = what to say (short, one breath; over the configured limit it is rejected). voice = LEAVE IT OUT unless someone explicitly asks for a specific voice: omitting it uses the owner\'s configured default voice (the wake body\'s [Voice] line shows it as default voice=<name>). Never substitute a built-in voice on your own initiative - 冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean are only for when that exact voice is asked for. If you do pass one: a built-in id or a saved custom voice id/name. style = optional one-sentence delivery direction (e.g. 轻轻的，带一点笑意). mode = tts (default, built-in voice) | design (with description = a voice description, synthesizes that voice) | clone (voice = a saved clone voice). replyToMessageId optionally quotes a message.',
+  'Send a spoken (voice) message to a QQ session: the text is synthesized into real speech with the configured voice and sent as a QQ voice bubble. Use it ONLY when a voice is actually wanted (the owner or the conversation asks you to speak / sing / say it out loud, or the session is in a voice mood) - normal replies stay text, and voice is not a substitute for answering. text = what to say (short, one breath; over the configured limit it is rejected). voice = LEAVE IT OUT unless someone explicitly asks for a specific voice: omitting it uses the owner\'s configured default voice (the wake body\'s [Voice] line shows it as default voice=<name>). Never substitute a built-in voice on your own initiative - 冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean are only for when that exact voice is asked for. If you do pass one: a built-in id or a saved custom voice id/name. style = optional one-sentence delivery direction (e.g. 轻轻的，带一点笑意). mode = tts (default, built-in voice) | design (with description = a voice description, synthesizes that voice) | clone (voice = a saved clone voice). replyToMessageId optionally quotes a message - but the bridge DROPS it for voice (QQ renders a reply+voice message as an empty bubble with just the quote box), so when you actually need to quote someone, say it with qq_reply/qq_send_message as text instead.',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token (from the wake prompt)'),
@@ -2491,30 +2518,31 @@ if (cfg.social?.tools?.sendForward !== false) {
 if (cfg.social?.tools?.sendRich !== false) {
   registerTool(
     'qq_send_rich',
-    'Send native rich interactive cards: music, contact (contact card), dice/rps (dice / rock-paper-scissors). MUSIC: pass ONLY type=music + musicType=163 + musicId=<the NetEase song id from qq_music_search> - the bridge resolves title/artist/cover/audio itself and builds the whole card (https cover + 300x300 thumbnail, the shape that renders on mobile QQ as well); if the card cannot be sent the bridge automatically falls back to the official song link and the result says music.card=link. NEVER hand-write card fields (image/title/audio/url): a hand-written cover is exactly what makes mobile QQ show a blank card. musicType=qq (QQ Music) is sent as the official share link - the client renders that card itself.',
+    'Send native rich interactive cards: music, video (B站/抖音… link card), contact (contact card), dice/rps (dice / rock-paper-scissors). MUSIC: pass ONLY type=music + musicType=163 + musicId=<the NetEase song id from qq_music_search> - the bridge resolves title/artist/cover/audio itself and builds the whole card (https cover + 300x300 thumbnail, the shape that renders on mobile QQ as well); if the card cannot be sent the bridge automatically falls back to the official song link and the result says music.card=link. NEVER hand-write card fields (image/title/audio/url): a hand-written cover is exactly what makes mobile QQ show a blank card. musicType=qq (QQ Music) is also built by the bridge now: pass type=music + musicType=qq + musicId=<songmid from qq_music_search> + title=<song name> (and content=<artist> if you have it) - the bridge resolves the playable link/cover itself and sends a real music card; if it cannot resolve them it automatically sends the official share link instead and the result says music.card=link. VIDEO: pass ONLY type=video + videoUrl=<the bilibili/douyin link or a bare BV id> - the bridge resolves title/uploader/cover/duration/play-count; for bilibili/weibo it asks NapCat for a real mini-program Ark (com.tencent.miniapp_01, QQ-server-signed) so the result is the same 哔哩哔哩 card a human gets when sharing from B站, and only if that fails does it fall back to cover-image + share text (video.card=native/cover+link); other platforms send cover + share text. If resolving fails it still sends the link as text and the result says video.card=link, so never send both the card and the link yourself.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      type: z.enum(['music', 'contact', 'dice', 'rps']).describe('Card type: music (NetEase real card / QQ Music official share link), contact=contact card, dice, rps=rock-paper-scissors'),
-      musicType: z.enum(['qq', '163', 'kugou', 'migu', 'kuwo', 'custom']).optional().describe('musicType: 163=NetEase (real music card, built by the bridge), qq=QQ Music (official share link), kugou/kuwo/migu/custom=other platforms (custom needs musicUrl+image, last resort)'),
+      type: z.enum(['music', 'video', 'contact', 'location', 'dice', 'rps']).describe('Card type: music (NetEase real card / QQ Music real card built by the bridge), video (bilibili/weibo = a REAL mini-program card the bridge asks QQ to sign; douyin/YouTube/X = cover + share link), contact=contact card, location=share a place (needs lat+lon, locTitle/locContent optional) - sent as an AMap rich-text card (the same com.tencent.tuwen.lua card a human gets when sharing a place from 高德地图) plus a text line with the place name and a 高德 map link, dice, rps=rock-paper-scissors'),
+      musicType: z.enum(['qq', '163', 'kugou', 'migu', 'kuwo', 'custom']).optional().describe('musicType: 163=NetEase (real music card, built by the bridge), qq=QQ Music (also built by the bridge; needs title, falls back to the official share link), kugou/kuwo/migu/custom=other platforms (custom needs musicUrl+image, last resort)'),
       musicId: z.union([z.number(), z.string()]).optional().describe('Platform music id: 163=song id from qq_music_search, qq=songmid. This is the ONLY music field you normally pass.'),
       musicUrl: z.string().optional().describe('Only for musicType=custom/kugou/kuwo/migu: the click-through song URL.'),
       audio: z.string().optional().describe('Only for custom platforms - leave empty for 163 (the bridge resolves it).'),
       title: z.string().optional().describe('LEAVE EMPTY for 163/qq - the bridge reads the real title itself. Only for custom platforms.'),
       image: z.string().optional().describe('LEAVE EMPTY for 163/qq - the bridge picks a mobile-safe https 300x300 cover (a hand-written cover is the #1 cause of a blank cover on mobile QQ). Only for custom platforms, and even then the bridge upgrades http to https and adds the size param.'),
       content: z.string().optional().describe('Artist/description - custom platforms only.'),
-      contactType: z.enum(['qq', 'group']).optional().describe('Contact card type'),
-      contactId: z.union([z.number(), z.string()]).optional().describe('Contact QQ number or group number'),
+      videoUrl: z.string().optional().describe('VIDEO only: the video link or bare id - bilibili (https://www.bilibili.com/video/BV..., https://b23.tv/xxx, or just BV1xx411c7mD) or douyin (https://v.douyin.com/xxx, https://www.douyin.com/video/ID). This is the ONLY video field you normally pass; the bridge resolves the title/uploader/cover itself. Do NOT hand-write video title/cover.'),
+      contactType: z.enum(['qq', 'group']).optional().describe('Contact card type'),      contactId: z.union([z.number(), z.string()]).optional().describe('Contact QQ number or group number'),
       result: z.union([z.number(), z.string()]).optional().describe('dice/rps result (optional)'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Message id to quote (optional)'),
       atUserId: z.union([z.number(), z.string()]).optional().describe('QQ number of group member to @ (optional; group chats)')
     },
-    async ({ key, token, type, musicType, musicId, musicUrl, audio, title, image, content, contactType, contactId, lat, lon, locTitle, locContent, data, result, replyToMessageId, atUserId }) => {
+    async ({ key, token, type, musicType, musicId, musicUrl, audio, title, image, content, videoUrl, contactType, contactId, lat, lon, locTitle, locContent, data, result, replyToMessageId, atUserId }) => {
       try {
         const body = { key, type };
         if (musicType) body.musicType = musicType;
         if (musicId !== undefined && musicId !== null) body.musicId = musicId;
         if (musicUrl) body.musicUrl = musicUrl;
+        if (videoUrl) body.videoUrl = videoUrl;
         if (audio) body.audio = audio;
         if (title) body.title = title;
         if (image) body.image = image;
@@ -2547,7 +2575,7 @@ if (cfg.social?.tools?.sendRich !== false) {
 if (cfg.social?.tools?.musicSearch !== false) {
   registerTool(
     'qq_music_search',
-    'Search songs (overseas-reachable NetEase music.163.com / QQ Music c.y.qq.com); returns platform/title/artist/album/link/cover per song (NetEase covers are resolved to https + a 300x300 thumbnail, so they load on mobile too). TO SHARE A SONG: pick a result and call qq_send_rich with ONLY {type:"music", musicType:"163", musicId:"<the NetEase id>"} - the bridge resolves the fields and builds the card; if the card cannot be sent it automatically sends the official song link instead and the result says music.card=link. So never hand-write card JSON or cover URLs, and never send both the card and the link for the same song. QQ Music results (platform=qqmusic) are shared as a normal text link - QQ renders that card itself.',
+    'Search songs (overseas-reachable NetEase music.163.com / QQ Music c.y.qq.com); returns platform/title/artist/album/link/cover per song (NetEase covers are resolved to https + a 300x300 thumbnail, so they load on mobile too). TO SHARE A SONG: pick a result and call qq_send_rich with ONLY {type:"music", musicType:"163", musicId:"<the NetEase id>"} - the bridge resolves the fields and builds the card; if the card cannot be sent it automatically sends the official song link instead and the result says music.card=link. So never hand-write card JSON or cover URLs, and never send both the card and the link for the same song. QQ Music results (platform=qqmusic) are shared with qq_send_rich {type:"music", musicType:"qq", musicId:"<the id>", title:"<the title>", content:"<the artist>"} — the bridge resolves the playable link and builds the card itself, and falls back to the song link if it cannot.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
@@ -2563,6 +2591,265 @@ if (cfg.social?.tools?.musicSearch !== false) {
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `搜索音乐失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// ── 视频：看链接 / 搜视频 / 发视频卡片（bridge 侧解析，模型不碰卡片字段）──
+if (cfg.social?.tools?.videoSearch !== false) {
+  registerTool(
+    'qq_video_parse',
+    'Look up ONE video link (read-only, no sending): returns platform / title / uploader / duration / play count / cover / description for bilibili (https://www.bilibili.com/video/BV..., https://b23.tv/xxx, or a bare BV id) and douyin (https://v.douyin.com/xxx) links. CALL THIS whenever someone drops a video link or asks "这个视频讲了啥 / 看看这个 / 这什么视频" - never guess from the URL alone. When it returns degraded:true (douyin pages are JS-rendered and signed, so the title/cover may be unavailable), just say you cannot see the content instead of inventing it. To actually SHARE a video into the chat afterwards, call qq_send_rich with type=video + videoUrl (do not paste the link as text if a card is wanted).',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      url: z.string().describe('The video link, or a bare BV id like BV1xx411c7mD'),
+    },
+    async ({ key, token, url }) => {
+      try {
+        const q = new URLSearchParams({ key, url: String(url ?? '') });
+        const data = await agentApi(`/api/social/video-parse?${q.toString()}`, { headers: { 'x-agent-token': token }, timeoutMs: 30000 });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `视频解析失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_video_search',
+    'Search bilibili videos by keyword (read-only): returns bvid / title / uploader / duration / play count / cover / link per hit. Use it to find a specific video to share, or to answer "帮我找个关于X的视频". To send one of the hits, call qq_send_rich with type=video + videoUrl="<the link or bvid from the result>" - the bridge builds the card, so never hand-write title/cover.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      query: z.string().describe('Search keyword'),
+      limit: z.number().optional().describe('How many results, default 8, max 20'),
+    },
+    async ({ key, token, query, limit }) => {
+      try {
+        const q = new URLSearchParams({ key, q: String(query ?? '') });
+        if (limit) q.set('limit', String(limit));
+        const data = await agentApi(`/api/social/video-search?${q.toString()}`, { headers: { 'x-agent-token': token }, timeoutMs: 30000 });
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `搜索视频失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+/* ── 联网找图 / 发图（2026-09-18 主人要求："支持联网找图并发图"）──────────────
+ * 分工：qq_image_search 只查不发（把候选 URL 摆给模型看）；qq_send_image 负责真发。
+ * qq_send_image 可以只给 query（自己搜第一张就发），也可以给 imageUrl（直接发这个链接）。
+ * 下载走 safeFetchBuffer：禁内网/本机地址、限制 8MB、并且**验证确实是图片**（不是伪装成图片的 HTML）。
+ * 落盘落到 napcat 的 tmpDir（就是 NapCat 容器/进程能读到的那份），再走桥的统一发送端点。 */
+if (cfg.social?.tools?.imageSearch !== false) {
+  registerTool(
+    'qq_image_search',
+    'Search images on the web by keyword (read-only, sends nothing): returns candidate {title, imageUrl, thumbUrl, pageUrl, source} from Bing Images and Baidu Images. Use it when someone asks for a picture ("来张XX的图 / 找张图 / 发个XX的照片"), when a reply would land better with an image, or to look at what a thing looks like before describing it. THEN call qq_send_image with the SAME query (it will pick the top hit) or with a specific imageUrl from this list. Never invent image URLs.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      query: z.string().describe('What to look for, e.g. 蓝鲸 高清 / 猫娘 表情包 / deepseek logo'),
+      limit: z.number().optional().describe('How many candidates, default 8, max 20'),
+      source: z.enum(['bing', 'baidu']).optional().describe('Only use one engine (default: both)'),
+    },
+    async ({ query, limit, source }) => {
+      try {
+        const r = await searchImages(query, { limit, source });
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `找图失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_send_image',
+    'Find an image online and SEND it to a QQ session as a real picture. Pass EITHER query (the bridge searches for it and sends the best hit - the normal case: someone asks 来张XX的图) OR imageUrl (a URL you already got from qq_image_search). index picks which search hit to send (0 = first, default). The image is downloaded with SSRF protection, size-capped and verified to be a real image; nothing is written outside the NapCat temp dir. Prefer ONE image per request - do not spam several pictures in a row unless asked.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      query: z.string().optional().describe('Search keyword (used when imageUrl is not given)'),
+      imageUrl: z.string().optional().describe('Direct image URL (from qq_image_search). Takes precedence over query.'),
+      index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
+    },
+    async ({ key, token, query, imageUrl, index, replyToMessageId }) => {
+      try {
+        let url = String(imageUrl ?? '').trim();
+        let picked = null;
+        if (!url) {
+          const q = String(query ?? '').trim();
+          if (!q) return { content: [{ type: 'text', text: '要么给 query（关键词），要么给 imageUrl（图片直链）' }], isError: true };
+          const r = await searchImages(q, { limit: 10 });
+          picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
+          if (!picked) return { content: [{ type: 'text', text: `没搜到「${q}」的图片（失败源：${JSON.stringify(r.failures)}）。换个更具体的说法再试。` }] };
+          url = picked.imageUrl;
+        }
+
+        const got = await safeFetchBuffer(url, 8 * 1024 * 1024);
+        const buf = got.buffer;
+        const ext = buf[0] === 0x89 ? 'png'
+          : buf[0] === 0xff ? 'jpg'
+            : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
+              : 'webp';
+
+        const cfgImg = getConfig();
+        const tmpRoot = String(cfgImg?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
+        fs.mkdirSync(tmpRoot, { recursive: true });
+        const tmpPath = path.join(tmpRoot, `${Date.now()}-webimg-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+        fs.writeFileSync(tmpPath, buf);
+
+        const body = { key, messages: [], images: [tmpPath] };
+        const rid = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
+        if (rid) body.replyToMessageId = rid;
+        const data = await agentApi('/api/social/send-message', {
+          method: 'POST',
+          body: JSON.stringify(body),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 120000,
+        });
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              from: picked ? 'search' : 'url',
+              query: picked ? String(query) : undefined,
+              title: picked?.title || '',
+              imageUrl: got.url || url,
+              bytes: buf.length,
+              format: ext,
+              sent: data?.sent ?? null,
+              quoted: data?.quoted ?? null,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发图失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+/* ── Pixiv 找图 / 发图（2026-09-18 主人要求："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
+ * 走第三方平替站 x.pixigraph.xyz（官网要登录、机房 IP 常被挡），细节见 lib/pixiv.js 顶部注释。
+ * 分工与"联网找图"完全同构：qq_pixiv_search 只查不发，qq_send_pixiv 负责真发。
+ * 下载仍走 safeFetchBuffer（禁内网、限大小、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。 */
+if (cfg.social?.tools?.pixiv !== false) {
+  registerTool(
+    'qq_pixiv_search',
+    'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for a 插画/原图/同人图 of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ'),
+      page: z.number().optional().describe('Result page, default 1'),
+      limit: z.number().optional().describe('How many candidates, default 8, max 20'),
+    },
+    async ({ query, page, limit }) => {
+      try {
+        const r = await pixivSearch(query, { page, limit });
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `搜 Pixiv 失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  registerTool(
+    'qq_send_pixiv',
+    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give query (the bridge searches Pixiv and sends the best hit) or illustId (a Pixiv work id / pixiv.net link you already know). index picks which search hit to send (0 = first). size=master (default, 1200px, safe for QQ) or original (full size, may be several MB). Prefer ONE image per request. The bridge skips R-18/R-18G works.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      query: z.string().optional().describe('Search keyword (used when illustId is not given)'),
+      illustId: z.string().optional().describe('Pixiv work id or pixiv.net link; takes precedence over query'),
+      index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
+      size: z.enum(['master', 'original']).optional().describe('master (default, 1200px) or original (full size)'),
+      page: z.number().optional().describe('Which page of a multi-page work to send, 0-based, default 0'),
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
+    },
+    async ({ key, token, query, illustId, index, size, page, replyToMessageId }) => {
+      try {
+        let picked = null;
+        let work = null;
+        const wantId = parsePixivId(illustId);
+        if (wantId) {
+          // 只给了作品号：没有"按号取详情"的免登录接口，直接按号拼图片地址发（标题留空）
+          work = { id: wantId, title: '', author: '', thumbUrl: '', pageUrl: pixivPageUrl(wantId) };
+          picked = work;
+        } else {
+          const q = String(query ?? '').trim();
+          if (!q) return { content: [{ type: 'text', text: '要么给 query（关键词），要么给 illustId（Pixiv 作品号/链接）' }], isError: true };
+          const r = await pixivSearch(q, { limit: 10 });
+          picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
+          if (!picked) {
+            return { content: [{ type: 'text', text: `Pixiv 没搜到「${q}」的安全作品（已过滤 R-18 ${r.filtered} 条）。换个更具体的说法再试。` }] };
+          }
+          work = picked;
+        }
+
+        /* 候选逐个试：master1200 / 原图 jpg / png / 缩略图 —— 都走站内代理。
+         * 逐个试而不是只试一个，是因为原图扩展名不定、且大图可能超过体积上限。 */
+        const candidates = pixivImageCandidates(work, { page, size });
+        let got = null;
+        const tried = [];
+        for (const u of candidates) {
+          try {
+            got = await safeFetchBuffer(u, 8 * 1024 * 1024);
+            break;
+          } catch (e) {
+            tried.push(`${u.slice(0, 90)} → ${e?.message ?? e}`);
+          }
+        }
+        if (!got) {
+          return { content: [{ type: 'text', text: `Pixiv 图片下载失败（试了 ${candidates.length} 个地址）：\n${tried.join('\n')}` }], isError: true };
+        }
+
+        const buf = got.buffer;
+        const ext = buf[0] === 0x89 ? 'png'
+          : buf[0] === 0xff ? 'jpg'
+            : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
+              : 'webp';
+        const cfgPx = getConfig();
+        const tmpRoot = String(cfgPx?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
+        fs.mkdirSync(tmpRoot, { recursive: true });
+        const tmpPath = path.join(tmpRoot, `${Date.now()}-pixiv-${picked.id}.${ext}`);
+        fs.writeFileSync(tmpPath, buf);
+
+        const body = { key, messages: [], images: [tmpPath] };
+        const rid = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
+        if (rid) body.replyToMessageId = rid;
+        const data = await agentApi('/api/social/send-message', {
+          method: 'POST',
+          body: JSON.stringify(body),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 120000,
+        });
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              source: wantId ? 'illustId' : 'search',
+              id: picked.id,
+              title: picked.title || undefined,
+              author: picked.author || undefined,
+              tags: picked.tags?.length ? picked.tags : undefined,
+              pageUrl: picked.pageUrl,
+              size: String(size ?? 'master'),
+              bytes: buf.length,
+              format: ext,
+              sent: data?.sent ?? null,
+              quoted: data?.quoted ?? null,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发 Pixiv 图失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

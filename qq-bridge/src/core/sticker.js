@@ -22,6 +22,7 @@ import { enqueueSend } from './send-chain.js';
 import { getSocialState } from './social-state.js';
 import { fetchOneBotImage, fetchFaceMedia } from './media-pipe.js';
 import { napcatImageFileArg, resolveStickerTmpDir, rewriteToContainerPath } from '../lib/napcat-file.js';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 
 export let stickerEntries = loadStickerStore(STICKER_FILE);
 export let stickerSyncedAt = 0; // 上次从 NapCat 拉取收藏表情的时间戳（毫秒）
@@ -325,6 +326,13 @@ export async function sendSticker2(key, stickerRef, options = {}) {
         }
       }
       if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+        // EventChecker Failed = 已经发出去了（见 lib/onebot-delivery.js），别报失败让模型重发
+        const errText = onebotErrText(body);
+        if (isDeliveredUnconfirmed(errText)) {
+          log(`[sticker] ${action} 回执 EventChecker Failed —— 已发出（只是事件确认失败），按已送达处理`);
+          sendResolve(deliveredUnconfirmedResult());
+          return;
+        }
         const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
         throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
       }
@@ -390,6 +398,13 @@ export async function sendQqFace2(key, faceId, faceName, options = {}) {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+        // EventChecker Failed = 已经发出去了（见 lib/onebot-delivery.js），别报失败让模型重发
+        const errText = onebotErrText(body);
+        if (isDeliveredUnconfirmed(errText)) {
+          log(`[sticker] ${action} 回执 EventChecker Failed —— 已发出（只是事件确认失败），按已送达处理`);
+          sendResolve(deliveredUnconfirmedResult());
+          return;
+        }
         const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
         throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
       }

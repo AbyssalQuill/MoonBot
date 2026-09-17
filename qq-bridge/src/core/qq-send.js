@@ -15,6 +15,7 @@ import { recordAiTurnOutbound } from './turn-guard.js';
 import { resolveArtifactFaceId } from '../lib/qq-face-parse.js';
 import { writeStickerTmpFile } from './sticker.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 // 全语音发送模式（state/voice-config.json 的 send.allVoice）：回复正文改语音发出、失败退回文字。
 // 放在这里是因为本文件是**模型回复正文**的唯一出口（sendMessages → onebotSend）；
 // 开关关闭时 tryAllVoiceReply 是空转（不打日志、不发请求），老用户行为不变。
@@ -119,12 +120,67 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
 
 // ── P5-7 追加：onebotSend/sendMessages（自 bridge.js 抽取，1:1） ──────
 
+/* ── 引用怎么发（不要 reply 段 / 要 reply 段）─────────────────────────────────────
+ * 【2026-09-18 线上实测 · 终于钉住的引用根因】
+ * 主人报"引用有框、框下面没内容"，一直以为是 reply 段本身的问题。真因是**全语音模式**：
+ *   · 那个会话 `state/voice-config.json` 的 `send.allVoice=true` → 每条回复都先转语音发。
+ *   · 于是所有"带引用的回复"实际发出去的都是 `[{type:'reply'},{type:'record'}]`，
+ *     而 QQ 客户端**渲染不了"引用 + 语音气泡"这个组合** —— 引用框在，语音没了。
+ *   · 连之前那次"对照实验"也没逃掉：脚本打的是 `/api/social/send-message`，
+ *     而那条路**先试语音**，所以所谓"A 文字+引用"其实也是语音+引用。
+ * 读内核消息表可以逐条对上（线上 16:14–16:15 主人的实测）：
+ *   16:14:25 [reply+record] 16:15:14 [reply+record] 16:15:31 [reply+record]   ← 全是语音
+ * 日志也写着 `[voice] 全语音模式：已用语音发出 …`。
+ *
+ * 所以规矩是：**要引用的时候就用文字发**（主人原话）。语音只在没有引用时才用。
+ * 三种模式（config: `social.send.quoteMode`）：
+ *   · `native-text`（默认）：带引用的回复**跳过语音、按文字发**，并保留 QQ 原生 reply 段（引用框最好看）；
+ *   · `prefix`：连 reply 段都不用 —— 把被引内容当正文前缀（`> 原话\n我的回复`）发成**纯文字气泡**，
+ *     任何客户端都一定渲染得出来（原生引用万一在别的客户端也渲染不出来时用这条兜底）；
+ *   · `native`：老行为（引用时也允许走语音）；`off`：干脆不引用。 */
+function quoteModeOf() {
+  const m = String(cfgRef?.social?.send?.quoteMode ?? 'native-text').trim().toLowerCase();
+  return ['native-text', 'prefix', 'native', 'off'].includes(m) ? m : 'native-text';
+}
+
+/** 这种模式下，"带引用的这条"要不要强制走文字（而不是语音）？ */
+function quoteForcesText() {
+  const m = quoteModeOf();
+  return m === 'native-text' || m === 'prefix';
+}
+
+/** prefix 模式用：从会话记录里把被引用那条的原文捞出来（截断成一行）。 */
+function lookupQuotedText(key, rid) {
+  try {
+    const st = getSocialState(key);
+    const list = [
+      ...(Array.isArray(st?.recentMessages) ? st.recentMessages : []),
+      ...(Array.isArray(st?.unread) ? st.unread : []),
+    ];
+    const hit = list.find((m) => m && String(m.messageId ?? '') === String(rid));
+    const t = String(hit?.text ?? hit?.plain ?? hit?.tail ?? '')
+      .replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    return redactKnownTokensOnly(t).slice(0, 60);
+  } catch { return ''; }
+}
+
 export async function onebotSend(kind, id, message, replyToMessageId, atUserId = null, imagePath = null) {
   const segments = [];
-  if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
-    const rid = String(replyToMessageId).trim();
-    if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
-    segments.push({ type: 'reply', data: { id: rid } });
+  const replyId = (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '')
+    ? String(replyToMessageId).trim()
+    : '';
+  if (replyId && !/^-?[1-9]\d*$/.test(replyId)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
+  const qMode = quoteModeOf();
+  let quotePrefix = '';
+  if (replyId) {
+    if (qMode === 'prefix') {
+      const q = lookupQuotedText(`${kind}:${id}`, replyId);
+      if (q) quotePrefix = `> ${q}\n`;
+      else log(`[quote] prefix 模式：引用目标 ${replyId} 在会话记录里翻不到原文，这条按"不引用"发`);
+    } else if (qMode !== 'off') {
+      segments.push({ type: 'reply', data: { id: replyId } });
+    }
   }
   let atSegment = null;      // atUserId 推入的 at 段（自愈时要去掉的就是它）
   let atSpacer = null;       // 紧跟在它后面的那个占位空格段
@@ -160,6 +216,8 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     rawMessage = redactKnownTokensOnly(rawMessage0);
   }
   if (artifactFaceId != null) segments.push({ type: 'face', data: { id: artifactFaceId } });
+  // prefix 引用：把"被引用原文"当正文前缀一起发出去（纯文字气泡，不依赖 QQ 的 reply 段）
+  if (quotePrefix) rawMessage = quotePrefix + rawMessage;
   if (imagePath) {
     // 本地图片路径：gif 用本地路径才能播放动画；webp/png/jpg 直接发。
     // 本机部署（bridge 与 NapCat 同机，Windows/裸机）：把源图片复制到本机可写临时目录
@@ -255,9 +313,12 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
       throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}${code ? ` (${code})` : ''}${abort ? '（超时未重试：请求可能已送出，重试会导致重复发送）' : ''}`);
     }
   }
-  const errText = `${body?.errMsg ?? ''} ${body?.wording ?? ''} ${body?.retcode ?? ''}`;
+  const errText = onebotErrText(body);
+  /* 【2026-09-18】EventChecker Failed = 消息已进 QQ 内核（日志先有「发送 ->」），只是事件确认失败，
+   * 属于**已送达未确认**，重试只会真的发第二遍 —— 所以这类回执既不重试也不报错，直接按送达处理。 */
+  const deliveredUnconfirmed = isDeliveredUnconfirmed(errText);
   if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-    if (/1006514|网络连接异常|网络.*异常/i.test(errText)) {
+    if (!deliveredUnconfirmed && /1006514|网络连接异常|网络.*异常/i.test(errText)) {
       log(`[send] ${kind}:${id} 触发网络异常重试(1/1): ${body.retcode || body.wording || res.status}`);
       await sleep(2500);
       const again = await attemptSend();
@@ -314,6 +375,11 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     }
   }
   if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+    // 已送达未确认（EventChecker Failed）：不回错误、不重试。见 lib/onebot-delivery.js。
+    if (isDeliveredUnconfirmed(onebotErrText(body))) {
+      log(`[send] ${kind}:${id} 回执 EventChecker Failed —— QQ 内核已受理并发出（只是事件确认失败），按已送达处理、不重试`);
+      return deliveredUnconfirmedResult();
+    }
     const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
     throw new Error(`OneBot ${action} 失败: ${body.wording || body.errMsg || body.retcode || res.status}${hint}`);
   }
@@ -529,7 +595,13 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
          * 放在发送任务**里面**（而不是函数开头）的原因：语音要沿用同一套节奏、同一个串行链，
          * 也要沿用 console-server 在调用前就检查/预占好的发送频率额度（那里在 sendMessages 之前）。
          * 开关关闭时 tryAllVoiceReply 直接返回 off（不打日志、不发请求），老用户完全无感。 */
-        const spoken = img ? '' : speakableForVoice(msg);
+        /* 【2026-09-18 修「引用有框、框下面没内容」】这一条带引用时**不走语音**。
+         * 根因：QQ 渲染不了 `[{reply},{record}]` 这个组合 —— 引用框在、语音没了；
+         * 而全语音模式下每条回复都先转语音，所以"带引用的回复"永远是这个坏组合（详见 quoteModeOf 注释）。
+         * 主人定稿：「改成引用的时候发文字」。spoken='' 就是本文件里"这条别用语音"的既有写法。 */
+        const quoteWantsText = !!useReply && quoteForcesText();
+        const spoken = (img || quoteWantsText) ? '' : speakableForVoice(msg);
+        if (quoteWantsText) log(`[quote] ${key} 这条带引用 → 不走语音、按文字发（quoteMode=${quoteModeOf()}）`);
         const voiceOut = await tryAllVoiceReply(key, spoken, { replyToMessageId: useReply, hasMedia: !!img });
         if (voiceOut.ok) {
           // 与模型自己调 qq_send_voice 的记录格式保持一致（见 console-server `/api/voice/send`）：

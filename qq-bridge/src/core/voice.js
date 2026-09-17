@@ -27,6 +27,7 @@ import { STATE_DIR } from '../lib/paths.js';
 import { log } from '../lib/log.js';
 import { napcatImageFileArg, resolveStickerTmpDir } from '../lib/napcat-file.js';
 import { readJsonSafe, atomicWriteJson } from '../lib/json-fs.js';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 
 const VOICE_CFG_FILE = path.join(STATE_DIR, 'voice-config.json');
 const VOICE_LIB_FILE = path.join(STATE_DIR, 'voice-voices.json');
@@ -374,6 +375,8 @@ export async function synthesize({
   // 内置音色 id 发给服务端 → 400 Unknown voice（可用音色只有那 9 个内置的）。
   // 现在统一在合成入口解析：设计型改走 design（用它的描述），复刻型改走 clone（读它的样本）。
   let resolvedVoice = String(voice || '').trim();
+  // 【2026-09-18】本音色是从音色库里的**描述型自建音色**解析来的，记一下 —— 合成成功后要把它冻结
+  let designRec = null;
   if (m === 'tts') {
     const wanted = resolvedVoice || String(cfg.defaultVoice ?? '').trim();
     if (wanted && !BUILTIN_VOICES.some((v) => v.id === wanted)) {
@@ -383,9 +386,18 @@ export async function synthesize({
         wantSample = fs.readFileSync(hit.samplePath).toString('base64');
         resolvedVoice = '';
       } else if (hit?.kind === 'design' && hit.description) {
-        m = 'design';
-        wantDesc = hit.description;
-        resolvedVoice = '';
+        // 【2026-09-18】冻结过就按 clone 走同一个锚点（音色才稳），没冻结才现设计
+        const frozen = frozenSampleOf(hit);
+        if (frozen) {
+          m = 'clone';
+          wantSample = fs.readFileSync(frozen).toString('base64');
+          resolvedVoice = '';
+        } else {
+          m = 'design';
+          wantDesc = hit.description;
+          resolvedVoice = '';
+          designRec = hit;
+        }
       } else if (/^(design|clone)-/i.test(wanted)) {
         // 以我们自己的自建音色 id 前缀开头却查不到 → 多半是音色被删了，给一句人话而不是 400
         throw new Error(`默认音色「${wanted}」在音色库里已经不存在了（可能刚被删除）：请到管理端「语音」页重新选一个默认音色`);
@@ -442,6 +454,11 @@ export async function synthesize({
   const buf = Buffer.from(b64, 'base64');
   if (!buf.length) throw new Error('语音服务返回的音频为空');
   fs.writeFileSync(filePath, buf);
+  /* 【2026-09-18 修「音色小幅漂移」】第一次按描述设计出来的音色，立刻把这段音频冻成参考样本，
+   * 之后每次合成都会走 clone 复用同一个锚点 —— 否则每次都是"重新设计一个音色"，必然轻微漂移。
+   * 放在这里（而不是只放在 synthesizeWithSavedVoice）是因为全语音模式走的是 synthesize({text,cfg})
+   * 这条直路，冻结必须在合成入口就发生。 */
+  if (designRec) freezeDesignVoice(designRec, filePath, log);
   bumpUsage({ chars: clean.length, calls: 1 });
   pruneCache(dir, Math.max(20, Number(cfg.maxCacheFiles) || 300));
   const ms = Date.now() - t0;
@@ -622,7 +639,58 @@ export function deleteCustomVoice(id) {
   return { ok: true };
 }
 
-/** 用自定义音色合成：复刻型读取样本 base64 走 clone；描述型走 design */
+/* ── 【2026-09-18 修「每次发送的语音音色有小幅漂移」】────────────────────────────
+ * 根因（子代理复核过代码链路）：
+ *   · `design`（文字设计）型音色是**每次调用现设计一个音色** —— 同一段描述两次合成，
+ *     服务端内部有随机性，音色就会轻微漂移。而主人的默认音色正是自建 design 音色，
+ *     全语音模式下每条回复都重新设计一次，漂移最明显。
+ *   · `cacheKeyFor()` 把 `text` 也算进 key，所以只有"同一句话"才命中缓存，换个说法必然重新合成。
+ *   · `clone`（音频复刻）有参考音频当锚点，天然稳得多。
+ *
+ * 修法：**把 design 音色"冻住"** —— 第一次合成成功后，把那段音频留作参考样本
+ * （`frozenSamplePath`），之后每次都按 clone 走同一个锚点。等于"一次设计、终身复用"，音色就稳了。
+ * 描述被改过（hash 对不上）或样本文件丢了，就自动忽略冻结、重新设计一次。
+ * 这是最小改动：不动合成接口、不动缓存 key 的语义，只加一个"锚点"。
+ */
+function descHashOf(desc) {
+  return crypto.createHash('sha1').update(String(desc ?? '')).digest('hex').slice(0, 16);
+}
+
+/** 取某个自建音色当前可用的"冻结样本"（没有/失效就返回 null） */
+function frozenSampleOf(v) {
+  try {
+    if (!v || v.kind !== 'design') return null;
+    const p = String(v.frozenSamplePath ?? '').trim();
+    if (!p || !fs.existsSync(p)) return null;
+    if (String(v.frozenDescHash ?? '') !== descHashOf(v.description)) return null;
+    return p;
+  } catch { return null; }
+}
+
+/** 把一次 design 合成的音频冻成该音色的参考样本（音色锚点）；失败只记日志，不影响本次合成 */
+function freezeDesignVoice(rec, audioPath, logFn = log) {
+  try {
+    if (!rec?.id || !audioPath || !fs.existsSync(audioPath)) return false;
+    const ext = path.extname(audioPath).replace(/^\./, '') || 'mp3';
+    const frozenPath = path.join(sampleDir(), `frozen-${rec.id}.${ext}`);
+    fs.copyFileSync(audioPath, frozenPath);
+    // 重新读库再写，避免覆盖期间别处的改动
+    const lib = loadVoiceLib();
+    const target = lib.voices.find((x) => x.id === rec.id);
+    if (!target) return false;
+    target.frozenSamplePath = frozenPath;
+    target.frozenDescHash = descHashOf(target.description);
+    target.frozenAt = new Date().toISOString();
+    atomicWriteJson(VOICE_LIB_FILE, lib);
+    logFn?.(`[voice] 音色「${target.name}」已冻结参考样本 —— 之后每次都用它当锚点，音色不会再漂`);
+    return true;
+  } catch (e) {
+    logFn?.(`[voice] 冻结参考样本失败（不影响本次合成，下次还会重新设计）：${e?.message ?? e}`);
+    return false;
+  }
+}
+
+/** 用自定义音色合成：**优先用冻结样本走 clone（音色稳定）**，没有才回退 design，并把结果冻下来 */
 export async function synthesizeWithSavedVoice(text, voiceId, { style = '', format = '' } = {}) {
   const lib = loadVoiceLib();
   const v = lib.voices.find((x) => x.id === String(voiceId ?? ''));
@@ -634,8 +702,51 @@ export async function synthesizeWithSavedVoice(text, voiceId, { style = '', form
     const r = await synthesize({ text, mode: 'clone', sampleBase64: sample, style, format });
     return { ...r, voiceName: v.name };
   }
+
+  // design 型：先看有没有可用的冻结样本
+  const frozen = frozenSampleOf(v);
+  if (frozen) {
+    const r = await synthesize({ text, mode: 'clone', sampleBase64: fs.readFileSync(frozen).toString('base64'), style, format });
+    return { ...r, voiceName: v.name, frozen: true };
+  }
+
+  // 第一次：按描述设计，成功后立刻把结果冻成参考样本（下次起就走上面那条 clone 路径）
   const r = await synthesize({ text, mode: 'design', description: v.description, style, format });
-  return { ...r, voiceName: v.name };
+  try {
+    if (r?.filePath && fs.existsSync(r.filePath)) {
+      const ext = path.extname(r.filePath).replace(/^\./, '') || 'mp3';
+      const frozenPath = path.join(sampleDir(), `frozen-${v.id}.${ext}`);
+      fs.copyFileSync(r.filePath, frozenPath);
+      // 重新读一遍库再写，避免覆盖期间别处的改动
+      const lib2 = loadVoiceLib();
+      const rec = lib2.voices.find((x) => x.id === v.id);
+      if (rec) {
+        rec.frozenSamplePath = frozenPath;
+        rec.frozenDescHash = descHashOf(rec.description);
+        rec.frozenAt = new Date().toISOString();
+        atomicWriteJson(VOICE_LIB_FILE, lib2);
+        log(`[voice] 音色「${rec.name}」已冻结参考样本（${frozenPath}）—— 之后每次都用它当锚点，音色不会再漂`);
+      }
+    }
+  } catch (e) {
+    // 冻结失败不影响这次合成（只是下次还会重新设计）
+    log(`[voice] 冻结参考样本失败（不影响本次合成）：${e?.message ?? e}`);
+  }
+  return { ...r, voiceName: v.name, frozen: false };
+}
+
+/** 手动解冻：删掉冻结样本，下次合成会重新设计一次（管理端"重新设计音色"用得上） */
+export function unfreezeVoice(id) {
+  const lib = loadVoiceLib();
+  const v = lib.voices.find((x) => x.id === String(id ?? ''));
+  if (!v) throw new Error('音色不存在');
+  if (v.frozenSamplePath) { try { fs.unlinkSync(v.frozenSamplePath); } catch { /* ignore */ } }
+  delete v.frozenSamplePath;
+  delete v.frozenDescHash;
+  delete v.frozenAt;
+  atomicWriteJson(VOICE_LIB_FILE, lib);
+  log(`[voice] 音色「${v.name}」已解冻，下次合成会重新设计音色`);
+  return { ok: true };
 }
 
 // ── 全语音发送模式（voice-config.json 的 send.allVoice）────────────────────────
@@ -818,10 +929,19 @@ export async function sendVoiceToOneBot(key, filePath, { replyToMessageId = null
   // 换不出去就退回 base64:// —— 与图片/表情走的是同一套逻辑，避免各写一份。
   const fileArg = napcatImageFileArg(p, cfgRef);
   const segments = [];
+  /* 【2026-09-18 修「引用有框、框下面没内容」】语音**不带 reply 段**。
+   * 实测（线上 16:14–16:15，全语音模式）：QQ 渲染不了 `[{type:'reply'},{type:'record'}]` ——
+   * 引用框在、语音没了；内核消息表里那几条也正是 `[reply+record]`。
+   * 只有把 `social.send.quoteMode` 显式设成 `native`（老行为）才保留这个组合。 */
+  const quoteMode = String(cfgRef?.social?.send?.quoteMode ?? 'native-text').trim().toLowerCase();
   if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
     const rid = String(replyToMessageId).trim();
     if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数');
-    segments.push({ type: 'reply', data: { id: rid } });
+    if (quoteMode === 'native') {
+      segments.push({ type: 'reply', data: { id: rid } });
+    } else {
+      log(`[voice] ${key} 这条要引用 ${rid} 但发的是语音 —— 丢弃引用段（QQ 渲染不了"引用+语音"，会变成空气泡）；要带引用请按文字发（quoteMode=${quoteMode}）`);
+    }
   }
   const recordSeg = { type: 'record', data: { file: fileArg } };
   segments.push(recordSeg);
@@ -829,19 +949,29 @@ export async function sendVoiceToOneBot(key, filePath, { replyToMessageId = null
   const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
 
   let { res, body } = await onebotPost(action, build());
-  const errText = `${body?.wording ?? ''} ${body?.errMsg ?? ''} ${body?.message ?? ''}`;
+  let errText = onebotErrText(body);
   if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) {
     if (/文件处理失败|识别URL失败|ENOENT|no such file|语音|record/i.test(errText) && !/^base64:\/\//i.test(String(recordSeg.data.file))) {
       try {
         recordSeg.data.file = `base64://${fs.readFileSync(p).toString('base64')}`;
         log(`[voice] NapCat 读不到语音路径（${shortBody(errText).slice(0, 60)}），改用 base64 重发一次`);
         ({ res, body } = await onebotPost(action, build()));
+        errText = onebotErrText(body);
       } catch (e) {
         log(`[voice] base64 兜底重发失败：${e?.message ?? e}`);
       }
     }
   }
   if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) {
+    /* 【2026-09-18 线上实测】EventChecker Failed = 语音**已经发出去**了。
+     * 旧代码在这里抛错 → sendMessages 判定"语音发送失败"→ 原地退回文字再发一遍，
+     * 于是每条回复都变成"语音 + 文字"两份。现在按已送达处理。
+     * 详见 lib/onebot-delivery.js。 */
+    if (isDeliveredUnconfirmed(errText)) {
+      const bytes = fs.statSync(p).size;
+      log(`[voice] 回执 EventChecker Failed —— 语音已发出（只是事件确认失败），按已送达处理：${path.basename(p)}（${fmt}）`);
+      return { ok: true, messageId: deliveredUnconfirmedResult().messageId, unconfirmed: true, bytes, format: fmt };
+    }
     throw new Error(`发送语音失败：${body?.wording || body?.errMsg || body?.message || body?.retcode || res.status}`);
   }
   const messageId = body?.data?.message_id ?? body?.data?.messageId ?? null;

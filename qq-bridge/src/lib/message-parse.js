@@ -53,6 +53,8 @@ export async function segmentsToText(segments, options = {}) {
       case 'json': {
         // 富文本卡片（网易云音乐/B站/链接分享/群聊邀请/个人名片等）：解析出可读内容
         const cardText = parseJsonCardText(d.data ?? d.content ?? '');
+        // 【2026-09-18】顺手把原始卡片 JSON 存下来（取证用，见 noteIncomingCard 注释）
+        try { noteIncomingCard(seg, cardText); } catch { /* ignore */ }
         out.push(cardText ? `[${cardText}]` : '[卡片消息]');
         break;
       }
@@ -118,7 +120,93 @@ export async function segmentsToText(segments, options = {}) {
 }
 
 // 解析 QQ 富文本卡片（json 消息段）为可读文本。
-// 覆盖：网易云音乐卡片、B站卡片、链接分享、群聊邀请、其他通用卡片。
+// 覆盖：小程序（miniapp）卡片、图文/位置卡片、音乐卡片、链接分享、群聊邀请、其他通用卡片。
+//
+// 【为什么改成"按字段名扫全部子对象"——三张线上真卡踩出来的坑】
+// 1) 不能按 app 写死，也不能只扫 meta 的第一个子对象：子对象名五花八门
+//    （小程序卡是 detail_1、图文/位置卡是 news、音乐卡是 music、还有 multi_1…），
+//    所以下面遍历 meta 下**所有**子对象，按“字段名语义”分桶收集后再按优先级挑。
+// 2) 小程序卡（app=com.tencent.miniapp_01，meta.detail_1）里 `title` 是**应用名**（"哔哩哔哩"），
+//    真正的内容标题在 `desc`（视频标题）。照通用规则把 title 当标题，模型就只能看到应用名。
+// 3) 同一张卡里 `url` 是 QQ 服务端的 hash 短链（m.q.qq.com/a/s/93777ccbcc6d9423b5670af29890d82d），
+//    模型既打不开也看不懂，纯噪声；真正能点开的是 `qqdocurl`（https://b23.tv/WZVnINP）。
+//    所以链接按 qqdocurl > jumpUrl > url > href 取，并显式丢掉 m.q.qq.com/a/s/ 这类 hash 短链。
+// 4) 封面在 `preview`；但只有“卡片形态”（小程序卡）才把封面写进正文，
+//    否则 icon/tagIcon 这类应用小图标会混进普通卡片的文案里变成噪声。
+/* 【2026-09-18 取证用】把收到的原始卡片 JSON 落一份盘。
+ *
+ * 为什么需要：主人要机器人发"B站那种卡片"，但手写的 structmsg/news 在 QQ 上显示成
+ * "该消息类型暂不支持查看" —— 我们**没有**真卡的原始 JSON 可参照（桥只存解析后的文本，
+ * 日志里也没有）。而主人自己从 B 站分享进 QQ 的那张卡是**真卡**，它的 Ark JSON 就是标准答案。
+ * 这里把每张收到的卡片原样追加到 state/incoming-cards.jsonl（一行一条 JSON，含时间/来源/原始段），
+ * 之后照它复刻即可。纯取证，不参与任何解析逻辑，失败也不影响消息处理。 */
+function noteIncomingCard(rawSeg, parsedText) {
+  try {
+    const dir = path.join(process.cwd(), 'state');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'incoming-cards.jsonl');
+    fs.appendFileSync(file, JSON.stringify({
+      at: new Date().toISOString(),
+      type: rawSeg?.type ?? '',
+      parsed: String(parsedText ?? '').slice(0, 300),
+      raw: rawSeg?.data ?? null,
+    }) + '\n');
+    const all = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    if (all.length > 200) fs.writeFileSync(file, all.slice(-200).join('\n') + '\n');
+  } catch { /* 取证失败绝不能影响消息处理 */ }
+}
+
+// ── 卡片字段的语义分组：只认字段名、不认 app，这样没见过的卡片也能读 ──────────
+// 为什么用“集合 + 优先级表”而不是 `m.title ?? m.desc ?? …`：
+// 未知卡片里同一个字段名可能出现在多个子对象（detail_1 / detail_2 / news…），
+// 先全部收进桶里，再由下面的优先级规则挑，能同时做到“通用”和“可控”。
+const CARD_TITLE_FIELDS = new Set(['title', 'name', 'songname', 'worktitle']);
+const CARD_DESC_FIELDS = new Set(['desc', 'content', 'summary', 'artist', 'singer']);
+const CARD_SOURCE_FIELDS = new Set(['tag', 'sourcename', 'appname']);
+const CARD_IMAGE_FIELDS = new Set(['preview', 'icon', 'tagicon', 'cover', 'picurl']);
+// 链接优先级（从高到低）：qqdocurl 是分享方可控的真链，jumpUrl 次之，url/href 常是 QQ 中转。
+const CARD_LINK_FIELDS = ['qqdocurl', 'jumpurl', 'url', 'href'];
+// 封面优先级：preview 才是 QQ 卡片约定的封面，icon/tagIcon 只是应用小图标。
+const CARD_COVER_ORDER = ['preview', 'cover', 'picurl', 'icon', 'tagicon'];
+
+// QQ 服务端 hash 短链（https://m.q.qq.com/a/s/93777c…，真卡里也常给成不带协议的 m.q.qq.com/a/s/…）。
+// 为什么要判定它：这种链接对模型完全无信息量（只有一串 hash），还会盖住真正的可点链接，
+// 所以进桶前就丢掉；真的没有别的链接时，宁可正文里不出现链接。
+function isQqHashShortLink(value) {
+  return /^(?:https?:\/\/)?m\.q\.qq\.com\/a\/s\//i.test(String(value ?? '').trim());
+}
+
+// 扫 meta 下所有子对象，把标量字段按语义分桶。
+// 只收标量：嵌套对象（如 miniapp 的 detail_1.host = {uin,nick}）里是分享者信息，不是卡片内容。
+function collectCardFields(meta) {
+  const found = { title: [], desc: [], source: [], image: [], otherUrl: [] };
+  const linkByField = new Map(); // 小写字段名 -> 值（同名字段取第一次出现的）
+  for (const key of Object.keys(meta ?? {})) {
+    const sub = meta[key];
+    if (!sub || typeof sub !== 'object' || Array.isArray(sub)) continue;
+    for (const field of Object.keys(sub)) {
+      const raw = sub[field];
+      if (raw == null || typeof raw === 'object') continue;
+      const value = String(raw).trim();
+      if (!value) continue;
+      const f = field.toLowerCase();
+      if (CARD_TITLE_FIELDS.has(f)) { found.title.push(value); continue; }
+      if (CARD_DESC_FIELDS.has(f)) { found.desc.push(value); continue; }
+      if (CARD_SOURCE_FIELDS.has(f)) { found.source.push(value); continue; }
+      if (CARD_IMAGE_FIELDS.has(f)) { found.image.push([f, value]); continue; }
+      if (CARD_LINK_FIELDS.includes(f)) {
+        if (isQqHashShortLink(value)) continue;
+        if (!linkByField.has(f)) linkByField.set(f, value);
+        continue;
+      }
+      // 兜底：musicUrl / shareUrl / docUrl 之类任何以 url 结尾的字段，
+      // 优先级排在四个已知链接字段之后（所以先单独存，最后才用）。
+      if (/url$/.test(f) && !isQqHashShortLink(value)) found.otherUrl.push(value);
+    }
+  }
+  return { found, linkByField };
+}
+
 export function parseJsonCardText(jsonData) {
   let data = null;
   if (typeof jsonData === 'string') {
@@ -131,26 +219,67 @@ export function parseJsonCardText(jsonData) {
   const prompt = String(data.prompt ?? '').trim();
   const desc = String(data.desc ?? '').trim();
   const meta = data.meta && typeof data.meta === 'object' ? data.meta : {};
-  let title = '';
-  let sub = '';
+
+  // 1) 收齐 meta 下所有子对象的字段（见文件头注释第 1 条）
+  const { found, linkByField } = collectCardFields(meta);
+
+  // 2) 链接：qqdocurl > jumpUrl > url > href（hash 短链已在 collectCardFields 里丢掉），
+  //    四个已知字段都没有时才回落到 musicUrl/shareUrl 之类的兜底字段。
   let url = '';
-  for (const key of Object.keys(meta)) {
-    const m = meta[key];
-    if (!m || typeof m !== 'object') continue;
-    if (!title) title = String(m.title ?? m.name ?? m.songName ?? '').trim();
-    if (!sub) sub = String(m.desc ?? m.content ?? m.summary ?? m.artist ?? '').trim();
-    if (!url) url = String(m.jumpUrl ?? m.url ?? m.href ?? '').trim();
-    if (title && sub && url) break;
+  for (const field of CARD_LINK_FIELDS) {
+    if (linkByField.has(field)) { url = linkByField.get(field); break; }
   }
-  const hint = `${prompt} ${app} ${title} ${sub}`;
+  if (!url) url = found.otherUrl[0] ?? '';
+
+  // 3) 封面：preview 优先于 icon/tagIcon（后者是应用小图标）
+  let cover = '';
+  for (const field of CARD_COVER_ORDER) {
+    const hit = found.image.find(([k]) => k === field);
+    if (hit) { cover = hit[1]; break; }
+  }
+
+  // 4) 小程序卡（miniapp 模板）：title=应用名、desc=真标题，这里把两者摆正
+  //    —— 不做这一步，模型看到的就只是“哔哩哔哩”四个字，看不到视频标题。
+  const detail1 = meta.detail_1 && typeof meta.detail_1 === 'object' ? meta.detail_1 : null;
+  const isMiniApp = /miniapp/i.test(app) || /miniapp/i.test(String(data.view ?? '')) || !!(detail1 && detail1.appid);
+  const rawTitle = found.title[0] ?? '';
+  const rawDesc = found.desc[0] ?? '';
+  // 应用名挪到“来源”位（source），标题位留给真标题。
+  const source = found.source[0] || (isMiniApp ? rawTitle : '');
+  const title = isMiniApp ? (rawDesc || rawTitle) : rawTitle;
+  const sub = isMiniApp ? '' : rawDesc;
+  // 标签表匹配串：把真链接也算进去——很多卡片的 app 是模板名（com.tencent.tuwen.lua），
+  // 只能靠链接域名（b23.tv / y.qq.com / music.163.com）认出是哪家平台。
+  const hint = [prompt, app, title, sub, source].filter(Boolean).join(' ');
+  // 统一拼装：前缀 + 标题 + 描述 + 来源 + 链接（小程序卡额外带封面）——顺序沿用旧实现，
+  // 只是多了一个来源位，保证老卡片输出的词序不变。
+  const build = (prefix) => {
+    const parts = [];
+    const push = (value, soft = false) => {
+      const s = String(value ?? '').trim();
+      if (!s) return;
+      // 与前缀重复时跳过：小程序卡的应用名（“哔哩哔哩”）常常就等于平台标签，
+      // 不去重就会输出“哔哩哔哩 哔哩哔哩 <标题>”。
+      if (s.toLowerCase() === String(prefix).toLowerCase()) return;
+      // 软去重（来源类字段用）：来源“高德”已被标题/描述“高德地图”包含时不再重复。
+      if (soft && parts.some((p) => p.includes(s))) return;
+      if (!parts.includes(s)) parts.push(s);
+    };
+    push(title || desc || prompt);
+    push(sub);
+    push(desc);
+    // 来源放描述之后、链接之前：有平台标签前缀时它基本都等于前缀而被丢掉；
+    // 放在描述后面才能用“已被包含”判断吃掉高德这类重复（desc="高德地图"、tag="高德"）。
+    push(source, true);
+    push(url);
+    // 封面只在“卡片形态”（小程序卡）时进正文：模型才知道这条消息还带一张图；
+    // 普通卡片不带，避免把 icon/tagIcon 这类应用小图标混进消息正文。
+    if (isMiniApp) push(cover);
+    return [prefix, ...parts].filter(Boolean).join(' ').trim();
+  };
   // 群聊邀请卡片：提示语/应用名含邀请加入群聊
   if (/邀请.{0,6}加入群聊|邀请你.{0,6}群|加入群聊|group.?invite|joingroup|group_join/i.test(hint)) {
-    const parts = [];
-    if (title) parts.push(title);
-    if (sub && sub !== title) parts.push(sub);
-    if (desc && desc !== title && desc !== sub) parts.push(desc);
-    if (url) parts.push(url);
-    return `群聊邀请 ${parts.join(' ')}`.trim();
+    return build('群聊邀请');
   }
   // 常见卡片标签表：按 (应用名/内容特征, 标签) 匹配，命中即输出「标签 标题 描述 链接」
   const cardTagRules = [
@@ -178,23 +307,14 @@ export function parseJsonCardText(jsonData) {
     [/vote|投票/i, '投票'],
     [/bilibili|bili|哔哩/i, '哔哩哔哩'],
   ];
+  // 命中标签表：输出「平台标签 + 标题 + 描述 + 链接」。
+  // 标签表本身保持不变（网易云/QQ音乐等既有输出格式不能退化），只是上面的字段来源更准了。
   for (const [rule, label] of cardTagRules) {
-    if (rule.test(`${app} ${url} ${hint}`)) {
-      const parts = [title || desc || prompt || label];
-      if (sub && sub !== parts[0]) parts.push(sub);
-      if (desc && desc !== parts[0] && desc !== sub) parts.push(desc);
-      if (url) parts.push(url);
-      return `${label} ${parts.join(' ')}`.trim();
-    }
+    if (rule.test(`${app} ${url} ${hint}`)) return build(label);
   }
-  // 其他卡片：标题 + 描述 + 链接
-  const parts = [];
-  if (title) parts.push(title);
-  if (sub && sub !== title) parts.push(sub);
-  if (desc && desc !== title && desc !== sub) parts.push(desc);
-  if (url) parts.push(url);
-  if (parts.length) return `卡片 ${parts.join(' ')}`.trim();
-  if (prompt) return `卡片 ${prompt}`.trim();
+  // 其他卡片：标题 + 来源 + 描述 + 链接（没有可读字段时退回下面的老兜底）
+  if (title || sub || source || url || desc) return build('卡片');
+  if (prompt) return `卡片 ${prompt}`;
   return null;
 }
 

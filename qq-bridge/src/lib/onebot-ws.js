@@ -5,6 +5,7 @@
 // - 事件归一化：OneBot post_type → 既有桥接订阅接口
 //   （onPrivateMessage / onGroupMessage / onNotice('notify') / onNotice(fn) / onRequest('friend') / on('open'|'close'|'error')）。
 import { EventEmitter } from 'node:events';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult } from './onebot-delivery.js';
 
 const RECONNECT_BASE_MS = 1500;
 // 【2026-09-15 修「又不回复了：桥连不上 NapCat 却一直刷错误」】见 _scheduleReconnect 的调用点。
@@ -421,7 +422,15 @@ export class OneBotWsClient extends EventEmitter {
         return await this._raw(action, params);
       } catch (error) {
         const message = String(error?.message ?? error);
-        const transient = /无法获取用户信息|请检查是否已是好友|好友列表|user.?info|not ?found|EventChecker Failed|网络连接异常|rich media transfer failed/i.test(message);
+        /* 【2026-09-18 线上实测】`EventChecker Failed: NTEvent …/sendMsg`（通常带 1006514 网络连接异常）
+         * **不代表没发出去** —— NapCat 先记「发送 ->」再抛这个错，消息已进 QQ 内核并真的送达。
+         * 旧代码把它当瞬时错误，这里会重试 3 次（800/2000/5000ms）→ 每条消息实际发 4 份。
+         * 现在：按已送达处理，直接返回，不重试、不抛错。详见 lib/onebot-delivery.js。 */
+        if (isDeliveredUnconfirmed(message)) {
+          console.log(`[onebot-ws] ${action} 回执 EventChecker Failed —— 已送达（只是事件确认失败），不重试`);
+          return deliveredUnconfirmedResult();
+        }
+        const transient = /无法获取用户信息|请检查是否已是好友|好友列表|user.?info|not ?found|网络连接异常|rich media transfer failed/i.test(message);
         if (!transient || attempt >= delays.length) throw error;
         console.log(`[onebot-ws] ${action} 第 ${attempt + 1} 次失败（${message}），${delays[attempt]}ms 后重试`);
         await new Promise((r) => setTimeout(r, delays[attempt]));

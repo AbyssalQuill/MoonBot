@@ -108,10 +108,23 @@ function containerInfo() {
 /**
  * 探针：get_rkey。优先走 NapCat HTTP（3000），没配 httpUrl 时退回已连上的 OneBot WS。
  * 返回 { ok, detail }。ok=false 只代表"这一次没探通"，判定交给调用方做连续失败计数。
+ *
+ * 【2026-09-18 线上实测 · 必须加这道回退，否则会误重启 NapCat】
+ * 这台（QQ Linux 3.2.33-52892 + NapCat 4.18.28）上 `get_rkey` **恒定失败**：
+ *   {"status":"failed","retcode":200,"data":null,
+ *    "message":"Cannot read properties of undefined (reading 'rkeyList')"}
+ * 栈是 `pY.FetchRkey → y_e._handle → httpApiRequest` —— 是 NapCat 侧取 rkey 的实现炸了，
+ * **不代表 QQ 掉线**：同一时刻 `get_status` 返回 `{"online":true,"good":true}`，
+ * 收发消息、发表情、发卡片全部正常。
+ * 后果（实测）：守护连着 20+ 次判"探针失败"，达到阈值就 `重启容器 napcat`，
+ * 于是**一个假信号把好好的 QQ 反复重启** —— 而"掉线"正是主人最在意的问题。
+ * 所以：get_rkey 失败时**再看一眼 get_status**，只要 NapCat 说自己 online && good，
+ * 就当探针通过（detail 里写清楚"rkey 探针自身故障"），只有 get_status 也说不在线才算真失败。
  */
 export async function probeNapcatOnce() {
   const { httpUrl = '', accessToken = '' } = nap();
   const base = String(httpUrl || '').trim().replace(/\/+$/, '');
+  const rkeyFallback = /rkeyList/i;
   if (base) {
     try {
       const res = await fetch(`${base}/get_rkey`, {
@@ -122,9 +135,14 @@ export async function probeNapcatOnce() {
       });
       const j = await res.json().catch(() => null);
       if (j && j.status === 'ok' && Array.isArray(j.data) && j.data.length) return { ok: true, detail: `rkey ${j.data.length} 组` };
-      return { ok: false, detail: `HTTP ${res.status} ${JSON.stringify(j).slice(0, 160)}` };
+      const detail = `HTTP ${res.status} ${JSON.stringify(j).slice(0, 160)}`;
+      // rkey 探针自身故障 → 用 get_status 兜底判定登录态
+      if (rkeyFallback.test(detail)) return await probeStatusFallback(base, accessToken, detail);
+      return { ok: false, detail };
     } catch (error) {
-      return { ok: false, detail: `HTTP 探针异常：${error?.message ?? error}` };
+      const detail = `HTTP 探针异常：${error?.message ?? error}`;
+      if (rkeyFallback.test(detail)) return await probeStatusFallback(base, accessToken, detail);
+      return { ok: false, detail };
     }
   }
   if (typeof callAction === 'function') {
@@ -132,12 +150,41 @@ export async function probeNapcatOnce() {
       const r = await callAction('get_rkey', { count: 1 }, 12000);
       const data = r?.data ?? r;
       if (Array.isArray(data) && data.length) return { ok: true, detail: `rkey ${data.length} 组（WS）` };
-      return { ok: false, detail: `WS 返回：${JSON.stringify(r).slice(0, 160)}` };
+      const detail = `WS 返回：${JSON.stringify(r).slice(0, 160)}`;
+      if (rkeyFallback.test(detail)) return await probeStatusFallback('', accessToken, detail, true);
+      return { ok: false, detail };
     } catch (error) {
-      return { ok: false, detail: `WS 探针异常：${error?.message ?? error}` };
+      const detail = `WS 探针异常：${error?.message ?? error}`;
+      if (rkeyFallback.test(detail)) return await probeStatusFallback('', accessToken, detail, true);
+      return { ok: false, detail };
     }
   }
   return { ok: false, detail: '没配 napcat.httpUrl，也没有可用的 OneBot 连接，无法探活' };
+}
+
+/** get_rkey 自身故障时的兜底探针：只看 NapCat 自己报的 online/good。 */
+async function probeStatusFallback(base, accessToken, why, viaWs = false) {
+  try {
+    const call = viaWs
+      ? () => callAction('get_status', {}, 12000)
+      : async () => {
+          const r = await fetch(`${base}/get_status`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}) },
+            body: '{}',
+            signal: AbortSignal.timeout(12000)
+          });
+          return r.json().catch(() => null);
+        };
+    const j = await call();
+    const d = j?.data ?? j;
+    if (d && d.online === true && d.good === true) {
+      return { ok: true, detail: `rkey 探针自身故障（${String(why).slice(0, 60)}），但 get_status 报 online&&good —— 判为未掉线，不重启` };
+    }
+    return { ok: false, detail: `rkey 探针故障且 get_status 未报在线：${JSON.stringify(j).slice(0, 160)}` };
+  } catch (error) {
+    return { ok: false, detail: `rkey 探针故障，get_status 兜底也失败：${error?.message ?? error}` };
+  }
 }
 
 function exportQr() {

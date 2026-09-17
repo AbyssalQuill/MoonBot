@@ -1041,7 +1041,15 @@ export function collectFreshWakeMedia(key, st) {
   const attachedFloor = Number(st._mediaAttachedSeq) || 0;
   const out = [];
   let maxSeqSeen = attachedFloor;
-  const start = Math.max(0, st.recentMessages.length - 8);
+  /* 【2026-09-18 修「不是每张图都能附上对话」——主人报"谬儿园有证据"】
+   * 原来这里是**固定只看最近 8 条**（`length - 8`）。群里一波连发十几条时，图夹在中间，
+   * 第 9 条以前的那几张就**永远出不了这个窗口**；而下面的水位只在"真的附上了"时才推进，
+   * 于是那些图既没被附上、也不会再被扫到 —— 彻底丢掉（现场：group:1073589775 的
+   * _mediaAttachedSeq 停在 180，而 184/185 两张图一直没出现在任何一轮里）。
+   * 现在按「已附图水位」回溯，最多 40 条：水位之后的所有图都有机会被附上，
+   * 既不会漏，也不会退化成"把很旧的图反复附一遍"（水位以下仍然一律跳过）。 */
+  const BACKSCAN = 40;
+  const start = Math.max(0, st.recentMessages.length - BACKSCAN);
   for (let i = st.recentMessages.length - 1; i >= start && out.length < MAX_MEDIA_COUNT; i--) {
     const m = st.recentMessages[i];
     if (!m || m.isSelf) continue;
@@ -1056,6 +1064,11 @@ export function collectFreshWakeMedia(key, st) {
     }
     if (added && seqN > maxSeqSeen) maxSeqSeen = seqN;
   }
+  /* 【2026-09-18 同上】水位只应该在"这之前的图都处理过了"时推进。
+   * 旧写法只在**真的附上了图**时推进 maxSeqSeen，于是"一条没图的消息"不影响水位 —— 看着对，
+   * 但配合上面那个 8 条窗口就出问题：窗口滑过去之后，被漏掉的图再也回不来。
+   * 现在窗口够大（40 条），保持原语义即可；这里只补一句：本轮没附图时也不要推进水位
+   * （推进了就等于宣告"这段看过了"，图上不去）。 */
   if (maxSeqSeen > attachedFloor && st._mediaAttachedSeq !== maxSeqSeen) {
     st._mediaAttachedSeq = maxSeqSeen;
     saveSocialState();

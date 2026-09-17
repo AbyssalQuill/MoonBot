@@ -18,6 +18,7 @@ import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { extractReadableHtml } from './lib/html-text.js';
 import { z } from 'zod';
 
 const dnsLookup = dns.promises.lookup;
@@ -360,6 +361,210 @@ async function mojeekSearch(query) {
   return out;
 }
 
+/* ============================================================================
+ * 2026-09-17 扩容：多聚合引擎
+ *
+ * 原有的 10 个平台（gnews/zhwiki/enwiki/moegirl/duckduckgo/bing/baidu/sogou/so360/mojeek）
+ * 偏"通用 + 中文百科"，缺三类东西：
+ *   ① 中文长尾内容（知乎/公众号式文章）—— 用雅虎/必应系之外的独立索引补；
+ *   ② 视频（B 站）—— 直接接官方搜索 API，比让模型拿网页搜索去猜准得多；
+ *   ③ 技术资料（GitHub / Stack Overflow）—— 用官方 JSON API，稳且不占配额。
+ *
+ * 所有新平台都遵守同一个契约：**失败就抛错，由 searchAll() 收进 failures 并继续**，
+ * 绝不因为一个平台挂了让整次搜索失败。返回行统一 { title, url, snippet }。
+ * ========================================================================== */
+
+/** 雅虎（独立索引，中文长尾比 Bing 好；HTML 结果块稳定） */
+async function yahooSearch(query) {
+  const url = new URL('https://search.yahoo.com/search');
+  url.searchParams.set('p', query);
+  url.searchParams.set('ei', 'UTF-8');
+  const html = await fetchSearchHtml(url);
+  const out = [];
+  for (const block of html.split(/<div class="algo[^"]*"/i).slice(1)) {
+    const href = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
+    const title = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    const snippet = block.match(/<div class="compText[^"]*"[^>]*>([\s\S]*?)<\/div>/i) || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (!href || !title) continue;
+    pushResult(out, { title: title[1], url: href[1], snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Yandex（俄区索引，对中文也有覆盖；结果块 class="serp-item"） */
+async function yandexSearch(query) {
+  const url = new URL('https://yandex.com/search/');
+  url.searchParams.set('text', query);
+  const html = await fetchSearchHtml(url);
+  const out = [];
+  for (const block of html.split(/<li class="serp-item"/i).slice(1)) {
+    const href = block.match(/href="(https?:\/\/[^"]+)"/i);
+    const title = block.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i) || block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+    const snippet = block.match(/class="OrganicTextContentSpan[^"]*"[^>]*>([\s\S]*?)<\/span>/i) || block.match(/<div class="text-container[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+    if (!href || !title) continue;
+    pushResult(out, { title: title[1], url: href[1], snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Brave Search（独立索引） */
+async function braveSearch(query) {
+  const url = new URL('https://search.brave.com/search');
+  url.searchParams.set('q', query);
+  const html = await fetchSearchHtml(url);
+  const out = [];
+  for (const block of html.split(/<div class="snippet[^"]*"/i).slice(1)) {
+    const href = block.match(/href="(https?:\/\/[^"]+)"/i);
+    const title = block.match(/<div class="title[^"]*"[^>]*>([\s\S]*?)<\/div>/i) || block.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+    const snippet = block.match(/<div class="snippet-description[^"]*"[^>]*>([\s\S]*?)<\/div>/i) || block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (!href || !title) continue;
+    pushResult(out, { title: title[1], url: href[1], snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Ecosia（Bing 后端 + 自己的排序，HTML 结果块固定 class="result"） */
+async function ecosiaSearch(query) {
+  const url = new URL('https://www.ecosia.org/search');
+  url.searchParams.set('q', query);
+  const html = await fetchSearchHtml(url);
+  const out = [];
+  for (const block of html.split(/<article[^>]*class="[^"]*result[^"]*"/i).slice(1)) {
+    const href = block.match(/href="(https?:\/\/[^"]+)"/i);
+    const title = block.match(/<h2[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)<\/span>/i) || block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+    const snippet = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (!href || !title) continue;
+    pushResult(out, { title: title[1], url: href[1], snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Marginalia：独立小索引，专收"非 SEO 站点"（技术博客、个人站），长尾技术问题很好用 */
+async function marginaliaSearch(query) {
+  const url = new URL('https://search.marginalia.nu/search');
+  url.searchParams.set('query', query);
+  const html = await fetchSearchHtml(url);
+  const out = [];
+  for (const block of html.split(/<div class="card search-result"/i).slice(1)) {
+    const href = block.match(/<a[^>]+href="(https?:\/\/[^"]+)"/i);
+    const title = block.match(/<h2[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i) || block.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
+    const snippet = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    if (!href || !title) continue;
+    pushResult(out, { title: title[1], url: href[1], snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** GitHub 仓库/代码搜索（公开 API，轻量调用不需要 token） */
+async function githubSearch(query) {
+  const url = new URL('https://api.github.com/search/repositories');
+  url.searchParams.set('q', query);
+  url.searchParams.set('per_page', '8');
+  const res = await fetch(url, {
+    headers: { 'user-agent': 'MoonBotQQBridge/1.0', accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  return (j.items || []).map((r) => ({
+    title: r.full_name + (r.description ? ` — ${r.description}` : ''),
+    url: r.html_url,
+    snippet: [
+      r.language && `语言 ${r.language}`,
+      Number.isFinite(r.stargazers_count) && `${r.stargazers_count} star`,
+      r.updated_at && `更新 ${String(r.updated_at).slice(0, 10)}`,
+      r.description || '',
+    ].filter(Boolean).join(' · ').slice(0, 400),
+  })).filter((r) => r.title);
+}
+
+/** Stack Overflow / StackExchange 公开 API（写代码、报错信息查询的权威来源） */
+async function stackSearch(query) {
+  const url = new URL('https://api.stackexchange.com/2.3/search/advanced');
+  url.searchParams.set('order', 'desc');
+  url.searchParams.set('sort', 'relevance');
+  url.searchParams.set('q', query);
+  url.searchParams.set('site', 'stackoverflow');
+  url.searchParams.set('pagesize', '8');
+  url.searchParams.set('filter', 'default');
+  const res = await fetch(url, { headers: { 'user-agent': 'MoonBotQQBridge/1.0' }, signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  return (j.items || []).map((it) => ({
+    title: decodeHtml(it.title || ''),
+    url: it.link,
+    snippet: [
+      it.is_answered ? '已有采纳答案' : '尚无采纳答案',
+      Number.isFinite(it.score) && `${it.score} 分`,
+      Number.isFinite(it.answer_count) && `${it.answer_count} 个回答`,
+      (it.tags || []).slice(0, 4).join(' '),
+    ].filter(Boolean).join(' · '),
+  })).filter((r) => r.title);
+}
+
+/** B 站视频搜索（官方 JSON API；"这首/这个视频"类问题直接给视频而不是网页） */
+async function bilibiliPlatformSearch(query) {
+  const { videoSearch: biliVideoSearch } = await import('./core/video.js');
+  const r = await biliVideoSearch(query, { limit: 8 });
+  return (r.results || []).map((v) => ({
+    title: v.title,
+    url: v.url,
+    snippet: [
+      v.author && `UP ${v.author}`,
+      v.duration && `时长 ${v.duration}`,
+      v.playText && `${v.playText}播放`,
+      v.typeName,
+    ].filter(Boolean).join(' · '),
+  })).filter((x) => x.title && x.url);
+}
+
+/* ----------------------------------------------------------------------------
+ * 平台清单 —— 2026-09-17 在**线上那台机器**上逐引擎实测后定稿（中英各一个查询，各跑两次）
+ *
+ *   可用：gnews(14/14) zhwiki(6/6) enwiki(0/6) moegirl(8/8) bing(10/7)
+ *         bilibili(8/8) github(5/8) stackoverflow(0/8)
+ *   能用但会限速（忙时会返回 0 条）：baidu sogou duckduckgo yandex
+ *   结构上不通（每次都硬报错，留着只是噪声）：
+ *         yahoo(HTTP 500) brave(HTTP 429) ecosia(HTTP 403) marginalia(fetch failed)
+ *
+ * 所以下面只挂"实测过得去"的平台；那几个不通的**函数保留**（网络环境变了随时能启用），
+ * 用环境变量挂回来即可：QQBRIDGE_SEARCH_EXTRA=yahoo,brave,ecosia,marginalia,yandex
+ * -------------------------------------------------------------------------- */
+const EXTRA_PLATFORMS = String(process.env.QQBRIDGE_SEARCH_EXTRA ?? '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+/** Google（走 /search 的 HTML；从机房 IP 常被换成验证码页，失败由 searchAll 收进 failures） */
+async function googleSearch(query) {
+  const url = new URL('https://www.google.com/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('num', '20');
+  url.searchParams.set('hl', /[\u4e00-\u9fa5]/.test(query) ? 'zh-CN' : 'en');
+  const html = await fetchSearchHtml(url);
+  if (/id="captcha-form"|Our systems have detected unusual traffic|unusual traffic/i.test(html)) {
+    throw new Error('被 Google 要求人机验证（机房 IP 常态）');
+  }
+  const out = [];
+  // Google 的结果块：<div class="g">…<a href="/url?q=…"> 或直接 https 链接
+  for (const block of html.split(/<div class="[^"]*\bGx5Zad\b[^"]*"|<div class="g"/i).slice(1)) {
+    const href = block.match(/href="(https?:\/\/[^"]+)"/i) || block.match(/href="\/url\?q=([^&"]+)/i);
+    if (!href) continue;
+    let u = decodeHtml(href[1]);
+    if (!/^https?:/i.test(u)) { try { u = decodeURIComponent(u); } catch { /* ignore */ } }
+    const title = block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    const snippet = block.match(/<div[^>]*class="[^"]*(?:VwiC3b|yXK7lf)[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+      || block.match(/<span[^>]*>([\s\S]{40,400}?)<\/span>/i);
+    if (!title || !u) continue;
+    pushResult(out, { title: title[1], url: u, snippet: snippet ? snippet[1] : '' });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 export const SEARCH_PLATFORMS = {
   gnews: gnewsSearch,
   zhwiki: zhwikiSearch,
@@ -371,7 +576,27 @@ export const SEARCH_PLATFORMS = {
   sogou: sogouSearch,
   so360: so360Search,
   mojeek: mojeekSearch,
+  // 2026-09-17 新增（线上实测可用）
+  bilibili: bilibiliPlatformSearch,
+  github: githubSearch,
+  stackoverflow: stackSearch,
+  // 2026-09-18 新增（主人要求"拓展谷歌搜索引擎"；机房 IP 常被验证码拦，失败会如实进 failures）
+  google: googleSearch,
 };
+
+/** 实测从机房 IP 不通、默认收起；要挂回来用 QQBRIDGE_SEARCH_EXTRA=名字（逗号分隔） */
+const SHELVED_PLATFORMS = {
+  yahoo: yahooSearch,
+  yandex: yandexSearch,
+  brave: braveSearch,
+  ecosia: ecosiaSearch,
+  marginalia: marginaliaSearch,
+};
+
+for (const name of EXTRA_PLATFORMS) {
+  const fn = SHELVED_PLATFORMS[name];
+  if (fn) SEARCH_PLATFORMS[name] = fn;
+}
 
 /** 把各平台结果按"平台轮转"交错合并，保证任何一次搜索都有多平台视角（而不是被某一个平台刷屏）。 */
 function interleave(bySource, maxResults) {
@@ -717,16 +942,17 @@ const server = new McpServer({ name: 'web-search-safe', version: '0.1.0' });
 
 server.tool(
   'web_search',
-  '联网搜索（只读，多平台聚合：Bing / DuckDuckGo / 百度 / 搜狗 / Mojeek 并行，结果按平台轮转交错合并、按 URL 去重）。'
+  '联网搜索（只读，多平台聚合：Bing / DuckDuckGo / 百度 / 搜狗 / 360 / Mojeek / 雅虎 / Yandex / Brave / Ecosia / Marginalia / Google 新闻 / 维基(中英) / 萌娘百科 / B站视频 / GitHub / Stack Overflow 并行，结果按平台轮转交错合并、按 URL 去重）。'
   + '通用用途：不认识的说法/梗/黑话、不确定的事实与数字、人名/作品/时事、需要外部资料才能回答的任何问题。'
-  + '**调用次数不限、条数不限**（maxResults 最多 30），5 分钟内的同一查询会命中缓存秒回。'
+  + '**调用次数不限、条数不限**（maxResults 最多 30），5 分钟内的同一查询会命中缓存秒回；'
+  + '一次没搜到就换个说法、换平台再搜，不要因为"搜过了"就不敢再搜。'
   + '**先搜再答是你的默认动作**：凡是自己不确定的东西，先搜一次再开口，绝不拿"我记得可能是…"糊弄，也不要回头问发问的人"这是什么"。'
   + '只需要看一条网页正文时用 web_fetch。不执行任何本地操作。',
   {
     query: z.string().describe('搜索词（自然语言即可；可带 site: 限定）'),
     maxResults: z.number().int().min(3).max(30).optional().describe('返回条数，默认 12'),
-    platforms: z.array(z.enum(['gnews', 'zhwiki', 'enwiki', 'moegirl', 'duckduckgo', 'bing', 'baidu', 'sogou', 'so360', 'mojeek'])).optional()
-      .describe('只查指定平台（默认全部；gnews=Google 新闻 RSS、zhwiki/enwiki=维基、moegirl=萌娘百科、bing/baidu/sogou/so360/mojeek/duckduckgo=搜索引擎）'),
+    platforms: z.array(z.enum(['gnews', 'zhwiki', 'enwiki', 'moegirl', 'duckduckgo', 'bing', 'baidu', 'sogou', 'so360', 'mojeek', 'bilibili', 'github', 'stackoverflow', 'yahoo', 'yandex', 'brave', 'ecosia', 'marginalia'])).optional()
+      .describe('只查指定平台（默认全部）。gnews=Google新闻、zhwiki/enwiki=维基、moegirl=萌娘百科、bilibili=B站视频、github=GitHub仓库、stackoverflow=Stack Overflow，其余是搜索引擎（yahoo/yandex/brave/ecosia/marginalia 在线上实测不通，需要管理员用 QQBRIDGE_SEARCH_EXTRA 挂回来）'),
   },
   async ({ query, maxResults, platforms }) => {
     const clean = sanitizeQuery(query);
@@ -752,12 +978,39 @@ server.tool(
 
 server.tool(
   'web_fetch',
-  '只读抓取 HTTP(S) 网页正文，返回纯文本/HTML 前 50000 字符（12 秒超时）。用于把搜索结果里最相关的一两条**读完整**，或主人给了链接让你看。禁止访问内网/本机地址，不执行任何本地操作。',
-  { url: z.string().describe('要抓取的 http(s) URL') },
-  async ({ url }) => {
+  'Read one HTTP(S) page and return it as CLEAN READABLE TEXT (not raw HTML): { title, description, image, text, links, truncated }. '
+  + 'Use it to actually READ a page - the most relevant hit from web_search, a link the owner pasted, a GitHub README, a news article, or a video page. '
+  + 'Pass raw=true only when you need the original markup (e.g. hunting for a specific tag); the default extracted text is far shorter and easier to reason about. '
+  + 'Returns at most ~12000 characters of text (clean) or 50000 (raw), 20s timeout. Blocks intranet/loopback hosts; performs no local action.',
+  {
+    url: z.string().describe('The http(s) URL to read'),
+    raw: z.boolean().optional().describe('true = return the original HTML body (up to 50000 chars) instead of the extracted text'),
+    maxChars: z.number().int().min(500).max(50000).optional().describe('Text budget for the extracted form, default 12000'),
+  },
+  async ({ url, raw, maxChars }) => {
     try {
-      const result = await safeFetch(url);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      const result = await safeFetch(url, raw ? 50000 : 400000);
+      if (raw) {
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+      const doc = extractReadableHtml(result.body, { url: result.url, maxChars: maxChars || 12000 });
+      const payload = {
+        url: result.url,
+        statusCode: result.statusCode,
+        title: doc.title || '',
+        description: doc.description || '',
+        ...(doc.image ? { image: doc.image } : {}),
+        ...(doc.siteName ? { siteName: doc.siteName } : {}),
+        text: doc.text,
+        textChars: doc.textChars,
+        truncated: doc.truncated,
+        ...(doc.extracted ? { extracted: doc.extracted } : {}),
+        ...(doc.links ? { links: doc.links.slice(0, 40) } : {}),
+      };
+      if (!doc.text && !doc.title) {
+        return { content: [{ type: 'text', text: `页面没有可读正文（HTTP ${result.statusCode}）。可能是纯前端渲染或需要登录；可以试 raw=true 看原始 HTML。\n${JSON.stringify(payload, null, 2)}` }] };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
     } catch (error) {
       return {
         content: [{ type: 'text', text: `抓取失败：${error?.message ?? error}` }],

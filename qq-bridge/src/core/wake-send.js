@@ -40,6 +40,62 @@ export const TOPIC_WAKE_RE = /(?:\b(?:ai|gpt|deepseek|dsh|llm|aigc)\b|人工智�
 let cfgRef = null;
 let apiRef = null;
 let deliverRef = null;
+
+/* ── 会话轮换（rotateTurns）的判定与"回合忙时怎么办" ─────────────────────────────
+ * 【2026-09-19 修「会话轮换永远不触发、上下文一直堆」】
+ *
+ * 症状：线上 `private:3305269183` 的 `rotateTurns=20`、`config` 里 `wakeThreshold=15`、
+ * `_promptInjected=true`、`state.sessions` 里也有映射会话 —— 三个条件全满足，**却从来没轮换过**：
+ * `state/bridge.log` 里 `[rotate]` / `[prewarm]` / `[autoReset]` 三个前缀**一条都没有**。
+ *
+ * 根因（读码 + 线上状态共同确认）：**轮换判定只存在于"这一轮唤醒不忙"的那条路上**。
+ *   · `rotateTurns` 有两个自增点：`sendWakePrompt()` 里的用户触发唤醒（语义正确），
+ *     和 `turn-hold.js` 的 `noteExchange()`（回合内每一次来回 +1，**这是上下文真正膨胀的地方**）。
+ *   · 但 `sendWakePrompt()` 一开头就有 `if (isConversationBusy(key, st))` → 试着 steer 进在途回合
+ *     → **成功就 `return`**，连下面那段轮换判定都走不到。
+ *   · 于是：turn-hold 把一个 DSH 回合长期吊着的时候，`rotateTurns` 被 `noteExchange()` 推过阈值，
+ *     而**当时根本没有任何人在检查它**；等回合真的收尾时，下一条消息只要还是"忙"就继续被 steer 掉。
+ *     计数器就这么一路涨（15→20→…），轮换永远等不到那次检查。
+ *
+ * 修法（三处，任何一条路都跑不掉）：
+ *   ① 判定逻辑提成一个共用函数 `rotationDue()`，`wake-send` 的 busy 分支、轮换块、`turn-hold` 共用；
+ *   ② busy 分支：轮换已经到期时**不再把新消息塞进在途回合**，先让这个回合收尾；
+ *   ③ `turn-hold`：轮换到期就**不再保持**（`finish('rotate-threshold')`），回合立刻关，
+ *      下一条消息自然走"不忙"那条路 → 轮换块正常执行。
+ *
+ * 防卡死：推迟注入最多 `ROTATE_DEFER_MAX_MS`（2 分钟）。超时后 `rotationDue()` 自动改判 false，
+ * 消息照常注入 —— **宁可晚一点轮换，也绝不把用户的消息扣死**。 */
+export const ROTATE_DEFER_MAX_MS = 120000;
+
+/** 轮换阈值（config: social.autoReset.wakeThreshold，缺省 12，下限 5）。 */
+export function rotateThresholdOf(cfg) {
+  return Math.max(5, Number(cfg?.social?.autoReset?.wakeThreshold) || 12);
+}
+
+/**
+ * 现在该不该轮换？
+ * @returns {{due:boolean, count:number, threshold:number, why:string}}
+ *   due=true 只是"该轮换了" —— 不代表可以立刻换会话（回合还在跑时换会把在跑的回合连根拔掉，
+ *   见 busy 分支那条注释），所以调用方要么等回合收尾、要么先放行关回合。
+ */
+export function rotationDue(key, st, cfg) {
+  const threshold = rotateThresholdOf(cfg);
+  const count = Number(st?.rotateTurns) || 0;
+  if (count < threshold) return { due: false, count, threshold, why: 'below-threshold' };
+  const sidNow = state.sessions?.[key];
+  if (!sidNow) return { due: false, count, threshold, why: 'no-session' };
+  if (!st._promptInjected) return { due: false, count, threshold, why: 'prompt-not-injected' };
+  const since = Number(st._rotatePendingSince) || 0;
+  if (since && Date.now() - since > ROTATE_DEFER_MAX_MS) return { due: false, count, threshold, why: 'defer-expired' };
+  return { due: true, count, threshold, why: 'due' };
+}
+
+/** 推迟注入的计时标记：第一次决定"先别注入、等回合收尾"时打上，轮换真发生（或放弃）时清掉。 */
+export function markRotatePending(st, on) {
+  if (!st || typeof st !== 'object') return;
+  st._rotatePendingSince = on ? (Number(st._rotatePendingSince) || Date.now()) : 0;
+}
+
 /** main 启动时调用：注入 cfg */
 export function initWakeCore(cfg) { cfgRef = cfg; }
 /** DSH client（NodeApiClient）就绪后注入 */
@@ -1073,6 +1129,19 @@ export async function sendWakePrompt(key, reason) {
     // 塞失败（没有映射会话 / 桥没观测到回合 / DSH 拒绝）→ 落回正常唤醒流程，
     // 而那条路现在也是 steer 投递（见 prompt-deliver.js），**绝不会再卡在 next-turn**。
     let steeredNow = false;
+    /* 【2026-09-19 修「会话轮换永远不触发」】轮换已经到期 → **这一轮先不注入**。
+     * 为什么必须在这里挡：注入成功就 `return`（见下），下面那段轮换判定根本不会执行；
+     * 而 turn-hold 正把回合长期吊着，`rotateTurns` 就是在这段时间被推过阈值的。
+     * 让这个回合收尾（turn-hold 会在下一次 200ms 轮询里 `finish('rotate-threshold')` 放行），
+     * 下一条消息落地时 `isConversationBusy` 已经是 false → 走正常路 → 轮换块正常执行。
+     * 消息不会丢：它还在 unread 里，投递看门狗/下一次唤醒会再取。 */
+    const rotateNow0 = rotationDue(key, st, cfgRef);
+    if (rotateNow0.due) {
+      markRotatePending(st, true);
+      saveSocialState();
+      log(`[rotate] ${key} 已到轮换阈值（${rotateNow0.count}/${rotateNow0.threshold}）但回合仍在跑 → 这条先不塞进在途回合，等本回合收尾后再轮换（最多推迟 ${Math.round(ROTATE_DEFER_MAX_MS / 1000)}s，超时照常注入，消息不会被扣死）`);
+      return;
+    }
     try {
       steeredNow = await steerIntoRunningTurn(key, reason);
     } catch (error) {
@@ -1147,7 +1216,7 @@ export async function sendWakePrompt(key, reason) {
   // 阈值到达后直接转移，不再现场创建（消除新会话首轮卡顿）。
   // 只在“用户主动触发”的唤醒（私聊/@/提问/名字/拍一拍/关键词/引导）时执行——
   // 回复检查/概率/主动冒泡等内部唤醒不轮换，避免刚回复完就把上下文清掉、新会话重复回复同一批消息。
-  const rotateThreshold = Math.max(5, Number(cfgRef.social?.autoReset?.wakeThreshold) || 12);
+  const rotateThreshold = rotateThresholdOf(cfgRef);
   // 【2026-09-16 修「没在 config.json 里显式写 prewarmAhead，预建预热就永远不触发」】
   // 原来是 `Math.max(1, Number(...prewarmAhead) ?? 3)`：键不存在时 Number(undefined) = NaN，
   // 而 `NaN ?? 3` 仍是 NaN（?? 只挡 null/undefined），Math.max(1, NaN) = NaN ——
@@ -1189,7 +1258,22 @@ export async function sendWakePrompt(key, reason) {
       }
     }
     // ② 阈值到达：转移到已预热的会话；无可用预热会话时回退“归档旧会话 + 现场重建”老路径
-    if (count >= rotateThreshold && sidNow && st._promptInjected) {
+    if (count >= rotateThreshold) {
+      if (!sidNow || !st._promptInjected) {
+        /* 【2026-09-19】阈值到了，但**没有映射会话 / 还没注入过完整 prompt** ——
+         * 这说明下一次投递本来就会新建一个会话（上下文已经是新的了），等价于"已经轮换过"。
+         * 旧代码在这里直接跳过、把计数留在原处，于是这个数字会一直挂着，
+         * 而且以后再也不会有人看到"为什么没轮换"。现在按已轮换处理并把计数归零。 */
+        st.rotateTurns = 0;
+        markRotatePending(st, false);
+        wc.wakeCount = 0;
+        wc.noActionCount = 0;
+        st.sessionToolCalls = 0;
+        wakeConfigMissCount.delete(key);
+        st._justAutoReset = true;
+        log(`[rotate] ${key} rotateTurns=${count} 已过阈值（${rotateThreshold}），但${sidNow ? '本会话还没注入过完整 prompt' : ' state.sessions 里没有映射会话'} —— 下次投递本来就会新建会话，按"已轮换"处理并把计数归零`);
+        saveSocialState();
+      } else {
       const standby = st._standbySessionId;
       try {
         if (standby && state.sessions[key] !== standby) {
@@ -1206,12 +1290,14 @@ export async function sendWakePrompt(key, reason) {
           reverse.delete(sidNow);
           delete state.sessions[key];
           state.sessions[key] = null;
-          log(`[autoReset] ${key} 已软重置 DSH 上下文（第 ${rotateThreshold} 次唤醒，无预热会话，下次现建），记忆保留`);
+          log(`[autoReset] ${key} 已软重置 DSH 上下文（第 ${count} 次唤醒，无预热会话，下次现建），记忆保留`);
         }
         wc.wakeCount = 0;
         wc.noActionCount = 0;
         st.sessionToolCalls = 0;
         st.rotateTurns = 0;
+        markRotatePending(st, false);
+        st._standbySessionId = null;
         wakeConfigMissCount.delete(key); // 重置后给新会话留足缓冲，避免“防遗忘”兜底立刻把用户设的活跃模式冲成默认潜水
         st._promptInjected = false; // 下次唤醒重新注入完整 prompt（含最近消息窗口，替代摘要总结）
         st._promptSessionId = state.sessions[key] || null; // 轮换后以新映射为准（standby 或 null=待现建）
@@ -1219,6 +1305,10 @@ export async function sendWakePrompt(key, reason) {
       } catch (error) {
         log(`[rotate] ${key} 会话轮换失败（保留现状）: ${error?.message ?? error}`);
       }
+      }
+    } else {
+      // 没到阈值就不该留着"待轮换"的计时标记（否则它会在下一次真的到阈值时立刻被判过期）
+      if (st._rotatePendingSince) markRotatePending(st, false);
     }
   }
   saveSocialState();

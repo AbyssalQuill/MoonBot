@@ -4,6 +4,10 @@ import { sleep } from '../lib/async.js';
 import { randInt } from '../lib/rand.js';
 import { log } from '../lib/log.js';
 import { enqueueSend } from './send-chain.js';
+import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
+import { napcatImageFileArg } from '../lib/napcat-file.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // 网易云接口统一请求头（这几个接口对 Referer 敏感，缺了会返回空 result）
 const NETEASE_HEADERS = { Referer: 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' };
@@ -123,6 +127,13 @@ export function createMediaDomain(cfg) {
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          // 已送达未确认（EventChecker Failed）：卡片其实已经发出去了，别报失败（见 lib/onebot-delivery.js）
+          const errText = onebotErrText(body);
+          if (isDeliveredUnconfirmed(errText)) {
+            log(`[rich] ${action} 回执 EventChecker Failed —— 卡片已发出（只是事件确认失败），按已送达处理`);
+            sendResolve(deliveredUnconfirmedResult());
+            return;
+          }
           const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 napcat.httpUrl 是否为 OneBot HTTP API 地址）' : '';
           throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
         }
@@ -140,6 +151,74 @@ export function createMediaDomain(cfg) {
     );
     const data = await sendResult;
     return { messageId: data?.message_id ?? null };
+  }
+
+  /* ── 封面为什么要先搬到 QQ 图床 ───────────────────────────────────────────────
+   * 【2026-09-19 修「手机端音乐卡片封面空白、电脑端正常」】
+   * 实测对照（线上同一台机器，两条卡都发到主人私聊）：
+   *
+   *   对照A：直接把网易云的外部封面 URL 交给卡片
+   *     → 卡里 preview = https://p2.music.126.net/…jpg?param=300y300   （外部域名）
+   *     → 手机端空白、电脑端正常
+   *   对照B：先把同一张图**发一遍**换成 QQ 图床 URL，再把那个 URL 交给卡片
+   *     → 卡里 preview = https://qq.ugcimg.cn/v1/kgij0dgo…             （QQ 自己的 CDN）
+   *     → 与主人从高德/腾讯地图分享进来的**真卡**同一个域名（真卡 preview 也是 qq.ugcimg.cn / qpic.cn）
+   *
+   * 也就是说：**卡片里的图必须是 QQ 自己的图床地址，手机端才肯加载**；外部 URL 电脑端能读、手机端不读。
+   * NapCat 那个音乐签名服务（`musicSignUrl` 默认 http://106.55.0.102:10087/）对 QQ 域名的图会转存成
+   * `qq.ugcimg.cn/v1/…`，对外部 URL 则原样透传 —— 所以桥这边得先把图送进 QQ。
+   *
+   * 怎么"安静地"把图送进 QQ：**发给机器人自己的 QQ**（user_id = 自己的 uin，就是"我的设备"那个会话）——
+   * 实测 200 且能回读到 `https://multimedia.nt.qq.com.cn/download?appid=1406&fileid=…` 的图床地址，
+   * **不会在任何人（包括主人）的聊天里留下气泡**。拿到的地址缓存起来，同一张封面只搬一次。
+   */
+  const qqHostedCache = new Map();
+  let botUin = 0;
+  const NAPCAT_HTTP = () => String(cfg.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  const NAPCAT_HDR = () => ({ 'content-type': 'application/json', ...(cfg.napcat?.accessToken ? { authorization: `Bearer ${cfg.napcat.accessToken}` } : {}) });
+
+  function isQqHosted(u) {
+    try { return /(^|\.)(qpic\.cn|qq\.com|ugcimg\.cn)$/i.test(new URL(u).hostname); } catch { return false; }
+  }
+
+  /** 外部图 → QQ 图床 URL（失败就原样返回，绝不让卡片因此发不出去）。 */
+  async function ensureQqHostedImage(url) {
+    const src = String(url ?? '').trim();
+    if (!src || isQqHosted(src)) return src;
+    if (qqHostedCache.has(src)) return qqHostedCache.get(src);
+    try {
+      const res = await fetch(src, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(12000) });
+      if (!res.ok) return src;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length || buf.length > 4 * 1024 * 1024) return src;
+      const tmpDir = String(cfg.napcat?.tmpDir || '').trim() || path.join(process.cwd(), 'state', 'image-tmp');
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const tmp = path.join(tmpDir, `cover-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
+      fs.writeFileSync(tmp, buf);
+      if (!botUin) {
+        const li = await fetch(`${NAPCAT_HTTP()}/get_login_info`, { method: 'POST', headers: NAPCAT_HDR(), body: '{}', signal: AbortSignal.timeout(8000) }).then((r) => r.json()).catch(() => null);
+        botUin = Number(li?.data?.user_id) || 0;
+      }
+      if (!botUin) return src;
+      const sent = await fetch(`${NAPCAT_HTTP()}/send_private_msg`, {
+        method: 'POST', headers: NAPCAT_HDR(),
+        body: JSON.stringify({ user_id: botUin, message: [{ type: 'image', data: { file: napcatImageFileArg(tmp, cfg) } }] }),
+        signal: AbortSignal.timeout(20000)
+      }).then((r) => r.json()).catch(() => null);
+      const mid = sent?.data?.message_id;
+      if (mid == null) { log(`[cover] 封面搬到 QQ 图床失败（send_private_msg 到自身没给 message_id），仍用外部 URL：${sent?.wording || sent?.message || ''}`); return src; }
+      const got = await fetch(`${NAPCAT_HTTP()}/get_msg`, { method: 'POST', headers: NAPCAT_HDR(), body: JSON.stringify({ message_id: mid }), signal: AbortSignal.timeout(15000) }).then((r) => r.json()).catch(() => null);
+      const seg = (got?.data?.message || []).find((s) => s?.type === 'image');
+      const hosted = String(seg?.data?.url ?? '').trim();
+      try { fs.unlinkSync(tmp); } catch {}
+      if (!hosted) { log('[cover] 封面搬到 QQ 图床失败（get_msg 里没有 image.url），仍用外部 URL'); return src; }
+      qqHostedCache.set(src, hosted);
+      log(`[cover] 封面已搬到 QQ 图床（手机端才会显示）：${hosted.slice(0, 70)}…`);
+      return hosted;
+    } catch (error) {
+      log(`[cover] 封面搬 QQ 图床异常（改用外部 URL）：${error?.message ?? error}`);
+      return src;
+    }
   }
 
   /**
@@ -193,7 +272,7 @@ export function createMediaDomain(cfg) {
     const pid = String(id ?? '').trim();
     if (!pid) throw new Error('缺少歌曲 id（网易云=数字 song id，QQ 音乐=songmid）');
     if (platform === 'qq' || platform === 'qqmusic') {
-      // QQ 音乐不走卡片（官方分享链接由客户端自己渲染成卡片），这里只需要链接与封面
+      // QQ 音乐：卡片形态见 buildMusicCard 的 qq 分支（secapi 拿可播放直链）；这里只做兜底返回。
       return {
         platform: 'qqmusic',
         id: pid,
@@ -217,6 +296,92 @@ export function createMediaDomain(cfg) {
       audio: await neteaseAudioUrl(pid),
       url: `https://music.163.com/#/song?id=${pid}`
     };
+  }
+
+  /**
+   * QQ 音乐解析：歌名/歌手/封面/**可播放直链**，**不需要任何 key**。
+   *
+   * 为什么不用 QQ 官方 vkey：2026-09-18 在线上这台 VPS 实测
+   * `u.y.qq.com/cgi-bin/musicu.fcg` 的 `vkey.GetVkeyServer/CgiGetVkey` 直接被拒：
+   *   `{"code":104009, ... "msg":"202.61.72.79;invalidq;", "purl":""}`
+   * （歌名/封面的 `music.pf_song_detail_svr` 是通的，唯独取 vkey 这条把机房 IP 判成无效请求。）
+   *
+   * 可用的是 secapi.top 的聚合解析（主人 2026-09-18 实测：**不带 Authorization 也返回 200**）：
+   *   GET https://secapi.top/API/QQ音乐/?msg=<歌名 歌手>&list=2&n=2
+   *   → {code:200, title, singer, cover, link, music_url}
+   * 字段映射：title→title、singer→content(歌手)、cover→image、link→url、music_url→audio。
+   *
+   * ⚠️ 两个坑：
+   *   ① `music_url` 里的 `vkey` 是**带时效**的直链 —— 绝不能进缓存 key，也不能存下来复用；
+   *   ② 这个接口是**关键词搜索**，不是按 songmid 查（拿 songmid 当 msg 会返回一首完全无关的歌，
+   *      实测 mid=004Fs2FP1EvZYc 返回了 "W O F"）。所以这里必须**按 songmid 或歌名回检**，
+   *      对不上就宁可不发卡片（退官方分享链接），绝不把别人的歌当卡片发出去。
+   */
+  async function qqMusicResolve(mid, opts = {}) {
+    const givenTitle = String(opts?.title ?? '').trim();
+    const givenArtist = String(opts?.artist ?? '').trim();
+    const fallbackUrl = `https://y.qq.com/n/ryqq/songDetail/${encodeURIComponent(mid)}`;
+    const out = {
+      platform: 'qqmusic',
+      id: mid,
+      title: givenTitle,
+      artist: givenArtist,
+      cover: normalizeCoverUrl(opts?.cover ?? opts?.image),
+      audio: '',
+      url: fallbackUrl,
+      via: ''
+    };
+    const q = [givenTitle, givenArtist].filter(Boolean).join(' ').trim();
+    if (!q) {
+      log('[qqmusic] 没有歌名/歌手，无法解析可播放直链（模型应先调 qq_music_search 拿到 title/artist）');
+      return out;
+    }
+    /* 关键词要**先只用歌名**：实测 `msg=晴天 周杰伦` 会被服务端回 404「歌曲信息获取失败」，
+     * 而 `msg=晴天` 正常。两条候选依次试。 */
+    const queries = [givenTitle, q].filter((v, i, a) => v && a.indexOf(v) === i);
+    const headers = { 'user-agent': 'Mozilla/5.0' };
+    const secapiKey = String(cfg?.social?.secapiKey ?? process.env.QQBRIDGE_SECAPI_KEY ?? '').trim();
+    if (secapiKey) headers.authorization = `Bearer ${secapiKey}`;
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/[\s（）()【】\[\]·\-—_·,，.。!！?？]/g, '');
+    for (const query of queries) {
+      let pick = null;
+      // 这个聚合接口**偶发**返回 404「歌曲信息获取失败」（同一句话隔几秒再问就正常），所以重试一次。
+      for (let attempt = 0; attempt < 2 && !pick; attempt += 1) {
+        try {
+          const url = `https://secapi.top/API/QQ%E9%9F%B3%E4%B9%90/?msg=${encodeURIComponent(query)}&list=2&n=2`;
+          const res = await fetch(url, { headers, signal: AbortSignal.timeout(9000) });
+          const body = await res.json().catch(() => null);
+          // 接口可能返回单个对象，也可能返回数组 —— 两种形状都吃
+          const raw = Array.isArray(body) ? body : (Array.isArray(body?.data) ? body.data : (body ? [body] : []));
+          const ok = raw.filter((s) => Number(s?.code ?? 200) === 200 && s?.music_url);
+          // ① 按 songmid 精确回检（最可靠）② 歌名归一化后相等 ③ 歌名互相包含且歌手对得上
+          pick = ok.find((s) => String(s?.link ?? '').includes(mid))
+            || ok.find((s) => norm(s?.title) === norm(givenTitle))
+            || ok.find((s) => {
+              const t = norm(s?.title); const g = norm(givenTitle);
+              if (!t || !g || !(t.includes(g) || g.includes(t))) return false;
+              if (!givenArtist) return true;
+              const a1 = norm(s?.singer); const a2 = norm(givenArtist);
+              return a1.includes(a2) || a2.includes(a1);
+            });
+          if (!pick) log(`[qqmusic] 查询「${query}」返回 ${raw.length} 条，没有一条对得上 mid=${mid}/${givenTitle}`);
+        } catch (error) {
+          log(`[qqmusic] secapi 请求失败（query=${query}）：${error?.message ?? error}`);
+        }
+        if (!pick && attempt === 0) await sleep(1200);
+      }
+      if (pick) {
+        out.title = String(pick.title || givenTitle);
+        out.artist = String(pick.singer || givenArtist);
+        out.cover = normalizeCoverUrl(pick.cover) || out.cover;
+        out.url = String(pick.link || fallbackUrl);
+        out.audio = normalizeMediaUrl(pick.music_url);
+        out.via = `secapi/${String(pick.quality || '').trim()}`;
+        return out;
+      }
+    }
+    log(`[qqmusic] 试了 ${queries.length} 个关键词都解析不到可播放直链（id=${mid}），退回官方分享链接`);
+    return out;
   }
 
   /**
@@ -254,7 +419,7 @@ export function createMediaDomain(cfg) {
       if (!song?.cover || !song?.audio) {
         return { title, primary: native, native: null, link, note: '解析不到封面/音频，退回 NapCat 原生 163 卡片' };
       }
-      const data = { type: '163', url: song.url, audio: song.audio, title, image: song.cover };
+      const data = { type: '163', url: song.url, audio: song.audio, title, image: await ensureQqHostedImage(song.cover) };
       if (artist) data.singer = artist;
       return {
         title,
@@ -262,6 +427,46 @@ export function createMediaDomain(cfg) {
         native,
         link,
         note: '桥拼 163 卡片（https 封面 + 300×300 缩略图，避免手机端白框）'
+      };
+    }
+
+    /* 【2026-09-18】QQ 音乐：以前只会发"官方分享链接纯文本"（因为 ss.xingzhige 关闭了 qq id 解析、
+     * 自造 Ark 又被 QQ 判"版本过低"）。现在 secapi.top 能直接给到**可播放直链**，所以改成真卡片：
+     *   primary = 桥拼 music 卡（type=custom，url/audio/image/title/singer 全由桥解析填好）
+     *   native  = 无（`type:'qq'` + id 那条路签名服务已知关闭，不值得占一格降级梯子）
+     *   link    = 官方分享链接文本（与真人"分享歌曲到QQ"一致，客户端自己渲染）
+     * 解析不到直链/封面时**只**发 link —— 宁可少一张卡，也不发一张点不开或配错歌的卡。
+     * 想改回带平台身份的 `type:'qq'` 卡片：设 QQBRIDGE_QQMUSIC_CARD=qq。 */
+    if (mt === 'qq' || mt === 'qqmusic') {
+      let song = null;
+      try {
+        song = await qqMusicResolve(pid, { title: givenTitle, artist: givenArtist, cover: opts?.image });
+      } catch (error) {
+        log(`[music-card] QQ 音乐解析失败，退回官方分享链接(id=${pid}): ${error?.message ?? error}`);
+      }
+      const title = song?.title || givenTitle || 'QQ音乐';
+      const artist = song?.artist || givenArtist || '';
+      const url = song?.url || `https://y.qq.com/n/ryqq/songDetail/${encodeURIComponent(pid)}`;
+      const link = `${title}${artist ? ' ' + artist : ''} ${url}`;
+      if (!song?.audio || !song?.cover) {
+        return {
+          title,
+          primary: null,
+          native: null,
+          link,
+          note: '解析不到可播放直链/封面，发官方分享链接（QQ 客户端自己渲染卡片）'
+        };
+      }
+      const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
+      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(song.cover) };
+      if (artist) data.singer = artist;
+      if (cardType === 'custom') data.content = artist || 'QQ音乐';
+      return {
+        title,
+        primary: { type: 'music', data },
+        native: null,
+        link,
+        note: `QQ 音乐卡片（桥拼 type=${cardType}，直链 ${song.via || 'secapi'}；vkey 带时效，不缓存）`
       };
     }
 
@@ -348,5 +553,5 @@ export function createMediaDomain(cfg) {
     return { query: q, platform, results };
   }
 
-  return { sendRich, musicSearch, musicResolve, buildMusicCard };
+  return { sendRich, musicSearch, musicResolve, buildMusicCard, qqMusicResolve };
 }
