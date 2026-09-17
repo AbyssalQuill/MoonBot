@@ -450,7 +450,25 @@ export function createMediaDomain(cfg) {
       if (!cover || !song?.audio) {
         return { title, primary: native, native: null, link, note: '解析不到封面/音频，退回 NapCat 原生 163 卡片' };
       }
-      const data = { type: '163', url: song.url, audio: song.audio, title, image: await ensureQqHostedImage(cover) };
+      const data = {
+        type: '163',
+        /* 【2026-09-19 实测·修「点开卡片弹『将要访问』中转页」】
+         * 主人拿同一首歌点了 5 种链接形态，结论很干净：
+         *   A https://music.163.com/#/song?id=X           → 弹
+         *   B https://music.163.com/song?id=X             → 弹
+         *   C https://y.music.163.com/m/song?id=X         → 弹
+         *   D https://music.163.com/song/media/outer/…    → 弹
+         *   E https://m701.music.126.net/…/xxx.mp3?vuutv= → **不弹**
+         * 也就是 QQ 只给**网页**盖那层安全页，**直链媒体文件不盖**（直接在播放器里播）。
+         * 所以卡片的 `url`（= 点卡片本体打开的那个）也指到直链去了。
+         * 代价：直链带 `vuutv` 口令，理论上会过期 —— 但实测同一首歌两次解析（间隔 20 分钟）
+         * 路径**完全一致**且仍能 206 取到，路径里的时间戳是编码时间不是签名时间，实践上够稳。
+         * 想换回"打开歌曲页"：`social.send.neteaseJumpUrl = 'page'`。 */
+        url: String(cfg?.social?.send?.neteaseJumpUrl ?? 'direct').trim().toLowerCase() === 'page' ? song.url : (song.audio || song.url),
+        audio: song.audio,
+        title,
+        image: await ensureQqHostedImage(cover)
+      };
       if (artist) data.singer = artist;
       return {
         title,
