@@ -615,8 +615,12 @@ const PLATFORM_LABEL = {
  *   B 站/抖音都在 QQ 的联合预览白名单里，客户端自己会渲染出带封面/标题的原生卡片 ——
  *   比机器人手写的假卡更好，而且不会"版本太低"。
  *
- *   primary 因此默认是 null，真正的载体是 link（纯文本，走桥的文本发送通道）；
- *   想强行试手写卡片的机器上用 opts.style='json' 或环境变量 QQBRIDGE_VIDEO_CARD=json。
+ *   primary 因此默认是 null，真正的载体是 link（纯文本，走桥的文本发送通道）。
+ *
+ * 【2026-09-18 第十五批】`opts.style='json'` / `QQBRIDGE_VIDEO_CARD=json` 这条路**已停用**：
+ *   它手拼的 structmsg/news 卡 `config.token` 只能是空串，会命中"空 token 被 QQ 服务端静默拒收"
+ *   那个已知坑（详见本函数尾部的注释）。现在传 json 也只是打一行日志、照样发分享链接。
+ *   要原生卡片请走 `fetchMiniAppArk`（miniapp_01，token 由 QQ 服务端签发）。
  */
 /**
  * 【2026-09-18 第八批·重大纠正】B 站**原生小程序卡片**其实做得到 —— 直接调 NapCat 的 `get_mini_app_ark`。
@@ -647,6 +651,30 @@ const PLATFORM_LABEL = {
  * 最高只到 `3.2.33-52892`，**正是现在这台装的**；装更新的 QQ 反而会让 NapCat 找不到
  * appid/packet/napi2native 映射而直接坏掉。
  *
+ * ── 2026-09-18 第十五批·修「B 站卡片能发出来，但点进去不是那个视频」──
+ * 物证（`tools/diag-bili-forensic.mjs` 从 NapCat 消息记录里挖出来的那条卡，私聊 1736784911）：
+ *   msgId=1559621895  2026-09-18 12:56:17Z  sender=3199924964  real_seq=11222（seq 前进 = 真送达）
+ *   app=com.tencent.miniapp_01  view=view_8C8E89B49BE609866298ADDFF2DBABA4
+ *   meta.detail_1 = { appid:"1109937557", title:"哔哩哔哩", desc:"【4K修复】周杰伦 - 晴天",
+ *                     url:"m.q.qq.com/a/s/beec9bb4fa643e530120b82c9026e71f",
+ *                     config.token 由服务端签发 …  —— **没有任何 qqdocurl 字段** }
+ * 同一时间窗里**真人从 B 站 App 分享进 QQ 的真卡全都带 qqdocurl**（同一台 NapCat 回读，共 4 张）：
+ *   09-17 15:11:22 私聊  desc=“你觉得世界上大多数痛苦…”， qqdocurl=https://b23.tv/WZVnINP?share_medium=android&share_source=qq&bbid=…&ts=…
+ *   09-18 11:48:23 群 868756515  qqdocurl=https://b23.tv/9kFv2VX?share_medium=android&share_source=qq&bbid=…&ts=…
+ *   09-18 12:46:18 群 868756515  qqdocurl=https://b23.tv/w1c4DfM?share_medium=android&share_source=qq&bbid=…&ts=…
+ *   09-18 13:05:35 私聊  desc=五十个角色、五十种声音、同一个我， qqdocurl=https://b23.tv/1ncmZVP?…
+ * B 站小程序**点开后靠 `qqdocurl` 决定进哪个视频页**，缺了它就只剩小程序的 url（m.q.qq.com 短链），
+ * 于是"卡片显示正常、封面标题都对，点进去却不是那个视频"。
+ *
+ * qqdocurl 从哪来？NapCat 把 `webUrl` 原样放进 Ark 请求体的 `webURL`（/root/napcat-build/napcat.mjs:14206
+ * `webURL: e.webUrl ?? ""`）。`tools/probe-miniapp-ark.mjs` 做的对照实验（同一 BV，只改一个参数）：
+ *   A 不传 webUrl                      → detail_1 **没有 qqdocurl**
+ *   B webUrl=https://b23.tv/BV1GJ411x7h7 → qqdocurl=https://b23.tv/BV1GJ411x7h7
+ *   C webUrl=https://www.bilibili.com/video/BV1GJ411x7h7 → qqdocurl=同一条长链
+ *   D jumpUrl/webUrl 都用长链           → qqdocurl=同一条长链
+ * 即：**QQ 服务端只在 webURL 非空时才生成 qqdocurl，值就是 webURL 的原样回显**。
+ * 之前这里只传了 jumpUrl、没传 webUrl —— 这正是那张卡没有 qqdocurl 的原因。
+ *
  * @returns {Promise<null|{type:'json', data:{data:string}}>} 可直接当 rich 段的 json 段；失败返回 null
  */
 export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutMs = 12000 } = {}) {
@@ -660,6 +688,14 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
   const jumpUrl = (platform === 'bilibili' && info?.kind === 'bvid' && info?.id)
     ? `https://b23.tv/${info.id}`                  // 真卡的 qqdocurl 也是 b23.tv 短链
     : String(info?.url ?? '').trim();
+  /* webUrl —— **必须传**，它是 qqdocurl 的唯一来源（见上面第十五批的对照实验 A/B/C/D）。
+   * 取值用长链 `https://www.bilibili.com/video/BV…`：那是 B 站自己的规范路由，
+   * 小程序拿到它可以直接进视频页，不用再解析短链（b23.tv 的规范路径本来是**不透明短码**，
+   * 用 BV 当路径这件事只实测到"HTTP 层跳对"：家宽 IP 上抽 8 个真实 BV，8/8 都是
+   * `302 → https://www.bilibili.com/video/<同一个BV>`，终点页 200 且 <title> 就是那条视频，
+   * 见 tools/probe-b23-bv.mjs）。
+   * jumpUrl 保留 b23.tv 短链：真卡用的就是 b23.tv，两条字段各自独立指向同一条视频，互为兜底。 */
+  const webUrl = String(info?.url ?? '').trim() || jumpUrl;
   if (!title || !picUrl || !jumpUrl) return null;
   const bits = [];
   if (info?.author) bits.push(info.author);
@@ -674,7 +710,8 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
       headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
       // rawArkData=true 拿"原始形态"（appName/appView/metaData），再自己转成发送形态 ——
       // 与 NapCat 内部 MiniAppInfoHelper.RawToSend 的映射逐字一致。
-      body: JSON.stringify({ type, title: title.slice(0, 100), desc: desc.slice(0, 100), picUrl, jumpUrl, rawArkData: 'true' }),
+      // webUrl 一定要带：不带就没有 qqdocurl，卡片点进去落不到那条视频（第十五批物证）。
+      body: JSON.stringify({ type, title: title.slice(0, 100), desc: desc.slice(0, 100), picUrl, jumpUrl, webUrl, rawArkData: 'true' }),
       signal: AbortSignal.timeout(timeoutMs)
     });
     body = await res.json().catch(() => null);
@@ -697,7 +734,11 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
     miniappShareOrigin: 3,
     miniappOpenRefer: '10002'
   };
-  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）`);
+  /* 日志里把 qqdocurl 打出来：它是"点进去是不是这条视频"的唯一判据，
+   * 以后线上再出同类问题，看这一行就知道卡片有没有带对目标。 */
+  const docUrl = send.meta?.detail_1?.qqdocurl;
+  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）qqdocurl=${docUrl || '(缺失！点开不会落到这条视频)'}`);
+  if (!docUrl) log(`[video] 警告：本次请求带了 webUrl=${webUrl} 但服务端没回 qqdocurl —— 卡片点开会落不到目标视频`);
   return { type: 'json', data: { data: JSON.stringify(send) } };
 }
 
@@ -722,58 +763,37 @@ export function buildVideoCard(info, opts = {}) {
   })();
   const shareText = `${title}${info?.author ? ' - ' + info.author : ''} ${shareUrl}`;
 
-  const statBits = [];
-  if (info?.author) statBits.push(info.author);
-  if (info?.playText) statBits.push(`${info.playText}播放`);
-  if (info?.durationText) statBits.push(info.durationText);
-  const sub = statBits.join(' · ') || (info?.description || '').slice(0, 60);
-  const cover = normalizeImageUrl(info?.cover, { width: 480, height: 270 });
-
   const base = { title, native: null, link: shareText, platform: info?.platform || '', info, style };
 
-  if (style !== 'json') {
-    return {
-      ...base,
-      primary: null,
-      note: `官方分享链接（${label}，QQ 客户端自己渲染卡片；手写 json 卡会被新版 QQ 判"版本太低"）`,
-    };
+  /* 【2026-09-18 第十五批·停用"手拼 structmsg Ark"这条路，别再让 token 为空的手拼卡上线】
+   *
+   * style==='json' 时这里原来会手拼一张 `com.tencent.structmsg / view=news` 的 Ark，
+   * 其中 `config.token` 是**空字符串**。本仓库已实测过的坑（见 media.js 的"对账"注释与
+   * tools/diag-seq-history.mjs）：**手写 Ark 的 token 是空/随机值时 QQ 服务端直接拒收** ——
+   * 消息只写进本地库、对方什么都收不到；判据是回读消息的 `real_seq` **不前进**
+   * （diag-seq-history 在线上跑出来的就是一批"com.tencent.tuwen.lua … ❌ 本地幽灵"）。
+   *
+   * 我（这一批）**没有复现**"structmsg+空 token"这一条 —— bridge.log 里找不到 structmsg 的记录
+   * （`grep structmsg` 无命中），线上最近发出去的视频卡都是 miniapp_01 或分享链接，所以这条结论
+   * 沿用仓库既有实测记录，不当成新证据。但既然它是**已知会静默丢消息**的形态，
+   * 就不该留一个"改个环境变量就能把幽灵卡发上线"的开关：
+   * 现在 style==='json' **不再产出任何 Ark**，一律退回与默认相同的分享链接形态，并在日志里说明原因。
+   *
+   * 真正可用的原生卡片是 **NapCat 的 `get_mini_app_ark`**（app=com.tencent.miniapp_01，
+   * token/url/preview 全部由 QQ 服务端现场签发）—— 那条在 console-server 的视频分支里是第一优先，
+   * 与本函数的 primary 无关。 */
+  if (style === 'json') {
+    log(`[video] QQBRIDGE_VIDEO_CARD=json 已停用：手拼 structmsg 卡的 token 只能为空，`
+      + `QQ 服务端会静默拒收（real_seq 不前进，对方收不到）—— 本次改发分享链接；`
+      + `想要原生卡片请依赖 NapCat get_mini_app_ark（miniapp_01，服务端签名）`);
   }
-
-  const payload = {
-    app: 'com.tencent.structmsg',
-    desc: '新闻',
-    view: 'news',
-    ver: '0.0.0.1',
-    prompt: `[分享] ${title}`.slice(0, 100),
-    /* 【2026-09-18】补 `extra` —— 主人发进来的真实 B 站卡片是 `m.q.qq.com/a/s/<hash>` 的
-     * structmsg/news，除了 meta.news 之外顶层还带一个 extra（app_type/appid/uin/type）。
-     * 之前缺这一段，很可能就是新版 QQ 判"版本太低"的原因之一。 */
-    extra: { app_type: 1, appid: '100951776', uin: 0, type: 'normal' },
-    config: { autosize: true, ctime: Math.floor(Date.now() / 1000), forward: true, token: '', type: 'normal' },
-    meta: {
-      news: {
-        action: '',
-        app_type: 1,
-        appid: '100951776',
-        appType: 1,
-        ctime: Math.floor(Date.now() / 1000),
-        desc: sub.slice(0, 150),
-        jumpUrl: url,
-        tag: label,
-        title: title.slice(0, 120),
-        source: label,
-        ...(cover ? { preview: cover, image: cover } : {}),
-      },
-    },
-  };
 
   return {
     ...base,
-    // NapCat json 段：data 是"字符串里的 JSON"
-    primary: { type: 'json', data: { data: JSON.stringify(payload) } },
-    note: cover
-      ? `桥拼 ${label} 卡片（structmsg/news，封面 480×270 已归一化 https）—— 新版 QQ 可能拒收`
-      : `桥拼 ${label} 卡片（structmsg/news，没取到封面）—— 新版 QQ 可能拒收`,
+    primary: null,
+    note: style === 'share'
+      ? `官方分享链接（${label}，QQ 客户端自己渲染卡片；手写 json 卡会被新版 QQ 判"版本太低"）`
+      : `手拼 json 卡已停用（空 token 会被 QQ 服务端静默拒收）→ 改发官方分享链接（${label}）`,
   };
 }
 

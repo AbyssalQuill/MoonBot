@@ -1,7 +1,7 @@
 // video.js 实机自测：解析链接 → 取信息 → 拼卡片，把中间每一步都打出来。
 // 用法: node tools/test-video.mjs [urlOrBv ...]
 //   不带参数则用内置样例（含一个短链、一个裸 BV、一个抖音短链占位）
-import { parseVideoUrl, extractVideoUrls, resolveVideo, buildVideoCard, videoSearch } from '../src/core/video.js';
+import { parseVideoUrl, extractVideoUrls, resolveVideo, buildVideoCard, videoSearch, fetchMiniAppArk } from '../src/core/video.js';
 
 const DEFAULTS = [
   'https://www.bilibili.com/video/BV1GJ411x7h7',
@@ -45,9 +45,18 @@ try {
   console.log('  title   :', card.title);
   console.log('  note    :', card.note);
   console.log('  link    :', card.link);
-  const payload = JSON.parse(card.primary.data.data);
-  console.log('  card app:', payload.app, '| view:', payload.view, '| tag:', payload.meta.news.tag);
-  console.log('  card len:', card.primary.data.data.length, '字节');
+  /* 【2026-09-18 第十五批】这里原来 JSON.parse(card.primary.data.data) —— 但默认 style='share' 下
+   * primary 本来就是 null（手拼 structmsg 卡已停用，见 video.js），那段一跑就抛异常，
+   * 打印出来永远是"拼卡片失败"，看的人会以为卡片功能坏了。现在按真实模型检查：
+   * 分享链接形态 + 小程序 Ark（服务端签发，必须带 qqdocurl，否则点开落不到这条视频）。 */
+  console.log('  primary :', card.primary === null ? 'null（share 形态，卡片由 QQ 客户端渲染链接预览）' : '有');
+  const ark = await fetchMiniAppArk(info, { httpUrl: process.env.NAPCAT_HTTP || 'http://127.0.0.1:3000', token: process.env.NAPCAT_TOKEN || '' });
+  if (!ark) {
+    console.log('  小程序 Ark: 无（NapCat 不可达 / 没封面 —— 会退回"封面图 + 分享链接"）');
+  } else {
+    const send = JSON.parse(ark.data.data);
+    console.log('  小程序 Ark:', send.app, send.view, '| qqdocurl =', send.meta?.detail_1?.qqdocurl ?? '(缺失！)');
+  }
 } catch (e) {
   console.log('  拼卡片失败:', e.message);
 }
