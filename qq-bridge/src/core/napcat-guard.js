@@ -105,6 +105,20 @@ function containerInfo() {
   return { name: containerName(), status: status || 'unknown', startedAt: startedAt || '' };
 }
 
+/* 【2026-09-19 修「napcat.log 被同一条堆栈刷满」】
+ * 上一版加了 `get_status` 回退，误重启是没了，但**每轮探活仍然先调一次 `get_rkey`** ——
+ * 而这台机器上它是**结构性故障**（NapCat 侧取 rkey 的实现直接抛，不是网络问题、也不代表掉线），
+ * 于是每 60 秒就往 NapCat 自己的日志里灌一段
+ *   `TypeError: Cannot read properties of undefined (reading 'rkeyList')` + 4 行栈。
+ * 主人桌面那份 napcat.log 496 行里几乎全是它 —— 真正的故障反而被淹没。
+ *
+ * 所以：**一旦确认它是结构性故障，就不再调用它**（省掉一次白跑 QQ 服务的往返，也不再刷日志），
+ * 只走 `get_status`。同时留一个低频重试窗口（每 RKEY_RETRY_EVERY 个周期放行一次）——
+ * 万一哪天 NapCat 升级把它修好了，我们能自动捡回来，而不是永久把这个信号丢掉。 */
+let rkeyProbeDead = false;
+let rkeyProbeCycles = 0;
+const RKEY_RETRY_EVERY = 30;
+
 /**
  * 探针：get_rkey。优先走 NapCat HTTP（3000），没配 httpUrl 时退回已连上的 OneBot WS。
  * 返回 { ok, detail }。ok=false 只代表"这一次没探通"，判定交给调用方做连续失败计数。
@@ -120,12 +134,17 @@ function containerInfo() {
  * 于是**一个假信号把好好的 QQ 反复重启** —— 而"掉线"正是主人最在意的问题。
  * 所以：get_rkey 失败时**再看一眼 get_status**，只要 NapCat 说自己 online && good，
  * 就当探针通过（detail 里写清楚"rkey 探针自身故障"），只有 get_status 也说不在线才算真失败。
+ * 上面那段"已知故障就不再调它"是这一版的进一步收敛（见 rkeyProbeDead 的说明）。
  */
 export async function probeNapcatOnce() {
   const { httpUrl = '', accessToken = '' } = nap();
   const base = String(httpUrl || '').trim().replace(/\/+$/, '');
   const rkeyFallback = /rkeyList/i;
-  if (base) {
+  /* 已知结构性故障 → 本轮跳过对 get_rkey 的调用（每 RKEY_RETRY_EVERY 轮放行一次做复检）。
+   * 注意：**只有当确实配了 HTTP 探针时**才有"跳过"这回事；没配就直接走下面的 WS 分支。 */
+  rkeyProbeCycles += 1;
+  const skipRkey = rkeyProbeDead && (rkeyProbeCycles % RKEY_RETRY_EVERY !== 0);
+  if (base && !skipRkey) {
     try {
       const res = await fetch(`${base}/get_rkey`, {
         method: 'POST',
@@ -134,28 +153,45 @@ export async function probeNapcatOnce() {
         signal: AbortSignal.timeout(12000)
       });
       const j = await res.json().catch(() => null);
-      if (j && j.status === 'ok' && Array.isArray(j.data) && j.data.length) return { ok: true, detail: `rkey ${j.data.length} 组` };
+      if (j && j.status === 'ok' && Array.isArray(j.data) && j.data.length) {
+        if (rkeyProbeDead) log('[napcat-guard] get_rkey 恢复正常，重新启用 rkey 探针');
+        rkeyProbeDead = false;
+        return { ok: true, detail: `rkey ${j.data.length} 组` };
+      }
       const detail = `HTTP ${res.status} ${JSON.stringify(j).slice(0, 160)}`;
-      // rkey 探针自身故障 → 用 get_status 兜底判定登录态
-      if (rkeyFallback.test(detail)) return await probeStatusFallback(base, accessToken, detail);
+      // rkey 探针自身故障 → 标记为结构性故障并走 get_status 兜底判定登录态
+      if (rkeyFallback.test(detail)) {
+        if (!rkeyProbeDead) log(`[napcat-guard] get_rkey 存在结构性故障（${detail.slice(0, 90)}）→ 之后不再每轮调用它，避免把 NapCat 日志刷满；改为只探 get_status，每 ${RKEY_RETRY_EVERY} 轮复检一次`);
+        rkeyProbeDead = true;
+        return await probeStatusFallback(base, accessToken, detail);
+      }
       return { ok: false, detail };
     } catch (error) {
       const detail = `HTTP 探针异常：${error?.message ?? error}`;
-      if (rkeyFallback.test(detail)) return await probeStatusFallback(base, accessToken, detail);
+      if (rkeyFallback.test(detail)) {
+        rkeyProbeDead = true;
+        return await probeStatusFallback(base, accessToken, detail);
+      }
       return { ok: false, detail };
     }
   }
+  if (base && skipRkey) {
+    // 已知故障期：不再白调 get_rkey，直接看 get_status
+    return await probeStatusFallback(base, accessToken, 'get_rkey 已知结构性故障，本轮跳过（不再刷日志）');
+  }
   if (typeof callAction === 'function') {
+    // 已知结构性故障期：WS 这条路同样不再白调 get_rkey（它会以异常形式回来，同样刷日志）
+    if (skipRkey) return await probeStatusFallback('', accessToken, 'get_rkey 已知结构性故障，本轮跳过（不再刷日志）', true);
     try {
       const r = await callAction('get_rkey', { count: 1 }, 12000);
       const data = r?.data ?? r;
       if (Array.isArray(data) && data.length) return { ok: true, detail: `rkey ${data.length} 组（WS）` };
       const detail = `WS 返回：${JSON.stringify(r).slice(0, 160)}`;
-      if (rkeyFallback.test(detail)) return await probeStatusFallback('', accessToken, detail, true);
+      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, detail, true); }
       return { ok: false, detail };
     } catch (error) {
       const detail = `WS 探针异常：${error?.message ?? error}`;
-      if (rkeyFallback.test(detail)) return await probeStatusFallback('', accessToken, detail, true);
+      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, detail, true); }
       return { ok: false, detail };
     }
   }
