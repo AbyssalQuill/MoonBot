@@ -350,13 +350,14 @@ body textarea.json-text, body .log-viewer, body .log-line {
    等高靠 .lrn-grid 的 align-items: stretch（两栏都是 grid item）；这里负责"撑满 + 内部滚动 + 底部不留死空白"：
    卡片是 flex 列 → 正文区 flex: 1 + min-height: 0 → 滚动区自己 flex: 1 + min-height: 0。
    下面那一栏（画像学习 .lrn-status-block-fill）吃满卡片剩余高度，资料区一直铺到卡底。 */
-/* 【2026-09-19 修「最后一条卡片没和左边最底下对齐」】
- * 主人澄清了要的是什么：**粉色板（画像学习那一栏）里那块滚动区，要一直铺到粉色板底边**，
- * 中间不能留一截空粉色。真因就是下面那条 `max-height: 720px` 的硬上限 ——
- * 左栏比它高时，滚动区到 720px 就停住，下面剩一截粉色空白，看着就是"分界处没拉到底"。
- * 所以这里保持**不参与分配剩余高度**（上面那栏按内容自然高度），把剩余高度全留给粉色那栏，
- * 再摘掉它的 max-height，滚动区自然铺满。 */
-.lrn-status-card { display: flex; flex-direction: column; min-height: 0; }
+/* 【2026-09-19 定稿】**右卡不参与行高计算**，靠一层绝对定位的壳精确铺满左栏撑出的高度。
+ * 主人要的两条同时成立：粉色板里的滚动区铺到板底（不留空粉色）＋ 整行不被拉长。
+ * 光摘 max-height 只能做到前一条，会把行撑高（实测主人立刻反馈"拉长了，不要拉长"）。
+ * 做法：.lrn-status-col 是 position: relative 的 grid item（被 stretch 拉到行高），
+ *       它唯一的孩子是绝对定位的卡 → 这个 grid item 的内容高度为 0 → **行高只由左栏决定**；
+ *       卡 inset: 0 于是精确等于该高度，内容再多也只在内部滚动，撑不到外面。 */
+.lrn-status-col { position: relative; min-height: 0; }
+.lrn-status-card { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
 .lrn-status-body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
 .lrn-status-block { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
 /* 下面那一栏（画像学习）：吃满卡片剩余高度 —— 浅色托底让它看着是"铺到卡底"的一块栏，而不是留白 */

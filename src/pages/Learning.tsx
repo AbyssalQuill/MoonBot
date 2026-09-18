@@ -853,7 +853,17 @@ const clampHrs = (v: any): number => {
               )}
             </div>
 
-            {/* ============ 右：人格学习状态（与左卡片等高；上下两栏：人格学习 / 画像学习；超出滚动；点开看完整资料） ============ */}
+            {/* ============ 右：人格学习状态（与左卡片等高；上下两栏：人格学习 / 画像学习；超出滚动；点开看完整资料）
+                【2026-09-19 为什么外面多包了一层 .lrn-status-col】
+                主人要的是「粉色板里的滚动区铺到板底、但整行不许被拉长」。这两条同时要满足，
+                就必须让右卡**完全不参与行高计算** —— 否则它内容一多就把 grid 的 auto 行撑高：
+                  · .lrn-status-col 是个 position: relative 的 grid item（被 align-items: stretch 拉到行高），
+                    它自己不产生任何内容高度（唯一的孩子是绝对定位）；
+                  · 里面那张卡 position: absolute; inset: 0 —— 于是它**精确等于左栏撑出来的高度**，
+                    内容再多也只是自己内部滚动，撑不到外面去。
+                之前用 `.lrn-status-block-fill .lrn-status-scroll { max-height: 720px }` 这种手调上限
+                就是在硬凑这件事（历史上调过三次 300→640→720），左栏一变高就露馅。 */}
+            <div className="lrn-status-col">
             <div className="card lrn-status-card">
               <div className="card-title">
                 <Users size={17} /> 人格学习状态
@@ -1171,6 +1181,7 @@ const clampHrs = (v: any): number => {
                 })()}
               </div>
               </div>
+            </div>
             </div>
           </div>
 
