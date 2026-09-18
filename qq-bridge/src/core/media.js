@@ -193,6 +193,16 @@ export function createMediaDomain(cfg) {
    * 全部探不到就等 800ms 再探一轮（抖动多半是瞬时的），最后兜底返回第一个候选
    * （绝不能因为"封面探不到"就让整张卡片发不出去）。
    */
+  /* 【2026-09-19 修「QQ音乐卡又没封面了」】封面域名 `y.gtimg.cn` → `y.qq.com`。
+   *
+   * 线索：主人手机上 `y.gtimg.cn` 的封面**时有时无**，而网易云真卡的封面是
+   * `p1.music.126.net`（同样是外部域名）**一直正常** —— 所以不是"外链就不能用"，
+   * 而是 **`y.gtimg.cn` 这个域在本机客户端上不可靠**（它常做防盗链/限流）。
+   * 实测同一个 albummid：`y.qq.com/music/photo_new/T002R300x300M000<albummid>.jpg`
+   * 与 `y.gtimg.cn/…` 返回**完全一样**的图（都是 200 image/jpeg、11028 字节），
+   * 而 `y.qq.com` 是腾讯主域、更稳。所以统一改写成 `y.qq.com`；别的域名（网易云、p.qpic.cn…）原样不动。 */
+  const preferStableQqCover = (u) => String(u ?? '').trim().replace(/^https?:\/\/y\.gtimg\.cn\//i, 'https://y.qq.com/');
+
   async function firstWorkingImage(candidates) {
     const list = [...new Set(candidates.map((u) => String(u ?? '').trim()).filter(Boolean))];
     if (!list.length) return '';
@@ -553,22 +563,34 @@ export function createMediaDomain(cfg) {
       const artist = song?.artist || givenArtist || '';
       const url = song?.url || `https://y.qq.com/n/ryqq/songDetail/${encodeURIComponent(pid)}`;
       const link = `${title}${artist ? ' ' + artist : ''} ${url}`;
-      if (!song?.audio || !song?.cover) {
-        return {
-          title,
-          primary: null,
-          native: null,
-          link,
-          note: '解析不到可播放直链/封面，发官方分享链接（QQ 客户端自己渲染卡片）'
-        };
-      }
       const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
       const qqExplicitCover = String(opts?.image ?? '').trim();
       /* **桥自己解析的那张优先**（聚合站按 songmid/歌名回检匹配过，肯定是这首歌的），
        * 调用方传的 `image` 只兜底 —— 它是从聊天记录里别的卡片抄来的话就gg了（主人实测"封面不对"就是这么来的）。
        * `song.coverExplicit` 是解析器专门留的"调用方传的那张"（不能和 song.cover 混）。 */
-      const qqCover = await firstWorkingImage([song.cover, song.coverExplicit, qqExplicitCover]);
-      const data = { type: cardType, url, audio: song.audio, title, image: await ensureQqHostedImage(qqCover) };
+      const qqCover = preferStableQqCover(await firstWorkingImage([song?.cover, song?.coverExplicit, qqExplicitCover]));
+      /* 【2026-09-19 修「QQ音乐又没封面」——真因是**卡片根本没生成**】
+       * 线上现场：请求 `musicId=0039MnYb0qxYhV`，聚合站返回的最佳匹配却是
+       * `songDetail/004Fs2FP1EvZYc`（另一个版本，songmid 不同）→ 被"按 songmid 回检"判为对不上
+       * → `song.audio`/`song.cover` 都是空 → 旧代码**直接放弃卡片、退成一条纯链接**
+       *   （日志：`试了 2 个关键词都解析不到可播放直链…退回官方分享链接`）。
+       * 而 `qq_music_search` 给的第一条与聚合站最佳匹配**经常不是同一个版本**，所以这条会稳定命中，
+       * 表现就是主人说的"又没封面"——其实连卡片都没有。
+       *
+       * 现在改成：**只要有封面就把卡片拼出来**。可播放直链拿不到就**不带 audio**
+       * （歌页链接照样能点、封面照样显示），实在连封面都没有才退纯链接。
+       * 这样"对不对得上"只影响"能不能点播放"，不再影响"有没有卡片"。 */
+      if (!qqCover) {
+        return {
+          title,
+          primary: null,
+          native: null,
+          link,
+          note: '连封面都拿不到，发官方分享链接（QQ 客户端自己渲染卡片）'
+        };
+      }
+      const data = { type: cardType, url, title, image: await ensureQqHostedImage(qqCover) };
+      if (song?.audio) data.audio = song.audio;
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
       return {
@@ -576,7 +598,9 @@ export function createMediaDomain(cfg) {
         primary: { type: 'music', data },
         native: null,
         link,
-        note: `QQ 音乐卡片（桥拼 type=${cardType}，直链 ${song.via || 'secapi'}；vkey 带时效，不缓存）`
+        note: song?.audio
+          ? `QQ 音乐卡片（桥拼 type=${cardType}，直链 ${song.via || 'secapi'}；vkey 带时效，不缓存）`
+          : `QQ 音乐卡片（桥拼 type=${cardType}，**没有解析到可播放直链**：聚合站最佳匹配与 songmid 不同版本，只发了封面+歌页链接）`
       };
     }
 
@@ -652,7 +676,7 @@ export function createMediaDomain(cfg) {
             album: String(s?.albumname || ''),
             id: mid,
             url: mid ? `https://y.qq.com/n/ryqq/songDetail/${mid}` : '',
-            cover: normalizeCoverUrl(s?.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : ''),
+            cover: preferStableQqCover(s?.albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg` : ''),
             duration: Number(s?.interval) || 0
           });
         }
