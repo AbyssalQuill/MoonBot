@@ -92,26 +92,17 @@ export function normalizeMediaUrl(raw) {
  * 【顺带修掉的"将要访问"】真卡的 jumpUrl 用的是**手机播放页**
  * （`i.y.qq.com/v8/playsong.html?...songmid=…` / `y.music.163.com/m/song?id=…`），
  * 点开直接进播放器；我们之前用的是**桌面歌页** `y.qq.com/n/ryqq/songDetail/…`，
- * 那才会被 QQ 盖上"将要访问"那层安全页。照抄真卡就同时解决了这条。
+ * 那才会被 QQ 盖上"将要访问"那层安全页。照抄真卡的 jumpUrl 就同时解决了这条。
  *
- * 关于 `token`：真卡里那张是分享方签的 32 位十六进制，我们签不出来 ——
- * 用同格式的随机值顶上（位置卡就是这么做的，主人确认能正常渲染）。
- * ⚠️ 所以调用方**必须保留纯链接兜底**：万一 QQ 校验 token 把卡拒了，分享动作不能整体失败。
+ * 【⚠️ 但版式不能自己拼】**这张 Ark 必须由签名服务签**：手写 Ark 的 `config.token` 是随机的，
+ * QQ 服务端一律拒收 —— 消息只写进本地库、对方**什么都收不到**（判据：`real_seq` 不前进）。
+ * 实测 4 个变体（补 `uin`、换 jumpUrl、去 `&`）全灭。
+ * 正确的做法见下面 buildMusicCard 两条分支：**仍然交给签名服务，只是 payload 里不带 `audio`**
+ * —— 它就会签出 `tuwen.lua` + `view:news`（真机分享的版式），且带合法签名所以能送达。
+ *
+ * 【弃用的东西】以前这里有一个 `buildShareNewsCard()`，作用是"自己拼一张 tuwen Ark"。
+ * 已删掉：那条路根本发不出去，留着只会被再捡起来用。
  * ══════════════════════════════════════════════════════════════════════════════ */
-
-/** 各平台在 QQ 里的「应用身份」——appid / 显示名 / 官方图标，全部抄自真机分享卡。 */
-export const SHARE_APP = {
-  qqmusic: {
-    appid: 100497308,
-    tag: 'QQ音乐',
-    tagIcon: 'https://p.qpic.cn/qqconnect/0/app_100497308_1626060999/100?max-age=2592000&t=0'
-  },
-  netease: {
-    appid: 100495085,
-    tag: '网易云音乐',
-    tagIcon: 'https://i.gtimg.cn/open/app_icon/00/49/50/85/100495085_100_m.png'
-  }
-};
 
 /** QQ 音乐的**手机播放页**（真卡用的就是这个；桌面歌页会被"将要访问"拦一层）。 */
 export function qqMobilePlayUrl(songmid) {
@@ -127,38 +118,6 @@ export function neteaseMobileSongUrl(id) {
   return sid ? `https://y.music.163.com/m/song?id=${encodeURIComponent(sid)}` : '';
 }
 
-/**
- * 拼一张与真机分享**同形**的图文卡（tuwen.lua + view:news + meta.news）。
- * 返回可直接发送的 OneBot json 段；字段顺序也照真卡排（便于日后比对）。
- */
-export function buildShareNewsCard({ platform = 'qqmusic', title = '', desc = '', jumpUrl = '', preview = '', uin = '' }) {
-  const app = SHARE_APP[platform] ?? SHARE_APP.qqmusic;
-  const ctime = Math.floor(Date.now() / 1000);
-  const hex = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
-  const news = {
-    app_type: 1,
-    appid: app.appid,
-    ctime,
-    desc,
-    jumpUrl,
-    preview,
-    tag: app.tag,
-    tagIcon: app.tagIcon,
-    title
-  };
-  if (uin) news.uin = uin;
-  const card = {
-    app: 'com.tencent.tuwen.lua',
-    bizsrc: 'qqconnect.sdkshare',
-    config: { ctime, forward: 1, token: hex(), type: 'normal' },
-    extra: { app_type: 1, appid: app.appid, ...(uin ? { uin } : {}) },
-    meta: { news },
-    prompt: `[分享]${title || '音乐'}`.slice(0, 60),
-    ver: '0.0.0.1',
-    view: 'news'
-  };
-  return { type: 'json', data: { data: JSON.stringify(card) } };
-}
 
 
 /**
@@ -728,52 +687,32 @@ export function createMediaDomain(cfg) {
       }
       const data = {
         type: '163',
-        /* 【2026-09-19 实测·「将要访问」到底是什么】
-         * 主人拿同一首歌点了 5 种链接形态，结论很干净：
-         *   A https://music.163.com/#/song?id=X           → 弹
-         *   B https://music.163.com/song?id=X             → 弹
-         *   C https://y.music.163.com/m/song?id=X         → 弹
-         *   D https://music.163.com/song/media/outer/…    → 弹
-         *   E https://m701.music.126.net/…/xxx.mp3?vuutv= → **不弹**
-         * 也就是 QQ 只给**网页**盖那层安全页，**直链媒体文件不盖**（直接进播放器）。
-         * 而且官方从网易云 App 分享出来的真卡，jumpUrl 用的就是 C 那种手机页 ——
-         * **说明真卡一样弹，这不是我们引入的问题**。
-         *
-         * 【2026-09-19 主人定稿】**默认改回歌曲页**（`url = song.url`）：
-         * 弹一下中转页可以接受，但直链带 `vuutv` 口令、理论上会过期，
-         * 而卡片是永久留在聊天记录里的 —— 稳定 > 少点一下。
-         * 想改成直链（不弹中转页、直接播）：`social.send.neteaseJumpUrl = 'direct'`。 */
-        url: String(cfg?.social?.send?.neteaseJumpUrl ?? 'page').trim().toLowerCase() === 'direct' ? (song.audio || song.url) : song.url,
-        audio: song.audio,
+        /* 【2026-09-19 定稿】url 用**手机歌曲页**（真卡用的就是这种；桌面页会被 QQ 盖上"将要访问"）。 */
+        url: neteaseMobileSongUrl(pid),
         title,
         image: await ensureQqHostedImage(ensureJpegCover(cover, coverPick.ct, { w: 300, h: 300, fit: 'cover' }, coverPick.magic))
       };
       if (artist) data.singer = artist;
-      /* 【2026-09-19 定稿】默认发**图文卡**（tuwen/news，照抄真机分享的形状）——
-       * `music.lua` 那个版式手机端不画封面，见文件上方 buildShareNewsCard 的说明。
-       * 想回到旧的 music.lua 卡：`social.send.musicCardStyle = 'music'`（或环境变量 QQBRIDGE_MUSIC_CARD_STYLE=music）。 */
-      if (MUSIC_CARD_STYLE !== 'music') {
-        const seg = buildShareNewsCard({
-          platform: 'netease',
-          title,
-          desc: artist,
-          jumpUrl: neteaseMobileSongUrl(pid),
-          preview: data.image
-        });
-        return {
-          title,
-          primary: seg,
-          native,
-          link,
-          note: '桥拼 163 图文卡（tuwen/news，与网易云 App 分享同形：手机端才画封面、点开进手机播放页）'
-        };
-      }
+      /* 【2026-09-19 定稿·这是"手机端没封面"的最终答案】
+       * NapCat 会把这个 data 原样 POST 给签名服务换整张 Ark，而**签名服务只看 payload 里有没有 `audio`**
+       * 来决定版式 —— 线上逐组实测：
+       *     带 audio   → app=com.tencent.music.lua  view=music   ← 手机端**不画封面**（电脑端宽容，所以"电脑上有"）
+       *     不带 audio → app=com.tencent.tuwen.lua  view=news    ← **真机分享的那种版式**，手机端会画封面
+       * 不带 audio 时签出来的是 `qqconnect.sdkshare` + 合法 `config.token`，所以**能真正送达**。
+       *
+       * ⚠️ 顺带作废一条弯路：我一度改成"自己手写 tuwen Ark"。那是**发不出去的** ——
+       * 手写卡的 token 是随机的，QQ 服务端一律拒收，消息只写进本地库、对方什么都收不到
+       * （判据：消息的 `real_seq` 不前进；实测 4 张全灭，且改 `uin`、改 jumpUrl 里的 `&` 都无效）。
+       * 结论：**卡片必须由签名服务签**，版式则由"带不带 audio"决定。 */
+      if (MUSIC_CARD_STYLE === 'music') data.audio = song.audio;
       return {
         title,
         primary: { type: 'music', data },
         native,
         link,
-        note: '桥拼 163 卡片（music.lua 版式 —— 手机端不画封面，仅在 social.send.musicCardStyle=music 时使用）'
+        note: MUSIC_CARD_STYLE === 'music'
+          ? '桥拼 163 卡片（music.lua 版式 —— 手机端不画封面，仅在 social.send.musicCardStyle=music 时使用）'
+          : '桥拼 163 图文卡（签名服务签的 tuwen/news，与网易云 App 分享同版式：手机端才画封面、点开进手机歌曲页）'
       };
     }
 
@@ -826,43 +765,24 @@ export function createMediaDomain(cfg) {
           note: '连封面都拿不到，发官方分享链接（QQ 客户端自己渲染卡片）'
         };
       }
-      const data = { type: cardType, url, title, image: await ensureQqHostedImage(ensureJpegCover(qqCover, qqPick.ct, { w: 300, h: 300, fit: 'cover' }, qqPick.magic)) };
-      if (song?.audio) data.audio = song.audio;
+      const data = { type: cardType, url: MUSIC_CARD_STYLE === 'music' ? url : qqMobilePlayUrl(pid), title, image: await ensureQqHostedImage(ensureJpegCover(qqCover, qqPick.ct, { w: 300, h: 300, fit: 'cover' }, qqPick.magic)) };
       if (artist) data.singer = artist;
-      if (cardType === 'custom') data.content = artist || 'QQ音乐';
-      /* 【2026-09-19 定稿】默认发**图文卡**（tuwen/news，照抄真机分享的形状）。
-       * 真卡（主人从 QQ 音乐 App 分享进来的）是：
-       *   app=com.tencent.tuwen.lua / view=news / meta.news
-       *   jumpUrl=https://i.y.qq.com/v8/playsong.html?...songmid=…   ← 手机播放页，不是桌面歌页
-       *   preview=<封面>
-       * 而 `music.lua`（我们之前一直发的）**手机端不画封面**；桌面歌页还会被 QQ 盖一层
-       * "将要访问"的安全页 —— 两条都是照着真卡改掉的。 */
-      if (MUSIC_CARD_STYLE !== 'music') {
-        const seg = buildShareNewsCard({
-          platform: 'qqmusic',
-          title,
-          desc: artist,
-          jumpUrl: qqMobilePlayUrl(pid),
-          preview: data.image
-        });
-        return {
-          title,
-          primary: seg,
-          native: null,
-          link,
-          note: song?.audio
-            ? 'QQ 音乐图文卡（tuwen/news，与 QQ音乐 App 分享同形：手机端才画封面、点开进手机播放页）'
-            : 'QQ 音乐图文卡（tuwen/news；没有解析到可播放直链，点开进手机播放页听）'
-        };
-      }
+      if (cardType === 'custom' && MUSIC_CARD_STYLE === 'music') data.content = artist || 'QQ音乐';
+      /* 【2026-09-19 定稿】**不带 audio** → 签名服务签出 `com.tencent.tuwen.lua` + `view:news`
+       * （真机分享的版式，手机端会画封面），而且带合法签名所以真能送达；
+       * 带 audio → 签成 `music.lua`，手机端不画封面。详见 163 分支上那段长注释。
+       * url 同时换成**手机播放页**（真卡用的那种），点开直接进播放器，不再被"将要访问"拦一层。 */
+      if (MUSIC_CARD_STYLE === 'music' && song?.audio) data.audio = song.audio;
       return {
         title,
         primary: { type: 'music', data },
         native: null,
         link,
-        note: song?.audio
-          ? `QQ 音乐卡片（桥拼 type=${cardType}，直链 ${song.via || 'secapi'}；vkey 带时效，不缓存）`
-          : `QQ 音乐卡片（桥拼 type=${cardType}，**没有解析到可播放直链**：聚合站最佳匹配与 songmid 不同版本，只发了封面+歌页链接）`
+        note: MUSIC_CARD_STYLE === 'music'
+          ? 'QQ 音乐卡片（music.lua 版式，带可播放直链 —— 手机端不画封面）'
+          : (song?.audio
+            ? 'QQ 音乐图文卡（签名服务签的 tuwen/news，与 QQ音乐 App 分享同版式：手机端才画封面、点开进手机播放页）'
+            : 'QQ 音乐图文卡（签名服务签的 tuwen/news；没解析到可播放直链，点开进手机播放页听）')
       };
     }
 
