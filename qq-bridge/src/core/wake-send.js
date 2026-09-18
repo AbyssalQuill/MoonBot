@@ -189,9 +189,24 @@ export function evaluateWakeTrigger(key, st, event, kind, textContent, plainCont
 }
 
 // 运行时「人设/发言规则」文件注入（桌面 GUI 写入 qq-bridge/persona.md 与 speech-rules.md，桥只读；
-// 缺失跳过；按 mtime 缓存，文件变更下次唤醒自动生效；上限 persona 16000 / speech 6000 字符）
+// 缺失跳过；按 mtime 缓存，文件变更下次唤醒自动生效；上限 persona 16000 / speech 12000 字符）
 // 【2026-09-12 主人反馈】原来 persona 上限 6000 字符，而一份完整角色卡动辄 9KB+ —— 会被静默截断。
-const RUNTIME_OVERRIDE_MAX = { 'persona.md': 16000, 'speech-rules.md': 6000 };
+// 【2026-09-18 修「新加的规则根本没进模型」】现场证据链：
+//   ① 线上 speech-rules.md 已被桌面 GUI 追加到 **6683 字符**（第 49 行起是 `## OVER-FITTING BACKSTOP`
+//      和第 29~33 条），日志反复出现 `[wake] speech-rules.md 超过 6000 字符，已截断注入`；
+//   ② 旧实现是 `text.slice(0, cap)` —— **只保头部、尾巴整段丢弃**；
+//   ③ 从 DSH 会话（/root/.dsh/sessions/.../session.jsonl.zstd）里读回**真正送进模型的那段文本**，
+//      结尾恰好是 `30. **反问/撇清（"你猜"、"你自己"` + `…[truncated]` —— 即第 30 条后半句起、
+//      31/32/33 条、CALIBRATION 补充**一个字都没进模型**。
+//   教训：**往这个文件末尾追加规则 = 大概率白写**（这正是"规则写了却不生效"的机制原因）。
+// 现在两处一起改：
+//   ① speech 上限 6000 → 12000：按 6683 的现状留约 5300 字符余量，正常追加不会再触发截断
+//      （代价是上限内每轮多注入的 token；但规则文件是用户亲手写的、本就该生效，静默丢规则更贵）；
+//   ② 万一仍然超限：改成**保头 + 保尾**（尾段＝最新追加的规则，价值高于中段），
+//      并把"砍掉了第几到第几个字符"写进日志，让丢失可见，而不是继续静默砍尾。
+const RUNTIME_OVERRIDE_MAX = { 'persona.md': 16000, 'speech-rules.md': 12000 };
+// 超限时保证末尾这么多字符一定注入：新规则都追加在文件尾部，绝不能再被整段砍掉。
+const RUNTIME_OVERRIDE_KEEP_TAIL = 2500;
 const runtimeOverrideCache = {}; // fileName -> { statKey, text }
 function readRuntimeOverrideFile(fileName) {
   const cached = runtimeOverrideCache[fileName];
@@ -208,10 +223,18 @@ function readRuntimeOverrideFile(fileName) {
     let text = '';
     try {
       text = fs.readFileSync(p, 'utf8');
-      const cap = RUNTIME_OVERRIDE_MAX[fileName] || 6000;
+      const cap = RUNTIME_OVERRIDE_MAX[fileName] || 12000;
       if (text.length > cap) {
-        text = `${text.slice(0, cap).trimEnd()}\n…[truncated]`;
-        log(`[wake] ${fileName} 超过 ${cap} 字符，已截断注入（其余部分未进模型）`);
+        // 保头 + 保尾：尾部是最新追加的规则，不能再像旧实现那样被整段砍掉（见文件头注释的证据链）
+        const total = text.length;
+        const tailKeep = Math.min(RUNTIME_OVERRIDE_KEEP_TAIL, Math.floor(cap / 2));
+        const headKeep = cap - tailKeep;
+        const head = text.slice(0, headKeep).trimEnd();
+        const tail = text.slice(total - tailKeep).trimStart();
+        const dropFrom = headKeep + 1;
+        const dropTo = total - tailKeep;
+        text = `${head}\n…[truncated: 第 ${dropFrom}~${dropTo} 字符（共 ${total}）未注入]\n${tail}`;
+        log(`[wake] ${fileName} 超过 ${cap} 字符（实际 ${total}），已保头 ${headKeep} + 保尾 ${tailKeep} 注入：中段第 ${dropFrom}~${dropTo} 字符未进模型`);
       }
     } catch { text = ''; }
     runtimeOverrideCache[fileName] = { key: statKey, text };
