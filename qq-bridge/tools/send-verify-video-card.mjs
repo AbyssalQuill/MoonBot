@@ -54,6 +54,10 @@ if (process.env.VIDEO_FORCE_NO_COVER === '1') {
 }
 console.log(`title=${JSON.stringify(info?.title)}  author=${JSON.stringify(info?.author)}`);
 console.log(`cover=${info?.cover ? info.cover : '【空！】'}  source=${info?.source}  duration=${info?.durationText} play=${info?.playText}`);
+/* shareUrl 是卡片真正会带的那个链（真短码 / 用户给的短码 / b23.tv<BV> 兜底）——
+ * 它直接决定 qqdocurl 长什么样，所以回读之前先把本地算出来的值打出来对照。 */
+console.log(`shareUrl=${info?.shareUrl || '【空，会回落到长链】'}`);
+console.log(`url(长链)=${info?.url}  kind=${info?.kind}  id=${info?.id}`);
 
 console.log('\n========== 2) buildVideoCard ==========');
 const plan = buildVideoCard(info, { url: String(info?.url || VURL) });

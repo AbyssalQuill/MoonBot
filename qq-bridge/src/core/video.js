@@ -112,7 +112,27 @@ export function parseVideoUrl(rawUrl) {
     if (av) return { platform, kind: 'aid', id: av[1], url: `https://www.bilibili.com/video/av${av[1]}` };
     const bvQ = u.searchParams.get('bvid');
     if (bvQ && /^BV[0-9A-Za-z]{10}$/i.test(bvQ)) return { platform, kind: 'bvid', id: bvQ, url: `https://www.bilibili.com/video/${bvQ}` };
-    // 短链 / 其它形态：交给解析阶段跟随重定向
+    /* ── 2026-09-18 第十七批：b23.tv 的**路径位**必须原样留住 ──────────────────────
+     * 官方 API 文档（bilibili-API-collect `docs/misc/b23tv.md`）写明 b23.tv 有三种形态：
+     *   ① 任意短链：路径由 **7 位**数字/大小写字母组成，如 https://b23.tv/pigt3PQ（有时效性）
+     *   ② 视频短链(av)：/av<aid>
+     *   ③ 视频短链(BV)：/BV<bvid>
+     * 真人从 B 站 App 分享进 QQ 的真卡，qqdocurl 用的就是 ①（同一台 NapCat 回读到 6 张，
+     * 短码分别是 WZcddcS / WZVnINP / 0hEdnD1 / 9kFv2VX / w1c4DfM / 1ncmZVP，**全是 7 位字母数字**，
+     * 见 tools/dump-real-cards-full.mjs 的回读）。老代码把 b23.tv 一律当"短链、id 空"，
+     * 后面 resolveBilibili 跟完 302 就**只留 BV、把短码丢了** —— 用户给的短码本来可以直接用，
+     * 丢掉之后只能拿 BV 去反推，等于我们自己把信息降级了。这里把短码单独带出来。 */
+    if (u.hostname.toLowerCase() === 'b23.tv' || u.hostname.toLowerCase().endsWith('.b23.tv')) {
+      const seg = path.replace(/^\/+/, '').split('/')[0] || '';
+      if (/^BV[0-9A-Za-z]{10}$/.test(seg)) {
+        // 官方文档承认的 BV 形态，直接认出来，不用多绕一次 302；url 保持 b23.tv 短域形态
+        return { platform, kind: 'bvid', id: seg, url: `https://b23.tv/${seg}` };
+      }
+      if (/^[0-9A-Za-z]{5,12}$/.test(seg)) {
+        return { platform, kind: 'short', id: '', shortCode: seg, url: raw };
+      }
+    }
+    // 其它形态（旧短链 / 带 query 的分享链）：交给解析阶段跟随重定向
     return { platform, kind: 'short', id: '', url: raw };
   }
 
@@ -320,6 +340,7 @@ async function biliViaView(id, kind, via, apiPath = VIEW_API_PATHS[1]) {
     pubdate: Number(d.pubdate) || 0,
     cid: Number(d.cid) || 0,
     pages: Number(d.videos) || 1,
+    aid: Number(d.aid) || 0,     // 官方分享接口的 oid 要的是 aid，顺手带出来省一次请求
     source: (apiPath.includes('/wbi/') ? 'api-wbi' : 'api') + (via === 'direct' ? '' : '-proxy'),
   };
 }
@@ -376,6 +397,110 @@ async function biliViaSearchByTitle(title, bvid, via) {
 }
 
 /**
+ * 向 B 站官方分享接口要一条 **b23.tv/<7 位不透明短码>** 形态的短链。
+ *
+ * ── 2026-09-18 第十七批·实测（`tools/probe-bili-share-link.mjs` 在线上机器跑的）──────────
+ * 接口：`POST https://api.bilibili.com/x/share/click`（备路 `https://api.biliapi.net/x/share/click`）
+ * 参数照 bilibili-API-collect `docs/misc/b23tv.md` 的原文示例逐字搬（那份文档也标了"参数表基本失效"，
+ * 所以下面每个字段都是实跑验过的，不是抄完就算）：
+ *   platform=unix  share_channel=COPY  share_id=main.ugc-video-detail.0.0.pv
+ *   share_mode=4   oid=<**aid**，不是 bvid>  buvid=qwq  build=6114514
+ * 本机（机房 IP，老 view 接口稳定 412）实跑 4 组参数，**4/4 全部 HTTP 200 code=0**，例如：
+ *   BV13Xb56NEEZ → data.content = "【五十个角色、五十种声音、同一个我-哔哩哔哩】 https://b23.tv/hcBfL2T"
+ * 且把返回的短码跟到底验证过：`b23.tv/l38NbiD` → 302 → `https://www.bilibili.com/video/BV13Xb56NEEZ
+ * ?…&unique_k=l38NbiD&share_plat=unix…`，**落的正是同一条 BV**；短码后面再挂
+ * `?share_medium=android&share_source=qq&ts=…` 这些非设备参数也照样落对（bbid 是设备标识，我们不伪造）。
+ *
+ * ⚠️ 两个已知限制，如实写在这里：
+ *   ① 同一个视频每次调用返回的短码**都不一样**（hcBfL2T / GTSQYqy / hayEZyQ / xbkyqoD），
+ *      文档说这类任意短链"有时效限制"，但**具体多久过期没有测出来**（本次只验证了"刚生成就能跳对"）。
+ *      所以只缓存 10 分钟用于同轮复用，不做长期缓存；真过期了卡片会点不开，而 b23.tv/<BV> 那种
+ *      官方文档承认的形态不存在过期问题 —— 这是这里唯一的取舍。
+ *   ② 拿不到短码时**必须**退回 `https://b23.tv/<BV>`（不要在卡片上放长链：
+ *      QQ 的链接预览只认 b23.tv 这个白名单短域）。
+ */
+const SHARE_CODE_TTL_MS = 10 * 60 * 1000;
+const shareCodeCache = new Map();          // bvid(大写) → { code, at }
+
+/** 校验短码确实落到目标 BV：只跟 302 那一跳的 Location，不看终点页（机房 IP 终点恒 412） */
+async function shortCodeHitsBvid(code, bvid) {
+  try {
+    const r = await fetch(`https://b23.tv/${code}`, {
+      redirect: 'manual',
+      headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/' },
+      signal: AbortSignal.timeout(8000),
+    });
+    const loc = r.headers.get('location') || '';
+    return /\/video\/(BV[0-9A-Za-z]{10})/i.exec(loc)?.[1]?.toUpperCase() === String(bvid).toUpperCase();
+  } catch {
+    return null;                            // 网络问题不算"对不上"，交给调用方决定
+  }
+}
+
+/**
+ * @param {string} bvid
+ * @param {number} [aid] 已经知道 aid 时直接传，省一次 wbi/view
+ * @returns {Promise<string>} 7 位短码；拿不到返回空串
+ */
+export async function fetchBiliShareCode(bvid, aid = 0) {
+  const key = String(bvid || '').trim().toUpperCase();
+  if (!key) return '';
+  const hit = shareCodeCache.get(key);
+  if (hit && Date.now() - hit.at < SHARE_CODE_TTL_MS) return hit.code;
+
+  let oid = Number(aid) || 0;
+  if (!oid) {
+    try { oid = Number((await biliJson(`/x/web-interface/wbi/view?bvid=${encodeURIComponent(key)}`))?.aid) || 0; }
+    catch (e) { log(`[video] 取 aid 失败（分享短链要用 aid 当 oid）：${e?.message ?? e}`); }
+  }
+  if (!oid) return '';
+
+  const body = new URLSearchParams({
+    platform: 'unix',
+    share_channel: 'COPY',
+    share_id: 'main.ugc-video-detail.0.0.pv',
+    share_mode: '4',
+    oid: String(oid),
+    buvid: 'qwq',
+    build: '6114514',
+  }).toString();
+
+  for (const host of ['https://api.bilibili.com', 'https://api.biliapi.net']) {
+    try {
+      const r = await fetch(`${host}/x/share/click`, {
+        method: 'POST',
+        headers: {
+          'user-agent': UA,
+          referer: `https://www.bilibili.com/video/${key}`,
+          origin: 'https://www.bilibili.com',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body,
+        signal: AbortSignal.timeout(8000),
+      });
+      const text = await r.text();
+      const j = (() => { try { return JSON.parse(text); } catch { return null; } })();
+      const code = /b23\.tv\/([0-9A-Za-z]{5,12})/.exec(String(j?.data?.content ?? ''))?.[1] || '';
+      if (j?.code !== 0 || !code || /^BV[0-9A-Za-z]{10}$/i.test(code)) {
+        log(`[video] 分享短链 ${host} 没给出短码：HTTP ${r.status} code=${j?.code} body=${text.slice(0, 160)}`);
+        continue;
+      }
+      const ok = await shortCodeHitsBvid(code, key);
+      if (ok === false) {
+        log(`[video] 分享短链 ${host} 返回 ${code}，但它没落到 ${key} —— 弃用，退回 b23.tv/<BV>`);
+        continue;
+      }
+      shareCodeCache.set(key, { code, at: Date.now() });
+      log(`[video] 分享短链：${key} → b23.tv/${code}（官方 x/share/click 签发，302 已核对${ok === true ? '一致' : '（校验请求失败，未核对）'}）`);
+      return code;
+    } catch (e) {
+      log(`[video] 分享短链 ${host} 请求失败：${e?.message ?? e}`);
+    }
+  }
+  return '';
+}
+
+/**
  * 解析一个 bilibili 链接/短链 → 统一信息对象。
  * 多路降级，任一成功即返回；全失败抛出最后一个错误（调用方还有"只剩链接"这条路）。
  */
@@ -384,6 +509,11 @@ export async function resolveBilibili(rawUrl) {
   if (!parsed || parsed.platform !== 'bilibili') throw new Error('不是 bilibili 链接');
   let { kind, id } = parsed;
   let url = parsed.url;
+  /* 用户给进来的是 **b23.tv + 7 位短码** 时，把他那条短链原样留下
+   * （短码只有 B 站签得出来，我们反推不回去；老代码跟完 302 就只留 BV，白丢一条有效分享链）。
+   * 注意：`b23.tv/<BV>` 虽然是官方文档承认的形态，但它**不是** B 站 App 分享时用的那种短码，
+   * 所以不能因为"输入是 b23.tv 域名"就跳过换真短码这一步 —— 只认 `parsed.shortCode`。 */
+  const givenShortUrl = parsed.shortCode ? String(rawUrl).trim() : '';
 
   if (kind === 'short' || !id) {
     const finalUrl = await followRedirect(rawUrl);
@@ -462,11 +592,27 @@ export async function resolveBilibili(rawUrl) {
 
   if (!info) throw lastErr || new Error('bilibili 解析失败');
 
+  /* 卡片/小程序要用的"分享链"（shareUrl）在这里定下来，规则按优先级：
+   *   ① 用户给的就是 b23.tv 链接 → 原样用他那条（短码是 B 站签的，反推不回来）；
+   *   ② 我们有 BV 号 → 向官方 x/share/click 要一条**真短码**（形态与真卡一致）；
+   *      拿不到就退回 b23.tv/<BV>（bilibili-API-collect 明文承认的官方形态，不会过期）；
+   *   ③ 都不是 → 空串，调用方回落到长链。 */
+  let shareUrl = givenShortUrl;
+  if (!shareUrl && kind === 'bvid' && id) {
+    const code = await fetchBiliShareCode(id, info.aid);
+    shareUrl = code ? `https://b23.tv/${code}` : `https://b23.tv/${id}`;
+    if (!code) log(`[video] 没拿到官方短码，本次卡片用 b23.tv/${id}（BV 形态，官方文档承认且不过期）`);
+  }
+  // 兜底：输入本来就是别的 b23.tv 形态（如 /av<aid>），原样用它
+  if (!shareUrl && /^https?:\/\/b23\.tv\//i.test(String(rawUrl).trim())) shareUrl = String(rawUrl).trim();
+  if (givenShortUrl) log(`[video] 用户给的是 b23.tv 短链，原样保留：${givenShortUrl}`);
+
   return {
     platform: 'bilibili',
     id,
     kind,
     url,
+    shareUrl,
     title: info.title,
     author: info.author || '',
     cover: normalizeImageUrl(info.cover),
@@ -716,8 +862,8 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
   if (!base) return null;
   const title = String(info?.title ?? '').trim();
   const picUrl = String(info?.cover ?? '').trim();
-  const jumpUrl = (platform === 'bilibili' && info?.kind === 'bvid' && info?.id)
-    ? `https://b23.tv/${info.id}`                  // 真卡的 qqdocurl 也是 b23.tv 短链
+  const jumpUrl = (platform === 'bilibili' && (info?.shareUrl || (info?.kind === 'bvid' && info?.id)))
+    ? String(info.shareUrl || `https://b23.tv/${info.id}`)   // 真卡的 qqdocurl 也是 b23.tv 短链
     : String(info?.url ?? '').trim();
   /* webUrl —— **必须传**，它是 qqdocurl 的唯一来源（见上面第十五批的对照实验 A/B/C/D）。
    *
@@ -732,8 +878,22 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
    * `302 → /video/<同一个BV> → 301 → 200`，终点页 <title> 就是那条视频，见 tools/probe-b23-bv.mjs）。
    *
    * 真卡那串 `?share_medium=…&share_source=qq&bbid=…&ts=…` 是 B 站 App 分享时自己带的，
-   * 我们**没有**伪造它（bbid 是设备标识、ts 是分享时刻，编不出来也不该编）；先用纯粹的
-   * `b23.tv/<BV>`，若仍不灵，下一个候选就是补上 share_media/share_source 这类**非设备**参数。 */
+   * 我们**没有**伪造它（bbid 是设备标识、ts 是分享时刻，编不出来也不该编）。
+   *
+   * ── 2026-09-18 第十七批·把"短码形态"这件事做实 ────────────────────────────────
+   * 上一批的结论"真卡用的是 b23.tv 短链，所以我们也拼 b23.tv/<BV>"只对了一半：
+   * 形态对不上 —— 真卡是**7 位不透明短码**（`b23.tv/1ncmZVP`），我们是**BV 当路径**
+   * （`b23.tv/BV13Xb56NEEZ`）。两者在 b23.tv 的 HTTP 层都能 302 到视频页，所以 HTTP 层
+   * 证明不了差别；但 B 站小程序内部是按 qqdocurl 自己那套分享链路由的，形态不同就有风险。
+   * 现在不再靠猜：`resolveBilibili` 会直接向官方 `x/share/click` 要一条**真短码**，
+   * 这里用 `info.shareUrl`（拿不到才退回 BV 形态）。实测依据见 `fetchBiliShareCode` 的注释。
+   *
+   * ── 没验证到的部分（不要粉饰）──────────────────────────────────────────────
+   * `detail_1.url`（`m.q.qq.com/a/s/<hash>`）是 QQ 服务端签的短链，我们**无法解码**它指向
+   * 小程序哪个页面：`tools/probe-qq-miniapp-url.mjs` 用安卓/iPhone QQ 的 UA 跟过真卡和我们的卡，
+   * 落地页对两者返回**同一份 3948 字节的壳**，页内只有 `mqqapi://microapp/open?url=` 和
+   * `jump-qq.js`，没有任何"hash → 目标页"的接口可查。所以"点进去到底是不是那条视频"
+   * **只能在真机 QQ 上看**，服务端侧证明不了。这里能做的是把 qqdocurl 形态对齐真卡。 */
   const webUrl = jumpUrl;
   /* 硬性要求只有两个：title 缺了卡片没标题，jumpUrl 缺了没有跳转目标。
    *
@@ -802,7 +962,7 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
   /* 日志里把 qqdocurl 打出来：它是"点进去是不是这条视频"的唯一判据，
    * 以后线上再出同类问题，看这一行就知道卡片有没有带对目标。 */
   const docUrl = send.meta?.detail_1?.qqdocurl;
-  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）qqdocurl=${docUrl || '(缺失！点开不会落到这条视频)'}`);
+  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）webUrl=${webUrl} qqdocurl=${docUrl || '(缺失！点开不会落到这条视频)'}`);
   if (!docUrl) log(`[video] 警告：本次请求带了 webUrl=${webUrl} 但服务端没回 qqdocurl —— 卡片点开会落不到目标视频`);
   return { type: 'json', data: { data: JSON.stringify(send) } };
 }
@@ -821,8 +981,10 @@ export function buildVideoCard(info, opts = {}) {
   //   QQ 的链接预览只认它白名单里的**分享短域**（b23.tv）。
   //   而 `https://b23.tv/BV号` 是合法短链：实测它 302 到对应视频页（本来只用它做解析，现在直接用它当卡片载体）。
   //   所以 bilibili 一律发 b23.tv 短链，长链只在拿不到 BV 号时才退回去。
+  //   【第十七批】优先用 `info.shareUrl` —— 它可能是用户给的短码，也可能是官方 x/share/click 签发的
+  //   真短码；`b23.tv/<BV>` 只是这两种都拿不到时的兜底（形态见 fetchBiliShareCode 的实测注释）。
   const shareUrl = (() => {
-    if (info?.platform === 'bilibili' && info?.kind === 'bvid' && info?.id) return `https://b23.tv/${info.id}`;
+    if (info?.platform === 'bilibili') return String(info?.shareUrl || (info?.kind === 'bvid' && info?.id ? `https://b23.tv/${info.id}` : url));
     if (info?.platform === 'youtube' && info?.id) return `https://youtu.be/${info.id}`;
     return url;
   })();
