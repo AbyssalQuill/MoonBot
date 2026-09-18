@@ -350,18 +350,15 @@ body textarea.json-text, body .log-viewer, body .log-line {
    等高靠 .lrn-grid 的 align-items: stretch（两栏都是 grid item）；这里负责"撑满 + 内部滚动 + 底部不留死空白"：
    卡片是 flex 列 → 正文区 flex: 1 + min-height: 0 → 滚动区自己 flex: 1 + min-height: 0。
    下面那一栏（画像学习 .lrn-status-block-fill）吃满卡片剩余高度，资料区一直铺到卡底。 */
+/* 【2026-09-19 修「最后一条卡片没和左边最底下对齐」】
+ * 主人澄清了要的是什么：**粉色板（画像学习那一栏）里那块滚动区，要一直铺到粉色板底边**，
+ * 中间不能留一截空粉色。真因就是下面那条 `max-height: 720px` 的硬上限 ——
+ * 左栏比它高时，滚动区到 720px 就停住，下面剩一截粉色空白，看着就是"分界处没拉到底"。
+ * 所以这里保持**不参与分配剩余高度**（上面那栏按内容自然高度），把剩余高度全留给粉色那栏，
+ * 再摘掉它的 max-height，滚动区自然铺满。 */
 .lrn-status-card { display: flex; flex-direction: column; min-height: 0; }
 .lrn-status-body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
-/* 【2026-09-19 修「最后一条卡片没和左边最底下对齐」】
- * 原来是 `flex: 0 1 auto` —— 上面这一栏（人格学习）**不参与分配剩余高度**，
- * 于是它的列表高度只由内容决定，早早结束；剩下的高度全被下面那栏（画像学习）吃掉。
- * 而下面那栏经常是**空的**（没有自动筛出来的人）→ 就变成"人格学习最后一条（如「喜爱真乃」）
- * 停在中途，下面挂着一大块空的粉色栏" —— 看着就是最后一条没和左边底部对齐。
- * 现在改成 `flex: 1 1 auto`：两栏**按比例分剩余高度**，上面那栏的列表因此一直铺到接近卡底，
- * 最后一条的底边就落在左栏底边附近，而不是悬在半空。
- * （不再靠调 max-height 那个魔法数字 —— 这块已经因为左栏高度变化被反复调过三次，
- *   300→640→720，每次调准一次、过阵子又不齐。让它跟着高度分配走才是稳的。） */
-.lrn-status-block { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.lrn-status-block { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
 /* 下面那一栏（画像学习）：吃满卡片剩余高度 —— 浅色托底让它看着是"铺到卡底"的一块栏，而不是留白 */
 .lrn-status-block-fill {
   flex: 1 1 auto;
@@ -374,11 +371,6 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-status-hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--nc-foreground-400); }
 .lrn-block-refresh { margin-left: auto; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
-/* 上面那栏（人格学习）的列表**去掉 620px 上限**：不摘掉它，上面那条 flex 分配就白改了 ——
- * 块长高了、列表却仍被封在 620px，最后一条还是停在半空。
- * 这栏通常只有目标名单里的几个人，条目很少，所以不怕它把整行撑高；
- * 真正会无限变长的是下面「画像学习」（群友自动筛出来的），它的上限（720px）保持不动。 */
-.lrn-status-block .lrn-status-scroll { max-height: none; }
 /* 【2026-09-16 主人要求】最下面那一栏（画像学习）**限高 + 内部纵向滚动**：
    以前这里是 max-height:none，群友档案一多就把这一栏（连带整张右卡，因为 .lrn-grid 是 stretch）
    无限拉高，页面得一路滚到底才能看到别的区块。现在内容区限高自己滚，
@@ -396,7 +388,14 @@ body textarea.json-text, body .log-viewer, body .log-line {
    左卡底部那行状态文字（"上次自动学习：… · 进行中 N 个"）实际位置比 640px 上限还低一截，
    右卡资料区底边仍比它高。把上限从 640 提到 720px，让右卡滚动区向下延伸，
    底边与左栏状态行下沿大致齐平；仍然保留内部纵向滚动，标题/刷新/摘要照旧留在滚动区外。 */
-.lrn-status-block-fill .lrn-status-scroll { max-height: 720px; }
+/* 【2026-09-19 主人澄清后定稿】**粉色板里的滚动区不再设上限**，它靠 `flex: 1 1 auto` 铺满
+   粉色板的剩余高度 —— 于是「粉色背景 / 滚动区」的分界处（也就是滚动区的底边）**永远落在板底**，
+   不论左栏多高都不会在中途停住留出一截空粉色。
+   原来那个 720px 是个手调的魔法数字（历史上 300→640→720 调过三次），
+   只要左栏比它高就会露馅 —— 这也是主人反复看到"没对齐"的根本原因。
+   代价（明说）：名单特别长时不再有上限兜着，右栏会被内容撑高；但主人要的是"分界处拉到底、
+   不留空白"，这一条优先。真嫌长就自己滚轮往下滑（滚动区仍然是 overflow-y: auto）。 */
+.lrn-status-block-fill .lrn-status-scroll { max-height: none; }
 /* 画像学习栏固定头部（标题与刷新按钮之外的两行摘要）：不随下面档案区一起滚 */
 .lrn-portrait-head { flex: 0 0 auto; margin-top: 2px; padding: 0 2px; }
 /* 悬停动效：与主页那几张启动卡一致（微微抬起 + 阴影 + 边框变亮） */
