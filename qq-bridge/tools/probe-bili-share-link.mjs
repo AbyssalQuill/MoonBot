@@ -116,3 +116,13 @@ console.log('\n── 形态对照');
 for (const s of ['1ncmZVP', 'WZVnINP', 'WZcddcS', '0hEdnD1', '9kFv2VX', 'w1c4DfM', BV]) {
   console.log(`   ${s.padEnd(14)} 长度=${s.length}  ${/^BV[0-9A-Za-z]{10}$/.test(s) ? 'BV 号形态' : '不透明短码形态'}`);
 }
+
+/* 4) 把**历史真卡里那 6 个短码**逐个跟一遍，看它们各自落到哪条 BV。
+ *    这一步是为了把"真卡短码 = 有效视频短链"坐实，而不是只看长度像。 */
+const REAL_CODES = ['WZcddcS', 'WZVnINP', '0hEdnD1', '9kFv2VX', 'w1c4DfM', '1ncmZVP'];
+console.log('\n── 历史真卡里的 6 个短码，逐个跟重定向');
+for (const c of REAL_CODES) {
+  const hops = await chain(`https://b23.tv/${c}`);
+  const bv = hops.map((h) => /\/video\/(BV[0-9A-Za-z]{10})/.exec(h)?.[1]).find(Boolean) ?? '';
+  console.log(`   ${c.padEnd(9)} → ${bv ? '✅ ' + bv : '❌ 没跟到 BV：' + hops.join(' ')}`);
+}
