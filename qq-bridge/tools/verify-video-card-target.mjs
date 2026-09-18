@@ -1,4 +1,4 @@
-/* 「B 站卡片点进去不是那个视频」的可复现验证（第十五批）。
+﻿/* 「B 站卡片点进去不是那个视频」的可复现验证（第十五批）。
  *
  * 它**直接 import 线上那份 `src/core/video.js`**，跑的是真实代码路径，不是另写一份：
  *   1. 构造一个真实的 info（真实 BV + 真实封面）
@@ -87,7 +87,13 @@ if (!ark) {
   console.log(`   detail_1.url      = ${d1.url}`);
   console.log(`   detail_1.qqdocurl = ${d1.qqdocurl ?? '(无)'}`);
   ok(!!d1.qqdocurl, 'Ark 带 qqdocurl（卡片点开才知道进哪个视频页）');
-  ok(d1.qqdocurl === longUrl, `qqdocurl 指向这条视频本身（期望 ${longUrl}）`);
+  /* 【2026-09-18 二次修正】qqdocurl 现在与真卡一致：是 **b23.tv 短链**
+   * （真卡形如 `https://b23.tv/<不透明短码>?share_medium=android&share_source=qq&…`）。
+   * 原来断言的是长链 `https://www.bilibili.com/video/BV…` —— 那种形态发出去后
+   * **点进去仍落不到那条视频**，所以把 webUrl 改回了短链。判据相应改成"是 b23.tv 短链且带这条 BV"，
+   * 真正"落到哪"由下面那段重定向链实测（不能只看字符串相等就以为点得进去）。 */
+  ok(/^https?:\/\/b23\.tv\//i.test(String(d1.qqdocurl ?? '')), `qqdocurl 是 b23.tv 短链（真卡的形态）实际=${d1.qqdocurl}`);
+  ok(String(d1.qqdocurl ?? '').includes(bvid), `qqdocurl 里带的是这条视频的 BV（${bvid}）`);
   ok(String(d1.url ?? '').startsWith('m.q.qq.com/a/s/'), 'url 是 QQ 服务端签的 m.q.qq.com 短链');
   ok(!!send.config?.token, 'config.token 非空（空 token 的手拼卡会被 QQ 服务端静默拒收）');
 }

@@ -689,13 +689,21 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
     ? `https://b23.tv/${info.id}`                  // 真卡的 qqdocurl 也是 b23.tv 短链
     : String(info?.url ?? '').trim();
   /* webUrl —— **必须传**，它是 qqdocurl 的唯一来源（见上面第十五批的对照实验 A/B/C/D）。
-   * 取值用长链 `https://www.bilibili.com/video/BV…`：那是 B 站自己的规范路由，
-   * 小程序拿到它可以直接进视频页，不用再解析短链（b23.tv 的规范路径本来是**不透明短码**，
-   * 用 BV 当路径这件事只实测到"HTTP 层跳对"：家宽 IP 上抽 8 个真实 BV，8/8 都是
-   * `302 → https://www.bilibili.com/video/<同一个BV>`，终点页 200 且 <title> 就是那条视频，
-   * 见 tools/probe-b23-bv.mjs）。
-   * jumpUrl 保留 b23.tv 短链：真卡用的就是 b23.tv，两条字段各自独立指向同一条视频，互为兜底。 */
-  const webUrl = String(info?.url ?? '').trim() || jumpUrl;
+   *
+   * 【2026-09-18 二次修正】原来这里取**长链** `https://www.bilibili.com/video/BV…`，
+   * 理由是"B 站的规范路由、不用解析短链"。实测发出去后**点进去仍然落不到那条视频**，
+   * 而真卡的 `qqdocurl` 形如 `https://b23.tv/<不透明短码>?share_medium=android&share_source=qq&bbid=…&ts=…`
+   * —— 也就是 **b23.tv 短链**（同一台机器回读到 4 张真卡，张张如此）。
+   *
+   * 合理解释：B 站小程序认的是**自己那套 b23.tv 分享链**，给它一个站内网页 URL 它无法据此路由。
+   * 所以 webUrl 改回 b23.tv 短链，和真卡保持一致。
+   * `https://b23.tv/<BV号>§` 这种形态在 HTTP 层是通的（家宽 IP 抽 8 个真实 BV，8/8 都是
+   * `302 → /video/<同一个BV> → 301 → 200`，终点页 <title> 就是那条视频，见 tools/probe-b23-bv.mjs）。
+   *
+   * 真卡那串 `?share_medium=…&share_source=qq&bbid=…&ts=…` 是 B 站 App 分享时自己带的，
+   * 我们**没有**伪造它（bbid 是设备标识、ts 是分享时刻，编不出来也不该编）；先用纯粹的
+   * `b23.tv/<BV>`，若仍不灵，下一个候选就是补上 share_media/share_source 这类**非设备**参数。 */
+  const webUrl = jumpUrl;
   if (!title || !picUrl || !jumpUrl) return null;
   const bits = [];
   if (info?.author) bits.push(info.author);
