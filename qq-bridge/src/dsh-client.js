@@ -39,22 +39,54 @@ export function shouldResetSeqWatermark(known, maxRec) {
   return Number(known) > 0 && Number(maxRec) > 0 && (Number(known) - Number(maxRec)) > SEQ_RESET_GAP;
 }
 
-function readLatestToken(logFile) {
+/**
+ * 从 DSH web 的启动日志里取最新的 `?token=`。
+ *
+ * 【2026-09-18 修：尾部窗口 256KB → 逐级放大】原实现只看文件最后 256KB，
+ * 一旦最后一条 token 距 EOF 超过这个距离就返回 null，而 `_ensureSession` 的失败是
+ * **静默降级**（不带 cookie 继续请求），现场表现为全链路 401，非常难查。
+ * 实测那次：/root/.dsh/dsh-web.log 4260469 B，最后一条 token 在 3978919 B 处，
+ * 距 EOF 281550 B > 262144 B —— 只差 19KB 就被挤出去了（见 dsh-diag2 的输出）。
+ *
+ * 为什么会涨这么快：dsh-web.service 的 StandardOutput/StandardError 都 append 到同一个文件，
+ * 而桥自己拉起的 MCP 子进程也是 dsh-web 的子进程，它们的 stdout 一并落进去。
+ * agent preset 的 qq-tool-restrict.mjs 每遇到一个 DSH 里不存在的工具名就 console.error 一次
+ * DSH 的原话，而那句原话里嵌着**完整的已知工具列表**（约 4KB/行），23 个名字 × 2 份 preset
+ * 一次启动就灌进去几百 KB —— 每个 dsh-web 进程刚把自己的 token 打到日志里，转眼就被自己的
+ * 子进程刷出窗口。所以这不是"偶发日志太大"，是每次启动必然踩。
+ *
+ * 修法：从 256KB 起按 1MB / 4MB / 16MB 逐级放大，命中即停。
+ * 为什么分级而不一次读整个文件：绝大多数情况第一档就命中，零额外 IO；文件再大也只有
+ * 命中那一档的读取量，不会随日志无限增长同步放大成本。16MB 这一档是兜底上限，
+ * 到顶仍找不到就返回 null（退化成旧行为，不会更差）。
+ */
+const TOKEN_SCAN_STEPS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
+
+function readTokenFromTail(logFile, want) {
+  const size = fs.statSync(logFile).size;
+  const take = Math.min(size, want);
+  const fd = fs.openSync(logFile, 'r');
+  const buf = Buffer.alloc(take);
+  try { fs.readSync(fd, buf, 0, take, Math.max(0, size - take)); } finally { fs.closeSync(fd); }
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { try { text = new TextDecoder('gbk').decode(buf); } catch { text = buf.toString('utf8'); } }
+  const startIdx = text.lastIndexOf('===== start');
+  const tail = startIdx >= 0 ? text.slice(startIdx) : text;
+  const m = [...tail.matchAll(/[?&]token=([A-Za-z0-9_\-]+)/g)];
+  return m.length ? m[m.length - 1][1] : null;
+}
+
+export function readLatestToken(logFile) {
   try {
     if (!logFile || !fs.existsSync(logFile)) return null;
-    const size = fs.statSync(logFile).size;
-    const want = Math.min(size, 256 * 1024);
-    const fd = fs.openSync(logFile, 'r');
-    const buf = Buffer.alloc(want);
-    fs.readSync(fd, buf, 0, want, Math.max(0, size - want));
-    fs.closeSync(fd);
-    let text;
-    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-    catch { try { text = new TextDecoder('gbk').decode(buf); } catch { text = buf.toString('utf8'); } }
-    const startIdx = text.lastIndexOf('===== start');
-    const tail = startIdx >= 0 ? text.slice(startIdx) : text;
-    const m = [...tail.matchAll(/[?&]token=([A-Za-z0-9_\-]+)/g)];
-    return m.length ? m[m.length - 1][1] : null;
+    for (const step of TOKEN_SCAN_STEPS) {
+      const token = readTokenFromTail(logFile, step);
+      if (token) return token;
+      // 已到文件开头就没必要再放大窗口了
+      if (fs.statSync(logFile).size <= step) break;
+    }
+    return null;
   } catch { return null; }
 }
 

@@ -243,8 +243,28 @@ export function looksLikeImageBuffer(buf) {
   return false;
 }
 
+/**
+ * 读图（下载图片字节）的默认字节上限 = 15MB。
+ *
+ * 【2026-09-18 定标：4MB → 15MB，并把散落的 8MB 一并收拢到这里】
+ * 改之前全桥有三个互不相干的上限：本函数默认 4MB、qq_image_search/qq_send_image 8MB、
+ * qq_send_pixiv 8MB —— 同一张图走不同入口结论不同，也没有任何一处说明依据是什么。
+ * 现在统一成这一个常量，改上限只需改一行。
+ *
+ * 为什么 15MB 是安全的（依据，非估计）：真正卡人的是 DSH 附件层。线上装的是 DSH 0.1.2-rc.1，
+ * `/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js:637`
+ * 写着 `const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024`，同包 README.zh.md 第 41 行也写明
+ * `maxImageBytes` 默认 20 MiB；`/root/.dsh/profiles/web/` 下的 profile 没有覆盖这个值
+ * （grep maxImageBytes 在 profile 里无命中）。所以 15MB < DSH 的 20MB，下载侧放宽不会把 DSH 撑爆。
+ * 反过来说，原来的 4MB/8MB 纯粹是自设的更紧上限，会在图还没到投递闸门之前就把它丢掉。
+ *
+ * 注意：本常量只管"把图下载下来"，投递前的闸门是 image-compress.js 的 IMAGE_HARD_MAX_BYTES，
+ * 两者是两道独立的卡口（都放宽到 15MB 才叫端到端 15MB），但都不允许超过 DSH 的 20MB。
+ */
+export const MAX_IMAGE_FETCH_BYTES = 15 * 1024 * 1024;
+
 /** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
-export async function safeFetchBuffer(urlString, maxBytes = 4 * 1024 * 1024) {
+export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTES) {
   const MAX_REDIRECTS = 5;
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {

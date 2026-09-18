@@ -30,13 +30,21 @@ try { jpegCodec = require('./vendor/jpeg-js/index.js'); } catch {}
 export const IMAGE_MAX_SIDE = 1280;
 /** 硬上限：任何情况下送进 DSH 的单边都不得超过它（DSH 默认 8192，这里留 2 倍余量）。 */
 export const IMAGE_HARD_MAX_SIDE = 4096;
-/** 硬字节上限：与 DSH 附件层实际限制一致。
- *  DSH `@deepseek-ai/dsh-attachment-local` 的 maxImageBytes 默认 5MB（DEFAULT_MAX_IMAGE_BYTES），
- *  且本机 profile 未覆盖该值；此前按 20MB 放行会把 5~20MB 的图交给 DSH，
- *  被 `IMAGE_TOO_LARGE` 拒收 → 整条 prompt（含文字）一起丢，用户看到「⚠️ 消息未被接受」。
- *  超限时由本闸门判"不可投递"，只退化成文字占位，代价远小于整条消息被拒。
- *  注意：若在 DSH 侧调大 maxImageBytes，必须同步调大本常量。 */
-export const IMAGE_HARD_MAX_BYTES = 5 * 1024 * 1024;
+/** 硬字节上限：本桥**投递前**允许交给 DSH 的单张图片字节数 = 15MB。
+ *
+ *  【2026-09-18 更正并放宽 5MB → 15MB】旧注释写着"DSH 默认 maxImageBytes = 5MB"，这个依据是错的：
+ *  线上装的 DSH 0.1.2-rc.1 里，真正管投递的 `@deepseek-ai/dsh-attachment-local` 是
+ *    `/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js:637`
+ *    `const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;`（README.zh.md 第 41 行同样写 20 MiB），
+ *  且 `/root/.dsh/profiles/web/` 没有覆盖这个值。5MB 只出现在 `dsh-client-connection/lib/client.js`
+ *  （浏览器端自己的兜底默认值），不是服务端附件闸门。
+ *  也就是说 5MB 是本桥**自己加的更紧的**上限：5~15MB 的图明明 DSH 收得下，却在这里被判"不可投递"、
+ *  退化成文字占位，白白丢图。现按实测放宽到 15MB，给 DSH 的 20MB 留 5MB 余量。
+ *  仍然保留这道闸门的意义：超限时只退化成文字占位，代价远小于整条 prompt（含文字）被
+ *  `IMAGE_TOO_LARGE` 拒收、用户看到「⚠️ 消息未被接受」。
+ *  连带关系：本常量必须 <= DSH 的 maxImageBytes。若以后 DSH 换版本或 profile 覆盖了该值，
+ *  这里要同步改小，否则会重新变成"整条 prompt 被拒"。 */
+export const IMAGE_HARD_MAX_BYTES = 15 * 1024 * 1024;
 /** 纯 JS 解码的像素上限（解码后 RGBA = 4 字节/像素，太大就别硬解，直接判不可投递）。 */
 export const IMAGE_PUREJS_MAX_PIXELS = 40_000_000;
 const IMAGE_JPEG_QUALITY = 82;

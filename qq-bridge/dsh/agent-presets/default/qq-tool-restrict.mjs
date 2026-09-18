@@ -68,7 +68,17 @@ export function apply(ctx) {
       ctx.tools.restrict({ deny: [name] })
     } catch (error) {
       // 名字不存在时跳过；执行期白名单仍然兜底。
-      console.error(`[qq-tool-restrict] skip restrict ${name}: ${error?.message ?? error}`)
+      //
+      // 【2026-09-18 修：这行日志曾经把桥整条 DSH 链路搞断】
+      // DSH 抛出的原话里嵌着**完整的已知工具列表**（实测约 4KB/行），而 dsh-web.service 把
+      // 整个进程树（含它拉起的 MCP 子进程）的 stdout/stderr 都 append 到同一个
+      // /root/.dsh/dsh-web.log —— 于是这里的 23 个名字 ×2 份 preset 一次启动就往日志里灌几百 KB。
+      // 实测现场：该日志 4260469 B 里有 1794 行、合计 4201098 B 是这种行，占 98.6%，
+      // 把 dsh-web 自己刚打印的 `?token=` 挤出了 dsh-client.js 的读取窗口 → readLatestToken 返回 null
+      // → 桥不带 dsh-auth cookie 打 /api → 全链路 401（remote.mux 每 3 秒重连失败）。
+      // 名字不存在这条信息本身有用，但没必要把整张工具表再抄一遍，故截断。
+      const detail = String(error?.message ?? error)
+      console.error(`[qq-tool-restrict] skip restrict ${name}: ${detail.slice(0, 160)}${detail.length > 160 ? `…（原话 ${detail.length} 字符，含完整工具表，已截断以免刷爆 dsh-web.log）` : ''}`)
     }
   }
 

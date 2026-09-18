@@ -19,7 +19,7 @@ import { napcatImageFileArg } from './lib/napcat-file.js';
 // 两者都是纯函数模块，直接 import；下载复用 safe-fetch（禁内网、限字节、校验真是图片）。
 import { searchImages } from './lib/image-search.js';
 import { pixivSearch, pixivImageCandidates, parsePixivId, pixivPageUrl } from './lib/pixiv.js';
-import { safeFetchBuffer } from './safe-fetch.js';
+import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2644,7 +2644,8 @@ if (cfg.social?.tools?.videoSearch !== false) {
 /* ── 联网找图 / 发图（2026-09-18 主人要求："支持联网找图并发图"）──────────────
  * 分工：qq_image_search 只查不发（把候选 URL 摆给模型看）；qq_send_image 负责真发。
  * qq_send_image 可以只给 query（自己搜第一张就发），也可以给 imageUrl（直接发这个链接）。
- * 下载走 safeFetchBuffer：禁内网/本机地址、限制 8MB、并且**验证确实是图片**（不是伪装成图片的 HTML）。
+ * 下载走 safeFetchBuffer：禁内网/本机地址、限制 15MB（MAX_IMAGE_FETCH_BYTES，原为写死的 8MB，
+ * 定标依据见 safe-fetch.js 顶部注释）、并且**验证确实是图片**（不是伪装成图片的 HTML）。
  * 落盘落到 napcat 的 tmpDir（就是 NapCat 容器/进程能读到的那份），再走桥的统一发送端点。 */
 if (cfg.social?.tools?.imageSearch !== false) {
   registerTool(
@@ -2691,7 +2692,7 @@ if (cfg.social?.tools?.imageSearch !== false) {
           url = picked.imageUrl;
         }
 
-        const got = await safeFetchBuffer(url, 8 * 1024 * 1024);
+        const got = await safeFetchBuffer(url, MAX_IMAGE_FETCH_BYTES);
         const buf = got.buffer;
         const ext = buf[0] === 0x89 ? 'png'
           : buf[0] === 0xff ? 'jpg'
@@ -2739,7 +2740,7 @@ if (cfg.social?.tools?.imageSearch !== false) {
 /* ── Pixiv 找图 / 发图（2026-09-18 主人要求："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
  * 走第三方平替站 x.pixigraph.xyz（官网要登录、机房 IP 常被挡），细节见 lib/pixiv.js 顶部注释。
  * 分工与"联网找图"完全同构：qq_pixiv_search 只查不发，qq_send_pixiv 负责真发。
- * 下载仍走 safeFetchBuffer（禁内网、限大小、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。
+ * 下载仍走 safeFetchBuffer（禁内网、限 15MB、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。
  *
  * 【2026-09-18 加本地筛选 + 自动翻页（方案 A：不登录、不用会员、不加部署）】
  *   实测镜像站只认 keyword / page（mode=s_mode=order=bl=type= 全部被忽略），所以标签/构图/尺寸/AI/
@@ -2838,7 +2839,7 @@ if (cfg.social?.tools?.pixiv !== false) {
         const tried = [];
         for (const u of candidates) {
           try {
-            got = await safeFetchBuffer(u, 8 * 1024 * 1024);
+            got = await safeFetchBuffer(u, MAX_IMAGE_FETCH_BYTES);
             break;
           } catch (e) {
             tried.push(`${u.slice(0, 90)} → ${e?.message ?? e}`);
