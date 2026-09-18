@@ -6,7 +6,6 @@ import { log } from '../lib/log.js';
 import { enqueueSend } from './send-chain.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
-import { toJpegCover } from '../lib/jpeg-cover.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -46,6 +45,18 @@ export function normalizeCoverUrl(raw, size = 300) {
     } else {
       u += `${u.includes('?') ? '&' : '?'}imageView=1&thumbnail=${size}x${size}&type=jpg`;
     }
+    /* 【2026-09-19】再把**路径里那个 `==`**（网易云图床的加密 id 末尾填充）百分号编码掉：
+     * 手机端唯一验证过能显示的封面形态是 `https://y.qq.com/music/photo_new/T002R300x300M000<albummid>.jpg`
+     * —— 干干净净一段路径 + 一个 .jpg，既没有 `=` 也没有查询串。而网易云这边
+     * `fQOLZwjHwUqLAQs3b_yzUg==/109951173276565105.jpg?...` 路径里带着 `==`，
+     * 是它与"已知能显示"的形状之间**仅剩的结构差异**（图本身没问题：实测是标准的
+     * 基线 SOF0 / 300×300 / 3 分量 YCbCr JPEG，和腾讯那张逐字段一致）。
+     * 编码后指向**同一张图**（实测 200 / JPEG / 23183 字节，字节数与编码前完全相同）。
+     * 只动路径部分，查询串原样保留。 */
+    const qi = u.indexOf('?');
+    const pathPart = qi < 0 ? u : u.slice(0, qi);
+    const queryPart = qi < 0 ? '' : u.slice(qi);
+    u = pathPart.replace(/=/g, '%3D') + queryPart;
   }
   return u;
 }
@@ -202,50 +213,32 @@ export function createMediaDomain(cfg) {
     try { return /(^|\.)(qpic\.cn|qq\.com|ugcimg\.cn)$/i.test(new URL(u).hostname); } catch { return false; }
   }
 
-  /* 【2026-09-19 主人定稿】**卡片 preview 里的封面必须是 JPG，手机端才显示**。
-   * 各来源格式并不统一（实测：y.qq.com→image/jpeg、网易云 p2.music.126.net→**image/jpg** 非标准、
-   * 静态地图→**image/png**），所以要过一层"输出 JPEG 的图片代理"（见 lib/jpeg-cover.js）。
+  /* 【2026-09-19 定稿·封面一律**原样**交给签名服务，绝不过第三方代理】
    *
-   * ⚠️ 代价必须压到零：**已经是 JPEG 就直接返回，一次网络都不多花**（探测结果由 pickImage 带进来）。
-   * 早先那版对每个封面都额外探一次原始 URL + 探一次代理 URL，整整多了 2×8s 串行等待 ——
-   * 直接把卡片发送拖到 15s 超时、**网易云卡降级成纯链接**（线上实测 05:25:51）。
-   * 现在：JPEG 的封面零开销；只有真不是 JPEG 的（静态地图）才包一层代理，且不再回探。 */
+   * 上一版我加了"腾讯封面先过 wsrv 代理"，那是**错的**，而且正是它把卡弄坏的。真相从**真消息记录**里读出来
+   * （工具：`tools/dump-ark.mjs` / `dump-ark-raw.mjs`，直接查 NapCat 里存着的 Ark）：
+   *
+   *   ✅ 能用（主人确认"正常"）  05:25:10 / 05:27:54
+   *        preview = https://y.qq.com/music/photo_new/T002R300x300M000004fXSyj3bWTMN.jpg   ← **原始封面，原样透传**
+   *   ❌ 没图                    08:04:18
+   *        preview = https://qq.ugcimg.cn/v1/hdlclgnmhd0qtck5dvkiruk667cqv5lprg0c9p2olq87udhofqc027i9nbp2clt3c6h28kgcl5i6dlu4a7ltrtusou3gsbf0m2dn0rdm6rq4gmonnhe7ld41boild85krpcu91jrlrdpi45fllreqclcq1d9cojdetr5ce4altd3i97lpb5m2d38er1s0dni20rsma4hhp5kplb1gtp5bgts930juiu77n5kkog/kroub78d5sj37lujbs3qjuiio0
+   *
+   * 也就是：**图能被签名服务取到 → 它把图"转存"到 qq.ugcimg.cn → 那个转存链接手机端不渲染**（还顺带
+   * 把发送拖到 45s 超时、卡片降级成一条纯链接：线上 `music 卡片降级 card=link（The operation was aborted due to timeout）`）。
+   * 而原始外部 URL（y.qq.com / y.gtimg.cn / p*.music.126.net）**它会原样透传** —— 那条路才是对的。
+   *
+   * ⚠️ 我当初得出"腾讯封面取不到"的根据是一份**读错返回的对照测试**：签名服务的返回体是
+   * **被 JSON 编码过一次的字符串**，只 parse 一层就拿不到 `app`/`preview`，于是每一张卡都被误判成
+   * "卡片构造失败（card=link）"。那个坑现在已在 tools/test-qq-card-sign.mjs 里处理掉。
+   *
+   * 所以这里只做**诊断**（把封面的真实字节格式打到日志里，方便下次一眼看出"是不是 JPEG"），
+   * 绝不再改写 URL。网易云那种"字节是 PNG"的情况，由它自己的 CDN 参数解决（见 normalizeCoverUrl 的 `type=jpg`）。 */
   function ensureJpegCover(cover, ct = '', opts = {}, magic = '') {
     const raw = String(cover ?? '').trim();
     if (!raw) return '';
-    /* 【2026-09-19 实测·这是"QQ 音乐卡手机没封面"的最终根因】
-     * 签名服务（NapCat 的 `musicSignUrl`，线上默认 http://106.55.0.102:10087/）**要自己去取我们给的 image URL**
-     * 才能拼出 Ark。而 **`y.qq.com` / `y.gtimg.cn` 的封面它取不到**（那几个域做防盗链）→ 卡片直接构造失败
-     * → 桥这边降级成一条纯链接 → 手机端自然没有封面。线上四对照实测：
-     *
-     *   A custom + y.qq.com 原始封面   → card=link（卡片失败）
-     *   B qq     + y.qq.com 原始封面   → card=link（卡片失败）
-     *   C qq     + 网易云 CDN 封面      → card=primary ✅
-     *   D custom + 网易云 CDN 封面      → card=primary ✅
-     *   E custom + **代理过的 y.qq 封面** → card=primary ✅，且 preview 变成 **qq.ugcimg.cn**（签名服务转存了！）
-     *   F custom + 代理过的 y.gtimg 封面 → card=primary ✅，同样 qq.ugcimg.cn
-     *
-     * 也就是说：**图能被签名服务取到 → 它转存到 qq.ugcimg.cn → 卡片与封面上手机都正常**；
-     * 取不到 → 整张卡失败。所以腾讯自家那两个音乐 CDN 的封面**必须过一层公共图片代理**再交出去。
-     * （qq.ugcimg.cn 也正是主人从 B 站/高德/腾讯地图分享进来的**真卡**用的封面域名。） */
-    const SIGN_UNFETCHABLE = /^https?:\/\/(y\.gtimg\.cn|y\.qq\.com)\//i;
-    if (SIGN_UNFETCHABLE.test(raw)) {
-      const wrapped = toJpegCover(raw, { force: true, ...opts });
-      if (wrapped && wrapped !== raw) {
-        log(`[cover] 腾讯音乐封面签名服务取不到（防盗链）→ 走代理交给它，它会转存到 qq.ugcimg.cn：${raw.slice(0, 70)}`);
-        return wrapped;
-      }
-    }
-    /* 其余来源**按字节魔数判断**，不是按扩展名 / content-type：
-     * 线上实测网易云的封面 URL 是 `….jpg?param=300y300`、content-type 报 `image/jpg`，
-     * 但头三字节是 `89504e`（PNG）—— 手机端按内容判格式，于是不渲染，电脑端宽容所以能显示。
-     * （网易云自己的解法：URL 加 `imageView=1&thumbnail=300x300&type=jpg` 它就返回真 JPEG，见 normalizeCoverUrl。） */
     const isJpeg = magic ? /^ffd8ff$/i.test(magic) : /^image\/jpe?g$/i.test(String(ct));
-    if (isJpeg) return raw;
-    const wrapped2 = toJpegCover(raw, { force: true, ...opts });
-    if (wrapped2 && wrapped2 !== raw) {
-      log(`[cover] 封面不是 JPEG（magic=${magic || '未知'} ct=${ct || '未知'}）→ 走代理转成真 JPEG：${raw.slice(0, 70)}`);
-      return wrapped2;
+    if (!isJpeg) {
+      log(`[cover] 注意：封面不是真 JPEG（magic=${magic || '未知'} ct=${ct || '未知'}）—— 仍然原样发出去（绝不代理，代理会让签名服务转存成手机不渲染的 qq.ugcimg.cn 链接）：${raw.slice(0, 90)}`);
     }
     return raw;
   }

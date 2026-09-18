@@ -81,7 +81,6 @@ import { resolveVideo, buildVideoCard, videoSearch, parseVideoUrl, extractVideoU
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from '../lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from '../lib/social-timeline.js';
 import { createMediaDomain } from './media.js';
-import { toJpegCover } from '../lib/jpeg-cover.js';
 import {
   DOC_TMP_HOST_DIR, DOC_TMP_CONTAINER_DIR, MAX_DOCX_CHARS, docxQuota,
   loadDocxQuota, docxQuotaReserve, docxQuotaCommit, writeDocxToMount,
@@ -3288,8 +3287,11 @@ export function startConsoleServer() {
                 ctime,
                 desc: locContent || (locApp === 'amap' ? '高德地图' : '腾讯地图'),
                 jumpUrl: mapLink,
-                // 【2026-09-19 主人定稿】preview 必须是 JPG 手机端才显示；静态地图默认给的是 PNG，过一层"输出 JPEG"的代理
-                preview: toJpegCover(mapImg, { w: 600, h: 400, fit: 'cover' }),
+                /* 【2026-09-19 定稿】preview **原样**给静态地图，不过任何图片代理。
+                 * 上一版包了一层"输出 JPEG"的代理，结果和音乐封面同一个坑：签名服务会把代理 URL 的图
+                 * **转存成 qq.ugcimg.cn 长链接**，而那种链接手机端不渲染（真消息记录实测：
+                 * 原始外部 URL 会原样透传、手机正常；qq.ugcimg.cn 转存链接手机没图）。 */
+                preview: mapImg,
                 tag: locApp === 'amap' ? '高德' : '腾讯地图',
                 // 腾讯地图那个图标就是它自家分享卡里的 sourcelogo（miniapp.gtimg.cn/generated-icon/wx7643…）
                 tagIcon: locApp === 'amap'
