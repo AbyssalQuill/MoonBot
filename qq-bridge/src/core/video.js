@@ -415,7 +415,7 @@ const SECAPI_BILI_TIMEOUT_MS = 8000;
 /**
  * 单路：secapi.top 的 B 站解析 —— 存在的唯一理由就是**绕开机房 IP 的风控**。
  *
- * ── 2026-09-19 接口实测（`tools/probe-secapi-bili.mjs` 在线上这台 VPS 跑的，逐条可复现）──
+ * ── 2026-09-18 接口实测（`tools/probe-secapi-bili.mjs` 在线上这台 VPS 跑的，逐条可复现）──
  * `GET http://secapi.top/API/jiexi/bilibili.php?url=<链接或 BV>`，**参数名就是 `url`**：
  *   · 传 `bv=BV…` → `{"code":400,"状态":"错误","信息":"请提供B站链接或BV号"}`（HTTP 仍是 200）；
  *   · 认这些入参形态（逐个实测，返回同一条 BVID）：长链、长链带 `?spm_id_from=` 等 query、
@@ -653,7 +653,7 @@ export async function resolveBilibili(rawUrl) {
    * 结论：风控是**按老路径打的**，wbi 那条没被拦；而且它**不强制 w_rid 签名**，裸调即可。
    * 所以第一优先改成 wbi/view，老 view 留着兜底（换机器/换网络可能反过来好使）。
    *
-   * 【2026-09-19 接入 secapi 后的改动，只有两处，其余逐字未动】：
+   * 【2026-09-18 接入 secapi 后的改动，只有两处，其余逐字未动】：
    *   ① 第 0 路已经把信息拿全了 → **整段跳过**，不再白打两条官方接口；
    *   ② secapi 只给了一部分（比如没封面）时照旧进这里，但用 `{...got, ...pruneEmpty(info)}`
    *      **只补空字段、不覆盖第三方已给的值**（`pruneEmpty` 会把空值剔掉，所以 got 里的空字段
