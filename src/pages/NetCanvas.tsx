@@ -71,7 +71,12 @@ export interface EdgeClick { from: string; to: string; strength: number; sx: num
  * 五类两两最小 RGB 距离 105、关系色与未标注线的最小距离 92（≥40 即可分辨）；
  * 画布底色是浅色（卡片 rgba(255,255,255,.6)），五类对浅底的对比度 3.3~4.4（jiaren 原本 #c98a00 只有
  * 2.85，细线会发飘，压深到 #b57d00），对深底 4.0~5.3。
- * （全表里唯一小于 40 的一对是未标注线自身的不同强度档，那是"互动越多线越深"的梯度，不是类别色。） */
+ * （2026-09-19 主人澄清：未标注线**保留**"互动越多线越深"的强度梯度，但整条梯度走**蓝系**、
+ *   强端直接取 qunyou 的值 —— 未标注的那对本来就是群友关系。这样「显示强关系」与「显示弱关系」
+ *   两个视图里的线读起来是同一支蓝色，不会一边偏蓝一边偏灰。
+ *   另外 qunyou 由原来的蓝白 #8fb6e6 改成饱和的 #1f8fdc：它既要有别于未标注的淡蓝，
+ *   又不能让"标了群友"和"没标注"看起来是两种颜色 —— 取同一个蓝的深浅两端即可。
+ *   实测（脚本按源码取值算）：五类两两最小 RGB 距离 105，关系色与未标注线最小距离 92（≥40 即可分辨）。） */
 export const REL_CAT_COLOR: Record<string, string> = {
   guimi: '#9b51e0',   // 闺蜜/诡秘(紫)
   jiaren: '#b57d00',  // 家人(金)
@@ -83,12 +88,32 @@ export const REL_CAT_COLOR: Record<string, string> = {
 export const REL_CAT_LABEL: Record<string, string> = {
   guimi: '闺蜜/诡秘', jiaren: '家人', qinglv: '情侣', chouren: '仇人', qunyou: '群友',
 };
-/** 未标注（默认群友）连线：低饱和蓝灰阶梯，弱→强 = 浅→深。
- *  原来用 rgb(236,242,247)→rgb(96,150,214)：浅端和画布底色几乎一样（弱线看不见），中段又是"蓝白"，
- *  和 qunyou 撞色。改成灰调后，与任何关系色都不同色系。 */
+/** 未标注（默认群友）连线：**蓝系**强度梯度，弱→强 = 淡蓝→群友蓝。
+ *
+ *  【2026-09-19 主人澄清】**不是**要去掉梯度 —— 要的是「显示强关系」和「显示弱关系」这两个视图里
+ *  线色**读起来是同一支颜色**，并且**未标注线默认就是群友色（蓝）**：没标注的那对本来就是群友关系，
+ *  所以它不该是灰调，而应该和 qunyou 同属蓝系。
+ *
+ *  · 强端**直接取 qunyou 的值**（REL_CAT_COLOR.qunyou），这样"标了群友的线"和"没标注的线"
+ *    在强关系视图里是同一个蓝，不会一个偏灰一个偏蓝；
+ *  · 弱端是同一色相的淡蓝（不是灰）→ 弱关系视图里那些弱线看起来仍然是"蓝色系",
+ *    于是两个视图之间不会出现"一边蓝一边灰"的观感差；
+ *  · 深浅仍然表达强度（"互动越多线越深"这条原意保留）。
+ *
+ *  ⚠️ qunyou 的色值改这里也要跟着改 —— 所以下面从 REL_CAT_COLOR 取，不另写一份字面量。
+ */
+function hexRgb(hex: string): [number, number, number] {
+  const h = String(hex).replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+/** 弱端：与 qunyou 同色相的淡蓝。不用灰 —— 灰调会让"弱关系视图"整体看着不是蓝色系。 */
+const WEAK_LINE_RGB: [number, number, number] = [172, 203, 231];
 function defaultLineColor(strength: number): string {
   const t = Math.max(0, Math.min(1, strength));
-  const r = Math.round(201 - (201 - 122) * t), g = Math.round(210 - (210 - 139) * t), b = Math.round(221 - (221 - 160) * t);
+  const [r2, g2, b2] = hexRgb(REL_CAT_COLOR.qunyou);
+  const r = Math.round(WEAK_LINE_RGB[0] + (r2 - WEAK_LINE_RGB[0]) * t);
+  const g = Math.round(WEAK_LINE_RGB[1] + (g2 - WEAK_LINE_RGB[1]) * t);
+  const b = Math.round(WEAK_LINE_RGB[2] + (b2 - WEAK_LINE_RGB[2]) * t);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 /** 节点/文字尺寸随球半径等比缩放。
@@ -345,7 +370,9 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         // 否则主人标完一条线、球刚好转过去，就以为"颜色没生效"。
         if (avg < -0.55 && !labeled) continue;
         // 关系线的 alpha 有下限（0.34）：原来最低 0.14，深色线转到远侧直接被冲成灰。
-        ctx.globalAlpha = labeled ? 0.34 + 0.5 * zf01 : 0.14 + 0.44 * zf01 * (0.4 + 0.6 * l.strength);
+        // 未标注线保留强度因子（"互动越多线越实"这条原意主人要求保留）——
+        // 淡蓝 + 低 alpha 只是"更淡的蓝"，色相不变，所以弱关系视图里读起来仍是蓝系。
+        ctx.globalAlpha = labeled ? 0.34 + 0.5 * zf01 : 0.2 + 0.44 * zf01 * (0.5 + 0.5 * l.strength);
         ctx.strokeStyle = labeled ? REL_CAT_COLOR[cat!] : defaultLineColor(l.strength);
         ctx.lineWidth = (0.5 + l.strength * 1.2 + (labeled ? 0.4 : 0)) * (0.7 + 0.6 * zf01);
         ctx.beginPath(); ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy); ctx.stroke();
