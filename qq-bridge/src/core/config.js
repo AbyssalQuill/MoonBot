@@ -200,10 +200,13 @@ export function loadConfig() {
         resetWindow: 24            // 轮换后首轮贴给模型的条数（只此一次；取 max(contextWindow, 它)，上限 60）
       },
       // 自动轮换（会话上下文换新）：wake-send.js 里 rotateThreshold / prewarmAhead 读的就是这两个键，
-      // 缺省分别是 12 / 3。以前这里没有默认块，全新安装的 config.json 里也就没有这两个键 ——
+      // 缺省分别是 10 / 3。以前这里没有默认块，全新安装的 config.json 里也就没有这两个键 ——
       // 管理端「上下文与轮换」卡只画配置里存在的键，于是新人**看不到轮换旋钮**（同一类"旋钮没接线"）。
+      // 【2026-09-18】wakeThreshold 由 12 调到 10：轮换得更勤一点，把单会话上下文压小。
+      // 注意它只是"缺省值"——真正生效的是 config.json 里的值，而且读取处每轮现读、热加载原地合并，
+      // 所以改配置文件对跑着的老会话立即生效（详见 wake-send.js 的 rotateThresholdOf 注释）。
       autoReset: {
-        wakeThreshold: 12,         // 累计多少真实来回后换新会话（最小 5）
+        wakeThreshold: 10,         // 累计多少真实来回后换新会话（最小 5）
         prewarmAhead: 3            // 到阈值前提前几轮预建并预热下一代会话（最小 1）
       },
       ...(file.social ?? {})

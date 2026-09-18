@@ -67,9 +67,18 @@ let deliverRef = null;
  * 消息照常注入 —— **宁可晚一点轮换，也绝不把用户的消息扣死**。 */
 export const ROTATE_DEFER_MAX_MS = 120000;
 
-/** 轮换阈值（config: social.autoReset.wakeThreshold，缺省 12，下限 5）。 */
+/** 轮换阈值（config: social.autoReset.wakeThreshold，缺省 10，下限 5）。
+ *
+ *  【2026-09-18 明确"改阈值对已有会话生不生效"】
+ *  这里**每轮现读** `cfgRef`，没有任何快照：`cfgRef` 就是 bridge.js 交给 `initWakeCore()` 的那个对象，
+ *  而 `watchConfigFile()` 走的是**原地合并**（`applyConfigInPlace` 不换引用），所以：
+ *    · 改 config.json → 下一次唤醒就用新值判定，**不需要等老会话自然轮换，也不需要重启桥**；
+ *    · 重启桥也**不会**重置计数 —— `rotateTurns` 落在 state/social-state.json，由 social-state.js
+ *      的加载路径读回（存：`rotateTurns: Number(st.rotateTurns) || 0`；读：`rotateTurns: Number(val.rotateTurns) || 0`）。
+ *  另一半"改了不生效"的坑在`preset`（系统提示词）——那个**只在 DSH 会话创建时绑定**（dsh-session.js 建会话
+ *  时才带 agentPreset），所以老会话要等轮换或空闲归档重建才会拿到新提示词。两者别混为一谈。 */
 export function rotateThresholdOf(cfg) {
-  return Math.max(5, Number(cfg?.social?.autoReset?.wakeThreshold) || 12);
+  return Math.max(5, Number(cfg?.social?.autoReset?.wakeThreshold) || 10);
 }
 
 /**
@@ -1234,7 +1243,7 @@ export async function sendWakePrompt(key, reason) {
     const sq = Number(n);
     if (Number.isFinite(sq) && sq > 0) st.lastDeliveredSeq = Math.max(Number(st.lastDeliveredSeq) || 0, sq);
   }
-  // 会话轮换：用户触发回合数达到阈值（默认 12 轮）时切到下一代 DSH 会话，
+  // 会话轮换：用户触发回合数达到阈值（缺省 10 轮，**每轮现读** config）时切到下一代 DSH 会话，
   // 避免单会话上下文无限膨胀。提前 prewarmAhead 轮预建并预热新会话（首轮提示词命中缓存），
   // 阈值到达后直接转移，不再现场创建（消除新会话首轮卡顿）。
   // 只在“用户主动触发”的唤醒（私聊/@/提问/名字/拍一拍/关键词/引导）时执行——
@@ -1257,7 +1266,7 @@ export async function sendWakePrompt(key, reason) {
     wc.wakeCount = (wc.wakeCount || 0) + 1;
     // 用户触发回合计数（内部唤醒不计入——replyCheck/主动/概率类唤醒若是计入，
     // 会把单次对话的上下文 1-2 小时内就被切走 12 次，AI 频繁失忆、重复回复）：
-    // 这是轮换的唯一依据，语义清晰且与“12 轮真实对话”吻合。
+    // 这是轮换的唯一依据，语义清晰且与“10 轮真实对话”吻合。
     st.rotateTurns = (Number(st.rotateTurns) || 0) + 1;
     const count = Number(st.rotateTurns) || 0;
     // ① 提前预热：进入阈值前 prewarmAhead 轮，建好下一代会话并发一次廉价预热请求
@@ -1494,7 +1503,11 @@ export async function sendWakePrompt(key, reason) {
     const recentBlock = formatRecentWindow(st, key, ctxN);
     promptText = buildWakePrompt(key, reason) + recentBlock + autoResetNote;
     st._promptInjected = true;
-    st._promptSessionId = state.sessions[key] || liveSid || null;
+    /* 【2026-09-18】落点只认"当前映射"，**不能**再回退到 liveSid：轮换走"没有预热会话"的兜底路径时
+     * 上面刚把 state.sessions[key] 置空（真正的会话要等投递时才现建），而 liveSid 是轮换**之前**取到的
+     * 旧会话 id —— 把它写进记录，下一次唤醒必然命中上面「DSH 会话与记录不一致」而把完整 prompt 再注一遍。
+     * 真正收下这份 prompt 的会话由投递成功后的重绑补齐（见本函数结尾 `landedSid` 那段）。 */
+    st._promptSessionId = state.sessions[key] || null;
     st._promptOverrideStamp = ovStamp;   // 记住注入时的人设版本（文件一变就重新注入）
     log(`[default] ${key} ${justReset ? '轮换后首轮' : '首次'}唤醒，注入完整 prompt${recentBlock ? '（含最近 ' + ctxN + ' 条窗口' + (justReset ? '，轮换加长' : '') + '）' : '（窗口为空！）'}`);
   }
@@ -1557,6 +1570,20 @@ export async function sendWakePrompt(key, reason) {
       // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
       // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
       log(`[default] 唤醒已入队 ${key}（${reason}），等待 DSH 恢复后补投`);
+    } else {
+      /* 【2026-09-18 修「轮换后完整 prompt 被注入两次」】
+       * 轮换走"没有预热会话"的兜底路径时，`state.sessions[key]` 被置空，真正的会话是**投递时**才现建的
+       * （prompt-deliver.js 的 deliverPromptNow → ensureSession）。而"记下这次注入了完整 prompt"那一步
+       * 发生在投递之前，只能拿到轮换前的旧 liveSid —— 于是记录里写的是刚被归档的旧会话。
+       * 后果：下一次唤醒必命中上面的「DSH 会话与记录不一致」判定 → 把整套 base prompt + 最近窗口
+       * 往**同一个新会话**里再注一遍（白烧一次最贵的注入，日志还会显示成"首次唤醒"）。
+       * 这里在投递成功后把记录重绑到**实际收下这份 prompt 的会话**上，判定才与事实一致。
+       * 有预热会话的路径（state.sessions[key] = standby）本来就一致，这里对它是个空操作。 */
+      const landedSid = state.sessions[key] || null;
+      if (st._promptInjected && landedSid && st._promptSessionId !== landedSid) {
+        st._promptSessionId = landedSid;
+        saveSocialState();
+      }
     }
   } catch (error) {
     pendingWakeKeys.delete(key);

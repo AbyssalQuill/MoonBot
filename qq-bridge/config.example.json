@@ -201,7 +201,8 @@
       "resetWindow": 24
     },
     "autoReset": {
-      "wakeThreshold": 12,
+      "wakeThreshold": 10,
+      "_wakeThresholdNote": "「聊多少轮换新会话」：同一个会话累计到这么多轮，下一次**用户触发**的唤醒就切到下一代 DSH 会话（旧会话归档，记忆文件保留、不丢记忆）。计数有三处自增：用户触发的唤醒（私聊/被@/被提问/被喊名字/拍一拍/关键词）各 +1、qq_wait_for_messages 每取回一批新消息 +1、回合保持期间的每次来回 +1；回复检查/主动冒泡这类内部唤醒不计入，**也不触发轮换**（轮换只在用户触发的唤醒上执行）。桥里下限 5、缺省 10。它和 context.contextWindow / resetWindow 不是一回事：那两个是「换完之后第一轮贴多少条历史」，这里才是「什么时候换」。两个易踩的点：① 阈值是**每一轮现读** config.json 的（热加载是原地合并，见 core/config.js 的 watchConfigFile），所以改这个值对**正在跑的老会话立刻生效**，不需要等它自然轮换、也不需要重启桥；② 计数 rotateTurns 落在 state/social-state.json，重启桥**不会**重置它。",
       "prewarmAhead": 3
     },
     "sessionArchive": {

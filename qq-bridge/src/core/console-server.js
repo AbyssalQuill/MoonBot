@@ -107,7 +107,7 @@ import {
 } from './memory.js';
 import {
   evaluateWakeTrigger, buildWakePrompt, sendWakePrompt,
-  initWakeCore, setWakeApi, setWakeDeliver,
+  initWakeCore, setWakeApi, setWakeDeliver, rotateThresholdOf,
 } from './wake-send.js';
 import { resolveGroupMemberName, resolveReplyInfo, expandIncomingForwardPreview, setMessageCacheBot } from './message-cache.js';
 import {
@@ -4044,7 +4044,7 @@ export function startConsoleServer() {
         // （wake-send.js 里那段 standby 切换，条件同样是 `rotateTurns >= threshold`）。
         let rotateNow = false;
         let rotateTurnsNow = Number(st.rotateTurns) || 0;
-        const rotateThreshold = Math.max(5, Number(cfgRef.social?.autoReset?.wakeThreshold) || 12);
+        const rotateThreshold = rotateThresholdOf(cfgRef);
         if (arrived) {
           rotateTurnsNow += 1;
           st.rotateTurns = rotateTurnsNow;
