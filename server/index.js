@@ -4715,6 +4715,136 @@ app.get('/api/learning/profile', async (req, res) => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/* 群角色（群主 / 管理员 / 普通成员）：OneBot get_group_member_list      */
+/* ------------------------------------------------------------------ */
+/**
+ * 调 NapCat 的 OneBot HTTP —— **照抄仓库里已有的那套写法**，不另造连接方式。
+ * 桥侧 qq-bridge/src/mcp-napcat-safe.js 的 onebot() 与 core/voice.js 的 onebotPost() 就是这条路：
+ *   地址 = 桥 config.json 的 `napcat.httpUrl`（出厂 http://127.0.0.1:3000）
+ *   令牌 = 桥 config.json 的 `napcat.accessToken`（OneKey 启动器写的是 truefriend）
+ *   请求 = POST {httpUrl}/{action}，请求头 `authorization: Bearer <token>`，body 是参数 JSON
+ *   成功判据 = body.status==='ok' && body.retcode===0，结果取 body.data
+ * 这里读的 config.json 就是本文件 bridgeCfgPath()（findBridgeDir() 里那份），与桥**同源**，
+ * 所以不会出现"桥连得上 NapCat、管理端连不上"的配置漂移。
+ * 【踩过的坑】HTTP 426 是 httpUrl 指到了 WebSocket 端口（3001）的典型症状，桥侧就带了这句提示，
+ * 这里原样透出，主人自查时不用再去翻桥的代码。
+ */
+function napcatHttpTarget() {
+  let cfg = {};
+  try { cfg = readBridgeCfg(); } catch { /* 配置读坏了就用出厂默认再试一次 */ }
+  const base = String(cfg?.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  const token = String(cfg?.napcat?.accessToken || '');
+  return { base, token };
+}
+
+async function napcatOneBot(action, params = {}, timeoutMs = 8000) {
+  const { base, token } = napcatHttpTarget();
+  const res = await fetch(`${base}/${action}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    const hint = res.status === 426 ? '（HTTP 426：napcat.httpUrl 可能指向了 WebSocket 端口，请把桥 config.json 的 napcat.httpUrl 改成 OneBot HTTP API 地址）' : '';
+    throw new Error(`HTTP ${res.status}${hint}`);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (body?.status !== 'ok' || Number(body?.retcode) !== 0) {
+    throw new Error(`OneBot ${action} 失败: retcode=${body?.retcode} ${body?.wording ?? body?.message ?? ''}`.trim());
+  }
+  return body.data;
+}
+
+/**
+ * 群角色缓存（uid → 'owner'|'admin'|'member'，同一个人在多群时取**最高**角色：owner > admin > member）。
+ * 为什么必须缓存：get_group_member_list 是**逐群**一次 HTTP，几十个群串起来每次开画像页要好几秒
+ * （大群单次就要几百毫秒），而群成员表几乎不变。TTL 10 分钟，与桥侧 core/group-cache.js 的
+ * GROUP_INFO_TTL_MS 取同一个量级，两边的"角色信息多久算新鲜"不会打架。
+ * 为什么失败**不写缓存**：NapCat 没开/没登录时一次都拉不到，若把空结果当"新鲜缓存"存 10 分钟，
+ * 主人把 NapCat 拉起来后画像页照样 10 分钟没有角色 —— 这种"改了没反应"最难排查。
+ * 降级：拿不到就是 null，图谱照常出（绝不能因为 NapCat 挂了把整页画像带崩）。
+ */
+const GROUP_ROLE_TTL_MS = 10 * 60 * 1000;
+const ROLE_RANK = { member: 1, admin: 2, owner: 3 };
+let groupRoleCache = { at: 0, map: new Map(), groups: 0 };
+let groupRoleRefreshing = null;                  // 进行中的刷新（同一时刻只允许一个，避免并发开页重复打 NapCat）
+
+/** 画像涉及的群号：桥白名单 allow.groups 优先，再并上近 30 天有消息的群；上限 40 个（再多只是白等） */
+function collectGroupIds(db) {
+  const ids = [];
+  const seen = new Set();
+  const push = (v) => { const s = String(v ?? '').trim(); if (/^\d{5,12}$/.test(s) && !seen.has(s)) { seen.add(s); ids.push(s); } };
+  try {
+    const cfg = readBridgeCfg();
+    if (Array.isArray(cfg?.allow?.groups)) cfg.allow.groups.forEach(push);
+  } catch { /* 配置读不到就只靠消息推 */ }
+  try {
+    const rows = db.prepare("SELECT DISTINCT conv_key FROM chat_messages WHERE conv_key LIKE 'group:%' AND ts_ms >= ?").all(Date.now() - 30 * DAY_MS);
+    for (const r of rows) push(String(r.conv_key).slice(6));   // 'group:' 之后是群号
+  } catch { /* 表结构异常也不影响出图 */ }
+  return ids.slice(0, 40);
+}
+
+/** 逐群拉成员列表并合并出 uid → 最高角色；一个群都没成功即判定 NapCat 不可达（连错 3 个群就提前收手，别逐群白等超时） */
+async function fetchGroupRoles(groupIds) {
+  const map = new Map();
+  let okGroups = 0, failGroups = 0;
+  for (const gid of groupIds) {
+    if (failGroups >= 3 && okGroups === 0) break;
+    try {
+      const data = await napcatOneBot('get_group_member_list', { group_id: Number(gid) }, 8000);
+      const arr = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+      okGroups++;
+      for (const m of arr) {
+        const uid = m?.user_id != null ? String(m.user_id) : '';
+        const role = String(m?.role ?? '');
+        if (!uid || !ROLE_RANK[role]) continue;   // 未知取值（空串/'unknown'）当没拿到，不硬塞成 member
+        const cur = map.get(uid);
+        if (!cur || ROLE_RANK[role] > ROLE_RANK[cur]) map.set(uid, role);
+      }
+    } catch (e) {
+      failGroups++;
+      if (failGroups === 1) console.warn(`[group-roles] 群 ${gid} 成员列表拉取失败:`, e?.message || e);
+    }
+  }
+  return { map, okGroups, failGroups };
+}
+
+/**
+ * 取群角色表，返回 { map, cached, pending, at, groups }：
+ *   · 缓存新鲜 → 直接用；
+ *   · 过期/为空 → 触发一次刷新，最多等 budgetMs（默认 5 秒）就先把手头这份缓存返回、刷新留到后台跑完。
+ * 为什么刷新失败**不做时间退避**：NapCat 关着时是 ECONNREFUSED，几次尝试都在毫秒级（而且拉不到就
+ * 不写缓存，NapCat 一起来下一次开页立刻就有角色 —— 这才符合"主人刚把 NapCat 拉起来就该看到效果"）；
+ * 真正怕的是 NapCat 半死不活（连得上不回包），那种情况由单一刷新 + budgetMs 兜住，请求不会堆积。
+ * 为什么要这个"预算"：画像页是打开即看的页面，不能让 NapCat 拖成十几秒白屏；
+ * 宁可这一刷先出图、角色下一刷补齐（前端无需感知，role 拿不到就是 null）。
+ */
+async function getGroupRoleMap(groupIds, budgetMs = 5000) {
+  // 统一出口：cached 表示"此刻手里有没有可用缓存数据"（缓存为空时给 false，别让排查的人以为拿的是缓存）
+  const snap = (pending) => ({ map: groupRoleCache.map, cached: groupRoleCache.at > 0, at: groupRoleCache.at, pending, groups: groupRoleCache.groups });
+  if (groupRoleCache.at && Date.now() - groupRoleCache.at < GROUP_ROLE_TTL_MS) return snap(false);
+  if (!groupIds.length) return snap(false);
+  if (!groupRoleRefreshing) {
+    groupRoleRefreshing = fetchGroupRoles(groupIds)
+      .then((r) => {
+        if (r.okGroups > 0) groupRoleCache = { at: Date.now(), map: r.map, groups: r.okGroups };
+        return r;   // 一个群都没拉到 → 不写缓存（下次开页重试），角色保持 null
+      })
+      .catch((e) => { console.warn('[group-roles] 刷新异常:', e?.message || e); return null; })
+      .finally(() => { groupRoleRefreshing = null; });
+  }
+  let timer = null;
+  const raced = await Promise.race([
+    groupRoleRefreshing,
+    new Promise((r) => { timer = setTimeout(() => r(null), Math.max(200, budgetMs)); }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return snap(!raced);
+}
+
 app.get('/api/learning/graph', async (_req, res) => {
   let db = null;
   try {
@@ -4725,6 +4855,13 @@ app.get('/api/learning/graph', async (_req, res) => {
     const stats = msgStatsSince(db, cut30);
     const statMap = new Map(stats.map((r) => [String(r.uid), { c: Number(r.c) || 0, last: Number(r.last) || 0 }]));
     const privateUids = new Set(privateConvUids(db, cut30));
+
+    // 真实群角色（群主/管理员）：NapCat 不可达时整张表为空 → 每个节点 role 一律 null，图谱照常出。
+    // 只在这里 await 一次，节点循环里直接查表，避免每个节点都打一次 NapCat。
+    let roleRes = { map: new Map(), cached: true, pending: false, groups: 0 };
+    try { roleRes = await getGroupRoleMap(collectGroupIds(db)); } catch (e) { console.warn('[graph] 群角色获取失败:', e?.message || e); }
+    const roleMap = roleRes.map;
+    const roleOf = (uid) => roleMap.get(String(uid)) ?? null;
 
     const profiles = db.prepare("SELECT uid, name, personality, likes, dislikes, birthday, notes, updated_at FROM profiles WHERE name IS NOT NULL AND name != ''").all();
     const personaEntries = db.prepare("SELECT uid, category, content FROM memory_entries WHERE category = 'persona'").all();
@@ -4762,6 +4899,8 @@ app.get('/api/learning/graph', async (_req, res) => {
         uid,
         name: String(p.name ?? '').slice(0, 60) || uid,
         kind, tags, msgCount: st?.c || 0, lastSeen: st?.last || null,
+        // 真实角色（NapCat get_group_member_list）：主人自己也照实填（他可能就是某个群的群主）
+        role: roleOf(uid),
         ...extra,
       });
     }
@@ -4776,6 +4915,7 @@ app.get('/api/learning/graph', async (_req, res) => {
         uid,
         name: String(n).slice(0, 60) || uid,
         kind: uid === OWNER_QQ ? 'owner' : (privateUids.has(uid) ? 'friend' : 'member'),
+        role: roleOf(uid),
         tags: [],
         msgCount: Number(s.c) || 0,
         lastSeen: Number(s.last) || null,
@@ -4809,7 +4949,12 @@ app.get('/api/learning/graph', async (_req, res) => {
       ok: true,
       nodes,
       links,
-      meta: { ownerQQ: OWNER_QQ, nodeCount: nodes.length, linkCount: links.length, generatedAt: new Date().toISOString() },
+      meta: {
+        ownerQQ: OWNER_QQ, nodeCount: nodes.length, linkCount: links.length, generatedAt: new Date().toISOString(),
+        // roles 只为排查用（前端不依赖）：known=拿到角色的 uid 数；pending=true 表示这一刷没等 NapCat，
+        // 后台仍在拉，下一刷就有角色；cached=false 表示此刻手里没有缓存数据（NapCat 拉不到时就是这种）。
+        roles: { known: roleMap.size, cached: roleRes.cached, pending: roleRes.pending, at: roleRes.at || 0, groups: roleRes.groups, ttlMs: GROUP_ROLE_TTL_MS },
+      },
     });
   } catch (e) {
     console.error('[graph]', e?.message || e);
@@ -4843,6 +4988,11 @@ app.get('/api/learning/owner-profile', async (_req, res) => {
     const profileTags = splitFieldTags([owner.personality, owner.likes, owner.dislikes, owner.notes], 12);
     const memoryTop = memoryTopWords(memRows, 18);
     const persona = personaLibraryEntry(OWNER_QQ);
+    /* 主人**真实的群角色**：本接口没有节点结构（只有 owner 一个对象），就挂在 owner.role 上，
+       与 /api/learning/graph 的 node.role 同一套取值；拿不到一律 null（NapCat 没开也不该影响画像页）。
+       注意这与 owner.kind='主人' 不是一回事：主人本人在自己的群里可能只是普通成员。 */
+    try { const rr = await getGroupRoleMap(collectGroupIds(db)); owner.role = rr.map.get(OWNER_QQ) ?? null; }
+    catch { owner.role = null; }
 
     res.json({
       ok: true,
@@ -4957,8 +5107,299 @@ app.put('/api/learning/relations', (req, res) => {
     if (!cat) delete rels[pairKey(a, c)];
     else { if (!REL_CATS.includes(cat)) { res.json({ ok: false, message: '未知关系类别' }); return; } rels[pairKey(a, c)] = cat; }
     writeFileSync(RELATIONS_FILE, JSON.stringify(rels, null, 2));
+    /* 主人一旦**手工**动过这一对，就把它的"自动标注旁证"删掉：
+       ① 人工优先——下次 /api/learning/relations/auto 不会再把这条线覆盖掉；
+       ② 免得 relations-auto.json 里留一条跟当前画面对不上的旧理由。
+       （clear 也删：删掉线之后应当重新允许模型推断。） */
+    try {
+      const auto = readAutoRelations();
+      if (Object.prototype.hasOwnProperty.call(auto, pairKey(a, c))) { delete auto[pairKey(a, c)]; writeAutoRelations(auto); }
+    } catch { /* 旁证文件坏了不影响主流程 */ }
     res.json({ ok: true, relations: rels });
   } catch (e) { res.status(200).json({ ok: false, message: String(e?.message || e) }); }
+});
+
+/* ------------------------------------------------------------------ */
+/* 关系自动推断：管理端负责"挑边 + 喂画像数据 + 生成提示词 + 校验落库"     */
+/* ------------------------------------------------------------------ */
+/**
+ * 【为什么这里是"两步式"，而不是管理端自己调模型 —— 如实说明，没有假装接通】
+ * 找过本仓库所有现成的调模型通道，**没有一条能被管理端直接复用**：
+ *   · server/index.js 里没有任何 LLM HTTP 客户端：全文搜 `chat/completions` 零命中；`apiKey` 只出现在
+ *     ① .credentials.yaml → 环境变量（喂给 DSH 的 provider，见本文件 ~599 行）② settings.yaml 的
+ *     provider/model 读取（~2858 行起）—— 两者都只是**读配置**，一个请求都不发；
+ *   · 桥侧真正在跑模型的方式是 DSH **agent 会话**（qq-bridge/src/dsh-client.js 的 NodeApiClient），
+ *     它活在桥进程内部。管理端能碰到的只有桥 console 的学习端点（/api/learning/persona、/portrait、
+ *     /api/slang/research），那些是**异步起会话**、结果写进 memory.db，**不返回模型 JSON**，
+ *     拿不到"这一对是闺蜜还是仇人"的结构化结论；
+ *   · 全仓库唯一的 OpenAI 兼容 HTTP 调用在 qq-bridge/src/core/voice.js（POST {baseUrl}/chat/completions），
+ *     那是语音合成/识别的端点，跟主人 DSH 用的文本 provider 不是一套配置，硬搬过来等于自己发明新通道
+ *     （主人明确要求不要这么干）。
+ * 所以按主人给的备选方案做成两步（同一个接口的两相）：
+ *   ① POST /api/learning/relations/auto { minStrength?, limit?, overwriteAuto? }
+ *      → 返回挑好的候选对 + **给模型的完整提示词**（不落库）
+ *   ② 把模型吐的 JSON 原样 POST 回来：{ result: <对象或字符串> }
+ *      → 校验（类别只认五个、只认候选里的对、人工标注不覆盖）后写进 relations.json
+ * 落库那一相严格按人工优先：凡是被主人手点过的线（或已从"自动旁证"里剔除的线）一律不覆盖。
+ */
+const AUTO_RELATIONS_FILE = join(CONFIG_DIR, 'relations-auto.json');
+
+/** 自动标注的旁证（类别/理由/时间/强度）。relations.json 的值只能是五个类别 id（前端按字符串渲染），
+ *  所以模型的理由另存一份：既不动前端数据结构，也能在下次推断时当参考、在排查时看它凭什么这么标。 */
+function readAutoRelations() {
+  try { const o = JSON.parse(readFileSync(AUTO_RELATIONS_FILE, 'utf8')); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch { return {}; }
+}
+function writeAutoRelations(o) { try { writeFileSync(AUTO_RELATIONS_FILE, JSON.stringify(o, null, 2)); } catch { /* 旁证写不进去不影响主线 */ } }
+
+/** 模型偶尔会写中文类别名（实测会出现"闺蜜/情侣"这种），映射回五个 id；其余一律判非法丢弃 */
+const REL_CAT_ALIAS = { '闺蜜': 'guimi', '诡秘': 'guimi', '密友': 'guimi', '家人': 'jiaren', '亲戚': 'jiaren', '情侣': 'qinglv', '恋人': 'qinglv', '对象': 'qinglv', '仇人': 'chouren', '敌人': 'chouren', '群友': 'qunyou', '普通群友': 'qunyou', '熟人': 'qunyou' };
+function normalizeRelCat(v) {
+  const s = String(v ?? '').trim();
+  if (REL_CATS.includes(s)) return s;
+  return REL_CAT_ALIAS[s] || '';
+}
+
+const clampNum = (v, min, max, dflt) => { const n = Number(v); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
+
+/**
+ * 挑候选关系对：与 /api/learning/graph **同一套**强度算法（近 14d 同群同现 + 近 30d 私聊互动），
+ * 只取 strength ≥ minStrength 的，按强度降序取前 limit 条。
+ * 为什么既设阈值又设上限：几百条边一次性全丢给模型，既烧额度又慢，而且弱边（同群撞见一两次）
+ * 本身推不出关系 —— 那两个条件正好一起解决。默认 0.5 / 20 对，调用方可传参覆盖。
+ * 又为什么在这里先剔掉人工标注的并计数：人工优先，主人手点的那条线不该被模型改写。
+ * 自动标注过的对（能在 relations-auto.json 里查到旁证）默认允许重算刷新，见 overwriteAuto。
+ */
+async function collectRelationCandidates({ minStrength = 0.5, limit = 20, overwriteAuto = true } = {}) {
+  const db = await openBridgeMemoryDbRo();
+  try {
+    const cut30 = Date.now() - 30 * DAY_MS;
+    const cut14 = Date.now() - 14 * DAY_MS;
+    const raw = groupCooccurPairs(db, cut14);
+    const privRows = db.prepare("SELECT conv_key, COUNT(*) AS c FROM chat_messages WHERE conv_key LIKE 'private:%' AND ts_ms >= ? GROUP BY conv_key").all(cut30);
+    for (const r of privRows) {
+      const uid = String(r.conv_key).slice(8);   // 'private:' 之后是对方 uid
+      if (!uid || uid === OWNER_QQ) continue;
+      const k = pairKey(uid, OWNER_QQ);
+      raw.set(k, (raw.get(k) || 0) + (Number(r.c) || 0));
+    }
+    const maxRaw = Math.max(0, ...[...raw.values()]);
+    if (!maxRaw) return { candidates: [], info: new Map(), skippedManual: 0, lowStrength: 0, total: 0 };
+
+    const logMax = Math.log(1 + maxRaw);
+    const rels = readRelations();
+    const auto = readAutoRelations();
+    const scored = [];
+    let skippedManual = 0, lowStrength = 0;
+    for (const [k, v] of raw.entries()) {
+      const [a, b] = k.split('|');
+      if (!a || !b || a === b) continue;
+      if (!/^\d{5,11}$/.test(a) || !/^\d{5,11}$/.test(b)) continue;
+      const strength = maxRaw > 1 ? 0.05 + 0.95 * (Math.log(1 + v) / logMax) : 1;
+      if (strength < minStrength) { lowStrength++; continue; }
+      const existing = rels[k];
+      const isAutoKey = Object.prototype.hasOwnProperty.call(auto, k);
+      if (existing && !(isAutoKey && overwriteAuto)) { skippedManual++; continue; }
+      scored.push({ a, b, key: k, strength: Math.round(strength * 1000) / 1000, raw: v, existing: existing || null });
+    }
+    scored.sort((x, y) => y.strength - x.strength);
+    const picked = scored.slice(0, limit);
+
+    // 只为挑中的那几对（≤ 2×limit 个人）抓画像数据，不把整库读一遍
+    const uids = [...new Set(picked.flatMap((p) => [p.a, p.b]))];
+    const profStmt = db.prepare('SELECT uid, name, personality, likes, dislikes, notes FROM profiles WHERE uid = ?');
+    const personaStmt = db.prepare("SELECT content FROM memory_entries WHERE uid = ? AND category = 'persona' ORDER BY created_at DESC LIMIT 1");
+    const statStmt = db.prepare("SELECT COUNT(*) AS c, MAX(ts_ms) AS last FROM chat_messages WHERE sender_uid = ? AND is_self = 0 AND direction = 'in' AND ts_ms >= ?");
+    const cardStmt = db.prepare("SELECT sender_name AS n FROM chat_messages WHERE sender_uid = ? AND conv_key LIKE 'group:%' AND sender_name != '' ORDER BY ts_ms DESC LIMIT 1");
+    const groupStmt = db.prepare("SELECT conv_key, COUNT(*) AS c FROM chat_messages WHERE sender_uid = ? AND conv_key LIKE 'group:%' AND ts_ms >= ? GROUP BY conv_key ORDER BY c DESC LIMIT 3");
+    const msgStmt = db.prepare("SELECT content FROM chat_messages WHERE sender_uid = ? AND direction = 'in' AND is_self = 0 AND content != '' AND ts_ms >= ? ORDER BY ts_ms DESC LIMIT 8");
+    const info = new Map();
+    for (const uid of uids) {
+      const p = profStmt.get(uid) || null;
+      const ps = personaStmt.get(uid) || null;
+      const st = statStmt.get(uid, cut30) || null;
+      const card = cardStmt.get(uid) || null;
+      const lib = personaLibraryEntry(uid);
+      info.set(uid, {
+        uid,
+        name: String(p?.name ?? '').slice(0, 40) || String(card?.n ?? '').slice(0, 40) || uid,
+        cardName: String(card?.n ?? '').slice(0, 40),                       // 群昵称/群名片（最近一条群消息里的名字）
+        nickname: String(lib?.nickname ?? '').slice(0, 40),                 // 人格档案里学到的昵称
+        personality: String(p?.personality ?? lib?.personality ?? '').slice(0, 160),
+        likes: String(p?.likes ?? '').slice(0, 120),
+        dislikes: String(p?.dislikes ?? '').slice(0, 80),
+        notes: String(p?.notes ?? '').slice(0, 160),
+        personaSummary: String(ps?.content ?? '').slice(0, 160),            // memory_entries 里的 persona 摘要
+        relationshipAdvice: String(lib?.relationshipAdvice ?? '').slice(0, 120),
+        msgCount30d: Number(st?.c) || 0,
+        lastSeen: Number(st?.last) || 0,
+        groups: groupStmt.all(uid, cut30).map((r) => String(r.conv_key).slice(6)),
+        recent: msgStmt.all(uid, cut30).map((r) => String(r.content ?? '').replace(/\s+/g, ' ').slice(0, 60)).filter(Boolean),
+      });
+    }
+    return { candidates: picked, info, skippedManual, lowStrength, total: scored.length };
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+
+/** 单个人的资料段（提示词里给模型看的"证据"） */
+function relationPersonBlock(info, uid, tag) {
+  const it = info.get(uid);
+  if (!it) return `  · ${tag} ${uid}（没有画像数据）`;
+  const bits = [];
+  if (it.nickname && it.nickname !== it.name) bits.push(`档案昵称「${it.nickname}」`);
+  if (it.cardName && it.cardName !== it.name) bits.push(`群名片「${it.cardName}」`);
+  if (uid === OWNER_QQ) bits.push('（**主人本人**）');
+  const lines = [`  · ${tag} ${it.uid} 姓名「${it.name}」${bits.length ? ' ' + bits.join(' ') : ''}`];
+  if (it.personality) lines.push(`      性格/印象：${it.personality}`);
+  if (it.likes) lines.push(`      喜好：${it.likes}`);
+  if (it.dislikes) lines.push(`      不喜欢：${it.dislikes}`);
+  if (it.notes) lines.push(`      备注：${it.notes}`);
+  if (it.personaSummary) lines.push(`      人格摘要：${it.personaSummary}`);
+  if (it.relationshipAdvice) lines.push(`      相处建议：${it.relationshipAdvice}`);
+  lines.push(`      近30天发言 ${it.msgCount30d} 条${it.groups.length ? `，常在群：${it.groups.join('、')}` : ''}`);
+  if (it.recent.length) lines.push(`      最近发言：${it.recent.map((t) => `「${t}」`).join(' ')}`);
+  return lines.join('\n');
+}
+
+/** 组装给模型的提示词（这一步只生成文本，管理端不发任何模型请求） */
+function buildRelationsPrompt(pairs, info, { minStrength = 0.5 } = {}) {
+  const L = [];
+  L.push('你在帮 QQ 群主判断「群友画像」里两个人之间是什么关系。只依据下面给出的数据推断，不要编造不存在的信息。');
+  L.push('可选类别（只能从这五个里选一个，输出英文 id）：');
+  L.push('  guimi=闺蜜/密友（很亲密、常一起玩、互相打趣）  jiaren=家人（亲属关系或明显以家人相待）');
+  L.push('  qinglv=情侣（暧昧/恋人）  chouren=仇人（明显敌对、常互怼互骂）  qunyou=普通群友（只是同一个群，关系一般）');
+  L.push('判断依据：称呼与昵称、画像里的性格/喜好/备注、是否有专属人格档案、互动强度、近 30 天发言内容与口吻。');
+  L.push('互动力度弱、只有同群出现、看不出特殊关系的，一律判 qunyou，不要为了有结论而抬高关系。');
+  L.push('');
+  L.push('输出必须是**严格 JSON**，不要任何解释文字、不要 markdown 代码围栏，格式如下：');
+  L.push('{"relations":[{"a":"<小QQ号>","b":"<大QQ号>","category":"guimi","reason":"20字以内理由"}]}');
+  L.push('只能输出下面列出的这些对，a/b 必须照抄（小的那个号放 a、大的放 b）；拿不准的整对省略，宁缺勿滥。');
+  L.push(`待判断的关系对共 ${pairs.length} 对（已按互动强度降序，阈值 ${minStrength}）：`);
+  pairs.forEach((p, i) => {
+    L.push('');
+    L.push(`【第 ${i + 1} 对】${p.a} ↔ ${p.b}　互动强度 ${p.strength}${p.existing ? `（上一次的自动结论：${p.existing}，可以改）` : ''}`);
+    L.push(relationPersonBlock(info, p.a, '甲'));
+    L.push(relationPersonBlock(info, p.b, '乙'));
+  });
+  L.push('');
+  L.push('现在只输出那个 JSON。');
+  return L.join('\n');
+}
+
+/** 从模型回复里抠出 JSON：常见两种壳子（```json 围栏、前后夹一段解释），先剥围栏再取首尾括号 */
+function parseModelRelations(raw) {
+  let data = raw;
+  if (typeof data === 'string') {
+    let t = data.trim().replace(/^```[a-zA-Z]*\s*/, '').replace(/```\s*$/, '').trim();
+    const i = t.indexOf('{'), j = t.lastIndexOf('}');
+    if (i >= 0 && j > i) t = t.slice(i, j + 1);
+    try { data = JSON.parse(t); }
+    catch {
+      // 有的模型直接吐数组（不带 relations 外壳）
+      const ai = t.indexOf('['), aj = t.lastIndexOf(']');
+      if (ai >= 0 && aj > ai) { try { data = JSON.parse(t.slice(ai, aj + 1)); } catch { return null; } }
+      else return null;
+    }
+  }
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== 'object') return null;
+  if (Array.isArray(data.relations)) return data.relations;
+  if (Array.isArray(data.pairs)) return data.pairs;
+  if (Array.isArray(data.data)) return data.data;
+  if (data.relations && typeof data.relations === 'object') return data.relations;
+  return null;
+}
+
+/** 归一成 [{a,b,category,reason}]；字段名容错（模型爱写 from/to、uid1/uid2、cat/rel/type） */
+function normalizeModelRelations(raw) {
+  const parsed = parseModelRelations(raw);
+  const out = [];
+  if (!parsed) return out;
+  const push = (a, b, category, reason) => out.push({
+    a: String(a ?? '').trim(), b: String(b ?? '').trim(),
+    category: normalizeRelCat(category), reason: String(reason ?? '').replace(/\s+/g, ' ').slice(0, 60),
+  });
+  if (Array.isArray(parsed)) {
+    for (const it of parsed) {
+      if (!it || typeof it !== 'object') continue;
+      if (it.key) { const [x, y] = String(it.key).split('|'); push(it.a ?? x, it.b ?? y, it.category ?? it.cat ?? it.rel ?? it.type, it.reason ?? it.why); continue; }
+      push(it.a ?? it.from ?? it.uid1 ?? it.small, it.b ?? it.to ?? it.uid2 ?? it.big,
+        it.category ?? it.cat ?? it.rel ?? it.type ?? it.relationship, it.reason ?? it.why);
+    }
+    return out;
+  }
+  for (const [k, v] of Object.entries(parsed)) {   // { "小uid|大uid": "guimi" } 映射形态
+    const [x, y] = String(k).split('|');
+    if (v && typeof v === 'object') push(v.a ?? x, v.b ?? y, v.category ?? v.cat ?? v.rel, v.reason ?? v.why);
+    else push(x, y, v, '');
+  }
+  return out;
+}
+
+/**
+ * POST /api/learning/relations/auto
+ * 两相：不带 result → 返回提示词 + 候选对；带 result → 校验并落库（人工标注绝不覆盖）。
+ * 响应结构固定带 ok / updated / skippedManual / relations / message（失败只有 ok:false + message，
+ * 一律 200，不抛 500 —— 与仓库里其它画像接口一致，界面拿到 ok:false 也照常显示消息）。
+ */
+app.post('/api/learning/relations/auto', async (req, res) => {
+  try {
+    const b = req.body ?? {};
+    const minStrength = clampNum(b.minStrength, 0, 1, 0.5);
+    const limit = clampInt(b.limit, 1, 60, 20);
+    const overwriteAuto = b.overwriteAuto !== false;
+    const cand = await collectRelationCandidates({ minStrength, limit, overwriteAuto });
+    const relations = readRelations();
+    const pairs = cand.candidates.map((p) => ({ a: p.a, b: p.b, strength: p.strength, existing: p.existing }));
+
+    const hasResult = b.result !== undefined && b.result !== null && (typeof b.result !== 'string' || b.result.trim() !== '');
+    if (!hasResult) {
+      // —— 第一相：只生成提示词 ——
+      const prompt = pairs.length ? buildRelationsPrompt(cand.candidates, cand.info, { minStrength }) : '';
+      return res.json({
+        ok: true, updated: 0, skippedManual: cand.skippedManual, relations,
+        prompt, pairs, candidates: pairs.length, minStrength, limit,
+        message: pairs.length
+          ? `已生成给模型的提示词（${pairs.length} 对候选，强度阈值 ${minStrength}，另有 ${cand.lowStrength} 对太弱未入选、${cand.skippedManual} 对因人工标注不参与）。`
+            + '管理端目前没有可直接复用的模型通道（原因见 server/index.js 里 /api/learning/relations/auto 上方的注释），'
+            + '请把 prompt 交给模型，再把模型返回的 JSON 用 { result: <JSON 或字符串> } POST 回本接口落库。'
+          : `没有符合条件的候选关系对（阈值 ${minStrength}；太弱的 ${cand.lowStrength} 对、因人工标注跳过的 ${cand.skippedManual} 对）。`,
+      });
+    }
+
+    // —— 第二相：校验 + 落库 ——
+    const items = normalizeModelRelations(b.result);
+    if (!items.length) {
+      return res.json({ ok: true, updated: 0, skippedManual: cand.skippedManual, relations, candidates: pairs.length, invalid: 0, ignored: 0, message: '模型返回里没解析出任何关系对（relations.json 未改动）。请确认 result 是 {"relations":[{"a":"...","b":"...","category":"..."}]} 这种结构。' });
+    }
+    const candKeys = new Set(cand.candidates.map((p) => p.key));
+    const strengthMap = new Map(cand.candidates.map((p) => [p.key, p.strength]));
+    const auto = readAutoRelations();
+    const next = { ...relations };
+    let updated = 0, invalid = 0, ignored = 0, skippedManual = cand.skippedManual;
+    for (const it of items) {
+      if (!/^\d{5,11}$/.test(it.a) || !/^\d{5,11}$/.test(it.b) || !it.category) { invalid++; continue; }  // 五个类别之外（模型自创的"同事"之类）直接丢
+      const key = pairKey(it.a, it.b);
+      if (!candKeys.has(key)) { ignored++; continue; }        // 不在本次候选里（模型写错号或编的对）→ 不落库
+      const prev = next[key];
+      const isAutoKey = Object.prototype.hasOwnProperty.call(auto, key);
+      if (prev && !(isAutoKey && overwriteAuto)) { skippedManual++; continue; }   // 人工标注：双保险，绝不覆盖
+      if (prev !== it.category) { next[key] = it.category; updated++; }   // 结论没变就不算"更新"，只刷新旁证理由
+      auto[key] = { category: it.category, reason: it.reason, at: Date.now(), strength: strengthMap.get(key) ?? null };
+    }
+    if (updated > 0) writeFileSync(RELATIONS_FILE, JSON.stringify(next, null, 2));
+    if (updated > 0 || Object.keys(auto).length) writeAutoRelations(auto);
+    res.json({
+      ok: true, updated, skippedManual, relations: next, candidates: pairs.length, invalid, ignored,
+      message: `模型结论已落库：写入/更新 ${updated} 对；因人工标注跳过 ${skippedManual} 对；类别非法丢弃 ${invalid} 条；不在候选内忽略 ${ignored} 条。`
+        + '自动标注的理由与时间另存 ~/.qq-bridge-manager/relations-auto.json（relations.json 仍只存类别 id，前端数据格式没变）；'
+        + '你在图上手工改过的线会从该文件里移除，之后不再被自动推断覆盖。',
+    });
+  } catch (e) {
+    console.warn('[relations/auto]', e?.message || e);
+    res.status(200).json({ ok: false, message: `自动标注失败：${String(e?.message ?? e)}` });
+  }
 });
 
 /* ------------------------------------------------------------------ */
