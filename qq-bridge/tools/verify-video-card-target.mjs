@@ -1,4 +1,4 @@
-﻿/* 「B 站卡片点进去不是那个视频」的可复现验证（第十五批）。
+/* 「B 站卡片点进去不是那个视频」的可复现验证（第十五批）。
  *
  * 它**直接 import 线上那份 `src/core/video.js`**，跑的是真实代码路径，不是另写一份：
  *   1. 构造一个真实的 info（真实 BV + 真实封面）
@@ -11,7 +11,7 @@
  * 不发送任何消息（只问 NapCat 要 Ark 数据），可以随时重跑。
  * 用法（cwd = qq-bridge，需要 NapCat 的 HTTP 在本机）：node tools/verify-video-card-target.mjs [BV号]
  */
-import { fetchMiniAppArk, buildVideoCard } from '../src/core/video.js';
+import { fetchMiniAppArk, buildVideoCard, resolveVideo } from '../src/core/video.js';
 
 const TOKEN = process.env.NAPCAT_TOKEN || '061228';
 const HTTP = process.env.NAPCAT_HTTP || 'http://127.0.0.1:3000';
@@ -120,6 +120,24 @@ ok(jsonPlan.primary === null, 'primary 为 null（不会发出手拼 structmsg A
 ok(!/structmsg/.test(JSON.stringify(jsonPlan)), '产物里不再出现 com.tencent.structmsg');
 const sharePlan = buildVideoCard({ ...info }, { style: 'share' });
 ok(sharePlan.primary === null && sharePlan.link.includes(shortUrl), '默认 share 形态仍是"标题 + b23.tv 短链"');
+
+/* ── 4. 真解析必须拿得到封面 ─────────────────────────────────────────────
+ * 【2026-09-18 第十六批补的这一步】上面第 1 节的 info 是**手工拼的**，封面还带了个兜底假 URL
+ * （`picked.cover || 'https://i0.hdslb.com/bfs/archive/0d3b…jpg'`），所以它**永远测不到**
+ * "风控拿不到封面"这条真实失败路径 —— 线上连着两轮"自检全绿、实发还是纯链接"正是这么来的：
+ *   resolveVideo 的 cover 是空串 → fetchMiniAppArk 当时要求必须有封面 → 返回 null
+ *   → console-server 里 seg=null → 降级梯子发分享链接。
+ * 这条自检工具的价值就在于"它绿的 == 实发能出卡"，所以必须把**真解析**也断言进来：
+ * 一旦哪天 wbi/view 也被风控，这里会先红，而不是等用户收到一条纯链接才发现。 */
+console.log('\n── 4) resolveVideo 真解析必须给出封面/UP主（否则实发会退化成纯链接）');
+try {
+  const real = await resolveVideo(`https://b23.tv/${bvid}`);
+  console.log(`   source=${real?.source}  cover=${real?.cover || '(空)'}  author=${real?.author || '(空)'}`);
+  ok(!!real?.cover, `真实解析拿到封面（source=${real?.source}）`);
+  ok(!!real?.author, '真实解析拿到 UP 主');
+} catch (e) {
+  ok(false, `resolveVideo 抛错：${e?.message ?? e}`);
+}
 
 console.log(fails === 0 ? '\n全部通过 ✅' : `\n有 ${fails} 项不通过 ❌`);
 process.exit(fails === 0 ? 0 : 1);

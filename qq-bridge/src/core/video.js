@@ -298,10 +298,18 @@ function infoFromHtml(html, canonicalUrl) {
   };
 }
 
-/** 单路：view 接口（信息最全） */
-async function biliViaView(id, kind, via) {
+/**
+ * "视频详情"的两个入口，按顺序试。字段完全同构，风控却不是同一把尺子：
+ *   /x/web-interface/wbi/view  ← 本机实测 HTTP 200，是现在唯一能拿到封面的那条
+ *   /x/web-interface/view      ← 老路径，本机稳定 412
+ * 详见 resolveBilibili 第 1 路上面那段实测记录。
+ */
+const VIEW_API_PATHS = ['/x/web-interface/wbi/view', '/x/web-interface/view'];
+
+/** 单路：view 接口（信息最全）。apiPath 见 VIEW_API_PATHS */
+async function biliViaView(id, kind, via, apiPath = VIEW_API_PATHS[1]) {
   const q = kind === 'aid' ? `aid=${encodeURIComponent(id)}` : `bvid=${encodeURIComponent(id)}`;
-  const d = await biliJson(`/x/web-interface/view?${q}`, { via });
+  const d = await biliJson(`${apiPath}?${q}`, { via });
   return {
     title: cleanBiliTitle(d.title),
     author: d.owner?.name || '',
@@ -312,7 +320,7 @@ async function biliViaView(id, kind, via) {
     pubdate: Number(d.pubdate) || 0,
     cid: Number(d.cid) || 0,
     pages: Number(d.videos) || 1,
-    source: via === 'direct' ? 'api' : 'api-proxy',
+    source: (apiPath.includes('/wbi/') ? 'api-wbi' : 'api') + (via === 'direct' ? '' : '-proxy'),
   };
 }
 
@@ -388,9 +396,32 @@ export async function resolveBilibili(rawUrl) {
   let info = null;
   let lastErr = null;
 
-  // 第 1 路：view —— 一次拿全（标题/UP主/封面/时长/播放量），可惜这台机房 IP 会被 412
-  for (const via of vias) {
-    try { info = await biliViaView(id, kind, via); break; } catch (e) { lastErr = e; log(`[video] bilibili view/${via} 不可用：${e?.message ?? e}`); }
+  /* 第 1 路：view —— 一次拿全（标题/UP主/封面/时长/播放量）。
+   *
+   * ── 2026-09-18 第十六批：这才是「B 站链接发出去还是纯链接」的真因 ──────────────
+   * 实发日志里只有一行 `[video] bilibili view/direct 不可用：bilibili 风控：request was banned`，
+   * 然后就没有下文了。老路径 `/x/web-interface/view` 在这台机房 IP 上是**稳定 412**，
+   * 于是掉到第 2 路 pagelist（它只给标题和时长，**没有封面**），再掉"拿标题反查搜索"
+   * （时通时 412）、再掉视频页 og:meta（同样 412）。最终 `info.cover` 是空串，
+   * 而 `fetchMiniAppArk` 原来要求必须有封面 → 直接 return null
+   * → console-server 里"没 Ark 也没封面" → seg=null → 降级梯子发分享链接。
+   * 也就是说：**卡片的零件都在，是"封面"这一个前置条件把整条小程序链路掐断了。**
+   *
+   * 同一分钟、同一 BV，在服务器上直连实测的对照：
+   *   GET /x/web-interface/view?bvid=BV13Xb56NEEZ      → HTTP 412（风控页 3286B）
+   *   GET /x/web-interface/wbi/view?bvid=BV13Xb56NEEZ  → HTTP 200 code=0，字段与 view 同构：
+   *       title="五十个角色、五十种声音、同一个我"  owner=困雀雀
+   *       pic=http://i1.hdslb.com/bfs/archive/d806bc14c8c044b81799200896aa1cb7be45a8e2.jpg
+   *       duration=204  stat.view=392087  desc=…
+   *   （换 BV1d4411N7zD 复测同样 200；再同一时刻打老 view 仍然 412）
+   * 结论：风控是**按老路径打的**，wbi 那条没被拦；而且它**不强制 w_rid 签名**，裸调即可。
+   * 所以第一优先改成 wbi/view，老 view 留着兜底（换机器/换网络可能反过来好使）。 */
+  for (const apiPath of VIEW_API_PATHS) {
+    for (const via of vias) {
+      const tag = apiPath.includes('/wbi/') ? 'wbi/view' : 'view';
+      try { info = await biliViaView(id, kind, via, apiPath); break; } catch (e) { lastErr = e; log(`[video] bilibili ${tag}/${via} 不可用：${e?.message ?? e}`); }
+    }
+    if (info) break;
   }
 
   // 第 2 路：分P拿准确标题+时长 → 再用标题反查补齐封面/UP主/播放量
@@ -704,7 +735,33 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
    * 我们**没有**伪造它（bbid 是设备标识、ts 是分享时刻，编不出来也不该编）；先用纯粹的
    * `b23.tv/<BV>`，若仍不灵，下一个候选就是补上 share_media/share_source 这类**非设备**参数。 */
   const webUrl = jumpUrl;
-  if (!title || !picUrl || !jumpUrl) return null;
+  /* 硬性要求只有两个：title 缺了卡片没标题，jumpUrl 缺了没有跳转目标。
+   *
+   * 【2026-09-18 第十六批】**封面不再是硬性要求**。原来这里写的是
+   *   `if (!title || !picUrl || !jumpUrl) return null;`
+   * —— 于是 bilibili 一被风控、resolveVideo 交回空 cover，整条小程序卡链路就**静默断掉**
+   * （这个分支连一行日志都没有），降级梯子转而发纯文本链接。
+   * 线上 13:25/13:26/13:27 那四次实发全是这个原因，而"函数级自检"因为自己编了封面，
+   * 一次都没走到这里 —— 这就是"自检全绿、实发还是链接"的断点。
+   *
+   * 直接问 NapCat 的对照实验（同一 BV，只改 picUrl 一个字段，rawArkData=true）：
+   *   A picUrl=https://i0.hdslb.com/…jpg → app=com.tencent.miniapp_01 view=view_8C8E89…
+   *       detail_1.url=m.q.qq.com/a/s/ac97… qqdocurl=https://b23.tv/BV13Xb56NEEZ
+   *       preview=https://qq.ugcimg.cn/v1/…（服务端还会把封面重挂到自己图床）config.token 非空
+   *   B picUrl=""（空串）                → app / view / url / qqdocurl / token **一样齐全**，
+   *       只是 detail_1.preview 是空串 —— 即"没有缩略图的卡片"，不是"没有卡片"
+   *   C 索性不传 picUrl 这个键            → 400 Schema compilation error: Expected union value
+   *   D 只传 title+jumpUrl                → 同样 400
+   * 所以：**picUrl 这个键必须在，值可以是空串**。宁可发一张没有缩略图的真卡片，
+   * 也不要因为拿不到封面就退回纯链接 —— 卡片上的标题/UP主/时长照样准，点进去照样是那条视频。 */
+  if (!title || !jumpUrl) {
+    log(`[video] 不向 QQ 要小程序 Ark：缺 ${[!title && 'title', !jumpUrl && 'jumpUrl'].filter(Boolean).join('+')} —— 这次只能退回分享链接`);
+    return null;
+  }
+  if (!picUrl) {
+    log('[video] 本次没有封面（bilibili 风控拿不到 pic）—— 照样要 Ark：实测 picUrl 传空串，'
+      + '服务端仍会签发 url/qqdocurl/token，只是卡片没有缩略图');
+  }
   const bits = [];
   if (info?.author) bits.push(info.author);
   if (info?.playText) bits.push(`${info.playText}播放`);
