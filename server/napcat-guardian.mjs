@@ -14,6 +14,7 @@
  *       文件里的 pid 已经不是我（说明新后端起来了、并已接管守卫）→ 静默退出，什么都不杀；
  *       文件里的 pid 还是我 → 说明是"应用关了/崩了"，这时才动手：
  *         ① 按托管目录前缀停 NapCat（NapCatWinBootMain / QQ，绝不碰 Program Files 里的正版 QQ）
+ *            —— 这一条受 `--kill-napcat 0` 控制（后端的「关闭界面时结束 NapCat」开关，见下）
  *         ② 停桥（命令行含 bridge.js 的 node/qbm-node）
  *         ③ 停隔离 DSH（命令行含 `--port <dshPort>`）
  *      然后把动作写进日志并退出。
@@ -44,6 +45,11 @@ const guardFile = argOf('guard-file', '');
 const dshPort = Number(argOf('dsh-port', '')) || 0;
 const bridgeScript = argOf('bridge-script', '');   // 本安装的 bridge.js **绝对路径**（只杀这一份，不碰别的安装/别的测试）
 const graceMs = Number(argOf('grace', '6000')) || 6000;
+/* 【2026-09-18 killOnExit】要不要收 NapCat，由后端按 instances.napcatLocal.killOnExit 传进来。
+ * 缺省/非 '0' = 收（保持既有行为：老调用方与回归测试都不传这个参数）。
+ * 关掉时**只跳过 NapCat 这一步**，桥与隔离 DSH 的清理照旧 —— 那本来就是守卫的职责，
+ * 主人这次要的是"退出时别动 NapCat"，不是"退出时什么都别管"。 */
+const killNapcat = argOf('kill-napcat', '1') !== '0';
 let dirs = [];
 try { dirs = JSON.parse(argOf('dirs', '[]')) || []; } catch { dirs = []; }
 const logFile = argOf('log', '');
@@ -101,8 +107,9 @@ function stopDsh() {
 }
 
 function shutdownAll(reason) {
-  log(`父进程 ${parentPid} 已退出（${reason}）→ 开始收起整套：NapCat → 桥 → 隔离 DSH`);
-  stopNapcat();
+  log(`父进程 ${parentPid} 已退出（${reason}）→ 开始收起：${killNapcat ? 'NapCat → ' : '（按 killOnExit=false 跳过 NapCat）'}桥 → 隔离 DSH`);
+  if (killNapcat) stopNapcat();
+  else log('killOnExit=false：按主人的开关不动 NapCat，它继续在后台跑');
   stopBridge();
   stopDsh();
   try { if (guardFile && existsSync(guardFile)) rmSync(guardFile, { force: true }); } catch { /* ignore */ }
@@ -111,7 +118,7 @@ function shutdownAll(reason) {
 
 // ---- 主循环：父进程在就每 2s 看一眼；父进程没了先等宽限期再二次核对 ----
 if (!parentPid) { log('没有 --parent，直接退出（不做任何事）'); process.exit(0); }
-log(`守卫启动：父进程=${parentPid} 托管目录=${dirs.length} 个 宽限=${graceMs}ms guardFile=${guardFile || '(未指定)'}`);
+log(`守卫启动：父进程=${parentPid} 托管目录=${dirs.length} 个 宽限=${graceMs}ms 收NapCat=${killNapcat} guardFile=${guardFile || '(未指定)'}`);
 
 let acted = false;
 // ⚠️ 千万不能 unref：本进程"活着盯住父进程"就是它的存在意义。上一版手滑写成 unref，

@@ -131,6 +131,8 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
                     <label className="label">WebUI 登录令牌（登录 6099 网页用）</label>
                     <input className="input" value={n(cmdCfg.webuiToken, 'truefriend')} placeholder="默认 truefriend" onChange={(e) => setCmdCfg({ ...cmdCfg, webuiToken: e.target.value || 'truefriend' })} />
                   </div>
+                  {/* 【2026-09-18 主人要求】"本地启动后关闭界面终结 napcat 进程"的自由开关（组件定义见文件末尾） */}
+                  <NapcatKillOnExitSwitch value={cmdCfg.killOnExit} onChange={(v) => setCmdCfg({ ...cmdCfg, killOnExit: v })} />
                 </>
               )}
               <div className="form-row">
@@ -150,7 +152,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
           <button className="btn btn-primary" onClick={save}><Save size={14} /> 保存配置</button>
         </div>
 
-        {instanceId === 'napcat-local' && <NapcatLauncherInfo quickLogin={(cmdCfg as any)?.quickLogin} webuiToken={(cmdCfg as any)?.webuiToken} />}
+        {instanceId === 'napcat-local' && <NapcatLauncherInfo quickLogin={(cmdCfg as any)?.quickLogin} webuiToken={(cmdCfg as any)?.webuiToken} killOnExit={(cmdCfg as any)?.killOnExit} />}
 
         {inst?.url && (
           <div className="card" style={{ marginTop: 14 }}>
@@ -172,8 +174,27 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
   );
 }
 
+/** 「关闭界面时结束 NapCat」开关（NapCat 本地启动器那块）。
+ *  · 默认显示为"开"（value !== false）：配置里还没这个键的老配置也显示成开，与后端 DEFAULT_CONFIG 一致
+ *    （后端理由见 server/index.js 里 DEFAULT_CONFIG.instances.napcatLocal.killOnExit 的注释）；
+ *  · 样式沿用本仓库既有的 .switch-row（src/styles/app.css，与「群友画像学习」等开关同一个控件）。
+ *  · 导出来是为了让渲染探针能直接验证两种状态下的中文文案（不需要浏览器、不需要起服务）。 */
+export function NapcatKillOnExitSwitch({ value, onChange }: { value?: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="form-group">
+      <label className="switch-row">
+        <input type="checkbox" checked={value !== false} onChange={(e) => onChange(e.target.checked)} />
+        <div>
+          <span>关闭界面时结束 NapCat</span>
+          <em>开着：关掉管理器窗口 / 退出管理器进程时，把本机这套 NapCat 一并结束（本次启动器拉起来的按进程号精确收；没记到进程号时按 OneKey 安装目录匹配，与「停止」同一套口径），不留后台残留进程；QQ 会退出登录，下次点「启动」重登（配了快速登录即免扫码）。关着：退出管理器完全不碰 NapCat，它继续在后台跑。改完点下面「保存配置」立即生效。</em>
+        </div>
+      </label>
+    </div>
+  );
+}
+
 /** NapCat VBS 隐藏启动器信息（融合进项目：双击/管理器启动均无黑窗） */
-function NapcatLauncherInfo({ quickLogin, webuiToken }: { quickLogin?: string; webuiToken?: string }) {
+function NapcatLauncherInfo({ quickLogin, webuiToken, killOnExit }: { quickLogin?: string; webuiToken?: string; killOnExit?: boolean }) {
   const [info, setInfo] = useState<any>(null);
   useEffect(() => {
     api<any>('/napcat/launchers').then((r) => setInfo(r.success ? r : { success: false, message: '未定位 NapCat OneKey' })).catch(() => setInfo({ success: false, message: '加载失败' }));
@@ -186,7 +207,9 @@ function NapcatLauncherInfo({ quickLogin, webuiToken }: { quickLogin?: string; w
         <div><code>{info.qr}</code></div>
         <div><code>{info.quick}</code></div>
         <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)' }}>
-          快速登录账号：{info.quickLogin} ｜ WebUI 登录令牌：{webuiToken || 'truefriend'} ｜ 管理器「启动 NapCat」也会走 VBS 隐藏拉起。
+          关闭界面时结束 NapCat：<b>{killOnExit === false ? '关' : '开'}</b>
+          {killOnExit === false ? '（退出管理器不碰 NapCat，它继续后台跑）' : '（退出管理器会一并结束本机这套 NapCat，不留残留进程）'}
+          {' ｜ 快速登录账号：'}{info.quickLogin} ｜ WebUI 登录令牌：{webuiToken || 'truefriend'} ｜ 管理器「启动 NapCat」也会走 VBS 隐藏拉起。
         </div>
       </div>
     </div>

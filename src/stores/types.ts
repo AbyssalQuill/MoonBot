@@ -129,6 +129,9 @@ export interface NapcatLocalConfig {
   webuiPort?: number;        // 本机 WebUI 端口（默认 6099）
   /** NapCat WebUI 登录 token（默认 truefriend） */
   webuiToken?: string;
+  /** 关闭管理器界面/退出管理器进程时，是否结束**本次这个启动器拉起来的** NapCat（默认 true）。
+   *  开 = 不留后台残留进程（QQ 会退出登录，下次点「启动」重登）；关 = 退出管理器完全不碰 NapCat。 */
+  killOnExit?: boolean;
   env?: Record<string, string>;
 }
 

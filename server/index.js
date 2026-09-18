@@ -82,6 +82,20 @@ const DEFAULT_CONFIG = {
       webuiPort: 6099,
       webuiToken: 'truefriend',          // NapCat WebUI 登录 token（登录 6099 网页用）
       quickLogin: '',                    // 快速登录 QQ 号；空=自动探测 napcat_*.json
+      /* 【2026-09-18 主人要求】「关闭界面时结束 NapCat」开关（实例配置页可自由开关）：
+       * 开 = 关掉管理器窗口 / 退出管理器进程时，把**本次本地启动器拉起来的那个** NapCat 一并结束（不留后台残留）；
+       * 关 = 退出管理器完全不碰 NapCat，它继续在后台跑（连守卫也不会去收，见 armNapcatGuardian 的 --kill-napcat）。
+       *
+       * 默认值取 **true**（开），理由是"哪一侧更容易造成用户没察觉的坏状态"：
+       *   ① 打包版关窗时 Electron 壳执行的是 `taskkill /pid <后端> /T /F` —— 管理器**被强杀、跑不到任何清理代码**，
+       *      而 NapCat 是 wscript 拉起的游离进程（NapCatWinBootMain.exe → 注入 QQ.exe），不在壳的进程树里。
+       *      主人 2026-09-13 已明确要求"应用进程关闭时 NapCat 进程也要关闭"，并已由 server/napcat-guardian.mjs 落实。
+       *      若把默认值设成 false，等于**悄悄回退掉那条已生效的需求**：用户什么也没点，行为却变了。
+       *   ② 反过来，NapCat 留着不关的代价是"用户以为关了、其实 QQ 还在后台登录并收发消息"——无声且难发现；
+       *      而重登成本极低：配了 quickLogin 就是免扫码自动登录，没配也可以扫码，实例 enabled 还会被自动恢复。
+       *   ③ 这个开关不是"多一个功能"，而是"给已生效的默认行为一个出口"：想留后台 NapCat 的人把它关掉即可。
+       * 注意：关掉它**只影响退出时收不收 NapCat**，跟「停止」按钮、单点登录互斥（停本机 NapCat）无关。 */
+      killOnExit: true,
     },
     bridgeLocal: {
       enabled: false,
@@ -986,6 +1000,15 @@ function startNapcatLocal(cfgNap) {
       // 1) 显式命令
       if (cfgNap.launchCommand?.trim?.()) {
         const out = await startCommandInstance(id, cfgNap, 'NapCat');
+        // 【退出终结】自定义启动命令这条路子拿得到直接子进程的 pid（不像 VBS 那样秒退），一并登记，
+        // 这样 killOnExit 开着时"关掉界面"同样能收掉它（见 killNapcatOnExitSync 第一档）。
+        if (out?.success) {
+          const pid = Number(runtimes.get(id)?.proc?.pid) || 0;
+          if (pid) {
+            napcatLaunchedThisProcess = true;
+            napcatSpawnedPids.set(pid, { name: '(自定义启动命令)', path: String(cfgNap.launchCommand).slice(0, 200), at: new Date().toISOString() });
+          }
+        }
         resolve(out); return;
       }
       // 2) Windows：自动定位 OneKey
@@ -1028,10 +1051,19 @@ function startNapcatLocal(cfgNap) {
         const logFile = instanceLogPath(id);
         const logStream = createWriteStream(logFile, { flags: 'a' });
         logStream.write(`\n===== start ${new Date().toISOString()}: VBS hidden (${quickLogin ? 'quick ' + quickLogin : 'QR'}) =====\n`);
+        /* 【退出终结】从这一刻起，"本次管理器进程拉起过 NapCat"成立 —— 退出时才有资格按 killOnExit 收它
+         * （没这个标记就绝不会去动任何 NapCat 进程，见 killNapcatOnExitSync 的第一个判断）。 */
+        napcatLaunchedThisProcess = true;
+        const managedDirs = napcatManagedDirs({ cwd: onekey.dir });
+        // 启动前快照：上面那段预清理刚 Stop-Process 过，但进程真正消失有几秒延迟，
+        // 拿它做差集，才不会把"上一份还没退干净的 NapCat"当成这次启动的而误杀（见 collectNapcatPidsAfterLaunch）
+        const beforePids = new Set(listNapcatProcsInDirs(managedDirs).map((p) => p.pid));
         // 融合 VBS 隐藏启动：wscript 后台运行，任何模式都不弹黑窗
         const { child, target } = await startNapcatHiddenViaVbs(onekey, quickLogin);
         logStream.write(`\nlauncher: ${target}\n`);
         child.on('exit', () => logStream.write(`\n===== exit ${new Date().toISOString()} =====\n`));
+        // 后台登记"这次新出现的 NapCat 进程号"（VBS 非阻塞、wscript 秒退，pid 只能这样事后抓）
+        void collectNapcatPidsAfterLaunch(managedDirs, beforePids, logStream);
         runtimes.set(id, { proc: child, startedAt: new Date().toISOString(), logFile, cwd: onekey.dir });
         // 异步: 等 NapCat 首启生成 webui.json 后固定 token（napToken）; 并注入出厂 OneBot 网络配置
         (async () => {
@@ -1455,6 +1487,9 @@ app.get('/api/config', (_req, res) => {
 app.post('/api/config', (req, res) => {
   const cfg = loadConfig();
   const next = req.body ?? {};
+  // 【killOnExit】改开关前先记下旧值：守卫的武装参数里带着它，改了要在保存后**立刻重装守卫**，
+  // 否则这次改动要等下一次自动武装（默认 60 秒复查，且已武装时不会重装）才生效 —— 用户会以为开关没反应。
+  const killBefore = killOnExitEnabled();
   if (Array.isArray(next.servers)) cfg.servers = next.servers;
   if (typeof next.activeServerId === 'string' || next.activeServerId === null) cfg.activeServerId = next.activeServerId;
   if (next.local && typeof next.local === 'object') cfg.local = { ...cfg.local, ...next.local };
@@ -1462,8 +1497,28 @@ app.post('/api/config', (req, res) => {
   if (next.instances?.napcatLocal && typeof next.instances.napcatLocal === 'object') cfg.instances.napcatLocal = { ...cfg.instances.napcatLocal, ...next.instances.napcatLocal };
   if (next.instances?.bridgeLocal && typeof next.instances.bridgeLocal === 'object') cfg.instances.bridgeLocal = { ...cfg.instances.bridgeLocal, ...next.instances.bridgeLocal };
   saveConfig(cfg);
+  if ('killOnExit' in (next.instances?.napcatLocal ?? {})) {
+    try {
+      const killAfter = killOnExitEnabled();
+      if (killAfter !== killBefore) rearmGuardianAfterPolicyChange(killAfter, killBefore);
+    } catch (e) { mlog(`[exit-kill] 重装守卫失败（不影响其它功能）：${e?.message ?? e}`); }
+  }
   res.json({ success: true, config: cfg });
 });
+
+/** 开关变化后立刻让守卫带上新策略（守卫只在"应用关闭"那条路上生效，不重装就是这次改动没生效） */
+function rearmGuardianAfterPolicyChange(killAfter, killBefore) {
+  const prev = guardianFromFile();
+  if (pidAlive(prev.pid) && prev.parentPid) {
+    const r = armNapcatGuardian(prev.parentPid, { manual: true });
+    mlog(`[exit-kill] 开关已变更（${killBefore} → ${killAfter}），守卫已按新策略重装：`
+      + `${r.pid ? `pid=${r.pid}` : `失败(${r.error || '未知'})`}`);
+    return;
+  }
+  // 还没武装过（例如开发命令行方式启动）：只做一次自动武装尝试，不强行造守卫
+  const armed = ensureGuardianArmed();
+  mlog(`[exit-kill] 开关已变更（${killBefore} → ${killAfter}），当前没有在跑的守卫；自动武装结果=${armed}（没武装上时本次改动只影响管理器自己退出那条路）`);
+}
 
 // 实时状态：模式 + 服务可达性 + 本机实例
 app.get('/api/state', async (req, res) => {
@@ -5529,6 +5584,178 @@ if (process.env.QBM_NO_LISTEN !== '1') {
 }
 
 /* ============================================================================
+ * 「关闭界面时结束 NapCat」（instances.napcatLocal.killOnExit，2026-09-18 主人要求）
+ *
+ * 需求原文：「napcat配置界面加一个本地启动后关闭界面终结napcat进程的选项，支持自由开关」。
+ * 开 = 关掉界面/退出管理器进程时，**本次这个启动器拉起来的** NapCat 一并结束；关 = 完全不碰（它继续后台跑）。
+ *
+ * 这个开关管住三条"退出"路径，缺一条都会漏：
+ *   ① 管理器进程**优雅退出**（Ctrl+C / 收到 SIGINT、SIGTERM / 正常 exit）→ 本节的 process.on 处理器；
+ *   ② Electron 壳关窗：壳会先 POST /api/shutdown 再 `taskkill /pid <后端> /T /F` → 见该路由的 killOnExit 判断；
+ *   ③ 壳**没**走 ②（旧壳、被任务管理器直接结束、崩溃）→ 壳的 taskkill 是强杀，本进程一行 JS 都跑不到，
+ *      只能靠活过后端的守卫进程 server/napcat-guardian.mjs，它的武装参数里带上了同一开关（--kill-napcat）。
+ * 所以"一个开关"必须同时改这三处，否则在打包版里会是"关了开关也被守卫偷偷收掉"的假开关。
+ *
+ * 关于"只杀我们自己拉起来的那个"（主人明确要求，也是本节的实现难点）：
+ *   启动链是 `管理器 → wscript.exe 跑 VBS → NapCatWinBootMain.exe → 注入/拉起 QQ.exe`。
+ *   VBS 里用的是 `ws.Run ..., 0, False`（非阻塞），wscript 秒退，**所以 spawnDetached 返回的那个 pid
+ *   用完就没用了**——这也是现有 stopInstance 只能"按目录前缀一刀切"的原因。
+ *   现在改成两档匹配（从精确到兜底）：
+ *     ① **启动时登记的 pid**：启动后按目录前缀轮询新出现的 NapCatWinBootMain/QQ，把"启动前就在的"排除掉，
+ *        得到"这一轮新出现的"进程号；退出时 `taskkill /pid N /T /F` 精确收（见 collectNapcatPidsAfterLaunch）；
+ *     ② **目录前缀兜底**：没登记到 pid 时（刚启动几秒就被关掉、或登记窗口错过了），退回与「停止 NapCat」
+ *        完全相同的过滤条件（可执行文件路径落在托管 OneKey 目录内的 NapCatWinBootMain/QQ）。
+ *   误杀风险（如实写清，不粉饰）：
+ *     · ① 只在"pid 被系统回收后复用"这种极小概率下打错目标；登记到退出之间是秒级窗口，实际可忽略；
+ *     · ② 会连带收掉**同一个 OneKey 目录里用户自己双击 VBS 启动的那份** NapCat/QQ —— 这是按路径前缀过滤
+ *       的固有代价，与「停止」按钮一致；但托管目录之外的 QQ（如 Program Files 里的正版 QQ）绝不会被匹配到；
+ *     · 托管目录为空 → 直接跳过（宁可不动，也不误杀）。本进程**没拉起过** NapCat → 整个函数直接返回，
+ *       所以"用户在别处跑的 NapCat"在只有管理器被关掉时不会被牵连。
+ *
+ * 为什么用 `taskkill /T /F`（取舍写在这里，免得以后被"优化"掉）：
+ *   · `/T`：NapCatWinBootMain 与它拉起的 QQ 是一棵进程树，不收树就会残留 QQ 进程（等于没关干净）；
+ *     代价是"树上如果有别人的子进程"会被一起带走 —— 这两个 exe 的子进程只有彼此，实际风险可忽略。
+ *   · `/F`：NapCat 没有可供命令行调用的优雅退出协议，不带 /F 时 taskkill 只是发个关闭请求，
+ *     对无窗口的隐藏进程常常无效、甚至挂住，反而把退出流程卡死；这与现有「停止」按钮
+ *     （stopInstance 里同样是 /T /F）的选择保持一致。NapCat 的配置随写随落，强杀不会丢登录态以外的数据。
+ * 卡死兜底：全程 spawnSync + 超时 + try/catch，总预算 12 秒；任何一步失败只写日志、绝不抛出、绝不等待。
+ * 未覆盖（如实说明）：壳的 `taskkill /F` 强杀（路径 ③）本进程跑不到任何代码，只能由守卫代劳；
+ *   Windows 上 Node 收不到真正的 SIGTERM（Node 文档：Windows 不支持信号，process.kill 直接终止进程），
+ *   所以 SIGTERM 分支写了但在这台机器上实际只有 Ctrl+C(SIGINT) 与正常 exit 两条会走到。
+ * ========================================================================== */
+/** 本次管理器进程拉起来的 NapCat 相关进程（pid -> { name, path, at }），启动时登记，退出时精确收 */
+const napcatSpawnedPids = new Map();
+/** 本进程是否真的拉起过 NapCat：**没拉起过就一根手指都不动**（免得去动用户在别处跑的那份） */
+let napcatLaunchedThisProcess = false;
+/** 幂等标记：exit / SIGINT 可能连着触发，收尾只做一次 */
+let napcatExitKillDone = false;
+
+/** 读「关闭界面时结束 NapCat」开关（配置文件里没有这个键的老配置 → 按默认 true 处理） */
+function killOnExitEnabled() {
+  try {
+    const c = loadConfig();
+    return c?.instances?.napcatLocal?.killOnExit !== false;
+  } catch { return true; }          // 读配置失败也要按"默认开"走，别把已生效的行为悄悄关掉
+}
+
+/** 列出托管目录内正在运行的 NapCatWinBootMain / QQ（含 pid、进程名、可执行文件路径）
+ *  只在 Windows 上有意义；任何失败都返回空数组（调用方按"没拿到"处理，不会因此乱杀） */
+function listNapcatProcsInDirs(dirs) {
+  if (process.platform !== 'win32' || !dirs?.length) return [];
+  const where = dirs.map((p) => `$_.Path -like '${String(p).replace(/'/g, "''")}*'`).join(' -or ');
+  try {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-Process NapCatWinBootMain,QQ -ErrorAction SilentlyContinue | Where-Object { ${where} } | Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress`],
+      { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 10000, encoding: 'utf8' });
+    const raw = String(r.stdout || '').trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return (Array.isArray(parsed) ? parsed : [parsed])
+      .map((o) => ({ pid: Number(o?.Id) || 0, name: String(o?.ProcessName || ''), path: String(o?.Path || '') }))
+      .filter((o) => o.pid > 0);
+  } catch { return []; }
+}
+
+/** 启动后把这个"启动器新拉起来的" NapCat 进程号登记进 napcatSpawnedPids。
+ *  为什么要轮询：wscript 起完 VBS 就退，NapCatWinBootMain 要等一两秒才出现、再往后还有它拉起的 QQ.exe，
+ *  所以 spawn 返回那一刻根本拿不到 pid，只能盯一段时间（窗口 8 秒；实现在慢盘/杀软拦截下也够）。
+ *  beforePids 是**启动前**的快照（启动前那段预清理是 Stop-Process，进程真正消失有几秒延迟），
+ *  用它做差集才不会把"上一份还没退干净的 NapCat"当成自己的而误杀。
+ *  窗口内没抓到也不影响正确性：退出时会退回目录前缀兜底（见 killNapcatOnExitSync 的第二档）。 */
+async function collectNapcatPidsAfterLaunch(dirs, beforePids, logStream) {
+  const log = (m) => { try { logStream?.write(`\n[exit-kill] ${m}\n`); } catch { /* 日志失败不影响主流程 */ } };
+  try {
+    for (let i = 0; i < 12; i++) {
+      for (const p of listNapcatProcsInDirs(dirs)) {
+        if (beforePids.has(p.pid) || napcatSpawnedPids.has(p.pid)) continue;
+        napcatSpawnedPids.set(p.pid, { name: p.name, path: p.path, at: new Date().toISOString() });
+        log(`已登记本次启动的 NapCat 进程 pid=${p.pid} (${p.name}) ${p.path}`);
+      }
+      const names = new Set([...napcatSpawnedPids.values()].map((v) => String(v.name).toLowerCase()));
+      if (names.has('napcatwinbootmain') && names.has('qq')) break;   // 主进程与 QQ 都抓到了，不用再等
+      if (napcatSpawnedPids.size && i >= 5) break;                    // 抓到主进程又观察了 ~3.5 秒，收工
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    if (!napcatSpawnedPids.size) log('8 秒内没抓到 NapCat 进程号（退出时会按 OneKey 目录前缀兜底）');
+  } catch (e) { log(`登记进程号失败（不影响使用）：${e?.message ?? e}`); }
+}
+
+/** 退出时结束本次启动的 NapCat（同步！`process.on('exit')` 里做不了任何异步工作）。
+ *  条件：开关开着 + 本进程确实拉起过 NapCat + 只做一次。任何一步失败都只记日志，绝不抛出、绝不阻塞退出。 */
+function killNapcatOnExitSync(reason) {
+  try {
+    if (napcatExitKillDone) return;
+    if (!napcatLaunchedThisProcess) return;        // 本次没拉起过 → 完全不动（不碰用户在别处跑的 NapCat）
+    napcatExitKillDone = true;
+    if (!killOnExitEnabled()) {
+      mlog(`[exit-kill] 「关闭界面时结束 NapCat」已关闭（killOnExit=false）→ ${reason} 时不动 NapCat，它继续在后台跑`);
+      return;
+    }
+    const deadline = Date.now() + 12000;           // 总预算：再慢也不能把退出流程拖住
+    const recs = [...napcatSpawnedPids.entries()];
+    mlog(`[exit-kill] ${reason}：准备收掉本次启动的 NapCat（已登记 pid ${recs.length} 个）`);
+    for (const [pid, rec] of recs) {
+      if (Date.now() > deadline) { mlog('[exit-kill] 已超过 12 秒预算，停止继续收（不阻塞退出流程）'); return; }
+      try {
+        if (process.platform === 'win32') {
+          // /T 连子进程（NapCatWinBootMain → QQ），/F 强制（NapCat 没有可调用的优雅退出协议）；理由见本节大注释
+          const r = spawnSync('taskkill.exe', ['/pid', String(pid), '/T', '/F'],
+            { stdio: 'ignore', windowsHide: true, timeout: Math.max(1000, Math.min(8000, deadline - Date.now())) });
+          mlog(r?.status === 0
+            ? `[exit-kill] 已结束 pid=${pid}（${rec.name}）`
+            : `[exit-kill] 结束 pid=${pid}（${rec.name}）未成功（taskkill exit=${r?.status ?? 'null'}，多半是它已经自己退了）`);
+        } else {
+          // 非 Windows（Linux 官方安装脚本这条路）：没有 taskkill，按 pid 发 SIGTERM 即可（子进程自己会跟父进程收尾）
+          process.kill(pid, 'SIGTERM');
+          mlog(`[exit-kill] 已向 pid=${pid}（${rec.name}）发 SIGTERM`);
+        }
+      } catch (e) { mlog(`[exit-kill] 结束 pid=${pid} 异常（已忽略）：${e?.message ?? e}`); }
+    }
+    if (!recs.length) {
+      /* 第二档兜底：没登记到 pid（刚启动几秒就被关掉 / 登记窗口错过）。条件与「停止 NapCat」按钮完全一致 ——
+       * 只按托管 OneKey 目录前缀匹配，且目录为空时直接跳过。误杀边界见本节大注释。 */
+      try {
+        if (process.platform !== 'win32') { mlog('[exit-kill] 非 Windows 且没有登记 pid → 跳过（不做按路径猜杀）'); return; }
+        const dirs = napcatManagedDirs(runtimes.get('napcat-local'));
+        if (!dirs.length) { mlog('[exit-kill] 没有登记到 pid、也没有托管目录 → 跳过（宁可不动，也不误杀）'); return; }
+        mlog(`[exit-kill] 没有登记到 pid → 退回按 OneKey 目录前缀兜底：${dirs.join(' | ')}（可能连带同一目录里用户自己启动的那份）`);
+        const where = dirs.map((p) => `$_.Path -like '${String(p).replace(/'/g, "''")}*'`).join(' -or ');
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-Command',
+          `Get-Process NapCatWinBootMain,QQ -ErrorAction SilentlyContinue | Where-Object { ${where} } | Stop-Process -Force`],
+          { stdio: 'ignore', windowsHide: true, timeout: Math.max(1000, Math.min(10000, deadline - Date.now())) });
+        mlog(`[exit-kill] 兜底清理已执行（exit=${r?.status ?? 'null'}）`);
+      } catch (e) { mlog(`[exit-kill] 兜底清理异常（已忽略）：${e?.message ?? e}`); }
+    }
+    mlog('[exit-kill] 收尾完成');
+  } catch (e) {
+    try { mlog(`[exit-kill] 收尾异常（已忽略，不影响退出）：${e?.message ?? e}`); } catch { /* ignore */ }
+  }
+}
+
+/* 三条退出路径都挂上（幂等，重复触发只做一次）。
+ * 这里**没有**放 any 异步收尾：process.on('exit') 只能跑同步代码，所以 killNapcatOnExitSync 全程 spawnSync。 */
+process.on('exit', () => killNapcatOnExitSync('管理器进程正常退出'));
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    killNapcatOnExitSync(`收到 ${sig}`);
+    // 收到信号后必须自己退出（注册了处理器就不会再有默认终止行为），退出码沿用惯例 130/143
+    process.exit(sig === 'SIGINT' ? 130 : 143);
+  });
+}
+
+/** 【仅回归测试用】把"本进程拉起过 NapCat"（并可选定 pid）注入进来。
+ *  为什么不走真启动：真拉起 NapCat 会真登录 QQ（会踢掉主人手机/其它端的登录），代价太大。
+ *  所以 tools/test-napcat-exit-kill.mjs 用**同名的假 exe**（把 node.exe 复制成 NapCatWinBootMain.exe）
+ *  配合这个入口来验证退出收尾这条路径。产品代码里的唯一调用点是 startNapcatLocal（见那里的登记逻辑）。
+ *  pid 传 0（或不传）= 只置"拉起过"标记、不登记进程号，用来验第二档"按目录前缀兜底"。 */
+export function __testRegisterNapcatLaunch(pid = 0, name = 'NapCatWinBootMain') {
+  napcatLaunchedThisProcess = true;
+  const p = Number(pid) || 0;
+  if (p) napcatSpawnedPids.set(p, { name, path: '(test)', at: new Date().toISOString() });
+  return true;
+}
+
+/* ============================================================================
  * NapCat 守卫（2026-09-13，主人要求："应用进程关闭时，NapCat 进程也要关闭"）
  *
  * 关窗时 Electron 壳走的是 `taskkill /pid <后端> /T /F` —— 管理器**被强杀**、跑不到任何清理代码；
@@ -5629,6 +5856,11 @@ function armNapcatGuardian(watchPid, opts = {}) {
     }
     const dirs = napcatManagedDirs(runtimes.get('napcat-local'));
     const dshPort = Number(loadConfig()?.instances?.dshIsolated?.port) || 10721;
+    /* 【2026-09-18 killOnExit】把「关闭界面时结束 NapCat」开关一起交给守卫：
+     * 打包版关窗走的是壳的 `taskkill /F`，本进程跑不到任何代码（见文件上方「关闭界面时结束 NapCat」一节），
+     * 守卫是那条路上唯一能执行"收不收 NapCat"的地方。不带这个参数就等于开关在打包版里是假的。
+     * 关掉开关时守卫仍会收桥/隔离 DSH（那是它原本的职责，不在本次需求范围内）。 */
+    const killNapcat = killOnExitEnabled();
     const script = join(RUNTIME_ROOT, 'server', 'napcat-guardian.mjs');
     if (!existsSync(script)) { mlog(`[guardian] 守卫脚本不存在，跳过：${script}`); return { pid: 0, error: `脚本不存在：${script}` }; }
     const logFile = join(LOG_DIR, 'napcat-guardian.log');
@@ -5639,14 +5871,17 @@ function armNapcatGuardian(watchPid, opts = {}) {
       '--dsh-port', String(dshPort),
       // 只让守卫收掉**本安装**的桥（按绝对路径匹配），不影响同机其它安装/其它进程
       '--bridge-script', join(RUNTIME_ROOT, 'qq-bridge', 'src', 'bridge.js'),
+      // 0 = 按主人的开关，退出时不动 NapCat；1/缺省 = 收（老行为）
+      '--kill-napcat', killNapcat ? '1' : '0',
       '--log', logFile,
     ], (m) => mlog(`[guardian] ${m}`));
     if (!pid) { mlog(`[guardian] 武装失败（不影响其它功能）：${error || '未知'}`); return { pid: 0, error }; }
     writeFileSync(GUARDIAN_FILE, JSON.stringify({
-      pid, parentPid: watchPid, dirs, dshPort, exe, startedAt: new Date().toISOString(), manual: !!opts.manual,
+      pid, parentPid: watchPid, dirs, dshPort, exe, startedAt: new Date().toISOString(), manual: !!opts.manual, killNapcat,
     }, null, 2), 'utf8');
     mlog(`[guardian] 已武装：pid=${pid}（${exe}）盯应用进程=${watchPid} 托管目录=${dirs.length} 个`
-      + `（应用关闭时会一并收掉 NapCat/桥/DSH）${opts.manual ? ' · 手工' : ''}${error ? ' · ' + error : ''}`);
+      + `（应用关闭时会一并收掉 ${killNapcat ? 'NapCat/' : ''}桥/DSH；killOnExit=${killNapcat}）`
+      + `${opts.manual ? ' · 手工' : ''}${error ? ' · ' + error : ''}`);
     return { pid, exe, error };
   } catch (e) {
     mlog(`[guardian] 武装失败（不影响其它功能）：${e?.message ?? e}`);
@@ -5706,20 +5941,36 @@ app.post('/api/guardian/arm', (req, res) => {
 });
 
 /** POST /api/shutdown：应用关闭前的"体面收摊"。Electron 壳（新版 main.js）会先调它再 taskkill；
- *  手工/脚本也能用。默认只收 NapCat（与主人这次的要求一致），带 `{all:true}` 时连桥与隔离 DSH 一起收。 */
+ *  手工/脚本也能用。默认只收 NapCat（与主人这次的要求一致），带 `{all:true}` 时连桥与隔离 DSH 一起收。
+ *
+ *  【2026-09-18 killOnExit】"关闭界面"这条主路径就在这儿：壳先调本接口、再 `taskkill /T /F`。
+ *  所以开关为**关**时这里必须**完全不碰 NapCat**（桥/DSH 的 `all` 行为不受影响），否则就是假开关。
+ *  返回里带上 napcatSkipped 让调用方（壳/脚本/界面）知道"这次是故意没收"。 */
 app.post('/api/shutdown', async (req, res) => {
   const all = req.body?.all === true || req.query?.all === '1';
+  const killNapcat = killOnExitEnabled();
   const done = [];
   try {
-    const nap = await stopInstance('napcat-local');
-    done.push(`napcat=${nap?.success ? 'stopped' : 'partial'}`);
+    let napcatSkipped = false;
+    if (killNapcat) {
+      const nap = await stopInstance('napcat-local');
+      done.push(`napcat=${nap?.success ? 'stopped' : 'partial'}`);
+    } else {
+      napcatSkipped = true;
+      mlog('[shutdown] killOnExit=false → 按主人的开关不收 NapCat（它继续在后台跑）');
+    }
     if (all) {
       const br = await stopInstance('bridge-local');
       const dsh = await stopInstance('dsh-isolated');
       done.push(`bridge=${br?.success ? 'stopped' : 'partial'}`, `dsh=${dsh?.success ? 'stopped' : 'partial'}`);
     }
-    mlog(`[shutdown] ${done.join(' ')}`);
-    res.json({ ok: true, all, done, message: all ? '已收起 NapCat / 桥 / 隔离 DSH' : '已关闭 NapCat' });
+    mlog(`[shutdown] ${done.join(' ')}${napcatSkipped ? ' · NapCat 按开关跳过' : ''}`);
+    res.json({
+      ok: true, all, done, napcatSkipped,
+      message: napcatSkipped
+        ? `已按「关闭界面时结束 NapCat = 关」跳过 NapCat${all ? '，桥 / 隔离 DSH 已收起' : ''}`
+        : (all ? '已收起 NapCat / 桥 / 隔离 DSH' : '已关闭 NapCat'),
+    });
   } catch (e) {
     mlog(`[shutdown] 失败：${e?.message ?? e}`);
     res.status(500).json({ ok: false, message: e?.message ?? String(e) });
