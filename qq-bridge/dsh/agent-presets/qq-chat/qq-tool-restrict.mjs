@@ -61,10 +61,11 @@ export function apply(ctx) {
       // 名字不存在时跳过；执行期白名单仍然兜底。
       //
       // 【2026-09-18 修：这行日志曾经把桥整条 DSH 链路搞断】
-      // DSH 抛出的原话里嵌着**完整的已知工具列表**（实测约 4KB/行），而 dsh-web.service 把
-      // 整个进程树（含它拉起的 MCP 子进程）的 stdout/stderr 都 append 到同一个
-      // /root/.dsh/dsh-web.log —— 于是这里的 23 个名字 ×2 份 preset 一次启动就往日志里灌几百 KB。
-      // 实测现场：该日志 4260469 B 里有 1794 行、合计 4201098 B 是这种行，占 98.6%，
+      // DSH 抛出的原话里嵌着**完整的已知工具列表**（实测平均 2341 字符/行、最长 2453），
+      // 而 dsh-web.service 把整个进程树（含它拉起的 MCP 子进程）的 stdout/stderr 都 append
+      // 到同一个 /root/.dsh/dsh-web.log —— 于是这里的 23 个名字 ×2 份 preset 一次启动
+      // 就往日志里灌几百 KB。实测现场：该日志 4260469 B 里有 1794 行、合计 4199304 B
+      // 是这种行，占 98.6%，
       // 把 dsh-web 自己刚打印的 `?token=` 挤出了 dsh-client.js 的读取窗口 → readLatestToken 返回 null
       // → 桥不带 dsh-auth cookie 打 /api → 全链路 401（remote.mux 每 3 秒重连失败）。
       // 名字不存在这条信息本身有用，但没必要把整张工具表再抄一遍，故截断。

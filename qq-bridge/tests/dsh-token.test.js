@@ -14,7 +14,8 @@ const { readLatestToken } = await import('../src/dsh-client.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-token-'));
 const log = path.join(tmp, 'dsh-web.log');
 
-// 造一条“和线上同形”的噪声行：[qq-tool-restrict] 那行会嵌完整工具表，实测约 4KB。
+// 造一条“和线上同形”的噪声行：[qq-tool-restrict] 那行会嵌完整工具表。
+// 线上实测平均 2341 字符/行；这里用 3913 字符/行（把工具名重复 200 次），比线上更长，属加压。
 const noiseLine = '[qq-tool-restrict] skip restrict dev_x: tools.restrict() names unknown global tool "dev_x"; known global tools: ' + 'mcp__napcat__qq_a, '.repeat(200) + '\n';
 const noiseBytes = Buffer.byteLength(noiseLine);
 const tokenLine = (t) => `dsh web: http://127.0.0.1:3080/?token=${t}\n`;
@@ -43,5 +44,5 @@ assert.equal(readLatestToken(''), null, '没有配日志路径应返回 null');
 fs.writeFileSync(log, '');
 assert.equal(readLatestToken(log), null, '空文件应返回 null');
 
-console.log(`dsh-token: 全部通过 ✓（噪声行 ${noiseBytes} B/行，模拟线上 [qq-tool-restrict] 那种 4KB 长行）`);
+console.log(`dsh-token: 全部通过 ✓（噪声行 ${noiseBytes} 字符/行，比线上实测的 2341 更长，属加压）`);
 fs.rmSync(tmp, { recursive: true, force: true });

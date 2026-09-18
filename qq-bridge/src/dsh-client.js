@@ -51,9 +51,9 @@ export function shouldResetSeqWatermark(known, maxRec) {
  * 为什么会涨这么快：dsh-web.service 的 StandardOutput/StandardError 都 append 到同一个文件，
  * 而桥自己拉起的 MCP 子进程也是 dsh-web 的子进程，它们的 stdout 一并落进去。
  * agent preset 的 qq-tool-restrict.mjs 每遇到一个 DSH 里不存在的工具名就 console.error 一次
- * DSH 的原话，而那句原话里嵌着**完整的已知工具列表**（约 4KB/行），23 个名字 × 2 份 preset
- * 一次启动就灌进去几百 KB —— 每个 dsh-web 进程刚把自己的 token 打到日志里，转眼就被自己的
- * 子进程刷出窗口。所以这不是"偶发日志太大"，是每次启动必然踩。
+ * DSH 的原话，而那句原话里嵌着**完整的已知工具列表**（实测平均 2341 字符/行、最长 2453），
+ * 23 个名字 × 2 份 preset 一次启动就灌进去几百 KB —— 每个 dsh-web 进程刚把自己的 token
+ * 打到日志里，转眼就被自己的子进程刷出窗口。所以这不是"偶发日志太大"，是每次启动必然踩。
  *
  * 修法：从 256KB 起按 1MB / 4MB / 16MB 逐级放大，命中即停。
  * 为什么分级而不一次读整个文件：绝大多数情况第一档就命中，零额外 IO；文件再大也只有
