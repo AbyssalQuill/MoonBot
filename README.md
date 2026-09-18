@@ -2,6 +2,8 @@
 
 Windows 桌面应用，用于部署和管理 QQ 机器人。把 NapCat、QQ 桥接层、DeepSeek Harness 与模型服务商整合为一个可安装程序，提供图形化配置、进程编排、日志查看与远程部署。
 
+当前版本 **1.0.0**，产品名 MoonBot Pro，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)，本版发布说明（可直接用作 GitHub Release 正文）见 [docs/release-1.0.0.md](docs/release-1.0.0.md)。
+
 <p>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
   <img alt="electron" src="https://img.shields.io/badge/Electron-28-47848F">
@@ -15,6 +17,7 @@ Windows 桌面应用，用于部署和管理 QQ 机器人。把 NapCat、QQ 桥�
 - [简介](#简介)
 - [功能](#功能)
 - [架构](#架构)
+- [关键机制](#关键机制)
 - [目录结构](#目录结构)
 - [安装](#安装)
 - [使用](#使用)
@@ -48,9 +51,12 @@ MoonBot 管理五个部件，负责安装、配置、拉起、探活、记录日
 - 人设与规则分层，规则固定在 preset，人设来自上传的角色卡，修改后下一条消息生效
 - 群友画像、人格、黑话三类自动学习，黑话库可在管理端检索
 - 表情包、贴纸、QQ 空间说说、定时消息、跨会话留言
+- 富文本发送：图文卡、合并转发、Word 文档、QQ 原生表情、表情包；音乐点歌卡片可在手机端点开播放
+- 语音：接入小米 MiMo，支持全语音模式；语音与表情包的发送概率由桥侧掷骰决定
+- 联网搜索与网页抓取、图片搜索、Pixiv 搜图（镜像站地址可配，本地筛选 + 自动翻页）
 - 潜水与活跃模式、活动时段、回合保持、连发合并
 - Token 用量统计与费用估算，工具 schema 可按需精简
-- SSH 远程部署，支持代码、数据、表情包与 config.json 分别同步
+- SSH 远程部署，支持代码、数据、表情包与 config.json 分别同步，可一键克隆整套环境
 - 应用关闭时自动停止 NapCat、桥与隔离 DSH
 
 ## 架构
@@ -73,6 +79,22 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 ```
 
 管理端由 Electron 壳启动后端，后端监听 `127.0.0.1:1921`，托管前端静态文件并编排上述实例。
+
+各层的入口文件与职责：
+
+| 层 | 入口 | 职责 |
+| --- | --- | --- |
+| 管理端前端 | `src/App.tsx`、`src/api.ts` | 页面切换与后端接口封装；页面在 `src/pages/`，共享组件在 `src/components/`，状态与类型在 `src/stores/types.ts` |
+| 管理端后端 | `server/index.js` | HTTP API、实例编排与探活、前端静态托管、安装位置体检；SSH 远程部署在 `server/deploy.js`；关窗守卫是独立进程 `server/napcat-guardian.mjs` |
+| QQ 桥 | `qq-bridge/src/bridge.js` | 桥的入口，负责载入配置、连接 OneBot 反向 WS、装载事件泵与各子系统 |
+| 桥业务层 | `qq-bridge/src/core/*.js` | 唤醒判定与投递、提示词组装、会话映射、社交状态、发送链、媒体与卡片、语音、学习、用量计量 |
+| 桥工具层 | `qq-bridge/src/mcp-*.js` | 三组 MCP server，向 agent 暴露 QQ/NapCat、学习语料与联网工具 |
+| 桥基础库 | `qq-bridge/src/lib/*.js` | OneBot 客户端、消息解析、媒体工具、Pixiv、日志、路径与文本处理等无副作用的工具函数 |
+| 隔离 DSH | `qq-bridge/dsh/agent-presets/qq-chat/` | agent preset：`preset.yml` 提供 `[WAKE TYPES]` 等行为规则，`qq-tool-restrict.mjs` 限制可用工具 |
+| DSH 插件 | `qq-bridge/plugins/dsh-qq-hold/`、`qq-bridge/plugins/qq-mode-console/` | 回合保持与模式控制台两个本地插件 |
+| NapCat | `napcat-onekey/bootmain/` | 便携版 NapCat 与 QQ，启动脚本 `napcat.bat`、扫码登录用 `napcat.quick.bat` |
+
+两侧的配置与数据不混：管理端配置在 `%USERPROFILE%\.qq-bridge-manager\config.json`，桥配置在 `<运行时>\qq-bridge\config.json`，模板见 `qq-bridge/config.example.json`。
 
 ### 端口
 
@@ -106,6 +128,65 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 
 守卫只按托管目录、桥的绝对路径与 DSH 端口匹配进程，缺少参数时跳过对应清理。
 
+## 关键机制
+
+### 会话唤醒与投递
+
+一条 QQ 消息到一次回复，经过唤醒判定、正文组装、会话投递、回合保持与发送链五段。
+
+| 环节 | 文件 | 说明 |
+| --- | --- | --- |
+| 唤醒判定与正文组装 | `qq-bridge/src/core/wake-send.js` | 注入正文只携带数据行：`[Token]`、`[Wake …]`、`[Unread n]`、`[Mid-turn]`、`[Note]`；每种唤醒原因「该怎么做」全部写在 preset 的 `[WAKE TYPES]`，不再随唤醒正文重复下发 |
+| 唤醒调度与交付看门狗 | `qq-bridge/src/core/social-state.js` | `scheduleWake()` 统一入口，`startDeliveryWatchdog()` 对「该交付却未交付」的会话补一次 `deliveryWatchdog` 唤醒 |
+| 卡死与复读恢复 | `qq-bridge/src/core/turn-guard.js` | 有未读却长时间无动作时以 `loopRecovery` 拉回，回合卡死时以 `timeoutRecovery` 收尾 |
+| 回合保持与消息合并 | `qq-bridge/src/core/turn-hold.js`、`qq-bridge/src/core/mux.js` | 一个模型步只产生**一个** `[Mid-turn]` 块，把这步攒下的消息合成进去，而不是半路一条条塞 |
+| 打字状态等待 | `qq-bridge/src/core/typing-hold.js` | 私聊按对方打字状态决定等待还是插话；等待期间的消息全部入队，只注入一次 |
+| 发送与幂等 | `qq-bridge/src/core/send-chain.js`、`qq-bridge/src/core/send-idempotency.js`、`qq-bridge/src/lib/onebot-delivery.js` | 发送链负责分段与节奏，幂等闸门防止 `/reset` 之后重复回一次 |
+| 会话映射与自愈 | `qq-bridge/src/core/session-state.js`、`qq-bridge/src/core/session-archive.js` | 维护 QQ 会话与 DSH 会话的映射；启动时清掉指向已删会话的映射，避免事件泵空转 |
+
+### 人格学习与画像
+
+| 能力 | 文件 | 说明 |
+| --- | --- | --- |
+| 人格学习 | `qq-bridge/src/core/persona-learn.js` | 每个目标一个模型会话；学习会话只加载 host 组 MCP，工具全名固定为 `mcp__napcat-host__qq_learning_submit` 与 `mcp__napcat-host__qq_learning_corpus`，写成 `mcp__napcat__` 那组会直接 unknown tool |
+| 档案文本组装 | `qq-bridge/src/core/persona-text.js` | 把学习产出拼成一段完整介绍，不重复、不半句截断 |
+| 档案存储 | `qq-bridge/state/persona-library.json` | 人格档案；管理端「人格学习」页直接读它 |
+| 群友画像学习 | `qq-bridge/src/core/portrait-learn.js` | 按活跃度或指定 QQ 选目标，逐人写回 `profiles` 表 |
+| 资料与关系展示 | `src/pages/Learning.tsx`、`src/pages/GroupPortrait.tsx`、`src/pages/NetCanvas.tsx` | 单人完整资料走 `/api/learning/profile`（直读记忆库、不截断），关系图与关系标注走 `/api/learning/graph` 与 `/api/learning/relations` |
+
+### 黑话学习
+
+- 学习会话与语料工具在 `qq-bridge/src/slang-learner.js`，词条、状态机、去重与查询在 `qq-bridge/src/core/slang.js`，产出落到 `qq-bridge/state/slang.json`。
+- 已确认的词条**不再注入上下文**，模型需要时自己调 `qq_slang_query` 查，省额度。
+- 候选堆积与「研究链从来没跑成」的排查脚本：`qq-bridge/tools/diag-slang-dupes.mjs`、`qq-bridge/tools/diag-slang-why.sh`。
+
+### 工具 schema 精简
+
+- `qq-bridge/src/mcp-napcat-safe.js` 里的 `bareToolName()` 负责 MCP 前缀归一化，`social.slimTools` 名单里写 `mcp__napcat__qq_x` 与写 `qq_x` 等价。少了这一步，精简名单会整体不命中。
+- `social.slimTools` 在**注册期**排除工具，能真正减少每次请求的体积；`social.tools` 只在**调用期**拒绝，不减少体积。改完需要重启隔离 DSH。
+- 工具体积数据由 `qq-bridge/tools/emit-tool-chars.mjs` 现场生成，写入 `src/tool-schema-chars.ts`；手工核对用 `tools/probe-mcp-tools.mjs`。
+
+### 富文本卡片与封面处理
+
+- 卡片与媒体组装：`qq-bridge/src/core/media.js`；发送链在 `qq-bridge/src/core/send-chain.js` 与 `qq-bridge/src/core/qq-send.js`；表情与收藏表情在 `qq-bridge/src/core/sticker.js`；Word 文档在 `qq-bridge/src/core/docx.js`。
+- 封面只做 URL 归一化（`normalizeCoverUrl()`：http 升 https、限定尺寸、补 `type=jpg`），**不做图片代理** —— 代理过一次的那版正是「手机端没封面」的元凶，已回退。
+- 版式分两种：`share` 版照抄真机分享的图文卡，手机端会画封面；旧的 `music.lua` 版手机端本来就不画封面，且会被「将要访问」中转页拦一层。
+- 签名服务是独立进程 `qq-bridge/music-sign-proxy.py`；探针与回归在 `qq-bridge/tools/probe-netease-cover.mjs`、`probe-sign-payloads.mjs`、`probe-sign-types.mjs`、`test-music-card.mjs`、`test-qq-card-sign.mjs`。
+
+### 部署与克隆
+
+- 一键克隆在 `server/deploy.js`：先在源机打包（桥代码与 `state`、`.dsh` home、NapCat 配置、NapCat 应用本体、QQ 登录态、代理、表情库），再传到目标机解包并接线，最后写 systemd 服务、灌登录态、启动自检。
+- NapCat 跑法探针 `napcatModeCmd()`：有 `napcat.service` 判为原生，有 `napcat` 容器判为 docker，都没有才是 none；原生优先、docker 兜底。
+- 原生装机脚本 `installNapcatNative()` 被抽成纯函数，可以离线做 `bash -n` 与 systemd 校验，不必真连服务器就能验语法。
+- 启停与部署保持同一形状：`server/index.js` 与 `server/deploy.js` 都是「有 systemd unit 走 systemd，否则回退 docker」。
+- 原生模式下没有 docker 路径映射这回事，图片/语音/表情的路径就是宿主机路径，直接写即可。
+
+### 设备身份固定
+
+- 桥与 NapCat 不参与这件事，处理在服务器侧：`qq-bridge/tools/pin-napcat-device.sh` 保证 `/etc/machine-id` 存在且与 `/var/lib/dbus/machine-id` 一致，把 hostname 钉成与机器无关的常量，并把钉好后的身份记到 `/opt/napcat/config/device-pin.json` 便于日后比对。
+- `qq-bridge/tools/diag-napcat-device.sh` 是只读排查脚本，一条命令打出机器标识、QQ 实例目录（`~/.config/QQ/nt_qq_<hash>`，目录名一变服务端就当新设备）等全部证据。
+- 注意：改 hostname 本身会让 QQ 认为换了一次设备，所以只在确实需要时跑，不要反复跑。
+
 ## 目录结构
 
 标记 ✅ 的文件纳入版本管理，标记 ⛔ 的文件在本地存在但不纳入版本管理。
@@ -115,8 +196,9 @@ MoonBot Public/
 ├─ src/                      ✅ 管理端前端，React + TypeScript + Vite
 │   ├─ App.tsx               页面切换
 │   ├─ api.ts                后端接口封装
-│   ├─ pages/                8 个页面
-│   ├─ components/           通用组件
+│   ├─ pages/                9 个页面：首页、实例配置、SSH 配置、功能配置、
+│   │                        学习与用量、群友画像、语音、内嵌界面，以及关系图
+│   ├─ components/           通用组件（含 NapCat 令牌卡）
 │   ├─ stores/               状态与类型
 │   ├─ styles/               主题与全局样式
 │   └─ tool-schema-chars.ts  工具 schema 体积表
@@ -125,15 +207,21 @@ MoonBot Public/
 │   ├─ deploy.js             SSH 远程部署
 │   └─ napcat-guardian.mjs   关窗守卫
 ├─ qq-bridge/                ✅ 桥接层
-│   ├─ src/                  业务源码
+│   ├─ src/                  桥入口与工具层
+│   │   ├─ bridge.js         入口：载入配置、连 OneBot WS、装载事件泵
+│   │   ├─ core/             业务实现：唤醒投递、会话、社交状态、发送链、媒体、
+│   │   │                    语音、学习、用量计量等
+│   │   ├─ lib/              基础库：OneBot 客户端、消息解析、媒体工具、Pixiv 等
+│   │   └─ mcp-*.js          三组 MCP server
 │   ├─ dsh/                  agent preset
-│   ├─ plugins/              DSH 插件
+│   ├─ plugins/              DSH 插件（dsh-qq-hold、qq-mode-console）
 │   ├─ scripts/              运维脚本
-│   ├─ tools/                开发与回归工具
+│   ├─ tools/                开发与回归工具（含设备身份固定脚本）
 │   ├─ tests/                单元测试
 │   ├─ docs/                 桥接层文档
 │   ├─ characters/           角色卡模板
 │   ├─ config.example.json   出厂配置模板
+│   ├─ music-sign-proxy.py   音乐卡片签名代理
 │   ├─ state/                ⛔ 运行数据：记忆库、社交状态、用量日志
 │   ├─ config.json           ⛔ 实际配置
 │   ├─ persona.md  roles/    ⛔ 人设文件
@@ -145,9 +233,11 @@ MoonBot Public/
 ├─ napcat-onekey/            ⛔ NapCat 便携版
 ├─ meme/                     ⛔ 表情包库
 ├─ release/                  ⛔ 安装包
-├─ docs/                     ⛔ 内部交接文档
+├─ docs/                     ✅ 只有 release-1.0.0.md 纳入版本管理，
+│                              其余为 ⛔ 内部交接文档（含服务器信息）
 ├─ tools/                    ✅ 开发与运维脚本
 ├─ README.md                 ✅ 本文档
+├─ CHANGELOG.md              ✅ 更新日志
 ├─ LICENSE                   ✅ MIT
 └─ 启动管理端.bat             ✅ 开发模式启动
 ```
@@ -163,11 +253,23 @@ MoonBot Public/
 | `probe-ssh-banner.mjs` | SSH 端口探测，不进行认证 |
 | `diag-ssh-auth.mjs`、`diag-ssh-keys.mjs` | SSH 认证诊断 |
 | `probe-mcp-tools.mjs` | 读取 MCP 工具表，校验工具精简是否生效 |
+| `probe-dsh-model-catalog.mjs` | 查询 DSH 的服务商与模型目录 |
+| `probe-dsh-system-prompt.mjs` | 抓取隔离 DSH 实际下发的系统提示词 |
+| `audit-ui-labels.mjs`、`verify-rendered-labels.mjs` | 界面中文文案审计与渲染后校验 |
 | `test-*.mjs` | 回归测试 |
 
 ## 安装
 
 ### 安装包
+
+1.0.0 提供两份产物，文件名不带版本号后缀：
+
+| 产物 | 内容 | 适用场景 |
+| --- | --- | --- |
+| `MoonBot Pro Setup.exe` | 管理端 + 整套内置：NapCat（OneKey 与 QQ 客户端）、DSH CLI、qq-bridge 出厂模板 | 在一台 Windows 上跑整套 QQ 机器人 |
+| `MoonBot Pro Manager Setup.exe` | 只有管理端（内含 Node 运行时） | 远程连自己的服务器用 |
+
+安装步骤：
 
 1. 运行 `release\MoonBot Pro Setup.exe`
 2. 安装到普通目录，例如 `D:\MoonBot`
@@ -224,14 +326,16 @@ npm run dev
 | SSH 配置 | 服务器列表、连接测试、隧道、代码与数据同步、一键克隆整套、清理远端 |
 | 功能配置 | 常用设置、工具与规则、人设与发言规则、JSON 进阶、方案五个页签 |
 | 学习与用量 | 黑话、人格、画像三类学习的配置与状态，Token 用量面板 |
-| 群友画像 | 关系图、画像卡片、互动强度、关系标注 |
+| 群友画像 | 关系图、画像卡片、互动强度、群角色与关系标注 |
+| 语音 | 小米 MiMo 语音配置与全语音发送开关 |
 | 内嵌界面 | NapCat 与 DSH 官方界面，令牌自动跟随 |
 
 功能配置页关键行为：
 
 - 模型列表按服务商从 DSH 配置读取，切换服务商时模型列表与主模型同步切换
-- 推理档位使用 DSH 的真实档位标识，并显示当前生效值
-- 工具 schema 精简使被排除的工具不注册给模型，减少每次请求的体积
+- 推理档位使用 DSH 的真实档位标识，并显示当前生效值；服务商不支持所选档位时退回服务商默认
+- 工具 schema 精简使被排除的工具**不注册**给模型，减少每次请求的体积；另有只在调用期生效的开关，见「关键机制」
+- 群聊活跃时段按列表配置，群号不由管理端写死
 - 方案页签保存整套配置，参数相同的方案自动复用
 - 人格学习状态支持展开查看单人完整资料，资料直读记忆库，不做截断
 
@@ -276,7 +380,7 @@ npm run dev
 | `/slang 停止`、`/slang stop` | 停止进行中的黑话学习与研究 |
 | 其他 `/slang` 内容 | 返回用法说明 |
 
-其他会话会收到「仅主人可操作」（这句提示语本身不变）。
+其他会话会收到「仅主人可操作」（源码里的固定提示语，见 `core/slang.js`，不变）。
 
 ### 群友画像学习
 
@@ -288,7 +392,7 @@ npm run dev
 | `stop`、`停止` | 停止学习 |
 | `status`、`状态` | 查看开关、间隔、定时、筛选条件与最近一轮目标 |
 
-其他会话会收到「画像学习只有主人能指挥。」
+其他会话会收到「画像学习只有主人能指挥。」（同样是源码里的固定提示语，见 `core/portrait-learn.js`）
 
 ### 人格学习
 
@@ -334,7 +438,7 @@ npm run dev
 | `allow`、`deny` | 私聊与群聊名单，`allowAllWhenEmpty` 为 true 时空白名单表示允许全部 |
 | `social` | 社交行为、唤醒、发送节奏、主动闲聊、表情包、静默与跨会话 |
 | `slang` | 黑话学习的定时、间隔、研究阈值与是否注入提示词 |
-| `slimTools` | 工具精简名单，使用不带 MCP 前缀的工具名 |
+| `slimTools` | 工具精简名单，写 `qq_x` 或 `mcp__napcat__qq_x` 都可以（注册期生效，减少请求体积） |
 
 ## 数据与日志
 
@@ -345,16 +449,23 @@ npm run dev
 | `memory.db` | SQLite，含 `profiles`、`memory_entries`、`chat_messages` 三张表 |
 | `social-state.json` | 各会话社交状态、未读与会话令牌 |
 | `sessions.json` | QQ 会话与 DSH 会话的映射 |
+| `current-role.json` | 当前角色卡选择 |
 | `slang.json` | 黑话词条与证据 |
+| `slang-session.json` | 黑话学习会话的运行标记 |
 | `stickers.json` | 收藏表情元数据 |
 | `activity-windows.json` | 各群活跃时段 |
 | `token-usage.jsonl` | Token 用量明细 |
 | `tool-calls.jsonl` | 工具调用轨迹 |
 | `scheduled-tasks.json` | 定时消息任务 |
 | `crosschat.json` | 跨会话摘要与留言 |
+| `feedback.json` | 模型经 `qq_report_feedback` 上报的问题 |
+| `docx-quota.json` | 文档发送配额 |
 | `persona-library.json` | 人格档案 |
 | `learning-config.json` | 学习配置 |
-| `bridge.log` | 桥接日志 |
+| `bridge.lock` | 单实例锁 |
+| `bridge.log`、`qq-activity.log` | 桥接日志与活动流水；`dsh-qq-hold.log`、`qq-mode-plugin.log` 是两个 DSH 插件的日志 |
+
+路径常量集中在 `qq-bridge/src/lib/paths.js`，其余按需在各自模块里推导。
 
 `state/` 包含聊天记录与个人信息，不要对外分享。
 
@@ -379,6 +490,11 @@ npm run dev
 | GET | `/api/state` | 运行状态、实例阶段与安装位置警告 |
 | GET | `/api/open` | 返回官方界面地址 |
 | GET | `/api/napcat/launchers` | 定位 NapCat 并刷新隐藏启动脚本 |
+| GET、POST | `/api/napcat/tokens` | 读取或写入 NapCat 鉴权令牌并重启 |
+| GET、POST | `/api/napcat/guard` | 读取或设置会话守护 |
+| POST | `/api/napcat/guard/heal` | 会话假死自愈 |
+| GET | `/api/napcat/qr` | 取登录二维码 |
+| POST | `/api/napcat/quick-password` | 免扫码回退登录用的快速密码 |
 | GET | `/api/instance/:id/logs` | 实例日志 |
 
 ### 实例
@@ -393,9 +509,13 @@ npm run dev
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/api/ssh/test` | 连接测试，支持端口纠偏 |
+| GET | `/api/ssh/status` | 当前 SSH 连接状态 |
 | POST | `/api/ssh/connect` | 建立连接与隧道 |
 | POST | `/api/ssh/disconnect` | 断开连接 |
 | POST | `/api/ssh/sync` | 同步代码、数据、表情包与 config.json |
+| GET、POST | `/api/ssh/bridge-config` | 单独读写远端桥配置 |
+| POST | `/api/ssh/service` | 远端服务启停 |
+| POST | `/api/ssh/stack` | 远端整套状态 |
 | POST | `/api/ssh/remove-stack` | 停止并移走远端整套文件 |
 | POST | `/api/ssh/deploy/start` | 发起远程部署 |
 | GET | `/api/ssh/deploy/status` | 部署状态 |
@@ -409,6 +529,8 @@ npm run dev
 | POST | `/api/bridge/speech-reset` | 恢复默认发言规则 |
 | GET | `/api/bridge/characters` | 角色库列表 |
 | POST | `/api/bridge/characters/import` | 导入角色为 persona |
+| GET、POST | `/api/bridge/activity-hours` | 读写群聊活跃时段 |
+| GET | `/api/bridge/activity-targets` | 活跃时段适用的群列表 |
 | POST | `/api/bridge/upload` | 上传人设或角色包 |
 | POST | `/api/bridge/stickers/upload` | 上传表情图库 |
 | GET、POST | `/api/profiles` | 配置方案列表与保存 |
@@ -421,14 +543,39 @@ npm run dev
 | GET、POST | `/api/learning/config` | 学习配置 |
 | POST | `/api/learning/slang` | 黑话学习 |
 | POST | `/api/learning/persona` | 人格学习 |
+| POST | `/api/learning/persona-apply` | 应用人格学习结果（结合原人设完善 / 整篇覆盖） |
 | POST | `/api/learning/portrait` | 画像学习 |
 | GET | `/api/learning/token-report` | 用量报表 |
 | GET | `/api/learning/token-stream` | 用量实时推流 |
+| POST | `/api/learning/token-reconcile` | 与 DSH 会话级计数对账 |
 | GET | `/api/learning/graph` | 关系图数据 |
+| GET | `/api/learning/groups` | 关系图可选的群列表 |
+| GET | `/api/learning/messages` | 关系图上单个会话的消息 |
 | GET | `/api/learning/profile` | 单人完整画像资料 |
+| GET | `/api/learning/owner-profile` | 管理员本人的完整资料 |
 | GET | `/api/learning/slang-library` | 黑话库 |
 | GET、PUT | `/api/learning/portrait-config` | 画像自动刷新设置 |
 | GET、PUT | `/api/learning/relations` | 关系标注 |
+| POST | `/api/learning/relations/auto` | 让模型自动标注关系 |
+
+### 黑话库
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/slang/research` | 触发一次黑话研究 |
+| POST | `/api/slang/batch-confirm` | 批量确认候选 |
+| POST | `/api/slang/batch-reject` | 批量拒绝候选 |
+| POST | `/api/slang/batch-delete` | 批量删除词条 |
+
+### 语音
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET、PUT | `/api/voice/config` | 语音配置与全语音开关 |
+| GET、POST | `/api/voice/voices` | 音色列表与新增 |
+| DELETE | `/api/voice/voices` | 删除音色 |
+| POST | `/api/voice/preview` | 试听 |
+| POST | `/api/voice/test` | 连通性测试 |
 
 ### 守卫
 
@@ -439,26 +586,30 @@ npm run dev
 
 ## MCP 工具
 
-桥接层向 agent 注册 84 个工具。
+桥接层向 agent 注册 96 个工具。
 
 | 来源文件 | 数量 | 范围 |
 | --- | --- | --- |
-| `mcp-napcat-safe.js` | 77 | QQ 与 NapCat 能力 |
+| `mcp-napcat-safe.js` | 89 | QQ 与 NapCat 能力 |
 | `mcp-host-server.js` | 5 | 学习语料与 NapCat 进程控制，进程控制默认不注册 |
 | `mcp-web-search-safe.js` | 2 | 联网搜索与网页抓取 |
 
-| 分组 | 工具 |
-| --- | --- |
-| 消息读取 | `qq_get_recent_messages`、`qq_get_unread_messages`、`qq_mark_read`、`qq_get_message_detail`、`qq_get_message_images`、`qq_get_my_recent_messages`、`qq_get_forward_msg`、`qq_get_file_content`、`qq_get_group_history`、`qq_history_clear`、`qq_history_delete`、`qq_wait_for_messages`、`qq_get_prompt` |
-| 发送 | `qq_send_message`、`qq_send_group_message`、`qq_send_private_message`、`qq_reply`、`qq_send_burst`、`qq_send_poke`、`qq_send_rich`、`qq_send_forward`、`qq_send_docx`、`qq_send_qq_face`、`qq_send_sticker`、`qq_withdraw_message`、`qq_proactive_send` |
-| 表情与媒体 | `qq_list_stickers`、`qq_collect_sticker`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_face_list`、`qq_get_self_image`、`qq_meme_search`、`qq_send_meme`、`qq_music_search` |
-| 群与成员 | `qq_list_groups`、`qq_get_group_members`、`qq_get_group_owner`、`qq_get_active_members`、`qq_remove_friend` |
-| 记忆与画像 | `qq_memory_append`、`qq_memory_search`、`qq_memory_query`、`qq_memory_remove`、`qq_memory_clear`、`qq_profile_get`、`qq_profile_set` |
-| 社交状态 | `qq_social_state`、`qq_global_overview`、`qq_get_system_config`、`qq_set_system_config`、`qq_set_wake_config`、`qq_get_activity_hours`、`qq_set_activity_hours`、`qq_admin_set`、`qq_whitelist`、`qq_blacklist`、`qq_like`、`qq_report_feedback` |
-| 学习 | `qq_learning_submit`、`qq_learning_corpus`、`qq_slang_query`、`qq_slang_submit`、`qq_persona_learn_start`、`qq_persona_learn_status`、`qq_persona_learn_stop` |
-| 跨会话与空间 | `qq_crosschat_inbox`、`qq_crosschat_send`、`qq_qzone_view`、`qq_qzone_like`、`qq_qzone_comment`、`qq_qzone_reply_comment`、`qq_send_qzone` |
-| 定时与状态 | `qq_schedule_message`、`qq_schedule_list`、`qq_schedule_cancel`、`qq_deepsleep`、`qq_status` |
-| 宿主与联网 | `napcat_status`、`start_napcat`、`stop_napcat`、`web_search`、`web_fetch` |
+开启工具精简后实际下发给模型的会少于此数；`qq_status` 用裸 `server.tool` 注册，本来就不参与裁剪。
+
+| 分组 | 数量 | 工具 |
+| --- | --- | --- |
+| 消息读取 | 13 | `qq_get_recent_messages`、`qq_get_unread_messages`、`qq_mark_read`、`qq_get_message_detail`、`qq_get_message_images`、`qq_get_my_recent_messages`、`qq_get_forward_msg`、`qq_get_file_content`、`qq_get_group_history`、`qq_history_clear`、`qq_history_delete`、`qq_wait_for_messages`、`qq_get_prompt` |
+| 发送 | 13 | `qq_send_message`、`qq_send_group_message`、`qq_send_private_message`、`qq_reply`、`qq_send_burst`、`qq_send_poke`、`qq_send_rich`、`qq_send_forward`、`qq_send_docx`、`qq_send_qq_face`、`qq_send_sticker`、`qq_withdraw_message`、`qq_proactive_send` |
+| 表情与媒体 | 18 | `qq_list_stickers`、`qq_collect_sticker`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_face_list`、`qq_get_self_image`、`qq_meme_search`、`qq_send_meme`、`qq_music_search`、`qq_send_image`、`qq_image_search`、`qq_pixiv_search`、`qq_send_pixiv`、`qq_video_search`、`qq_video_parse`、`qq_send_voice`、`qq_transcribe_voice` |
+| 群与成员 | 5 | `qq_list_groups`、`qq_get_group_members`、`qq_get_group_owner`、`qq_get_active_members`、`qq_remove_friend` |
+| 记忆与画像 | 7 | `qq_memory_append`、`qq_memory_search`、`qq_memory_query`、`qq_memory_remove`、`qq_memory_clear`、`qq_profile_get`、`qq_profile_set` |
+| 社交状态 | 12 | `qq_social_state`、`qq_global_overview`、`qq_get_system_config`、`qq_set_system_config`、`qq_set_wake_config`、`qq_get_activity_hours`、`qq_set_activity_hours`、`qq_admin_set`、`qq_whitelist`、`qq_blacklist`、`qq_like`、`qq_report_feedback` |
+| 学习 | 5 | `qq_slang_query`、`qq_slang_submit`、`qq_persona_learn_start`、`qq_persona_learn_status`、`qq_persona_learn_stop` |
+| 角色卡 | 4 | `qq_character_list`、`qq_character_read`、`qq_character_search`、`qq_character_pack` |
+| 跨会话与空间 | 7 | `qq_crosschat_inbox`、`qq_crosschat_send`、`qq_qzone_view`、`qq_qzone_like`、`qq_qzone_comment`、`qq_qzone_reply_comment`、`qq_send_qzone` |
+| 定时与静默 | 4 | `qq_schedule_message`、`qq_schedule_list`、`qq_schedule_cancel`、`qq_deepsleep` |
+| 登录状态 | 1 | `qq_status` |
+| 宿主与联网 | 7 | `qq_learning_corpus`、`qq_learning_submit`、`napcat_status`、`start_napcat`、`stop_napcat`、`web_search`、`web_fetch` |
 
 权限约束：
 
@@ -466,6 +617,8 @@ npm run dev
 - `qq_blacklist` 不能拉黑管理员，`qq_remove_friend` 不能删除管理员
 - 发送类工具需要会话令牌，目标会话必须在名单内
 - `social.tools` 开关在调用时拒绝，不减少请求体积；`social.slimTools` 在注册期排除，可减少请求体积
+- 角色卡四个工具都是只读的，不会改动人设文件
+- `napcat_status`、`start_napcat`、`stop_napcat` 属于进程控制，默认不注册，只在管理员私聊的 `default` 模式里可用
 - 修改 `mcp-*.js` 后需要重启隔离 DSH
 
 ## 唤醒机制
@@ -536,6 +689,7 @@ powershell -File tools\diag-napcat-guard.ps1
 node tools\test-napcat-guardian.mjs
 node tools\test-guardian-arming.mjs
 node tools\test-guardian-hidden-window.mjs
+node tools\test-napcat-exit-kill.mjs
 node tools\test-provider-models.mjs
 node tools\test-any-drive-startup.mjs
 node tools\test-target-env.mjs
@@ -548,7 +702,13 @@ node qq-bridge\tools\test-steer-gate.mjs
 node qq-bridge\tools\test-config-hotreload.mjs
 node qq-bridge\tools\test-napcat-startup-retry.mjs
 node qq-bridge\tools\test-qq-hold.mjs
+node qq-bridge\tools\test-send-latency.mjs
+node qq-bridge\tools\test-music-card.mjs
+node qq-bridge\tools\test-qq-card-sign.mjs
+node qq-bridge\tools\test-pixiv-filters.mjs
 ```
+
+`qq-bridge/tests/*.test.js` 是更细的单元测试（发送节奏、智能引用、幂等、打字保持、用量对账、语音等），逐个用 `node` 跑，或直接在 `qq-bridge` 目录执行 `npm run check`（顺带做作用域与体积检查、`node --check` 语法检查）。
 
 ### 打包
 
@@ -564,6 +724,8 @@ node ..\tools\build-moonbot-app.mjs core
 
 node ..\tools\verify-installer-content.ps1
 ```
+
+出包脚本用 `artifactName` 把文件名固定为 `MoonBot Pro Setup.${ext}`，所以文件名不带版本号后缀；exe 本体与安装目录仍叫 `MoonBot`（`win.executableName`）。
 
 发布流程：
 
@@ -599,7 +761,15 @@ node ..\tools\verify-installer-content.ps1
 
 **远程部署失败**
 
-先用 `tools\probe-ssh-banner.mjs` 确认端口可达。SSH 端口不一定是 22，管理器会记录上次可用端口。部署过程会自动安装缺失的 node、npm 与 docker。
+先用 `tools\probe-ssh-banner.mjs` 确认端口可达。SSH 端口不一定是 22，管理器会记录上次可用端口。
+
+部署会按需补齐目标机缺的基础环境：node 依次尝试 nodesource 官方源、apt、nodejs.org 官方 tarball；npm 随 tarball 自带或走 apt；基础工具走 apt。NapCat 默认按原生方式安装（官方 Linux QQ deb + `/opt/napcat` + `systemd` unit `napcat.service` + Xvfb + 非 root 用户 `qq`），只有目标机本来就在跑容器版时才走 docker 兜底。原生装机脚本是纯函数，出问题可以先离线做 `bash -n` 校验。
+
+**掉线后要求重新扫码**
+
+QQ 判断「是不是同一台设备」靠它自己从机器上读出的一组标识：`/etc/machine-id`、hostname、网卡 MAC，以及数据目录 `~/.config/QQ/nt_qq_<hash>`。容器重建或迁移会让这些标识变化，服务端就当新设备。
+
+先在服务器上跑只读排查脚本 `qq-bridge\tools\diag-napcat-device.sh` 看证据，再按需跑 `qq-bridge\tools\pin-napcat-device.sh` 把 machine-id 与 hostname 钉死（钉完后的身份会记到 `/opt/napcat/config/device-pin.json`）。注意修改 hostname 本身会触发一次设备变更，只在确实需要时跑。
 
 ## 隐私
 
