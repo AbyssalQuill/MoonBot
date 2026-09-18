@@ -69,6 +69,23 @@ const softOf = (k: VKind) => (k === 'owner' ? C.ownerSoft : k === 'friend' ? C.f
 
 /* 过滤"给模型的说话要求/指导/闲聊记录"——这些不进画像 */
 const INSTR_RE = /(主人|要求|希望|应该|不要|别|请|记得|以后|末尾|句号|中括号|括号|引用|矜持|AI\s*味|纠正|备注|说话|回复|消息|发帖|潜水|唤醒|token|额度|设置|配置)/;
+/* 【实测补充】INSTR_RE 之外，从主人 notes 里切出来的标签还漏了这类：
+ * "像正常人一样聊天"（INSTR_RE 里没有"聊天"）——同样是说话要求，不该当人格标签。
+ * 只用在**标签**这一处，不动 INSTR_RE 本身（那个被整页复用，改它会牵动其它字段）。 */
+const INSTR_TAG_EXTRA_RE = /(聊天|拟人|正常一点|像正常人)/;
+/* persona-library 的正文是**学习产出**（成文画像/口头禅/风格），不是聊天原话。这里刻意用一份
+ * **窄名单**判定"说话要求"，而不是整条 INSTR_RE：
+ *  - INSTR_RE 里含 主人/说话/消息/回复/聊天 这些词，而正常画像几乎必然出现它们
+ *    （"主人喜欢被叫小月…说话带撒娇语气"），逐行套 INSTR_RE 会把整份画像删空 ——
+ *    那就又回到"已经学过了却一片空白"的老毛病（正是本次要修的 bug）。
+ *  - 窄名单只认"一旦出现就基本是命令"的词。实测主人 profile 字段里的说话要求就长这样：
+ *    "要求：回复不要超过两行" / "不要引用消息" / "记得群里要矜持" / "请以后发消息末尾不加句号"。
+ * 代价：极少数正常句子里出现"请/不要"的行会被误删一行（比把说话要求当人格档案展示要好）。 */
+const INSTR_PROSE_RE = /(已纠正|纠正|要求|请|不要|不许|必须|务必|记得|禁止|避免)/;
+/** persona 正文清洗：去空行 + 丢掉说话要求行（不截断长度，界面自己折叠内滚） */
+function cleanProse(s?: string | null): string {
+  return String(s ?? '').split('\n').map((l) => l.trim()).filter((l) => l && !INSTR_PROSE_RE.test(l)).join('\n').trim();
+}
 function cleanField(s?: string | null): string {
   if (!s) return '';
   return String(s).split('\n').map((l) => l.trim()).filter((l) => l && !INSTR_RE.test(l)).join('\n').slice(0, 120);
@@ -466,6 +483,9 @@ export default function GroupPortrait({ onBack }: Props) {
   const [profBusy, setProfBusy] = useState('');
   const [profErr, setProfErr] = useState<Record<string, string>>({});
   const [profOpen, setProfOpen] = useState(false);
+  /* 主人画像卡里"展开档案"的折叠开关：刻意**不复用** profOpen —— 那个是聚焦弹层里「学习档案」块的开关，
+   * 共用一个 state 会导致展开主人的档案把弹层那一块也撑开（两处互不相干） */
+  const [ownerOpen, setOwnerOpen] = useState(false);
 
   const loadAll = async () => {
     setLoading(true); setErr('');
@@ -582,21 +602,90 @@ export default function GroupPortrait({ onBack }: Props) {
     return pick;
   }, [allLinks, mainNodes, showWeak]);
 
-  /* 主人画像: 只留真实档案,过滤"给模型的说话要求" */
+  /* 主人画像: 只留真实档案,过滤"给模型的说话要求"
+   * 【2026-09-18 主人反馈】"已经学习过（64 条人格样本），却一个标签都没有、还写着暂无已整理档案"。
+   * 根因（用只读脚本直读本机 qq-bridge/state/memory.db 实测）：profiles 表主人那行的
+   * personality / likes / dislikes **全是空**，只有 notes 有内容，而 notes 里存的正是
+   * "已纠正：发消息末尾不带句号；主人要求以后全用数组发消息…"这类**给模型的说话要求**。
+   * 老口径只读 personality/likes，于是可切出来的标签全是该被 INSTR_RE 过滤掉的东西 → 页面整块空白。
+   * 而 /api/learning/owner-profile 早就返回了三个更有用的字段，前端一个都没用：
+   *   profileTags —— 切自同几个字段（**实测那 6 条全是说话要求**，所以拿到后必须再过一遍过滤）
+   *   memoryTop   —— 记忆条目里的高频二字词 {w,c}（见 server 的 memoryTopWords）
+   *   persona     —— persona-library 的完整条目：nickname/profile/catchphrases/style/topics…
+   * 现在：标签 = profileTags(过滤后) → 本地 likes/personality 切片 → **记忆高频词补足**；
+   *       只要有任何已学习痕迹（persona 条目 / 样本>0 / memoryTop 非空 / profileTags 非空）
+   *       就不再显示"暂无已整理档案"。 */
   const ownerInfo = useMemo(() => {
     const o = owner?.owner ?? allNodes.find((n) => n.kind === 'owner') ?? null;
     const persona = owner?.persona ?? null;
-    const tags = splitTags(o?.likes);
-    const pT = splitTags(o?.personality);
-    for (const t of pT) if (!tags.includes(t)) tags.push(t);
+
+    /* 标签回退链。记忆来源的标签单独记账（memTag），界面上用虚线 + 注解标明"来自记忆高频词"，
+     * 因为它们没有词典可依，可能是碎词（实测主人最近 30 天只有 2 条空间说说记忆，
+     * 切出来的高频词是 傍晚/抽风/出水/… 甚至 果数/里游 这种碎片）。 */
+    const TAG_BY_PROFILE = 8;   // profile 字段切出来的标签不足这个数，才用记忆高频词补
+    const TAG_CAP = 10;
+    const profileTags: string[] = [];
+    const memTags: Array<{ w: string; c: number }> = [];
+    const addProfileTag = (t?: string | null) => {
+      const s = String(t ?? '').trim();
+      if (!s || s.length > 12 || profileTags.length >= TAG_CAP) return;
+      if (profileTags.includes(s) || INSTR_RE.test(s) || INSTR_TAG_EXTRA_RE.test(s)) return;
+      profileTags.push(s);
+    };
+    for (const t of (owner?.profileTags ?? [])) addProfileTag(t);
+    for (const t of splitTags(o?.likes)) addProfileTag(t);
+    for (const t of splitTags(o?.personality)) addProfileTag(t);
+    if (profileTags.length < TAG_BY_PROFILE) {
+      for (const m of (owner?.memoryTop ?? [])) {
+        if (profileTags.length >= TAG_BY_PROFILE) break;
+        const w = String(m?.w ?? '').trim();
+        if (!w || w.length > 12 || INSTR_RE.test(w) || profileTags.includes(w)) continue;
+        profileTags.push(w);
+        memTags.push({ w, c: Number(m?.c) || 0 });
+      }
+    }
+
+    /* persona（学习产出）各字段；正文走 cleanProse（窄名单丢说话要求行），碎片字段原样用 */
+    const nick = String(persona?.nickname ?? '').trim() || null;
+    const address = String(persona?.addressTerms ?? '').trim() || null;
+    // o 可能是 /owner-profile 的 owner 对象（没有 personaSummary），也可能是图谱里的 VNode → 用 in 收窄
+    const oSummary = o && 'personaSummary' in o ? o.personaSummary : null;
+    const prose = cleanProse(persona?.profile) || cleanProse(persona?.personality) || cleanProse(oSummary);
+    const personaEn = cleanProse(persona?.personaEn);
+    const catchphrases = (persona?.catchphrases ?? [])
+      .map((c) => ({ phrase: String(c?.phrase ?? '').trim(), context: String(c?.context ?? '').trim() }))
+      .filter((c) => c.phrase).slice(0, 8);
+    const st = persona?.style ?? null;
+    const styleLines = [st?.sentenceLength, st?.rhetoricalQuestions, st?.toneWords]
+      .map((x) => String(x ?? '').trim()).filter(Boolean);
+    const styleExamples = (st?.examples ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 4);
+    const topics = (persona?.topics ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 10);
+    const taboos = (persona?.taboos ?? []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 6);
+    const samples = persona?.samples ?? null;
+    const learnedAtMs = Number(persona?.learnedAtMs || 0) || 0;
+
+    /* "学过没有"按后端能拿到的**原始**数据判定（过滤与否不算）：
+     * persona 条目存在 / 样本>0 / memoryTop 非空 / profileTags 非空 —— 满足任一条就不再显示"暂无档案" */
+    const hasLearned = !!persona || (samples ?? 0) > 0
+      || (owner?.memoryTop?.length ?? 0) > 0 || (owner?.profileTags?.length ?? 0) > 0;
+    /* 有已学习痕迹，但是否有**能展示出来**的东西（过滤之后）——决定是显示内容还是那句"学过但没成文档案" */
+    const hasContent = !!(prose || personaEn || nick || address || styleLines.length || styleExamples.length
+      || catchphrases.length || topics.length || taboos.length
+      || profileTags.length || cleanField(o?.likes) || cleanField(o?.personality));
+    /* 是否有人格学习档案里的实质内容（决定要不要标"内容来自 persona-library"那句话） */
+    const hasPersonaContent = !!(prose || personaEn || nick || address || styleLines.length || styleExamples.length
+      || catchphrases.length || topics.length || taboos.length);
+
     return {
       name: o?.name || '主人', uid: o?.uid || '',
+      nickname: nick && nick !== String(o?.name ?? '').trim() ? nick : null,
+      address,
       birthday: cleanField(o?.birthday) || null,
       likes: cleanField(o?.likes) || null,
       personality: cleanField(o?.personality) || null,
-      persona: persona?.personality && !INSTR_RE.test(String(persona.personality)) ? String(persona.personality).slice(0, 160) : null,
-      samples: persona?.samples ?? null,
-      tags: tags.slice(0, 8),
+      prose, personaEn, catchphrases, styleLines, styleExamples, topics, taboos,
+      memTags, samples, learnedAtMs, hasLearned, hasContent, hasPersonaContent,
+      tags: profileTags.slice(0, TAG_CAP),
     };
   }, [owner, allNodes]);
 
@@ -723,12 +812,20 @@ export default function GroupPortrait({ onBack }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <UserRound size={17} style={{ color: C.owner }} />
               <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>主人画像</span>
-              {ownerInfo.persona && <span style={{ fontSize: 10.5, padding: '1px 8px', borderRadius: 999, background: C.ownerSoft, color: C.owner }}>人格档案</span>}
+              {/* 徽标改成"学过没有"，不再看有没有那段短 personality（那正是"学过却显示暂无档案"的由来） */}
+              <span style={{
+                fontSize: 10.5, padding: '1px 8px', borderRadius: 999, fontWeight: 700,
+                background: ownerInfo.hasLearned ? 'hsl(145 55% 93%)' : C.ownerSoft,
+                color: ownerInfo.hasLearned ? 'hsl(150 50% 30%)' : C.owner,
+              }}>{ownerInfo.hasLearned ? '已学习' : '未学习'}</span>
             </div>
             <div style={{ fontSize: 15, fontWeight: 600, color: C.text, marginTop: 10 }}>{ownerInfo.name}</div>
             <div style={{ fontSize: 12, color: C.textMuted }}>QQ {ownerInfo.uid}</div>
+            {ownerInfo.nickname && <div style={{ fontSize: 12.5, color: C.text, marginTop: 4 }}>昵称 {ownerInfo.nickname}</div>}
+            {ownerInfo.address && <div style={{ fontSize: 12.5, color: C.text, marginTop: 2 }}>称呼 {ownerInfo.address}</div>}
             {ownerInfo.birthday && <div style={{ fontSize: 12.5, color: C.text, marginTop: 4 }}>生日 {ownerInfo.birthday}</div>}
             {ownerInfo.samples != null && <div style={{ fontSize: 11.5, color: C.textMuted, marginTop: 2 }}>人格样本 {ownerInfo.samples} 条</div>}
+            {ownerInfo.learnedAtMs > 0 && <div style={{ fontSize: 11.5, color: C.textMuted, marginTop: 2 }}>最近学习 {fmtTime(ownerInfo.learnedAtMs)}</div>}
           </div>
 
           <div style={{ flex: '1 1 360px', minWidth: 280 }}>
@@ -738,20 +835,108 @@ export default function GroupPortrait({ onBack }: Props) {
                 {ownerInfo.personality && <div style={{ fontSize: 13, color: C.text }}>性格：<span style={{ color: C.textMuted, fontWeight: 400 }}>{ownerInfo.personality}</span></div>}
               </div>
             )}
+            {/* 标签：实心 = 已整理档案字段切出来的；虚线 = 记忆高频词补的（来历在下面那行说明） */}
             {ownerInfo.tags.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {ownerInfo.tags.map((t, i) => (
-                  <span key={t + i} style={{ padding: '3px 11px', borderRadius: 999, fontSize: 12, background: i % 2 ? C.friendSoft : C.ownerSoft, color: i % 2 ? C.friend : C.owner }}>{t}</span>
-                ))}
-              </div>
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {ownerInfo.tags.map((t, i) => {
+                    const mem = ownerInfo.memTags.find((m) => m.w === t);
+                    return (
+                      <span key={t + i} title={mem ? `记忆高频词，出现 ${mem.c} 次` : '来自已整理的档案字段'}
+                        style={{
+                          padding: '3px 11px', borderRadius: 999, fontSize: 12,
+                          background: mem ? 'transparent' : (i % 2 ? C.friendSoft : C.ownerSoft),
+                          color: mem ? C.textMuted : (i % 2 ? C.friend : C.owner),
+                          border: mem ? '1px dashed rgba(0,0,0,0.2)' : '1px solid transparent',
+                        }}>{t}</span>
+                    );
+                  })}
+                </div>
+                {ownerInfo.memTags.length > 0 && (
+                  <div style={{ fontSize: 11, color: C.textMuted, marginTop: 6 }}>
+                    虚线标签来自<b>记忆高频词</b>（记忆条目按字频切出来的二字词，没有词典，可能出现碎词）；
+                    主人 profile 那几个字段基本是空的，所以标签主要靠它兜底
+                  </div>
+                )}
+              </>
             )}
-            {ownerInfo.persona && (
-              <div style={{ fontSize: 12.5, lineHeight: 1.65, color: C.text, marginTop: 10, borderLeft: `2px solid ${C.owner}55`, paddingLeft: 12 }}>
-                {ownerInfo.persona}
+
+            {/* 学习档案：沿用聚焦弹层「学习档案」那套折叠 + 内滚（.pv-intro 折起来 96px / 展开 240px 封顶），
+                档案再长也只滚，不把这张卡拉长。整块只在"确实学过"时才出现，没学过就只剩下面那句空状态 */}
+            {ownerInfo.hasLearned && (
+            <div className="pv-prof" style={{ marginTop: 10 }}>
+              <div className="pv-prof-head">
+                {ownerInfo.samples != null && <span className="pv-meta">人格样本 <b>{ownerInfo.samples}</b> 条</span>}
+                {ownerInfo.memTags.length > 0 && <span className="pv-meta">记忆高频词 <b>{ownerInfo.memTags.length}</b> 个</span>}
+                {ownerInfo.learnedAtMs > 0 && <span className="pv-meta">最近学习 {fmtTime(ownerInfo.learnedAtMs)}</span>}
+                {ownerInfo.hasContent && (
+                  <button className="btn btn-sm pv-prof-toggle" onClick={() => setOwnerOpen((v) => !v)}>
+                    {ownerOpen ? '收起档案 ▾' : '展开档案 ▸'}
+                  </button>
+                )}
               </div>
+              {/* 标明来历：档案内容来自人格学习（state/persona-library.json），已按「说话要求」规则过滤；
+                  万一还有命令句漏进来，主人能立刻看出是从哪来的 */}
+              {ownerInfo.hasPersonaContent && (
+                <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>
+                  内容来自人格学习档案（persona-library），已过滤「给模型的说话要求」；聊天里的说话要求不会当成人格展示
+                </div>
+              )}
+              {(ownerInfo.prose || ownerInfo.personaEn) && (
+                <div className={`pv-intro${ownerOpen ? ' is-open' : ''}`}>
+                  {ownerInfo.prose && <p className="pv-prose">{ownerInfo.prose}</p>}
+                  {ownerOpen && ownerInfo.personaEn && (
+                    <p className="pv-prose" style={{ marginTop: 8, opacity: 0.85 }}>
+                      <b style={{ color: C.textMuted, fontWeight: 600 }}>英文人设（personaEn）</b>{'\n'}{ownerInfo.personaEn}
+                    </p>
+                  )}
+                </div>
+              )}
+              {/* 碎片信息只在展开时出现；口径与「学习」页一致：口头禅/风格/话题/禁忌 */}
+              {ownerOpen && (ownerInfo.catchphrases.length > 0 || ownerInfo.styleLines.length > 0 || ownerInfo.styleExamples.length > 0 || ownerInfo.topics.length > 0 || ownerInfo.taboos.length > 0) && (
+                <div style={{ marginTop: 8, fontSize: 12.5, color: C.text, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {ownerInfo.catchphrases.length > 0 && (
+                    <div>
+                      <span style={{ color: C.textMuted }}>口头禅</span>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                        {ownerInfo.catchphrases.map((c, i) => (
+                          <span key={c.phrase + i} title={c.context || undefined}
+                            style={{ padding: '2px 9px', borderRadius: 999, fontSize: 12, background: C.ownerSoft, color: C.owner }}>{c.phrase}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {(ownerInfo.styleLines.length > 0 || ownerInfo.styleExamples.length > 0) && (
+                    <div style={{ lineHeight: 1.7 }}>
+                      <span style={{ color: C.textMuted }}>说话风格</span>
+                      <div>{ownerInfo.styleLines.join(' · ')}</div>
+                      {ownerInfo.styleExamples.length > 0 && (
+                        <div style={{ color: C.textMuted, marginTop: 2 }}>例：{ownerInfo.styleExamples.map((e) => `「${e}」`).join(' ')}</div>
+                      )}
+                    </div>
+                  )}
+                  {ownerInfo.topics.length > 0 && (
+                    <div style={{ lineHeight: 1.7 }}><span style={{ color: C.textMuted }}>常聊话题</span> {ownerInfo.topics.join('、')}</div>
+                  )}
+                  {ownerInfo.taboos.length > 0 && (
+                    <div style={{ lineHeight: 1.7 }}><span style={{ color: C.textMuted }}>忌讳</span> {ownerInfo.taboos.join('、')}</div>
+                  )}
+                </div>
+              )}
+            </div>
             )}
-            {!ownerInfo.likes && !ownerInfo.personality && !ownerInfo.persona && ownerInfo.tags.length === 0 && (
+
+            {/* 空状态两种口径：
+                ① 一点已学习痕迹都没有 → 保留原来那句（并说明为什么不展示聊天里的说话要求）；
+                ② 学过了、但过滤之后确实没有可展示的成文档案 → 说明情况，别再说"暂无已整理档案" */}
+            {!ownerInfo.hasLearned && (
               <div style={{ color: C.textMuted, fontSize: 12.5 }}>暂无已整理档案（不会展示聊天里的说话要求）</div>
+            )}
+            {ownerInfo.hasLearned && !ownerInfo.hasContent && (
+              <div style={{ color: C.textMuted, fontSize: 12.5 }}>
+                已学习过{ownerInfo.samples ? `（样本 ${ownerInfo.samples} 条）` : ''}，但记忆库里还没有可展示的成文档案；
+                可到「学习」页看「人格学习状态」，或对主人做一次「人格立即学习」。
+              </div>
             )}
           </div>
         </div>

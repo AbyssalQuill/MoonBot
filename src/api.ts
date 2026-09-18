@@ -333,6 +333,35 @@ export interface GraphData {
   message?: string;
   detail?: string;
 }
+/** 说话风格（persona-library 里 persona 的 style 字段，前端只读用来展示） */
+export interface PersonaStyle {
+  sentenceLength?: string;
+  rhetoricalQuestions?: string;
+  toneWords?: string;
+  examples?: string[];
+}
+/** persona-library.json 里某个 uid 的完整条目（server 的 personaLibraryEntry 原样返回，不截断） */
+export interface PersonaEntry {
+  nickname?: string | null;
+  /** 称呼用语（主人/老公/宝贝…） */
+  addressTerms?: string;
+  /** 成文画像（学习产出的人设正文，可能是长文） */
+  profile?: string | null;
+  personality?: string | null;
+  /** 英文人设正文 */
+  personaEn?: string | null;
+  chatHabits?: string;
+  emojiHabits?: string;
+  relationshipAdvice?: string;
+  style?: PersonaStyle | null;
+  catchphrases?: Array<{ phrase: string; context: string }>;
+  topics?: string[];
+  taboos?: string[];
+  samples?: number;
+  learnedAtMs?: number;
+  personaEditedAtMs?: number;
+  personaAppliedAtMs?: number;
+}
 export interface OwnerProfileResp {
   ok: boolean;
   owner?: {
@@ -344,23 +373,22 @@ export interface OwnerProfileResp {
     dislikes?: string | null;
     notes?: string | null;
     updatedAtMs?: number;
+    /** 主人在自己群里的真实角色（与图谱 node.role 同一套取值；null=拿不到）。注意这不是"主人"这个身份 */
+    role?: GraphRole | null;
   } | null;
-  /** profile 字段切出的标签 */
+  /** profile 字段(personality/likes/dislikes/notes)切出的标签，最多 12。
+   *  【实测】主人那行 profile 的 personality/likes/dislikes 都是空，只有 notes 有内容，
+   *  而 notes 存的正是"给模型的说话要求"（已纠正：发消息末尾不带句号…）→ 前端拿到后必须再过一遍 INSTR_RE。 */
   profileTags?: string[];
-  /** 近 30 天记忆词频 [{w,c}] */
+  /** 近 30 天记忆条目里的高频二字词。形状 {w,c}，来自 server 的 memoryTopWords
+   *  （按汉字连续段切 bigram + 停用字切断）：**没有词典**，所以可能出现"果数/里游"这类碎词，
+   *  界面上要标明来历，不要当成人格标签。 */
   memoryTop?: Array<{ w: string; c: number }>;
-  /** persona-library[owner] 摘要 */
-  persona?: {
-    nickname?: string | null;
-    personality?: string | null;
-    chatHabits?: string | null;
-    relationshipAdvice?: string | null;
-    topics?: string[];
-    samples?: number;
-    learnedAtMs?: number;
-  } | null;
+  /** persona-library 里该 uid 的条目（**存在**就说明这个人是学习过的）；老数据/没学过时为 null */
+  persona?: PersonaEntry | null;
   msgCount30d?: number;
   lastSeenAt?: number | null;
+  generatedAt?: string;
   message?: string;
   detail?: string;
 }
