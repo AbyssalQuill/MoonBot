@@ -8,7 +8,7 @@ import { STATE_DIR, SLANG_FILE, SLANG_SESSION_FILE } from '../lib/paths.js';
 import { readJsonSafe, atomicWriteJson } from '../lib/json-fs.js';
 import { bjMinutes, beijingDateKey, parseClockMin } from '../lib/time.js';
 import {
-  loadSlang, saveSlang, upsertSlangEntry, buildSlangContext,
+  loadSlang, saveSlang, upsertSlangEntry, buildSlangContext, slangKey,
   buildExtractionPrompt, buildResearchPrompt, parseExtractionJson, parseResearchJson, SLANG_STATUS,
   buildSlangTaskBrief, buildSlangRunCue, SLANG_BRIEF_VERSION,
 } from '../slang-learner.js';
@@ -178,7 +178,10 @@ export async function runSlangExtraction(key) {
   const promptText = buildSlangRunCue({
     sinceMs: cueSince, untilMs: Date.now(),
     sinceIso: new Date(cueSince).toISOString(), untilIso: new Date().toISOString(),
-    convKeys: [key]
+    convKeys: [key],
+    // 把库里已有的词一并告诉模型（含 candidate/confirmed/rejected 全部状态）——
+    // 否则它每轮都会把老词再提一遍，换个写法就成了新候选（见 buildSlangRunCue 的注释）
+    known: slangEntries
   });
   try {
     const accepted = await apiRef.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: promptText }] });
@@ -207,7 +210,14 @@ export async function runSlangExtraction(key) {
         : [];
       const result = upsertSlangEntry(slangEntries, item.content, { evidence, countIncrement: 1 });
       if (result.created) added += 1; else updated += 1;
-      if (result.entry && result.entry.status === SLANG_STATUS.CANDIDATE && thresholds.includes(result.entry.count) && result.entry.count > result.entry.lastInferenceCount) {
+      /* 【2026-09-19】原来这里是 `thresholds.includes(entry.count)` —— 只有**恰好**等于 2/4/8 才排研究。
+       * 于是出现次数落在 3、5、6、7 的词条**永远轮不到研究**；再叠加抽取一停，候选就永久躺在池子里
+       * （线上实测：118 条候选里 103 条 count=1、15 条 count=2，而 0 条被研究过）。
+       * 改成"达到最低阈值即可、且本次次数比上次研究时高"，既保留"够次数才研究"的意图，又不会漏掉中间次数。 */
+      const minThreshold = thresholds.length ? Math.min(...thresholds) : 2;
+      if (result.entry && result.entry.status === SLANG_STATUS.CANDIDATE
+        && result.entry.count >= minThreshold
+        && result.entry.count > result.entry.lastInferenceCount) {
         researchCandidates.push(result.entry);
       }
     }
@@ -227,17 +237,30 @@ export async function runSlangExtraction(key) {
 }
 
 export async function runSlangResearch(candidates) {
+  /* 【2026-09-19】这条链以前有 5 处**静默 return** —— 失败时一声不响，
+   * 于是现场表现是「勾了候选点批量分析，什么都没发生，候选一直堆着」。
+   * 线上实查：118 条候选里 **0 条有含义、0 条被研究过**（`lastInferenceCount` 全为 0）
+   * —— 也就是这个函数从来**没有成功跑过一轮**，而且没留下任何线索。
+   * 现在每一处提前退出都写明原因，下次一看日志就知道卡在哪一步。 */
   if (slangStopRequested) { // /slang stop 后排队的后续研究任务直接跳过（不清队列，逐个提前退出）
     slangStopRequested = false;
     log('[slang] 研究任务已因停止请求跳过');
     return;
   }
-  if (!candidates || !candidates.length) return;
-  if (cfgRef.slang?.enabled === false) return;
-  if (!dshReady) return;
+  if (!candidates || !candidates.length) { log('[slang] 研究任务跳过：没有候选'); return; }
+  if (cfgRef.slang?.enabled === false) { log('[slang] 研究任务跳过：slang.enabled=false'); return; }
+  if (!dshReady) {
+    /* 最可疑的一条：DSH 没就绪时整批研究**直接丢掉**，不重排也不报错。
+     * 候选会一直躺在池子里，看起来就像"分析过了但还是候选"。 */
+    log(`[slang] 研究任务跳过：DSH 未就绪（dshReady=false），本批 ${candidates.length} 条候选未处理，等下次触发`);
+    return;
+  }
   // 过滤掉已经在研究队列里的候选，避免同一批被重复排队研究。
   const targets = candidates.filter((e) => e && !slangResearchingIds.has(e.id));
-  if (!targets.length) return;
+  if (!targets.length) {
+    log(`[slang] 研究任务跳过：本批 ${candidates.length} 条都已在研究队列里（slangResearchingIds 未清空？）`);
+    return;
+  }
   for (const e of targets) slangResearchingIds.add(e.id);
   let sessionId;
   try {
@@ -257,7 +280,12 @@ export async function runSlangResearch(candidates) {
     const output = await waitLearnerTurn(sessionId);
     const results = parseResearchJson(output);
     for (const r of results) {
-      const entry = slangEntries.find((e) => e.content === r.content);
+      // 用归一化键找回词条：模型返回的文本可能和库里差一个空格/标点/大小写，
+      // 以前用完全相等匹配会导致这些研究结果被**静默丢弃**（候选永远得不到解释）
+      const rKey = slangKey(r.content);
+      const entry = rKey
+        ? slangEntries.find((e) => slangKey(e.content) === rKey)
+        : slangEntries.find((e) => e.content === r.content);
       if (!entry) continue;
       // 只有明确确认（confirmed: true）的结果才写入解释字段；
       // 不确定/未确认的结果保留原状，允许后续再次研究。
@@ -667,7 +695,9 @@ async function runSlangLearnFrom(sinceTsMs, mode) {
     const cue = buildSlangRunCue({
       sinceMs: sinceTsMs, untilMs: toTsMs,
       sinceIso: new Date(sinceTsMs).toISOString(), untilIso: new Date(toTsMs).toISOString(),
-      convKeys
+      convKeys,
+      // 同上：把已有词条带上，避免模型反复重提老词（学过的词又冒出新候选就是这个原因之一）
+      known: slangEntries
     });
     log(`[slang] ${mode === 'nightly' ? '夜间学习' : '立即学习'}：本轮提醒已发出，语料由学习会话自查库（区间 ${sinceTsMs}~${toTsMs}${convKeys.length ? `，限定 ${convKeys.length} 群` : ''}）`);
     const okBlock = await runLearnExtractionBlock(sessionId, cue, stats, researchCandidates, mode);
@@ -738,7 +768,11 @@ async function runLearnExtractionBlock(sessionId, promptText, stats, researchCan
         : [];
       const result = upsertSlangEntry(slangEntries, item.content, { evidence, countIncrement: 1 });
       if (result.created) stats.added += 1; else stats.updated += 1;
-      if (result.entry && result.entry.status === SLANG_STATUS.CANDIDATE && thresholds.includes(result.entry.count) && result.entry.count > result.entry.lastInferenceCount) {
+      // 与 runSlangExtraction 同一条判据：达到最低阈值即可（不再要求恰好等于 2/4/8，见那边的注释）
+      const minTh = thresholds.length ? Math.min(...thresholds) : 2;
+      if (result.entry && result.entry.status === SLANG_STATUS.CANDIDATE
+        && result.entry.count >= minTh
+        && result.entry.count > result.entry.lastInferenceCount) {
         researchCandidates.push(result.entry);
       }
     }

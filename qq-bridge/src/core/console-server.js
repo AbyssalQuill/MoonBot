@@ -24,6 +24,7 @@ import {
   parseResearchJson,
   createSlangEntry,
   mergeEvidence,
+  slangKey,
   SLANG_STATUS
 } from '../slang-learner.js';
 import {
@@ -739,7 +740,8 @@ export function startConsoleServer() {
         const body = await readBody();
         const content = String(body.content ?? '').trim();
         if (!content) { sendJson({ ok: false, error: '黑话内容不能为空' }, 400); return; }
-        if (slangEntries.some((e) => e.content === content)) { sendJson({ ok: false, error: `黑话「${content}」已存在` }, 400); return; }
+        // 归一化键判重（同一个词换个写法不该能再加一条，见 slangKey 的说明）
+        if (slangEntries.some((e) => slangKey(e.content) === slangKey(content))) { sendJson({ ok: false, error: `黑话「${content}」已存在` }, 400); return; }
         const entry = createSlangEntry({
           content,
           meaning: String(body.meaning ?? '').trim(),
@@ -858,7 +860,7 @@ export function startConsoleServer() {
         const body = await readBody();
         const entry = { ...slangEntries[idx] };
         if (body.content !== undefined) entry.content = String(body.content ?? '').trim();
-        if (body.content !== undefined && slangEntries.some((e) => e.id !== id && e.content === entry.content)) {
+        if (body.content !== undefined && slangEntries.some((e) => e.id !== id && slangKey(e.content) === slangKey(entry.content))) {
           sendJson({ ok: false, error: `黑话「${entry.content}」已存在` }, 400);
           return;
         }
@@ -4825,7 +4827,14 @@ export function startConsoleServer() {
         if (!content) { sendJson({ ok: false, error: 'content 不能为空' }, 400); return; }
         if (content.length > 50) { sendJson({ ok: false, error: '黑话词条过长（最多 50 字）' }, 400); return; }
         if (!allowSlangSubmit(key)) { sendJson({ ok: false, error: '黑话提交过于频繁，请稍后再试' }, 429); return; }
-        const existing = slangEntries.find((e) => e.content === content);
+        /* 【2026-09-19 修「学过的黑话又变成候选」】这里以前用 `e.content === content` 完全相等匹配，
+         * 所以模型把已确认的词换个写法提交（多空格、多标点、大小写不同）就会被判成"新词"，
+         * 走到下面去新建一条 candidate —— 主人看到的"学过了还在候选里"就有这一份。
+         * 改用与 upsertSlangEntry 同一套归一化键（slangKey）。 */
+        const submitKey = slangKey(content);
+        const existing = submitKey
+          ? slangEntries.find((e) => slangKey(e.content) === submitKey)
+          : slangEntries.find((e) => e.content === content);
         if (existing) {
           if (existing.status === SLANG_STATUS.CONFIRMED) {
             sendJson({ ok: true, duplicate: true, status: 'confirmed', entry: publicSlangEntry(existing) });

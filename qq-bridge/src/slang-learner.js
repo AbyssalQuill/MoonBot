@@ -92,14 +92,48 @@ export function createSlangEntry({ content, meaning = '', usage = '', example = 
   });
 }
 
+/**
+ * 词条的**归一化比较键**（2026-09-19 修「学过的黑话又变成候选」）。
+ *
+ * 【为什么需要它】以前 `upsertSlangEntry` 用的是 `e.content === content` **完全字符串相等**。
+ * 而抽取是模型给的自由文本，同一个词每次写法都可能差一点：
+ *   「笑死」/「笑死我」、带不带空格、带不带感叹号、`yyds`/`Yyds`、全角半角混用……
+ * 只要差一个字符就算"新词" → **新建一条 candidate**。于是主人已经确认过的黑话，
+ * 换个写法又冒出来一条候选，看着就像"学过了还一直在候选里"。
+ *
+ * 归一化只做**安全**的那些（不会把真正不同的词并到一起）：
+ *   · 去掉所有空白（黑话常带空格）
+ *   · 去尾部的标点/符号（！!。.、，,~～?？…）
+ *   · 英文转小写（yyds 和 Yyds 是一回事）
+ *   · 全角字母数字转半角
+ */
+export function slangKey(raw) {
+  return String(raw ?? '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[！!。.、，,~～?？…]+$/g, '')
+    .replace(/[\uFF01-\uFF5E]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .toLowerCase();
+}
+
 export function upsertSlangEntry(entries, content, patch = {}) {
   const normalizedContent = String(content ?? '').trim();
   if (!normalizedContent) return { entries, entry: null, created: false };
-  const existing = entries.find((e) => e.content === normalizedContent);
+  /* 用归一化键找已有词条 —— 不再要求字符串完全相等（见 slangKey 的说明）。 */
+  const key = slangKey(normalizedContent);
+  const existing = key ? entries.find((e) => slangKey(e.content) === key) : entries.find((e) => e.content === normalizedContent);
   if (existing) {
+    /* 【状态只能往上走，不能被抽取结果打回候选】
+     * 已 confirmed / rejected 的词条，即使抽取又提了一遍，也只累加次数与证据，
+     * **不允许**因为 patch 里带了 status:'candidate' 就被降级回候选池
+     * （那正是"学过的词又出现在候选里"的另一半原因）。 */
+    const safePatch = { ...patch };
+    if (existing.status !== SLANG_STATUS.CANDIDATE && safePatch.status === SLANG_STATUS.CANDIDATE) {
+      delete safePatch.status;
+    }
     const next = normalizeSlangEntry({
       ...existing,
-      ...patch,
+      ...safePatch,
       content: normalizedContent,
       count: (existing.count || 0) + (patch.countIncrement ?? 1),
       evidence: mergeEvidence(existing.evidence, patch.evidence ?? []),
@@ -107,7 +141,7 @@ export function upsertSlangEntry(entries, content, patch = {}) {
     });
     const index = entries.indexOf(existing);
     entries[index] = next;
-    return { entries, entry: next, created: false };
+    return { entries, entry: next, created: false, mergedInto: existing.content };
   }
   const entry = normalizeSlangEntry({
     ...createSlangEntry({ content: normalizedContent, source: 'ai' }),
@@ -189,12 +223,29 @@ If nothing is worth extracting, output [].
 NOTE: keys stay as written; "content" holds the raw Chinese term as it appeared in chat.`;
 }
 
-/** 每轮的小提醒：只给时间范围与（可选）会话限定，语料由 AI 自己查。 */
-export function buildSlangRunCue({ sinceIso, untilIso, sinceMs, untilMs, convKeys } = {}) {
+/** 每轮的小提醒：只给时间范围与（可选）会话限定，语料由 AI 自己查。
+ *
+ * 【2026-09-19 修「学过的黑话又变成候选」】这里多带一段 **ALREADY IN LIBRARY**：
+ * 以前每一轮都只告诉模型"去查语料、抽候选"，**从不告诉它库里已经有什么** ——
+ * 于是它每轮都会把已经存在的词再提一遍。完全相同的词还好（upsert 会合并、只累加次数），
+ * 但抽取是自由文本，同一个词写法差一点（多一个字、多个空格、多个标点）就会被当成新词
+ * → 又新建一条 candidate。**从源头告诉它"这些已经有了，别再输出"**，比事后去重更干净。
+ * 名单超长时截断（保留最近更新的那些），避免把每轮提示词撑大。
+ */
+export function buildSlangRunCue({ sinceIso, untilIso, sinceMs, untilMs, convKeys, known } = {}) {
   const range = (sinceIso && untilIso) ? `${sinceIso} ~ ${untilIso}` : 'the range given in this cue';
   const keys = Array.isArray(convKeys) && convKeys.length ? `, restricted to conversations: ${convKeys.join(', ')}` : '';
+  const list = (Array.isArray(known) ? known : [])
+    .filter((e) => e && e.content)
+    .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+    .slice(0, 200)
+    .map((e) => String(e.content).trim())
+    .filter(Boolean);
+  const knownBlock = list.length
+    ? `\n\nALREADY IN LIBRARY (${list.length} terms - these are known; do NOT output them again, do not output a longer/shorter variant of them either):\n${list.join('、')}`
+    : '';
   return `${SLANG_RUN_MARKER} range: ${range} (sinceMs=${Number(sinceMs) || 0}, untilMs=${Number(untilMs) || 0})${keys}.\n`
-    + `Call ${SLANG_CORPUS_TOOL} to pull that range in batches (continue while it returns a nextSinceMs), then follow the first-round rules and output the JSON array only.`;
+    + `Call ${SLANG_CORPUS_TOOL} to pull that range in batches (continue while it returns a nextSinceMs), then follow the first-round rules and output the JSON array only.${knownBlock}`;
 }
 
 export function buildExtractionPrompt(messages) {
