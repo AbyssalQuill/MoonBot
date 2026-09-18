@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getLearningGraph, getOwnerProfile, getPersonMessages, getPersonProfile, getPortraitCfg, savePortraitCfg, getLearningGroups, getRelations, saveRelation } from '../api';
 import type { PersonMsg, PortraitCfg, GroupInfo } from '../api';
-import { NetCanvas, REL_CAT_COLOR, type EdgeClick } from './NetCanvas';
-import type { GraphData, GraphNode, GraphLink, OwnerProfileResp } from '../api';
+import { NetCanvas, REL_CAT_COLOR, REL_CAT_LABEL, type EdgeClick } from './NetCanvas';
+import type { GraphData, GraphNode, GraphLink, GraphRole, OwnerProfileResp } from '../api';
 import { ArrowLeft, Users, Loader2, RefreshCw, RotateCcw, X, UserRound, Sparkles, History } from 'lucide-react';
 import NumInput from '../components/NumInput';
 
@@ -20,17 +20,40 @@ const C = {
   lineWeak: '#a9b4c2',
   text: '#33363d',
   textMuted: '#8a8f98',
+  /* 群主/管理员徽标色：两个色相拉开（金 42° / 青 172°），且不用私聊好友的靛蓝、群成员的蓝，
+   * 避免"群主 vs 管理员"、以及和节点色之间产生歧义。NetCanvas 里同色的角色环也取这两只色。 */
+  roleOwner: '#c98a00',
+  roleAdmin: '#0b7d74',
 };
 
 export type VKind = 'owner' | 'friend' | 'member' | 'tag';
 export interface VNode {
   uid: string; name: string; kind: VKind; tags?: string[];
+  /** 群内角色（后端 /api/learning/graph 新增；null/undefined = 没拿到 → 按"群成员"回落） */
+  role?: GraphRole | null;
   msgCount?: number; lastSeen?: number | null;
   birthday?: string | null; personality?: string | null; likes?: string | null;
   personaSummary?: string | null;
 }
 export interface VLink { from: string; to: string; strength: number; }
 const KIND_LABEL: Record<VKind, string> = { owner: '主人', friend: '私聊好友', member: '群成员', tag: '标签' };
+/* 角色文案（2026 主人反馈：页面上所有人都写「群成员」）。
+ * 优先级：主人自己(kind==='owner')永远显示「主人」，不被 role 覆盖 → 后端 role==='owner' 是「群主」
+ * → role==='admin' 是「管理员」→ 其余回落到原来的 kind 文案（私聊好友/群成员）。
+ * role 拿不到（老后端 / 接口没返回）时同样回落到 kind 文案，绝不会出现空白或 undefined。 */
+function kindLabelOf(n: { kind: VKind; role?: GraphRole | null }): string {
+  if (n.kind === 'owner') return KIND_LABEL.owner;
+  if (n.role === 'owner') return '群主';
+  if (n.role === 'admin') return '管理员';
+  return KIND_LABEL[n.kind] ?? KIND_LABEL.member;
+}
+/** 群主/管理员徽标（有角色时用彩色药丸显示，其余走纯文本 kindLabelOf） */
+function roleBadgeOf(n: { kind: VKind; role?: GraphRole | null }): { text: string; fg: string; bg: string } | null {
+  if (n.kind === 'owner') return null;
+  if (n.role === 'owner') return { text: '群主', fg: C.roleOwner, bg: 'rgba(201,138,0,0.14)' };
+  if (n.role === 'admin') return { text: '管理员', fg: C.roleAdmin, bg: 'rgba(11,125,116,0.14)' };
+  return null;
+}
 
 /* ---------- 小工具 ---------- */
 const fmtTime = (ms?: number | null) => {
@@ -333,6 +356,78 @@ function ForceCanvas({ nodes, links, vw = 1500, vh = 680, gid, interactive = tru
   );
 }
 
+/* ============ 关系标注卡片：状态机 ============
+ * 主人反馈"卡片的状态机要优化"，原实现的实际问题（都能在旧代码里对上）：
+ *  1. saveRelation 返回 ok:false 时照样 setEdgeSel(null) 把卡片关掉，catch{} 又是空的 →
+ *     保存失败看起来和成功一模一样，主人只会觉得"点了没反应"；
+ *  2. "清除标注"压根没有入口（clearRelCat 定义了却没人调用，而且它传的是 'qunyou' 不是空串，
+ *     后端语义是"空 category 才删除"，所以那条路径从来没真正删过标注）；
+ *  3. 上一次的失败/成功残留：取消或换一条线时只清了 edgeSel，卡片内的状态没归零。
+ * 现在四个状态：
+ *  idle   = 刚打开/已取消，等待选择类别
+ *  saving = 已提交、等接口返回；五个类别按钮与「清除标注」禁用，重复点击不会再发第二次请求
+ *           （「取消」**不**禁用：接口万一直不回来，也要让主人有路可走）
+ *  error  = 保存失败（ok:false 或抛错）；卡片留在屏幕上，显示原因 + 可原地重试
+ *  done   = 保存/清除成功；先显示「已保存」，900ms 后自动收起卡片
+ * 另外用一个自增令牌（relReqRef）标识"这一次提交"：取消或换一条线后令牌变化，在途请求的迟到回包
+ * 不再改卡片状态（服务端返回的 relations 仍会应用）。
+ */
+type RelEdit =
+  | { st: 'idle' }
+  | { st: 'saving'; cat: string }
+  | { st: 'error'; cat: string; msg: string }
+  | { st: 'done'; cat: string };
+
+/** 关系标注卡片（主图浮层与聚焦弹层共用一份，避免两处状态机写法漂移） */
+function RelEdgeCard({ title, current, state, floating = false, onPick, onClose }: {
+  title: string; current: string; state: RelEdit; floating?: boolean;
+  onPick: (cat: string) => void; onClose: () => void;
+}) {
+  const busy = state.st === 'saving';
+  // 正在提交/已提交的类别保持高亮（saving 时"按下去了"、error 时能看出是哪一类失败、done 时是对勾）
+  const pick = state.st === 'idle' ? null : state.cat;
+  return (
+    <div style={{
+      border: '1px solid rgba(120,120,190,0.4)', background: 'rgba(255,255,255,0.96)', borderRadius: 12,
+      padding: '8px 12px', boxShadow: '0 6px 20px rgba(0,0,0,0.14)', backdropFilter: 'blur(2px)',
+      ...(floating ? {} : { marginBottom: 8 }),
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 6 }}>
+        {title}
+        {current && <span style={{ marginLeft: 6, fontWeight: 400, color: C.textMuted, fontSize: 12 }}>当前: {current}</span>}
+        {state.st === 'saving' && <span style={{ marginLeft: 6, fontWeight: 400, color: C.textMuted, fontSize: 12 }}><Loader2 size={11} className="spin" /> 保存中…</span>}
+        {state.st === 'done' && <span style={{ marginLeft: 6, fontWeight: 400, fontSize: 12, color: '#2f9e44' }}>✓ 已保存</span>}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        {(['qunyou', 'guimi', 'jiaren', 'qinglv', 'chouren'] as const).map((c) => (
+          <button key={c} className="btn btn-sm" disabled={busy || state.st === 'done'} onClick={() => onPick(c)}
+            style={{
+              border: '1px solid ' + REL_CAT_COLOR[c], background: pick === c ? REL_CAT_COLOR[c] : 'transparent',
+              color: pick === c ? '#fff' : REL_CAT_COLOR[c], opacity: busy && pick !== c ? 0.55 : 1,
+            }}>
+            {REL_CAT_LABEL[c]}
+          </button>
+        ))}
+        {/* 清除标注：传空 category 后端会真的删掉这条记录（见 server 的 PUT /learning/relations）。
+            只在"当前确有标注"时出现，否则按了也没意义。 */}
+        {current && (
+          <button className="btn btn-sm" disabled={busy || state.st === 'done'} onClick={() => onPick('')}
+            style={{ border: '1px solid rgba(0,0,0,0.2)', color: C.textMuted, background: 'transparent' }}>
+            清除标注
+          </button>
+        )}
+        <button className="btn btn-sm" onClick={onClose}>取消</button>
+      </div>
+      {state.st === 'error' && (
+        <div style={{ marginTop: 6, fontSize: 12, color: '#c0504d', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span>保存失败：{state.msg}</span>
+          <button className="btn btn-sm" onClick={() => onPick(state.cat)}>重试</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============ 页面 ============ */
 
 export default function GroupPortrait({ onBack }: Props) {
@@ -355,7 +450,12 @@ export default function GroupPortrait({ onBack }: Props) {
   const [pCfgSaving, setPCfgSaving] = useState(false);
   const [rels, setRels] = useState<Record<string, string>>({});
   const [edgeSel, setEdgeSel] = useState<EdgeClick | null>(null);
-  const [relSaving, setRelSaving] = useState(false);
+  const [relEdit, setRelEdit] = useState<RelEdit>({ st: 'idle' });
+  /** 提交令牌：卡片被取消/换线后 +1，用来丢弃在途请求的迟到回包（否则旧回包会把新卡片标成"已保存"） */
+  const relReqRef = useRef(0);
+  /** 主图上点线时记录落点与容器尺寸，用来把浮层卡片夹在画布内（容器 overflow:hidden，贴边会被切掉） */
+  const [edgePos, setEdgePos] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const mainBoxRef = useRef<HTMLDivElement | null>(null);
   const [relayout, setRelayout] = useState(0);
 
   /* 【2026-09-14 主人反馈】聚焦弹层原来只有一行「还没有整理过的档案：多聊几次或对 ta 做「人格学习」会充实起来」——
@@ -378,7 +478,17 @@ export default function GroupPortrait({ onBack }: Props) {
     finally { setLoading(false); }
   };
   useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
-  useEffect(() => { setMsgs(null); setMsgsOpen(false); setMsgsErr(''); setRelSel(null); }, [focus?.uid]);
+  /* 换焦点人物 = 换一张关系网：顺带把关系标注卡片彻底归零（原来只清 relSel，卡片状态会残留到下一次） */
+  useEffect(() => {
+    setMsgs(null); setMsgsOpen(false); setMsgsErr(''); setRelSel(null);
+    setEdgeSel(null); setRelEdit({ st: 'idle' }); setEdgePos(null);
+  }, [focus?.uid]);
+  /* done 状态只停 900ms：既让「✓ 已保存」和图层上的线色变化被看见，又不会把卡片一直挂在图上 */
+  useEffect(() => {
+    if (relEdit.st !== 'done') return;
+    const t = setTimeout(() => { setEdgeSel(null); setRelEdit({ st: 'idle' }); setEdgePos(null); }, 900);
+    return () => clearTimeout(t);
+  }, [relEdit]);
   // 聚焦某人时按需取「完整档案」（与 Learning.tsx 同一套解包口径；已取过的不重复请求）
   useEffect(() => {
     setProfOpen(false);
@@ -431,7 +541,7 @@ export default function GroupPortrait({ onBack }: Props) {
   }, []);
 
   const allNodes: VNode[] = useMemo(() => (graph?.nodes ?? []).map((n: GraphNode) => ({
-    uid: n.uid, name: n.name, kind: n.kind, tags: n.tags ?? [], msgCount: n.msgCount, lastSeen: n.lastSeen,
+    uid: n.uid, name: n.name, kind: n.kind, role: n.role ?? null, tags: n.tags ?? [], msgCount: n.msgCount, lastSeen: n.lastSeen,
     birthday: n.birthday ?? null, personality: n.personality ?? null, likes: n.likes ?? null, personaSummary: n.personaSummary ?? null,
   })), [graph]);
   const allLinks = useMemo(() => (graph?.links ?? []).map((l: GraphLink) => ({ from: l.from, to: l.to, strength: l.strength })), [graph]);
@@ -501,21 +611,46 @@ export default function GroupPortrait({ onBack }: Props) {
 
   const kindCnt = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const n of allNodes) c[n.kind] = (c[n.kind] || 0) + 1;
+    for (const n of allNodes) {
+      c[n.kind] = (c[n.kind] || 0) + 1;
+      if (n.kind !== 'owner' && n.role === 'owner') c.roleOwner = (c.roleOwner || 0) + 1;
+      if (n.kind !== 'owner' && n.role === 'admin') c.roleAdmin = (c.roleAdmin || 0) + 1;
+    }
     return c;
   }, [allNodes]);
 
   const relLabelOf = (a: string, b: string): string => {
     const k = a < b ? a + '|' + b : b + '|' + a;
-    const map: Record<string, string> = { guimi: '闺蜜', jiaren: '家人', qinglv: '情侣', chouren: '仇人', qunyou: '群友' };
-    return rels[k] ? (map[rels[k]] || rels[k]) : '';
+    return rels[k] ? (REL_CAT_LABEL[rels[k]] || rels[k]) : '';
   };
-  const pickRelCat = async (cat: string) => {
-    if (!edgeSel) return;
-    setRelSaving(true);
-    try { const r = await saveRelation(edgeSel.from, edgeSel.to, cat); if (r?.ok) setRels(r.relations); setEdgeSel(null); } catch {} finally { setRelSaving(false); }
+  /** 打开/切换一条线：状态归零，不残留上一次的 error / done；token+1 让在途的旧请求回包作废 */
+  const openEdge = (e: EdgeClick) => { relReqRef.current++; setEdgeSel(e); setRelEdit({ st: 'idle' }); };
+  /** 关闭卡片：**saving 时也允许关**（否则接口一直不回来，主人会被一个全禁用的卡片卡住）。
+   *  关掉后 token 变化，回包不再改卡片状态；但服务端确实保存成功的话 setRels 照旧应用（见 submitRel）。 */
+  const closeEdge = () => {
+    relReqRef.current++;
+    setEdgeSel(null); setRelEdit({ st: 'idle' }); setEdgePos(null);
   };
-  const clearRelCat = async () => { await pickRelCat('qunyou'); };
+  /** 提交类别；cat 传空串 = 清除标注（后端 PUT /learning/relations 收到空 category 会 delete 这条记录） */
+  const submitRel = async (cat: string) => {
+    if (!edgeSel || relEdit.st === 'saving') return;   // 按钮已 disabled，这里再挡一次（快速双击/回车）
+    const token = ++relReqRef.current;
+    setRelEdit({ st: 'saving', cat });
+    try {
+      const r = await saveRelation(edgeSel.from, edgeSel.to, cat);
+      // 服务端返回的是全量 relations，属于真值：卡片还在不在都应用，线色当帧就变
+      // （setRels → 两处 NetCanvas 重渲染 → relationsRef 由 useEffect 同步，下一帧读到新配色，
+      //  不用等重力收敛、也不用重排）。
+      if (r?.ok) setRels(r.relations ?? {});
+      // 卡片状态只在"还是这次提交"时才动：否则取消/换了另一条线之后，旧回包会把新卡片标成已保存并自动收起
+      if (token !== relReqRef.current) return;
+      if (r?.ok) setRelEdit({ st: 'done', cat });
+      else setRelEdit({ st: 'error', cat, msg: r?.message || '接口返回失败' });
+    } catch (e2: any) {
+      if (token !== relReqRef.current) return;
+      setRelEdit({ st: 'error', cat, msg: String(e2?.message ?? e2) });
+    }
+  };
   const locCands = locQ.trim() ? allNodes.filter((n) => cleanName(n.name).toLowerCase().includes(locQ.trim().toLowerCase()) || String(n.uid).includes(locQ.trim())).slice(0, 12) : [];
   const pickLoc = (uid: string) => { setLocQ(''); const n = byUid.get(uid); if (n) setFocus(n); };
 
@@ -632,12 +767,28 @@ export default function GroupPortrait({ onBack }: Props) {
             </span>
             <span style={{ marginLeft: 'auto', fontSize: 12.5, color: C.textMuted }}>
               <span style={{ color: C.owner, marginRight: 12 }}>● 主人 ×{kindCnt.owner ?? 0}</span>
+              {/* 群主/管理员计数用角色环同色，和球上那圈细环对得上（拿不到 role 时是 0，不显示假的） */}
+              {(kindCnt.roleOwner ?? 0) > 0 && <span style={{ color: C.roleOwner, marginRight: 12 }}>◍ 群主 ×{kindCnt.roleOwner}</span>}
+              {(kindCnt.roleAdmin ?? 0) > 0 && <span style={{ color: C.roleAdmin, marginRight: 12 }}>◍ 管理员 ×{kindCnt.roleAdmin}</span>}
               <span style={{ color: C.friend, marginRight: 12 }}>● 私聊 ×{kindCnt.friend ?? 0}</span>
               <span style={{ color: C.member }}>● 群员 ×{kindCnt.member ?? 0}</span>
             </span>
           </div>
           {err && <div style={{ color: '#c0504d', fontSize: 12.5, marginBottom: 8 }}>{err}<button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={loadAll}>重试</button></div>}
-          <div style={{ height: 600, position: 'relative', border: '1px solid rgba(0,0,0,0.07)', borderRadius: 16, background: 'rgba(255,255,255,0.6)', overflow: 'hidden' }}>
+          {/* 线色图例：主人要求"大图上显示对应线的颜色"，但页面上原来没有图例，标过色的线看起来只是"随机彩色" */}
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', fontSize: 11.5, color: C.textMuted, marginBottom: 8 }}>
+            <span>关系线：</span>
+            {(['guimi', 'jiaren', 'qinglv', 'chouren', 'qunyou'] as const).map((c) => (
+              <span key={c} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <i style={{ width: 15, height: 2.5, borderRadius: 2, background: REL_CAT_COLOR[c], display: 'inline-block' }} />{REL_CAT_LABEL[c]}
+              </span>
+            ))}
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <i style={{ width: 15, height: 2.5, borderRadius: 2, background: 'linear-gradient(90deg,#c9d2dd,#7a8ba0)', display: 'inline-block' }} />未标注
+            </span>
+            <span>（点一条连线即可标注/清除）</span>
+          </div>
+          <div ref={mainBoxRef} style={{ height: 600, position: 'relative', border: '1px solid rgba(0,0,0,0.07)', borderRadius: 16, background: 'rgba(255,255,255,0.6)', overflow: 'hidden' }}>
             {loading && !graph ? (
               <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: C.textMuted }}><Loader2 size={18} className="spin" /> 读取画像数据…</div>
             ) : !graph || mainNodes.length === 0 ? (
@@ -647,10 +798,30 @@ export default function GroupPortrait({ onBack }: Props) {
               </div>
             ) : (
               <NetCanvas nodes={mainNodes} links={mainLinks} selectedUid={focus?.uid ?? null} relations={rels}
-                onEdge={(e) => setEdgeSel(e)}
-                onPick={(u) => setFocus(u ? (byUid.get(u) ?? null) : null)} onOpen={(n) => setFocus(n)} />
+                onEdge={(e) => {
+                  const el = mainBoxRef.current;
+                  openEdge(e);
+                  // 记下落点+容器尺寸，把浮层卡片夹在画布内（容器 overflow:hidden，贴边会被切掉）
+                  setEdgePos({ x: e.sx, y: e.sy, w: el?.clientWidth ?? 0, h: el?.clientHeight ?? 0 });
+                }}
+                onPick={(u) => { setFocus(u ? (byUid.get(u) ?? null) : null); if (!u) closeEdge(); }} onOpen={(n) => setFocus(n)} />
             )}
-            <div style={{ position: 'absolute', left: 12, bottom: 8, fontSize: 11.5, color: C.textMuted }}>拖拽移动 · 点击一个人聚焦（视图大小已固定）</div>
+            {/* 主图上的关系标注浮层。以前 edgeSel 只在聚焦弹层里渲染，于是"在首页点一条线"什么都没发生
+                （状态设了但没人画），下次打开聚焦弹层还会把这口旧状态带出来。 */}
+            {edgeSel && edgePos && !focus && (
+              <div style={{
+                position: 'absolute', width: 340, transform: 'translateX(-50%)', zIndex: 5,
+                left: Math.max(178, Math.min(edgePos.w - 178, edgePos.x)),
+                top: Math.max(8, Math.min(edgePos.h - 150, edgePos.y + 14)),
+              }}>
+                <RelEdgeCard
+                  title={cleanName(byUid.get(edgeSel.from)?.name || edgeSel.from) + ' ↔ ' + cleanName(byUid.get(edgeSel.to)?.name || edgeSel.to)}
+                  current={relLabelOf(edgeSel.from, edgeSel.to)}
+                  state={relEdit} floating
+                  onPick={submitRel} onClose={closeEdge} />
+              </div>
+            )}
+            <div style={{ position: 'absolute', left: 12, bottom: 8, fontSize: 11.5, color: C.textMuted }}>拖拽移动 · 点击一个人聚焦 · 点一条线标注关系（视图大小已固定）</div>
           </div>
         </div>
       </div>
@@ -662,7 +833,15 @@ export default function GroupPortrait({ onBack }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <span style={{ width: 14, height: 14, borderRadius: '50%', background: colorOf(focus.kind), opacity: 0.85, display: 'inline-block' }} />
               <span style={{ fontSize: 16, fontWeight: 800, color: C.text }}>{cleanName(focus.name)}</span>
-              <span style={{ fontSize: 13, color: C.textMuted }}>QQ {focus.uid} · {KIND_LABEL[focus.kind]}</span>
+              <span style={{ fontSize: 13, color: C.textMuted }}>QQ {focus.uid} ·</span>
+              {/* 角色：群主/管理员给药丸徽标（金/青），其余是纯文本 kindLabelOf 的回落文案；
+                  主人自己（kind==='owner'）永远显示「主人」，不被 role 覆盖 */}
+              {(() => {
+                const b = roleBadgeOf(focus);
+                return b
+                  ? <span style={{ fontSize: 12, fontWeight: 700, padding: '1px 9px', borderRadius: 999, background: b.bg, color: b.fg }}>{b.text}</span>
+                  : <span style={{ fontSize: 13, color: C.textMuted }}>{kindLabelOf(focus)}</span>;
+              })()}
               <button className="icon-btn" style={{ marginLeft: 'auto' }} onClick={() => setFocus(null)} title="关闭"><X size={18} /></button>
             </div>
 
@@ -774,44 +953,40 @@ export default function GroupPortrait({ onBack }: Props) {
                 </div>
               </div>
 
-              {/* 右: 个人关系图(可拖动、自动漂动,点邻居切换) */}
+              {/* 右: 个人关系图(可拖转,默认自动缓转) */}
               <div style={{ flex: '1 1 440px', minWidth: 340 }}>
                 {edgeSel && (
-                  <div style={{ border: '1px solid rgba(120,120,190,0.4)', background: 'rgba(255,255,255,0.92)', borderRadius: 12, padding: '8px 12px', marginBottom: 8, boxShadow: '0 6px 20px rgba(0,0,0,0.1)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 6 }}>
-                      {cleanName(byUid.get(edgeSel.from)?.name || edgeSel.from)} ↔ {cleanName(byUid.get(edgeSel.to)?.name || edgeSel.to)}
-                      {relLabelOf(edgeSel.from, edgeSel.to) && <span style={{ marginLeft: 6, fontWeight: 400, color: C.textMuted, fontSize: 12 }}>当前: {relLabelOf(edgeSel.from, edgeSel.to)}</span>}
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-                      {(['qunyou', 'guimi', 'jiaren', 'qinglv', 'chouren'] as const).map((c) => (
-                        <button key={c} className="btn btn-sm" disabled={relSaving} onClick={() => pickRelCat(c)}
-                          style={{ border: '1px solid ' + REL_CAT_COLOR[c], color: REL_CAT_COLOR[c], background: 'transparent' }}>
-                          {c === 'qunyou' ? '群友' : c === 'guimi' ? '闺蜜/诡秘' : c === 'jiaren' ? '家人' : c === 'qinglv' ? '情侣' : '仇人'}
-                        </button>
-                      ))}
-                      <button className="btn btn-sm" disabled={relSaving} onClick={() => setEdgeSel(null)}>取消</button>
-                    </div>
-                  </div>
+                  <RelEdgeCard
+                    title={cleanName(byUid.get(edgeSel.from)?.name || edgeSel.from) + ' ↔ ' + cleanName(byUid.get(edgeSel.to)?.name || edgeSel.to)}
+                    current={relLabelOf(edgeSel.from, edgeSel.to)}
+                    state={relEdit}
+                    onPick={submitRel} onClose={closeEdge} />
                 )}
-                <div style={{ fontSize: 12.5, color: C.textMuted, marginBottom: 6 }}>与 ta 互动较多（{ego.neigh.length} 人）· 可拖转（视图大小已固定）；点壳上其它人 → 左边看 ta 与主人的关系</div>
+                <div style={{ fontSize: 12.5, color: C.textMuted, marginBottom: 6 }}>
+                  与 ta 互动较多（{ego.neigh.length} 人）· 拖转后暂停自动旋转（双击恢复）· 线色与主图同一套；点壳上的人 → 看 ta 与 {cleanName(focus.name)} 的互动强度，点线 → 标注关系
+                </div>
                 <div style={{ height: 340, border: '1px solid rgba(0,0,0,0.06)', borderRadius: 14, position: 'relative', overflow: 'hidden' }}>
                   {ego.egoNodes.length >= 2 ? (
                     <div style={{ position: 'absolute', inset: 0 }}>
-                      <NetCanvas key={'ego' + focus.uid + (relSel?.node.uid ?? '')} nodes={ego.egoNodes} links={ego.egoLinks} centerUid={focus.uid}
+                      {/* key 只跟焦点人物走。原来还带了 relSel?.node.uid —— 点一个邻居就换 key 整块重挂，
+                          重挂会重新初始化相机(看好的角度被弹回正面)、重新从 TEMP_INIT 收敛一遍，
+                          这就是"点一下图就跳一下"的来源。选中高亮本来就由 selectedUid 负责，不用重挂。 */}
+                      <NetCanvas key={'ego' + focus.uid} nodes={ego.egoNodes} links={ego.egoLinks} centerUid={focus.uid}
                         selectedUid={relSel?.node.uid ?? focus.uid}
                         relations={rels}
-                        onEdge={(e) => setEdgeSel(e)}
+                        pauseSpinOnDrag
+                        onEdge={openEdge}
                         onOpen={(nn) => {
                           if (nn.uid === focus.uid) { setRelSel(null); return; }
                           const lk = ego.egoLinks.find((l) => l.to === nn.uid);
                           setRelSel({ node: nn, strength: lk ? lk.strength : 0 });
                         }}
-                        onPick={(u) => { if (!u) setRelSel(null); }} />
+                        onPick={(u) => { if (!u) { setRelSel(null); closeEdge(); } }} />
                     </div>
                   ) : (
                     <div style={{ color: C.textMuted, fontSize: 12.5, textAlign: 'center', paddingTop: 150 }}>暂无明显关系人</div>
                   )}
-                  <div style={{ position: 'absolute', right: 8, bottom: 6, fontSize: 11, color: C.textMuted }}>点其它人可切换查看</div>
+                  <div style={{ position: 'absolute', right: 8, bottom: 6, fontSize: 11, color: C.textMuted }}>点一个人看互动强度 · 双击空白处恢复自动旋转</div>
                 </div>
               </div>
             </div>

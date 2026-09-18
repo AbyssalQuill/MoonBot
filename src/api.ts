@@ -295,11 +295,18 @@ export const deleteProfile = (id: string) =>
 
 /* ================= 群友画像 / 主人画像（manager 直读本机桥 memory.db，无需桥在线） ================= */
 export type GraphNodeKind = 'owner' | 'friend' | 'member';
+/** 群内角色：owner=群主、admin=管理员、member=普通群成员。
+ *  由后端 /api/learning/graph 每个 node 新增；注意它与 kind 不是一回事
+ *  （kind='owner' 是"主人自己"，role='owner' 是"群主"）。老后端没有这个字段时为 null/undefined，
+ *  前端一律按"群成员"回落，不显示空白。 */
+export type GraphRole = 'owner' | 'admin' | 'member';
 
 export interface GraphNode {
   uid: string;
   name: string;
   kind: GraphNodeKind;
+  /** 群内角色（可选；拿不到时 null/undefined → 回落为"群成员"） */
+  role?: GraphRole | null;
   /** 兴趣/特征标签（≤5，启发式切词） */
   tags: string[];
   /** 近 30 天发言条数（direction=in 且非自己） */
