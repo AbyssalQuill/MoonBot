@@ -490,7 +490,11 @@ export function buildNapcatInstallScript(o = {}) {
     'StandardError=append:/var/log/napcat-native.log',
     'Environment=HOME=/home/qq',
     'KillMode=mixed',
-    'TimeoutStopSec=45',
+    // 【2026-09-19】线上实测：停服务时 QQ（/opt/QQ/qq，Electron 主进程）**不响应 SIGTERM**，
+    // 45 秒到点后被 systemd SIGKILL（journal：`napcat.service: Killing process … (qq) with signal SIGKILL`）。
+    // 硬杀意味着这次登录的会话状态来不及落盘 —— 再叠加设备身份漂移，QQ 服务端就会判"新设备/设备异常"。
+    // 所以把宽限放到 120s：**能给优雅退出的机会就不硬杀**（真不退出也只是多等一会儿，代价可控）。
+    'TimeoutStopSec=120',
     '',
     '[Install]',
     'WantedBy=multi-user.target',
@@ -521,6 +525,18 @@ export function buildNapcatInstallScript(o = {}) {
     'echo "[4/7] 运行用户 qq（非 root 才能用 chrome-sandbox）"',
     'id qq >/dev/null 2>&1 || useradd -m -s /bin/bash qq',
     'usermod -aG audio,video qq >/dev/null 2>&1 || true',
+    // 【2026-09-19 钉设备身份】反复出现「掉线后报检测到设备异常 / 新设备登录，必须扫码」。
+    // QQ 判断"是不是同一台设备"靠它从机器上读到的一组标识；目标机多是 LXC 容器
+    // （hostnamectl 显示 Virtualization: lxc，DMI 的 product_uuid / board_serial 读不到），
+    // 于是能用的就剩 machine-id 与 hostname —— 而很多容器里 hostname 是一串随容器变化的 UUID。
+    // 这里在**装 QQ 之前**把这两个钉死，QQ 第一次启动看到的身份就是稳定的。
+    // （eth0 的 MAC 由宿主机分配，容器内改它可能断网，所以只记录不动，见 device-pin.json。）
+    'echo "[4b/7] 钉死设备身份（machine-id + hostname）—— 免得 QQ 每次重启都当成新设备要扫码"',
+    'if [ ! -s /etc/machine-id ]; then tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id; echo "   machine-id 原本是空的 → 已生成"; fi',
+    'mkdir -p /var/lib/dbus; [ -L /var/lib/dbus/machine-id ] || { rm -f /var/lib/dbus/machine-id; ln -sf /etc/machine-id /var/lib/dbus/machine-id; }',
+    'if [ "$(hostname)" != "moonbot-qq" ]; then hostnamectl set-hostname moonbot-qq 2>/dev/null || { echo moonbot-qq > /etc/hostname; hostname moonbot-qq 2>/dev/null || true; }; echo "   hostname → moonbot-qq（原来 $(hostname)）"; fi',
+    'mkdir -p /opt/napcat/config && printf \'{"hostname":"%s","machineId":"%s","pinnedAt":"%s"}\\n\' "$(hostname)" "$(cat /etc/machine-id)" "$(date \'+%F %T %z\')" > /opt/napcat/config/device-pin.json',
+    'echo "   machine-id=$(cat /etc/machine-id) hostname=$(hostname)"',
     'echo "[5/7] NapCat 应用 → /opt/napcat"',
     'mkdir -p /opt/napcat',
     `if [ -f "${o.napcatTar || '/root/.qqbridge-clone/napcat-app.tar.gz'}" ]; then`,
