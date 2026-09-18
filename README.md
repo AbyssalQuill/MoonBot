@@ -169,7 +169,7 @@ MoonBot Public/
 
 ### 安装包
 
-1. 运行 `release\MoonBot-Full-Setup.exe`
+1. 运行 `release\MoonBot Pro Setup.exe`
 2. 安装到普通目录，例如 `D:\MoonBot`
 3. 启动后按 DSH、NapCat、桥的顺序启动实例，或使用一键启动
 
@@ -557,7 +557,9 @@ node qq-bridge\tools\test-qq-hold.mjs
 ```powershell
 cd ..\QQ-Bridge-packaging\moonbot-app
 
+# full → ..\..\MoonBot Public\release\MoonBot Pro Setup.exe（对外发布的整套安装包）
 node ..\tools\build-moonbot-app.mjs full
+# core → MoonBot Pro Manager Setup.exe（管理端精简包，仅连远程服务器用）
 node ..\tools\build-moonbot-app.mjs core
 
 node ..\tools\verify-installer-content.ps1

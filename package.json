@@ -1,7 +1,7 @@
 {
   "name": "qq-bridge-manager",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "QQ-Bridge 管理端 — 集成 NapCat 与 DSH 官方界面",
   "scripts": {
