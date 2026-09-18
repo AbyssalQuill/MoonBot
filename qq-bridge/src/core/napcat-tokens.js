@@ -244,6 +244,68 @@ function restartContainer() {
 }
 
 /**
+ * 【2026-09-19 修「刷新现状刷多了报查不到（NapCat WebUI 登录接口没通过（login rate limit））」】
+ *
+ * 原因：`probeQqLoginState()` 以前**每次调用都重新走一遍 WebUI 登录**
+ * （`POST /api/auth/login` 换 Credential，再用它查登录态）。而状态卡片每次刷新/轮询都调它，
+ * 连点几下就把 NapCat 的登录接口打到限流 → 界面显示"查不到"。
+ *
+ * 现在：**Credential 缓存复用**（同一 token 在 TTL 内直接复用，一次网络都不花），
+ * 撞限流则进入**退避期**，退避期内直接放弃本次探测。登录接口本来只是为了拿这个 Credential，
+ * 没有任何理由每次重登一次。
+ */
+const WEBUI_CRED_TTL_MS = 10 * 60 * 1000;   // Credential 复用 10 分钟
+const WEBUI_RL_BACKOFF_MS = 60 * 1000;      // 撞限流后退避 1 分钟
+let webuiCred = { token: '', value: '', at: 0 };
+let webuiBackoffUntil = 0;
+
+/** 拿一个可复用的 WebUI Credential；拿不到返回 ''（调用方据此如实说"暂时查不到"）。 */
+async function getWebuiCredential(token) {
+  const now = Date.now();
+  if (webuiCred.value && webuiCred.token === token && now - webuiCred.at < WEBUI_CRED_TTL_MS) {
+    return webuiCred.value;   // 命中缓存
+  }
+  if (now < webuiBackoffUntil) return '';   // 限流退避期内不再尝试
+  const r = await probeWebuiLoginRaw(token);
+  if (r.credential) {
+    webuiCred = { token, value: r.credential, at: now };
+    return r.credential;
+  }
+  if (/rate\s*limit|too\s*many/i.test(String(r.message ?? ''))) {
+    webuiBackoffUntil = now + WEBUI_RL_BACKOFF_MS;
+    webuiCred = { token: '', value: '', at: 0 };
+  }
+  return '';
+}
+
+/** 丢弃缓存的 Credential（失效时调一次，下次重新登录）。 */
+function dropWebuiCredential() {
+  webuiCred = { token: '', value: '', at: 0 };
+}
+
+/** 原始登录：返回 { code, message, http, credential }（原 probeWebuiLogin 只回 code/message）。 */
+async function probeWebuiLoginRaw(token) {
+  const hash = crypto.createHash('sha256').update(`${token}.napcat`).digest('hex');
+  try {
+    const res = await fetch(`http://127.0.0.1:${webuiPort()}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hash }),
+      signal: AbortSignal.timeout(8000)
+    });
+    const j = await res.json().catch(() => null);
+    return {
+      code: j?.code ?? null,
+      message: String(j?.message ?? ''),
+      http: res.status,
+      credential: String(j?.data?.Credential ?? '')
+    };
+  } catch (error) {
+    return { code: null, message: String(error?.name ?? error), http: 0, credential: '' };
+  }
+}
+
+/**
  * 【2026-09-16】NapCat 自己的**登录态**（是否已登录 QQ）。
  *
  * 为什么要有它：所有"机器人不回消息"的排查里，第一件事就是分清
@@ -260,23 +322,21 @@ export async function probeQqLoginState() {
   const w = readJsonFile(path.join(dir, 'webui.json'));
   const token = String(w?.token ?? '');
   if (!token) return { ok: false, error: '读不到 webui.json 的 token，无法查询登录态' };
-  const login = await probeWebuiLogin(token);
-  if (login.code !== 0) return { ok: false, error: `NapCat WebUI 登录接口没通过（${login.message || login.http}）`, webui: login };
-  const hash = crypto.createHash('sha256').update(`${token}.napcat`).digest('hex');
-  let credential = '';
-  try {
-    const res = await fetch(`http://127.0.0.1:${webuiPort()}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hash }),
-      signal: AbortSignal.timeout(8000)
-    });
-    const j = await res.json().catch(() => null);
-    credential = String(j?.data?.Credential ?? '');
-  } catch (error) {
-    return { ok: false, error: `拿不到 WebUI Credential：${error?.message ?? error}` };
+  // 令牌换了就把缓存作废（否则会拿旧 Credential 去查，一直失败）
+  if (webuiCred.token && webuiCred.token !== token) dropWebuiCredential();
+  let credential = await getWebuiCredential(token);
+  if (!credential) {
+    /* 【2026-09-19】拿不到 Credential（限流退避中 / 网络异常）时**必须如实说"暂时查不到"**，
+     * 而不是让上游把它渲染成"QQ 未登录、请扫码" —— 那是两件完全不同的事。 */
+    const backoff = webuiBackoffUntil > Date.now();
+    return {
+      ok: false,
+      rateLimited: backoff,
+      error: backoff
+        ? 'NapCat WebUI 登录接口被限流，暂时查不到登录态（已自动退避，稍后恢复；这**不代表** QQ 掉线）'
+        : '拿不到 WebUI Credential，暂时查不到登录态'
+    };
   }
-  if (!credential) return { ok: false, error: 'WebUI 登录成功但没返回 Credential' };
   const call = async (p) => {
     try {
       const res = await fetch(`http://127.0.0.1:${webuiPort()}${p}`, {
@@ -290,7 +350,13 @@ export async function probeQqLoginState() {
       return { code: null, message: String(error?.message ?? error) };
     }
   };
-  const st = await call('/api/QQLogin/CheckLoginStatus');
+  let st = await call('/api/QQLogin/CheckLoginStatus');
+  // Credential 过期/失效 → 丢缓存重登**一次**（只重试一次，免得又撞限流）
+  if (st?.code !== 0 && /auth|token|credential|unauthor|invalid/i.test(String(st?.message ?? ''))) {
+    dropWebuiCredential();
+    const again = await getWebuiCredential(token);
+    if (again) st = await call('/api/QQLogin/CheckLoginStatus');
+  }
   const info = st?.code === 0 ? await call('/api/QQLogin/GetQQLoginInfo') : null;
   const d = st?.data ?? {};
   return {

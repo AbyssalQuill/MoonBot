@@ -3,11 +3,11 @@ import type { CSSProperties } from 'react';
 import { KeyRound, RefreshCw, Loader2, AlertTriangle, ShieldCheck, Eye, EyeOff, Activity, Siren, Lock, QrCode } from 'lucide-react';
 import type { NapcatGuard, NapcatQrSnapshot } from '../api';
 import {
-  getNapcatTokens, applyNapcatTokens, getNapcatGuard, setNapcatGuard, healNapcatGuard, applyNapcatQuickPassword, getNapcatQr,
+  getNapcatTokens, applyNapcatTokens, getNapcatGuard, setNapcatGuard, healNapcatGuard, getNapcatQr,
 } from '../api';
 
 /**
- * NapCat 三张卡：① 鉴权令牌（WebUI / HTTP / WS） ② 会话守护 ③ 免扫码回退登录
+ * NapCat 两张卡：① 鉴权令牌（WebUI / HTTP / WS） ② 会话守护
  *
  * 【为什么令牌要单独说】管理端原来只是把令牌存在**桥的 config.json** 里（桥"期望"用哪个），
  * NapCat 自己的配置（webui.json / onebot11*.json）从来没被改过 —— 于是：
@@ -16,9 +16,11 @@ import {
  * 令牌卡做的是"把令牌真正写进 NapCat + 重启容器 + 复验（新令牌能过、旧令牌被拒）"，
  * 顺手把桥 config.json 的期望值对齐，并把结果如实显示出来（不含任何明文令牌）。
  *
- * 【为什么拆成三张卡】主人反馈"掺杂到一起了"：令牌 / 会话守护 / 免扫码回退登录是三件事，
- * 混在一张卡里三处标题各说各话。现在各自一张卡、各自的标题与说明、各自的底，互不掺杂；
+ * 【为什么拆成卡】主人反馈"掺杂到一起了"：令牌 / 会话守护本来是两件事，
+ * 混在一张卡里几处标题各说各话。现在各自一张卡、各自的标题与说明、各自的底，互不掺杂；
  * 请求与功能一个字都没变（同一个 GET/POST，只是重新归位到对应的卡里）。
+ * （2026-09-19 又删掉了第三张「免扫码回退登录」卡 —— 那是容器时代的产物，
+ *   原生 systemd 跑法下它必然报「docker inspect 失败」，见下方组件内的说明。）
  * 三张卡的渲染条件与拆分前完全一致：令牌那份读失败时，后两张卡跟以前一样不渲染。
  */
 interface NapStatus {
@@ -70,7 +72,7 @@ function healResultText(r?: string): string {
     case 'failed': return '失败（重启后仍探不通）';
     case 'cooldown': return '冷却中（同小时内自愈次数过多）';
     case 'giveup': return '已放弃（一小时自愈次数到上限）';
-    case 'manual': return '需人工处理（未配置免扫码回退登录）';
+    case 'manual': return '需人工处理（要扫码／过验证，重启救不了）';
     default: return '——';
   }
 }
@@ -118,9 +120,12 @@ export default function NapcatTokensCard() {
   const [guardMsg, setGuardMsg] = useState('');
   const [guardBusy, setGuardBusy] = useState(false);
   const [healing, setHealing] = useState(false);
-  const [pw, setPw] = useState('');
-  const [pwBusy, setPwBusy] = useState(false);
-  const [pwMsg, setPwMsg] = useState('');
+  /* 【2026-09-19 已删除「免扫码回退登录」整张卡】它是**容器时代**的产物（把 QQ 密码算成 md5
+   * 写进 docker 容器的环境变量、再重建容器来免扫码）。现在 NapCat 早就是**原生 systemd** 跑法，
+   * 那套 docker inspect/重建逻辑在原生环境下必然失败 —— 主人看到的正是
+   * 「docker inspect 失败（容器不存在或没权限）」，留着只会误导。
+   * 原生跑法的免扫码依据是配置目录里的 napcat_<qq>.json（快速登录票据）**加稳定的设备身份**，
+   * 见 qq-bridge/tools/pin-napcat-device.sh 与 start-bridge.sh 的说明。 */
   /* 【2026-09-16 补充契约】掉登录态（alert.level='needs-login'）时人必须扫码：把容器里的二维码现抓出来显示。
      不缓存（NapCat 会定期换新码），`qrFor` 记录"这份二维码是为哪条告警抓的"，避免显示上一次的旧码。 */
   const [qr, setQr] = useState<NapcatQrSnapshot | null>(null);
@@ -272,36 +277,6 @@ export default function NapcatTokensCard() {
     } finally { setHealing(false); }
   };
 
-  /** 免扫码回退登录：明文密码只随这一条请求发送，不进日志/本地存储；成功后刷新登录态 */
-  const submitQuickPassword = async () => {
-    if (pwBusy) return;
-    const p = pw;
-    if (!p.trim()) { setPwMsg('先填 QQ 密码（只会随这一次请求发给桥，明文不落盘）'); return; }
-    const ok = window.confirm(
-      '配置免扫码回退登录会用**同一份挂载/数据卷**重建 NapCat 容器：\n\n'
-      + '· 登录态不会丢（QQ 会话与登录票据都在数据卷里）\n'
-      + '· 但过程中约 20~60 秒不可用（容器要重建再起来登录）\n'
-      + '· 密码只算成 md5 写进容器环境变量，明文不落盘、不进日志\n\n'
-      + '确定现在执行吗？',
-    );
-    if (!ok) return;
-    setPwBusy(true); setPwMsg('正在重建容器并登录…（约 20~60 秒）');
-    try {
-      const r = await applyNapcatQuickPassword(p);
-      if (r?.ok === false || r?.error) {
-        setPwMsg(`失败：${r?.error || r?.message || '未知错误'}`);
-      } else {
-        const ls = r?.loginState;
-        setPwMsg(`成功：${r?.detail || '已配置免扫码回退登录'}${ls ? `；登录态：${ls.isLogin ? '已登录' : '未登录'}${ls.online ? '、在线' : ''}` : ''}`);
-        setPw('');            // 用完立刻从界面状态里清掉，不做任何持久化
-      }
-      await loadGuard();
-      await load();          // 顺带刷新「QQ 登录态」那一行
-    } catch (e: any) {
-      setPwMsg(`失败：${e?.message ?? e}`);
-    } finally { setPwBusy(false); }
-  };
-
   const mismatch = Boolean(st?.mismatch?.http || st?.mismatch?.ws);
   // 【2026-09-16】连接诊断用 any 取一层：TS 在 `st.connection ? … : (access .error)` 的 else 分支里
   // 会把类型收窄成 never（可选属性访问报 TS2339），这里明确放宽，避免构建被卡。
@@ -316,10 +291,10 @@ export default function NapcatTokensCard() {
   const needsLogin = isNeedsLogin(guard?.alert);
 
   return (
-    /* 三张卡各自独立成块（card-stack = 页面既有的竖排叠卡容器），不再共用一张卡的底 */
+    /* 两张卡各自独立成块（card-stack = 页面既有的竖排叠卡容器），不再共用一张卡的底 */
     <div className="card-stack">
-      {/* ============ 卡 1/3：NapCat 鉴权令牌（WebUI / HTTP / WS） ============
-          只放令牌：现状展示 → 填入/对齐 → 写入并重启。守护与回退登录都不在这张卡里。 */}
+      {/* ============ 卡 1/2：NapCat 鉴权令牌（WebUI / HTTP / WS） ============
+          只放令牌：现状展示 → 填入/对齐 → 写入并重启。会话守护不在这一张卡里。 */}
       <div className="card">
         <div className="card-title">
           <KeyRound size={17} /> NapCat 鉴权令牌（WebUI / HTTP / WS）
@@ -456,7 +431,7 @@ export default function NapcatTokensCard() {
 
       {!err && st && (
         <>
-          {/* ============ 卡 2/3：NapCat 会话守护 ============
+          {/* ============ 卡 2/2：NapCat 会话守护 ============
               桥侧每 60 秒 get_rkey 探活，连续失败自动重启容器。
               为什么要在管理端露出来：QQ 把登录态作废时 NapCat 可能**一条错都不报**，
               WebUI 上 isLogin/online 还是 true，消息却发不出去 —— 当天静默了 50 分钟没人发现。
@@ -525,7 +500,7 @@ export default function NapcatTokensCard() {
                             ? '用手机 QQ 扫下面的码即可恢复登录。'
                             : '需要重新扫码才能登录。'}
                           二维码文件在 <code>{guard.alert.qrPath || qr?.path || '（桥还没导出）'}</code>
-                          （NapCat WebUI 里也能看到），或在下面那张「免扫码回退登录」卡里配一次回退口令。
+                          （NapCat WebUI 里也能看到）。
                         </div>
                       )}
 
@@ -598,53 +573,6 @@ export default function NapcatTokensCard() {
             )}
           </div>
 
-          {/* ============ 卡 3/3：免扫码回退登录 ============
-              把 QQ 密码算成 md5 写进容器环境变量，容器重建后会用它自动登录，自愈重启就不必人工扫码。
-              明文只随请求发送。这张卡只有密码输入 + 配置按钮 + 说明。 */}
-          <div className="card">
-            <div className="card-title">
-              <Lock size={17} /> 免扫码回退登录
-              <span className="lrn-updated">
-                {guard?.passwordFallback?.configured ? '已配置（容器环境变量里已有回退口令）' : '未配置'}
-              </span>
-            </div>
-            <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
-              填一次 QQ 密码，桥会把它算成 md5 写进 NapCat 容器的环境变量，并<b>用同一份挂载/数据卷重建容器</b>；
-              以后自愈重启就能自动登回来，不必再扫码。
-              <br />
-              密码<b>只随这一次请求发送</b>：明文不落盘、不进日志、不写本地文件；桥侧也只保留 md5。
-              执行过程约 <b>20~60 秒不可用</b>，<b>登录态不会丢</b>（QQ 会话与登录票据都在数据卷里）。
-              {guard?.passwordFallback?.configured === false && '（当前未配置，这也是自愈重启后可能要重新扫码的原因）'}
-            </div>
-
-            {/* 没配回退登录时的提醒（从守护卡挪过来：说的就是"这张卡没配"） */}
-            {guard?.passwordFallback?.configured === false && (
-              <div className="lrn-note">
-                <AlertTriangle size={13} />
-                <span>未配置免扫码回退登录，自愈重启后可能需要重新扫码</span>
-                {guard?.passwordFallback?.error ? <span>　（{guard.passwordFallback.error}）</span> : null}
-              </div>
-            )}
-
-            <div className="cfg-fields">
-              <label className="field-row">
-                <span className="f-label">QQ 密码（仅用于算 md5 写入容器环境变量）</span>
-                <input className="input" type="password" autoComplete="current-password"
-                  placeholder="填完点右边按钮；点了会先二次确认（会重建容器）"
-                  value={pw} disabled={pwBusy}
-                  onChange={(e) => setPw(e.target.value)} />
-              </label>
-            </div>
-            <div className="lrn-actions" style={rowStyle}>
-              <button className="btn btn-outline-danger btn-sm" disabled={pwBusy || !pw} onClick={() => void submitQuickPassword()}>
-                {pwBusy ? <Loader2 size={14} className="spin" /> : <QrCode size={14} />} 配置回退登录
-              </button>
-              <button className="btn btn-sm" disabled={pwBusy || !pw} onClick={() => { setPw(''); setPwMsg(''); }}>
-                清空输入
-              </button>
-            </div>
-            {pwMsg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{pwMsg}</div>}
-          </div>
         </>
       )}
     </div>
