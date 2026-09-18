@@ -435,18 +435,16 @@ function napcatCtlCmd(act) {
 }
 
 /**
- * 在目标机上安装**原生** NapCat（官方 Linux QQ deb + /opt/napcat 应用 + systemd unit）。
+ * 生成"目标机原生装机"的 shell 脚本（纯函数，便于离线 `bash -n` 验证）。
  * 逐字对应模板机上现在跑的那一套（unit / run-napcat.sh / 接线都从线上机器抄下来）。
  *
- * @param {{account?:string, quickMd5?:string, napcatTar?:string}} o
- *   account  机器人 QQ 号（`/opt/QQ/qq -q <account>`）
- *   quickMd5 免扫码回退用的密码 MD5（没配就走扫码）
- *   napcatTar 从模板机带过去的 `/opt/napcat` 压缩包路径（不含 config/cache）
+ * @param {{account?:string, quickMd5?:string, qqVer?:string, napcatTar?:string}} o
  */
-async function installNapcatNative(conn, task, o = {}) {
+export function buildNapcatInstallScript(o = {}) {
   const account = String(o.account || '').trim();
   const quickMd5 = String(o.quickMd5 || '').trim();
   const qqVer = String(o.qqVer || '3.2.33-52892');
+  const napcatTar = String(o.napcatTar || '/root/.qqbridge-clone/napcat-app.tar.gz');
   const runScript = [
     '#!/bin/bash',
     '# 原生 NapCat 启动包装：先确保 Xvfb :1 在，再用官方 QQ 启动 NapCat',
@@ -473,6 +471,12 @@ async function installNapcatNative(conn, task, o = {}) {
     'Documentation=https://github.com/NapNeko/NapCatQQ',
     'After=network-online.target',
     'Wants=network-online.target',
+    // 【2026-09-19】StartLimit* 属于 [Unit] 段：线上那份写在 [Service] 里，
+    // systemd 每次都报 `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring`
+    // （等于"掉线风暴时不要疯狂重启"这条**根本没生效**）。新装的机器放到正确位置。
+    '# 掉线风暴时不要疯狂重启',
+    'StartLimitIntervalSec=300',
+    'StartLimitBurst=10',
     '',
     '[Service]',
     'Type=simple',
@@ -482,9 +486,6 @@ async function installNapcatNative(conn, task, o = {}) {
     'ExecStart=/opt/napcat/run-napcat.sh',
     'Restart=always',
     'RestartSec=8',
-    '# 掉线风暴时不要疯狂重启',
-    'StartLimitIntervalSec=300',
-    'StartLimitBurst=10',
     'StandardOutput=append:/var/log/napcat-native.log',
     'StandardError=append:/var/log/napcat-native.log',
     'Environment=HOME=/home/qq',
@@ -546,7 +547,12 @@ async function installNapcatNative(conn, task, o = {}) {
     'echo "   napcat=$(systemctl is-active napcat 2>/dev/null)"',
     'ss -ltn 2>/dev/null | grep -E ":3000|:3001|:6099" | head -3 || echo "   （端口还没起来，可能要扫码）"',
   ].join('\n');
+  return script;
+}
 
+/** 在目标机上安装原生 NapCat（装机脚本由 buildNapcatInstallScript 生成，便于离线 bash -n 验证）。 */
+async function installNapcatNative(conn, task, o = {}) {
+  const script = buildNapcatInstallScript(o);
   const r = await runCmd(conn, script, 1800000);
   if (r.out) for (const line of String(r.out).trim().split('\n')) taskLine(task, `  ${line}`);
   if (r.err) taskLine(task, `  stderr: ${String(r.err).slice(0, 300)}`);
