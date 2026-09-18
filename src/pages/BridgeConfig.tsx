@@ -227,6 +227,8 @@ const TOOL_MCP: Record<string, string> = {
   profileSet: 'qq_profile_set', profileQuery: 'qq_profile_get',
   memeSearch: 'qq_meme_search', sendMeme: 'qq_send_meme',
   qzoneView: 'qq_qzone_view', sendQzone: 'qq_send_qzone',
+  // 【2026-09-19】角色库四个工具由 social.tools.characterCards 一个开关统管（false = 四个都不注册）。
+  characterCards: 'qq_character_list / qq_character_read / qq_character_pack / qq_character_search',
 };
 
 /**
@@ -269,6 +271,11 @@ const MCP_LABEL: Record<string, string> = {
   qq_deepsleep: '群聊静默', qq_crosschat_send: '跨会话发话', qq_crosschat_inbox: '跨会话收件箱',
   qq_status: '机器人状态', qq_list_groups: '列出群聊', qq_get_system_config: '读桥系统配置',
   qq_set_system_config: '改桥系统配置',
+  // 【2026-09-19】漏登的六个（工具加了、中文名没跟着加 → 精简卡里会显示"未登记"占位）：
+  // 语音两个（无条件注册）与角色库四个（social.tools.characterCards 控制）。
+  qq_send_voice: '发语音（说话）', qq_transcribe_voice: '语音转文字',
+  qq_character_list: '列角色库', qq_character_read: '读角色卡文件',
+  qq_character_pack: '取整套角色卡', qq_character_search: '搜角色库',
 };
 
 /** 精简名单里某一行该显示的中文名；未登记时回落到「未登记」占位（绝不显示英文原名） */
