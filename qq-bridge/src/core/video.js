@@ -900,6 +900,57 @@ const PLATFORM_LABEL = {
 };
 
 /**
+ * 给 b23.tv 分享链补上真人分享时带的那三个**非设备**查询参数。
+ *
+ * ── 2026-09-18 第十八批：为什么卡片里的 qqdocurl 必须带查询串 ──────────────────────
+ * 现象：卡片渲染正常（封面/标题/哔哩哔哩标识都在），点进去却落到
+ * `https://b23.tv/uCHCDWw.html` —— b23.tv 对它回的是自家的 not found
+ * （HTTP 200 + `{"code":-404,"message":"啥都木有"}`），也就是**短码后面被多拼了一个 `.html`**。
+ *
+ * 三步排查（每步都有物证，别只看结论）：
+ *   ① **不是本仓库拼的**。`grep -rn "\.html" qq-bridge/src/` 的命中只有 QQ 音乐的
+ *      `i.y.qq.com/v8/playsong.html` 和 html-text.js 的文件名，视频链路一个 `.html` 都没有；
+ *      而且 b23.tv 短码进来时会被 `/^[0-9A-Za-z]{5,12}$/` 收成 `parsed.shortCode`（带 `.` 的一律
+ *      匹配不上这份正则），所以自己这条链路上根本没有机会混进 `.html`。
+ *   ② **不是 NapCat 拼的**。`/root/napcat-build/napcat.mjs` 里**搜不到 `qqdocurl` 这个字面量**：
+ *      它只把 webUrl 塞进 `LightAppSvc.mini_app_share.AdaptShareInfo` 的 `webURL`
+ *      （napcat.mjs:14200 `webURL: e.webUrl ?? ""`），再把 QQ 服务端返回的 jsonContent 原样吐出
+ *      （napcat.mjs:32612 `JSON.parse(i.content.jsonContent)`）。用 `get_mini_app_ark` 直连实测，
+ *      传进去 `https://b23.tv/<短码>` 回出来就是这一个字串，一个字都没多加。
+ *   ③ **发出去的卡里也是干净的**。从 NapCat 消息记录回读私聊 1736784911 那条卡（msgId=187836987，
+ *      2026-09-18 14:01:54Z），`detail_1.qqdocurl = "https://b23.tv/uCHCDWw"`，没有 `.html`。
+ *   所以 `.html` 是**点击那一刻由 QQ 侧补的** —— 字段名字面就是 qq**doc**url，QQ 拿它当"文档路径"。
+ *   这一步服务端证明不了（`detail_1.url` 那个 m.q.qq.com 短链解不出目标页），只能靠下面的对照推断。
+ *
+ * 为什么加查询串就没事（HTTP 实测，服务器上 `curl -D -` 逐条跑过，只看第一跳）：
+ *   `https://b23.tv/uCHCDWw.html`                    → 200（b23.tv 自己的 not found）❌
+ *   `https://b23.tv/uCHCDWw.html?…&ts=…`             → 200 ❌
+ *   `https://b23.tv/uCHCDWw`                         → 302 → /video/BV13Xb56NEEZ ✅
+ *   `https://b23.tv/uCHCDWw?…&ts=…`                  → 302 ✅
+ *   `https://b23.tv/uCHCDWw?…&ts=….html`             → **302 ✅**
+ *   `https://b23.tv/1ncmZVP?…&ts=….html`（真卡形态）  → **302 ✅**
+ * 后两条是关键：`.html` 拼在**整串末尾**时会落进 query 里，b23.tv 只按路径 `/uCHCDWw` 解析，
+ * 多出来的 `.html` 变成 query 值的一部分被忽略 —— 这正好解释"真人真卡带查询串所以点得开、
+ * 我们的裸短码被补死"。对照物证：同一台 NapCat 回读到 6 张真人真卡（WZcddcS / WZVnINP /
+ * 0hEdnD1 / 9kFv2VX / w1c4DfM / FUMBxsH），**张张都带查询串**，一张不落。
+ *
+ * ⚠️ 只用 `share_medium` / `share_source` / `ts` 三个**非设备**参数：
+ *   真卡里的 `bbid` 是**设备标识**，编不出来也不该编，这里不伪造（这是本次唯一的形态取舍）。
+ *   `ts` 取 Date.now()（毫秒），与真卡一致（真卡的 `ts` 与消息 ctime 落在同一秒）。
+ *
+ * 只对 b23.tv 生效：其它平台没有这条实测证据，不跟着改。
+ *
+ * @param {string} url 卡片要用的分享链
+ * @returns {string} b23.tv 链接带上查询串；其它形态（含已经有查询串的）一律原样返回
+ */
+export function withBiliShareQuery(url, { ts = Date.now() } = {}) {
+  const u = String(url ?? '').trim();
+  if (!/^https?:\/\/b23\.tv\//i.test(u)) return u;
+  if (u.includes('?')) return u;          // 已经有查询串（例如用户自己分享进来的那条）就一个字都不动
+  return `${u}?share_medium=android&share_source=qq&ts=${Number(ts) || Date.now()}`;
+}
+
+/**
  * 拼 QQ 卡片。返回与音乐卡片同构的 { title, primary, native, link, note }。
  *
  * ⚠️ 2026-09-18 实测纠偏（主人反馈"显示发送者QQ版本太低，无法展示内容"）：
@@ -1011,8 +1062,17 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
    * 小程序哪个页面：`tools/probe-qq-miniapp-url.mjs` 用安卓/iPhone QQ 的 UA 跟过真卡和我们的卡，
    * 落地页对两者返回**同一份 3948 字节的壳**，页内只有 `mqqapi://microapp/open?url=` 和
    * `jump-qq.js`，没有任何"hash → 目标页"的接口可查。所以"点进去到底是不是那条视频"
-   * **只能在真机 QQ 上看**，服务端侧证明不了。这里能做的是把 qqdocurl 形态对齐真卡。 */
-  const webUrl = jumpUrl;
+   * **只能在真机 QQ 上看**，服务端侧证明不了。这里能做的是把 qqdocurl 形态对齐真卡。
+   *
+   * ── 2026-09-18 第十八批·修「点进去落到 b23.tv/<短码>.html」────────────────────
+   * webUrl 决定 qqdocurl，而**不带查询串的裸 b23.tv 短码会被 QQ 侧在点击时补上 `.html`**
+   * （三步排查 + HTTP 对照都在 `withBiliShareQuery` 的注释里，结论是 `.html` 拼在整串末尾，
+   * 落进 query 就无害）。所以这里必须过一遍 `withBiliShareQuery`。
+   *
+   * `jumpUrl` 保持原样不带查询串：它是卡片自己的跳转参数，**没有任何证据**表明它也吃这个坑，
+   * 不动它就是零风险；而"文案里的链接"（buildVideoCard 的 shareUrl）同样保持裸短码，
+   * 用户要的是"自己分享进来的 b23.tv 短码原样保留"。 */
+  const webUrl = withBiliShareQuery(jumpUrl);
   /* 硬性要求只有两个：title 缺了卡片没标题，jumpUrl 缺了没有跳转目标。
    *
    * 【2026-09-18 第十六批】**封面不再是硬性要求**。原来这里写的是
@@ -1080,7 +1140,7 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
   /* 日志里把 qqdocurl 打出来：它是"点进去是不是这条视频"的唯一判据，
    * 以后线上再出同类问题，看这一行就知道卡片有没有带对目标。 */
   const docUrl = send.meta?.detail_1?.qqdocurl;
-  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）webUrl=${webUrl} qqdocurl=${docUrl || '(缺失！点开不会落到这条视频)'}`);
+  log(`[video] 小程序 Ark 已生成：app=${send.app} view=${send.view}（${type}）jumpUrl=${jumpUrl} webUrl=${webUrl} qqdocurl=${docUrl || '(缺失！点开不会落到这条视频)'}`);
   if (!docUrl) log(`[video] 警告：本次请求带了 webUrl=${webUrl} 但服务端没回 qqdocurl —— 卡片点开会落不到目标视频`);
   return { type: 'json', data: { data: JSON.stringify(send) } };
 }

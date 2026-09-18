@@ -94,6 +94,11 @@ if (!ark) {
    * 真正"落到哪"由下面那段重定向链实测（不能只看字符串相等就以为点得进去）。 */
   ok(/^https?:\/\/b23\.tv\//i.test(String(d1.qqdocurl ?? '')), `qqdocurl 是 b23.tv 短链（真卡的形态）实际=${d1.qqdocurl}`);
   ok(String(d1.qqdocurl ?? '').includes(bvid), `qqdocurl 里带的是这条视频的 BV（${bvid}）`);
+  /* 【2026-09-18 第十八批】qqdocurl **必须带一个非设备查询串**：
+   * 裸短码 `https://b23.tv/<码>` 会被 QQ 侧在点击时补成 `https://b23.tv/<码>.html`（b23.tv 回 not found），
+   * 而带查询串时那个 `.html` 会落进 query 里被忽略，照样 302 到视频页。机制与逐条 HTTP 实测见
+   * `src/core/video.js` 的 `withBiliShareQuery` 注释。这条断言就是把这个契约钉住，别再改回裸短码。 */
+  ok(/[?&]ts=\d{13}/.test(String(d1.qqdocurl ?? '')), `qqdocurl 带 share_medium/share_source/ts 查询串 实际=${d1.qqdocurl}`);
   ok(String(d1.url ?? '').startsWith('m.q.qq.com/a/s/'), 'url 是 QQ 服务端签的 m.q.qq.com 短链');
   ok(!!send.config?.token, 'config.token 非空（空 token 的手拼卡会被 QQ 服务端静默拒收）');
 }
