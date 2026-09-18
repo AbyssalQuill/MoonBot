@@ -396,6 +396,91 @@ async function biliViaSearchByTitle(title, bvid, via) {
   };
 }
 
+/* ==================== 第三方聚合解析（secapi.top，绕风控用） ==================== */
+
+/**
+ * 第三方解析接口前缀。**每次调用现读环境变量**，不缓存到模块常量：
+ * 线上要临时换域名、或者要做"这一路挂掉能不能优雅退回"的现场验证时，
+ * 不用改代码重新发版（`QQBRIDGE_SECAPI_BILI=<会失败的地址>` 起一次进程就能复现）。
+ * 默认值与 `media.js` 里 QQ 音乐那套 secapi 调用是同一家聚合站，风格照抄它：
+ * 只带 `user-agent`、`AbortSignal.timeout` 限时、失败只打日志不抛给上层。
+ */
+const SECAPI_BILI_DEFAULT = 'http://secapi.top/API/jiexi/bilibili.php';
+const secapiBiliBase = () => String(process.env.QQBRIDGE_SECAPI_BILI ?? '').trim() || SECAPI_BILI_DEFAULT;
+
+/** 这一路的超时。实测正常 0.9~1.6s、错误形态 50~190ms，8s 已经是很宽的余量；
+ *  它只是**第一路**，卡住太久会拖慢整条发送链，所以不能给到官方那档 9s。 */
+const SECAPI_BILI_TIMEOUT_MS = 8000;
+
+/**
+ * 单路：secapi.top 的 B 站解析 —— 存在的唯一理由就是**绕开机房 IP 的风控**。
+ *
+ * ── 2026-09-19 接口实测（`tools/probe-secapi-bili.mjs` 在线上这台 VPS 跑的，逐条可复现）──
+ * `GET http://secapi.top/API/jiexi/bilibili.php?url=<链接或 BV>`，**参数名就是 `url`**：
+ *   · 传 `bv=BV…` → `{"code":400,"状态":"错误","信息":"请提供B站链接或BV号"}`（HTTP 仍是 200）；
+ *   · 认这些入参形态（逐个实测，返回同一条 BVID）：长链、长链带 `?spm_id_from=` 等 query、
+ *     裸 BV、`b23.tv/<7位短码>`、**短码带 `?share_medium=android&share_source=qq&bbid=…&ts=…`**、
+ *     `b23.tv/<BV>`、`m.bilibili.com/video/<BV>`；
+ *   · **不认** `av<aid>` 长链（`{"code":404,…,"信息":"未找到有效的BV号"}`），也不认小写 `bv…` ——
+ *     所以 `kind === 'aid'` 时这一路直接跳过，交给官方多路（见 resolveBilibili 第 0 路的判断）。
+ *   · 也不认别的平台：抖音/快手/微博的链接一律回上面那句"未找到有效的BV号"。
+ *
+ * 返回是**中文键**（映射见下），另有 `视频播放地址.{4K,1080P,1080P+,720P,480P,360P,240P}`：
+ *   每个清晰度给 `视频链接`（`http://secapi.top/…?code=<base64>`，解出来是 `upos-…bilivideo.com`
+ *   或 `upos-hz-mirrorakam.akamaized.net` 的 mp4）、`文件大小`、`时长(秒)`。
+ *   实测：解开 base64 后的真实地址里带 `deadline=<unix秒>`，**距今约 2 小时（会过期）**；
+ *   逐个清度实取（Range 1KB 看头 12 字节）**大部分是真 MP4**（magic `…66747970` = "ftyp"），
+ *   偶有一条回 `{"code":404,"状态":"错误","信息":"短链无效"}`（HTTP 仍是 200）—— 也就是**不保证每条都能播**。
+ *   ⚠️ 另一处坑：`时长(秒)` 的值是 `203666`，而同一条视频官方 `duration` 是 204 秒 ——
+ *   它其实是**毫秒**，标签写错了。本桥的卡片不需要播放地址（卡片只放封面+标题+短链），
+ *   所以这些字段一个都不往 `info` 里带，避免把"会过期的直链"混进缓存。
+ *
+ * ⚠️ **最坑的一条：不存在的 BV 会回 `code:200 / 状态:"成功"`，但字段全是空的**
+ *   （实测 `url=BV1zz411c7zz` → 标题 ""、封面图 ""、时长 0、AID 0、`视频播放地址` 为 `[]`）。
+ *   也就是说**不能只看 `code`**：标题为空一律当失败抛出去，否则会把一条"空视频"当成功，
+ *   卡片标题变成兜底的"B站视频"、封面也没有，等于把风控那套故障换个姿势重现一遍。
+ */
+async function biliViaSecapi(id, kind) {
+  if (kind !== 'bvid' || !id) throw new Error(`secapi 只认 BV/短链（kind=${kind}），av 号它一律回 404`);
+  const url = `${secapiBiliBase()}?url=${encodeURIComponent(`https://b23.tv/${id}`)}`;
+  const res = await fetch(url, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(SECAPI_BILI_TIMEOUT_MS) });
+  const text = await res.text();
+  let body = null;
+  try { body = JSON.parse(text); } catch { /* 不是 JSON：当失败 */ }
+  if (!body) throw new Error(`secapi 返回的不是 JSON（HTTP ${res.status}）：${text.slice(0, 80)}`);
+  if (Number(body.code) !== 200) throw new Error(`secapi 报错 code=${body.code}：${body.信息 || body.状态 || ''}`);
+  const v = body.视频信息 || {};
+  const title = cleanBiliTitle(v.标题);
+  // 见上面那条实测：code=200 也可能是空壳，标题为空就不认
+  if (!title) throw new Error(`secapi 回 code=200 但标题为空（实测不存在/已删的视频就是这个形态，BVID=${v.BVID || '?'}）`);
+  /* `发布时间` 是 "2026-09-08 16:45:55" 这种**北京时间字符串**，而下游（buildVideoCard / 返回映射）
+   * 用的是官方那套 **epoch 秒**。这里显式按 +08:00 解析成 epoch，别用 Date.parse 裸解析
+   * （裸解析会按本机时区走，服务器是 UTC 就差 8 小时）。 */
+  const pubMs = Date.parse(`${String(v.发布时间 || '').trim().replace(' ', 'T')}+08:00`);
+  const s = body.统计信息 || {};
+  const u = body.作者信息 || {};
+  return {
+    title,
+    author: String(u.昵称 || '').trim(),
+    cover: String(v.封面图 || '').replace(/^http:\/\//i, 'https://'),
+    description: String(v.描述 || '').slice(0, 500),
+    durationSec: Number(v['时长(秒)']) || 0,
+    // 键名与 biliViaView 完全对齐，下游（stat.play → playText）不用改
+    stat: {
+      play: Number(s.播放量) || 0,
+      danmaku: Number(s.弹幕数) || 0,
+      like: Number(s.点赞数) || 0,
+      coin: Number(s.硬币数) || 0,
+      favorite: Number(s.收藏数) || 0,
+      reply: Number(s.评论数) || 0,
+    },
+    pubdate: Number.isFinite(pubMs) ? Math.floor(pubMs / 1000) : 0,
+    cid: Number(v.CID) || 0,
+    aid: Number(v.AID) || 0,          // 官方 x/share/click 要的是 aid，顺手带出来（拿错也不会发错卡：shortCodeHitsBvid 会核对）
+    source: 'secapi',
+  };
+}
+
 /**
  * 向 B 站官方分享接口要一条 **b23.tv/<7 位不透明短码>** 形态的短链。
  *
@@ -526,6 +611,27 @@ export async function resolveBilibili(rawUrl) {
   let info = null;
   let lastErr = null;
 
+  /* 第 0 路：第三方聚合解析 secapi.top（**故意放在官方之前**）。
+   *
+   * 为什么排在官方前面：这一路的全部价值就是"从第三方服务器去取 B 站数据"，
+   * 出口不是这台机房 IP，所以不吃 B 站对机房 IP 的那套风控（背景见下面第 1 路）。
+   * 接口实测、字段全集、错误形态、`code=200 但空壳` 那个坑，都写在 `biliViaSecapi` 的注释里。
+   *
+   * ⚠️ 它是**第三方、随时可能挂**，所以这里失败/超时**只打日志、绝不往上层抛**，
+   * 下面官方多路（wbi/view → pagelist+标题反查 → og:meta）原样保留当兜底。
+   * 实测它的响应时间 0.9~1.6s、10 次连胜 10/10 无失败，正常时反而比官方那几路快。 */
+  if (kind === 'bvid' && id) {
+    try {
+      const via = await biliViaSecapi(id, kind);
+      info = via;
+      log(`[video] bilibili 信息来自 secapi（source=${via.source}）：${via.title.slice(0, 40)} 播放=${via.stat.play} 封面=${via.cover ? '有' : '无'}`);
+    } catch (e) {
+      log(`[video] bilibili secapi 不可用，退回官方路径：${e?.message ?? e}`);
+    }
+  } else {
+    log(`[video] bilibili 跳过 secapi（kind=${kind}）：实测该接口只认 BV/短链，av 长链一律回"未找到有效的BV号"`);
+  }
+
   /* 第 1 路：view —— 一次拿全（标题/UP主/封面/时长/播放量）。
    *
    * ── 2026-09-18 第十六批：这才是「B 站链接发出去还是纯链接」的真因 ──────────────
@@ -545,13 +651,25 @@ export async function resolveBilibili(rawUrl) {
    *       duration=204  stat.view=392087  desc=…
    *   （换 BV1d4411N7zD 复测同样 200；再同一时刻打老 view 仍然 412）
    * 结论：风控是**按老路径打的**，wbi 那条没被拦；而且它**不强制 w_rid 签名**，裸调即可。
-   * 所以第一优先改成 wbi/view，老 view 留着兜底（换机器/换网络可能反过来好使）。 */
-  for (const apiPath of VIEW_API_PATHS) {
-    for (const via of vias) {
-      const tag = apiPath.includes('/wbi/') ? 'wbi/view' : 'view';
-      try { info = await biliViaView(id, kind, via, apiPath); break; } catch (e) { lastErr = e; log(`[video] bilibili ${tag}/${via} 不可用：${e?.message ?? e}`); }
+   * 所以第一优先改成 wbi/view，老 view 留着兜底（换机器/换网络可能反过来好使）。
+   *
+   * 【2026-09-19 接入 secapi 后的改动，只有两处，其余逐字未动】：
+   *   ① 第 0 路已经把信息拿全了 → **整段跳过**，不再白打两条官方接口；
+   *   ② secapi 只给了一部分（比如没封面）时照旧进这里，但用 `{...got, ...pruneEmpty(info)}`
+   *      **只补空字段、不覆盖第三方已给的值**（`pruneEmpty` 会把空值剔掉，所以 got 里的空字段
+   *      不会把 secapi 的标题顶掉）。拿到东西就 break，判据仍是 `if (info)`，与改动前一致。 */
+  if (!info?.cover || !info?.author || !info?.title) {
+    for (const apiPath of VIEW_API_PATHS) {
+      for (const via of vias) {
+        const tag = apiPath.includes('/wbi/') ? 'wbi/view' : 'view';
+        try {
+          const got = await biliViaView(id, kind, via, apiPath);
+          info = info ? { ...got, ...pruneEmpty(info) } : got;
+          break;
+        } catch (e) { lastErr = e; log(`[video] bilibili ${tag}/${via} 不可用：${e?.message ?? e}`); }
+      }
+      if (info) break;
     }
-    if (info) break;
   }
 
   // 第 2 路：分P拿准确标题+时长 → 再用标题反查补齐封面/UP主/播放量
