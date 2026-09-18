@@ -352,7 +352,16 @@ body textarea.json-text, body .log-viewer, body .log-line {
    下面那一栏（画像学习 .lrn-status-block-fill）吃满卡片剩余高度，资料区一直铺到卡底。 */
 .lrn-status-card { display: flex; flex-direction: column; min-height: 0; }
 .lrn-status-body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
-.lrn-status-block { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
+/* 【2026-09-19 修「最后一条卡片没和左边最底下对齐」】
+ * 原来是 `flex: 0 1 auto` —— 上面这一栏（人格学习）**不参与分配剩余高度**，
+ * 于是它的列表高度只由内容决定，早早结束；剩下的高度全被下面那栏（画像学习）吃掉。
+ * 而下面那栏经常是**空的**（没有自动筛出来的人）→ 就变成"人格学习最后一条（如「喜爱真乃」）
+ * 停在中途，下面挂着一大块空的粉色栏" —— 看着就是最后一条没和左边底部对齐。
+ * 现在改成 `flex: 1 1 auto`：两栏**按比例分剩余高度**，上面那栏的列表因此一直铺到接近卡底，
+ * 最后一条的底边就落在左栏底边附近，而不是悬在半空。
+ * （不再靠调 max-height 那个魔法数字 —— 这块已经因为左栏高度变化被反复调过三次，
+ *   300→640→720，每次调准一次、过阵子又不齐。让它跟着高度分配走才是稳的。） */
+.lrn-status-block { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 /* 下面那一栏（画像学习）：吃满卡片剩余高度 —— 浅色托底让它看着是"铺到卡底"的一块栏，而不是留白 */
 .lrn-status-block-fill {
   flex: 1 1 auto;
@@ -365,6 +374,11 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-status-hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--nc-foreground-400); }
 .lrn-block-refresh { margin-left: auto; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
+/* 上面那栏（人格学习）的列表**去掉 620px 上限**：不摘掉它，上面那条 flex 分配就白改了 ——
+ * 块长高了、列表却仍被封在 620px，最后一条还是停在半空。
+ * 这栏通常只有目标名单里的几个人，条目很少，所以不怕它把整行撑高；
+ * 真正会无限变长的是下面「画像学习」（群友自动筛出来的），它的上限（720px）保持不动。 */
+.lrn-status-block .lrn-status-scroll { max-height: none; }
 /* 【2026-09-16 主人要求】最下面那一栏（画像学习）**限高 + 内部纵向滚动**：
    以前这里是 max-height:none，群友档案一多就把这一栏（连带整张右卡，因为 .lrn-grid 是 stretch）
    无限拉高，页面得一路滚到底才能看到别的区块。现在内容区限高自己滚，

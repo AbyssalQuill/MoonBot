@@ -17,6 +17,10 @@
     "tmpDir": "",
     "dockerPathMap": []
   },
+  "pixiv": {
+    "base": "https://x.pixigraph.xyz",
+    "_note": "Pixiv 搜图/发图走的第三方镜像站地址（官网要登录、机房 IP 常被挡，所以走这个平替站）。换站只改这一行的域名，不用动代码；留空或删掉这个键 = 用内置默认 https://x.pixigraph.xyz。优先级：config.json 的 pixiv.base > 环境变量 QQBRIDGE_PIXIV_BASE > 内置默认（与 dsh.baseUrl 同一套规则，每次调用现读，改完不用重启）。镜像站搜索接口实测只认 keyword 和 page（mode/s_mode/order/bl/type 全部被忽略），所以 qq_pixiv_search / qq_send_pixiv 的标签/作者/构图/尺寸/AI/时间排序筛选都在桥本地做，并支持 scanPages 自动翻页，细节与实测依据见 qq-bridge/src/lib/pixiv.js。"
+  },
   "ownerQQ": 0,
   "guard": {
     "enabled": true,

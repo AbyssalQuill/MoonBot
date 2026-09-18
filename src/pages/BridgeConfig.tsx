@@ -173,6 +173,9 @@ const LABEL: Record<string, string> = {
   'social.send.gapBaseMs': '（已废弃）间隔基数', 'social.send.gapPerCharMs': '（已废弃）每字追加间隔',
   'social.send.gapJitterRatio': '（已废弃）间隔抖动比例',
   'social.burstIntervalMinMs': '（已废弃）连发间隔下限', 'social.burstIntervalMaxMs': '（已废弃）连发间隔上限',
+  /* 【2026-09-19】搜图的镜像站地址：主人反馈镜像站会换域名/镜像挂掉，所以要能自己改。
+   * 这一项没登记的话 tools/audit-ui-labels.mjs 会报"未翻译键"（界面会裸奔一个英文键名）。 */
+  pixiv: '搜/发 Pixiv 插画', 'pixiv.base': 'Pixiv 镜像站地址',
 };
 
 /** MCP 工具中文名（工具与规则页） */

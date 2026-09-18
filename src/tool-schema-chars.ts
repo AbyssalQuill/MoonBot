@@ -14,11 +14,13 @@
  * 现在改成现问 server，zod schema 是注册代码现场生成的，量到的就是此刻真实体积，不会再漏新增工具。
  *
  * 口径：字符数不是 token 数；本文件统一按 **3.2 字符/token** 估算（英文 JSON 的经验值）。
- * 合计 96 个工具 83914 字符，其中 mcp__napcat__ 系列 89 个 78680 字符
+ * 合计 96 个工具 87496 字符，其中 mcp__napcat__ 系列 89 个 82262 字符
  *（**只有这一批能被 social.slimTools.deny 精简掉** —— 名单是在 mcp-napcat-safe.js 里生效的）。
  */
 export const TOOL_SCHEMA_CHARS: Record<string, number> = {
   "mcp__napcat__qq_send_rich": 4879,
+  "mcp__napcat__qq_pixiv_search": 3023,
+  "mcp__napcat__qq_send_pixiv": 2849,
   "mcp__napcat__qq_send_voice": 2430,
   "mcp__napcat__qq_set_wake_config": 2389,
   "mcp__napcat__qq_send_message": 2290,
@@ -29,7 +31,6 @@ export const TOOL_SCHEMA_CHARS: Record<string, number> = {
   "todo_write": 1344,
   "ask_user_question": 1334,
   "mcp__napcat__qq_wait_for_messages": 1310,
-  "mcp__napcat__qq_send_pixiv": 1310,
   "mcp__napcat__qq_character_list": 1286,
   "mcp__napcat__qq_set_system_config": 1265,
   "mcp__napcat__qq_send_image": 1213,
@@ -44,7 +45,6 @@ export const TOOL_SCHEMA_CHARS: Record<string, number> = {
   "mcp__napcat__qq_set_activity_hours": 1059,
   "mcp__napcat__qq_send_docx": 1020,
   "mcp__napcat-host__qq_learning_submit": 997,
-  "mcp__napcat__qq_pixiv_search": 980,
   "mcp__napcat__qq_send_qq_face": 979,
   "mcp__napcat__qq_send_private_message": 973,
   "mcp__napcat__qq_list_stickers": 968,

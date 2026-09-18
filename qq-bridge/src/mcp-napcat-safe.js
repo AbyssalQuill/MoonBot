@@ -2739,21 +2739,41 @@ if (cfg.social?.tools?.imageSearch !== false) {
 /* ── Pixiv 找图 / 发图（2026-09-18 主人要求："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
  * 走第三方平替站 x.pixigraph.xyz（官网要登录、机房 IP 常被挡），细节见 lib/pixiv.js 顶部注释。
  * 分工与"联网找图"完全同构：qq_pixiv_search 只查不发，qq_send_pixiv 负责真发。
- * 下载仍走 safeFetchBuffer（禁内网、限大小、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。 */
+ * 下载仍走 safeFetchBuffer（禁内网、限大小、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。
+ *
+ * 【2026-09-18 加本地筛选 + 自动翻页（方案 A：不登录、不用会员、不加部署）】
+ *   实测镜像站只认 keyword / page（mode=s_mode=order=bl=type= 全部被忽略），所以标签/构图/尺寸/AI/
+ *   时间排序这些筛选**只能在桥本地做**；本地筛就要多翻几页才凑得齐 → 有 scanPages。
+ *   参数含义、取值与"做不到"的边界全写在每个 .describe() 里（工具描述是模型唯一的说明书），
+ *   实现细节与实测依据见 lib/pixiv.js；回归自测见 tools/test-pixiv-filters.mjs。 */
 if (cfg.social?.tools?.pixiv !== false) {
   registerTool(
     'qq_pixiv_search',
-    'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for a 插画/原图/同人图 of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.',
+    'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for a 插画/原图/同人图 of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.'
+      + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / r18 / scanPages 全部是在镜像站返回的数据里**本地筛**的：镜像站只认 keyword 和 page，不认任何标签/排序参数。一页 60 条，最多扫 scanPages 页（默认 3、上限 10）；返回里的 scan 对象与 scanNotice 会如实说明"只扫了哪几页 / 全站共 total 条 / lastPage 多少"，**别当成筛了全站**。排序只支持按投稿时间（date_desc 最新优先 / date_asc / random），**不支持按人气或收藏数**（镜像站返回体里根本没有收藏数，硬传会回落成 date_desc 并在 scan.warnings 里说明）。默认排除 R-18/R-18G，只有 r18 明确传 only/include 才放行。',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ'),
-      page: z.number().optional().describe('Result page, default 1'),
-      limit: z.number().optional().describe('How many candidates, default 8, max 20'),
+      query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ。关键词不等于标签，想按标签筛请用 tags 参数'),
+      page: z.number().optional().describe('从第几页开始搜（镜像站页码，从 1 开始，默认 1）。它只是"起点"，配合 scanPages 会自动往后翻'),
+      limit: z.number().optional().describe('最多返回几条，默认 8，上限 20'),
+      r18: z.enum(['exclude', 'only', 'include']).optional().describe('R-18/R-18G 怎么处理：exclude=排除（默认，发到 QQ 安全）/ only=只看 R-18 / include=都要。不传就是 exclude。这是本地筛的（镜像站不认 mode=r18）；实测该站默认搜索只给全年龄作品（xRestrict 全是 0），所以 only 往往是空的'),
+      tags: z.array(z.string()).optional().describe('必须**全部命中**的标签，大小写不敏感、按子串匹配，例如 ["初音ミク","VOCALOID"]。传了它就启用本地筛选'),
+      author: z.string().optional().describe('作者：填名字 → 按 userName 子串匹配（大小写不敏感）；填纯数字 → 按 userId 精确匹配'),
+      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('构图：portrait=竖图(高>宽) / landscape=横图(宽>高) / square=正方（按原图 width/height；宽高缺失的作品不算命中）'),
+      minWidth: z.number().optional().describe('最小宽度（像素，按原图 width）；比它窄的排除。想要高清大图时用，比如 2000'),
+      minHeight: z.number().optional().describe('最小高度（像素，按原图 height）；比它矮的排除'),
+      multiPage: z.boolean().optional().describe('true=只看多图作品（pageCount>1）：要发组图/系列、或者想挑有分镜的漫画时用'),
+      excludeAi: z.boolean().optional().describe('true=排除 AI 生成的作品（镜像站的 aiType=2，另加 AI 标签兜底；实测 aiType=2 才是 AI，1 是手绘）'),
+      illustType: z.enum(['illust', 'manga']).optional().describe('只看插画(illust，illustType=0)或漫画(manga，illustType=1)。本站还有 illustType=2 的动图(ugoira)，不属于这两类，传这两个值都会把它排除'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('排序：date_desc=最新优先（默认）/ date_asc=最旧优先 / random=随机（"随便来一张"时有用）。**不支持按人气/收藏数排序**——镜像站返回体里没有收藏数；传 popular/hot/rank 这类会回落 date_desc 并在 scan.warnings 里写明原因'),
+      scanPages: z.number().optional().describe('最多往后翻几页找符合条件的作品：默认 3、上限 10（超了按 10 夹）。筛选在本地做、一页只有 60 条，命中太少就得往后翻；返回的 scan.pagesScanned 是实际扫的页数，结果少不代表全站少'),
     },
-    async ({ query, page, limit }) => {
+    async ({ query, page, limit, r18, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
-        const r = await pixivSearch(query, { page, limit });
+        const r = await pixivSearch(query, {
+          page, limit, r18, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages,
+        });
         return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `搜 Pixiv 失败：${error?.message ?? error}` }], isError: true };
@@ -2763,18 +2783,29 @@ if (cfg.social?.tools?.pixiv !== false) {
 
   registerTool(
     'qq_send_pixiv',
-    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give query (the bridge searches Pixiv and sends the best hit) or illustId (a Pixiv work id / pixiv.net link you already know). index picks which search hit to send (0 = first). size=master (default, 1200px, safe for QQ) or original (full size, may be several MB). Prefer ONE image per request. The bridge skips R-18/R-18G works.',
+    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give query (the bridge searches Pixiv and sends the best hit) or illustId (a Pixiv work id / pixiv.net link you already know). index picks which search hit to send (0 = first). size=master (default, 1200px, safe for QQ) or original (full size, may be several MB). Prefer ONE image per request. The bridge skips R-18/R-18G works.'
+      + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages 都是在镜像站返回的数据里**本地筛**的（镜像站只认 keyword 和 page），一页 60 条、最多扫 scanPages 页（默认 3、上限 10）；index 选的是**筛完之后**的第几条。想先看清筛选细节（筛掉多少、扫了几页、有哪些候选）就用 qq_pixiv_search。排序只支持投稿时间（date_desc/date_asc/random），**不支持按人气/收藏数**（镜像站没有收藏数）。本工具**永远排除 R-18/R-18G**（刻意不给 r18 参数，避免把不宜内容发进 QQ），需要看 R-18 只用 qq_pixiv_search。',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      query: z.string().optional().describe('Search keyword (used when illustId is not given)'),
-      illustId: z.string().optional().describe('Pixiv work id or pixiv.net link; takes precedence over query'),
-      index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
+      query: z.string().optional().describe('搜索关键词（没给 illustId 时用），例如 初音ミク 壁纸。关键词不等于标签，按标签筛请用 tags'),
+      illustId: z.string().optional().describe('Pixiv 作品号或 pixiv.net 链接；给了它就优先按号取图，其它搜索/筛选参数都不生效'),
+      index: z.number().optional().describe('用 query 搜完后发第几条（0 开始，默认 0）。注意这是**筛选之后**结果里的序号：筛选条件一变，index 指向的作品就变了，拿不准就先 qq_pixiv_search 看清楚'),
       size: z.enum(['master', 'original']).optional().describe('master (default, 1200px) or original (full size)'),
-      page: z.number().optional().describe('Which page of a multi-page work to send, 0-based, default 0'),
+      page: z.number().optional().describe('多图作品发第几页（0 开始，默认 0）。注意这是**作品内的页号**，不是搜索页码'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
+      tags: z.array(z.string()).optional().describe('必须**全部命中**的标签（大小写不敏感、子串匹配），例如 ["初音ミク","壁紙"]。传了它就启用本地筛选'),
+      author: z.string().optional().describe('作者：名字 → 按 userName 子串匹配（大小写不敏感）；纯数字 → 按 userId 精确匹配'),
+      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('构图：portrait=竖图(高>宽) / landscape=横图(宽>高) / square=正方（宽高缺失的作品不算命中）'),
+      minWidth: z.number().optional().describe('最小宽度（像素，按原图 width），想要高清大图时用'),
+      minHeight: z.number().optional().describe('最小高度（像素，按原图 height）'),
+      multiPage: z.boolean().optional().describe('true=只看多图作品（pageCount>1）；要发系列图时配合 page 参数挑第几页'),
+      excludeAi: z.boolean().optional().describe('true=排除 AI 生成的作品（镜像站的 aiType=2 + AI 标签兜底）'),
+      illustType: z.enum(['illust', 'manga']).optional().describe('只看插画(illust，illustType=0)或漫画(manga，illustType=1)；illustType=2 的动图(ugoira)不属于这两类，传这两个值都会排除它'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('排序：date_desc=最新优先（默认）/ date_asc=最旧优先 / random=随机。**不支持按人气/收藏数**（镜像站没有收藏数），硬传会回落 date_desc 并写进警告'),
+      scanPages: z.number().optional().describe('最多往后翻几页找符合条件的作品：默认 3、上限 10。筛选在本地做，命中太少会自动往后翻'),
     },
-    async ({ key, token, query, illustId, index, size, page, replyToMessageId }) => {
+    async ({ key, token, query, illustId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
         let picked = null;
         let work = null;
@@ -2786,10 +2817,16 @@ if (cfg.social?.tools?.pixiv !== false) {
         } else {
           const q = String(query ?? '').trim();
           if (!q) return { content: [{ type: 'text', text: '要么给 query（关键词），要么给 illustId（Pixiv 作品号/链接）' }], isError: true };
-          const r = await pixivSearch(q, { limit: 10 });
+          const r = await pixivSearch(q, {
+            limit: 10, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages,
+          });
           picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
           if (!picked) {
-            return { content: [{ type: 'text', text: `Pixiv 没搜到「${q}」的安全作品（已过滤 R-18 ${r.filtered} 条）。换个更具体的说法再试。` }] };
+            /* 用了本地筛选时把"筛掉多少 / 扫了几页"一并说清楚，否则模型会以为"Pixiv 上没有这张图"。
+             * R-18 那部分单独算，免得和本地筛选条数重复计数。 */
+            const localDrop = r.scan ? r.scan.droppedTotal - r.scan.dropped.adult - r.scan.dropped.notR18 : 0;
+            const scanInfo = r.scan ? `，筛选条件再筛掉 ${localDrop} 条（已扫 ${r.scan.pagesScanned} 页 / 上限 ${r.scan.scanPagesLimit} 页，全站共 ${r.scan.total} 条）` : '';
+            return { content: [{ type: 'text', text: `Pixiv 没搜到「${q}」符合条件的作品（R-18 过滤 ${r.filtered} 条${scanInfo}）。换个更具体的说法或放宽筛选再试。` }] };
           }
           work = picked;
         }

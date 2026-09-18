@@ -887,7 +887,7 @@ export default function GroupPortrait({ onBack }: Props) {
                   {ownerInfo.prose && <p className="pv-prose">{ownerInfo.prose}</p>}
                   {ownerOpen && ownerInfo.personaEn && (
                     <p className="pv-prose" style={{ marginTop: 8, opacity: 0.85 }}>
-                      <b style={{ color: C.textMuted, fontWeight: 600 }}>英文人设（personaEn）</b>{'\n'}{ownerInfo.personaEn}
+                      <b style={{ color: C.textMuted, fontWeight: 600 }}>英文人设正文</b>{'\n'}{ownerInfo.personaEn}
                     </p>
                   )}
                 </div>
