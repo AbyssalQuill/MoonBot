@@ -64,12 +64,17 @@ const ROLE_HINT: Record<string, string> = {
 };
 
 /** 桥控制台返回体兼容：管理端代理失败时会回 { success:false, code, message }（**没有 ok 字段**），
- *  所以判成功一律用 `ok === true`，不能只判 `ok === false` —— 否则会把代理失败当成成功数据渲染。 */
+ *  所以判成功一律用 `ok === true`，不能只判 `ok === false` —— 否则会把代理失败当成成功数据渲染。
+ *  【2026-09-19 主人要求】文案不再在前端写死一份：**"桥没在运行"和"桥版本旧"是两件事**，
+ *  服务端已经按实际原因分好（code='bridge-offline' 对端没应答 / code='bridge-stale' 桥答了但没这条路由），
+ *  这里优先用服务端给的那句话。前端再抄一份必然漂移 —— 以前这里抄的就是那句把"没启动"说成
+ *  "确认桥接进程已启动、远端连接与隧道正常"的话，桥只是没跑的人会以为要升级/查隧道。 */
 function pickErr(e: any): string {
   if (!e) return '未知错误';
-  if (e.code === 'bridge-offline') return '目标桥不可达：请确认桥接进程已启动、远端连接与隧道正常';
-  if (e.code === 'bridge-stale') return '目标桥版本过旧或未连接（需要更新桥代码）';
-  return e.error || e.message || String(e);
+  if (e.message || e.error) return String(e.message || e.error);
+  if (e.code === 'bridge-offline') return '桥没在运行，这份语音配置要先启动桥才读得到（启动后点重试）';
+  if (e.code === 'bridge-stale') return '桥在运行，但它的版本里没有语音接口：更新桥代码并重启桥，再点重试';
+  return String(e);
 }
 
 export default function VoiceConfig({ onBack }: Props) {
@@ -259,6 +264,9 @@ export default function VoiceConfig({ onBack }: Props) {
   };
 
   const usage = cfg?.usage;
+  /** 【2026-09-19】配置没读到时也要把表单渲染出来（桥没在跑就取不到真实值，但页面不能因此变成一块错误提示）：
+   *  cfg 为空时用空壳兜住，下面所有取值都走可选访问。 */
+  const view: VoiceCfg = cfg ?? {};
   const voiceOptions = useMemo(() => {
     const opts = (builtin ?? []).map((b) => ({ id: b.id, label: `${b.label}（内置·${b.lang}${b.gender !== '—' ? '·' + b.gender : ''}）` }));
     for (const v of custom) opts.push({ id: v.id, label: `${v.name}（自建·${v.kind === 'clone' ? '样本复刻' : '文字设计'}）` });
@@ -285,20 +293,29 @@ export default function VoiceConfig({ onBack }: Props) {
       <div className="page-body">
         {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
 
-        {loadErr ? (
+        {loadErr && (
+          /* 【2026-09-19 主人要求】以前这里是 `loadErr ? <错误卡> : <整页表单>` —— 桥一停整页配置直接消失。
+             现在错误只当错误（提示条 + 重试），配置照常显示、照常能改；真正依赖桥运行时的部分
+             （保存/测试/试听/音色库）在下面用一句人话标出来，而不是把整页删掉。 */
           <div className="card">
             <div className="lrn-error">
               <AlertTriangle size={15} />
               <div style={{ flex: 1 }}>
                 {loadErr}
-                <div className="lrn-error-detail">语音接口来自桥侧新版本：请先把桥代码更新到服务器并重启桥，再回到本页。</div>
+                <div className="lrn-error-detail">
+                  {cfg
+                    ? '下面显示的是上次读到的配置，可以继续改；但保存、测试、试听、音色库都要经过桥，桥起来前点这些会报同样的错。'
+                    : <>下面字段里是<b>默认值，不是桥上已保存的配置</b>（桥一起来点「重试」就会填回真实值）；保存、测试、试听、音色库都要经过桥，桥起来前用不了。</>}
+                </div>
               </div>
               <button className="btn btn-sm btn-danger" disabled={busy !== null} onClick={() => void load()}>
                 <RefreshCw size={13} /> 重试
               </button>
             </div>
           </div>
-        ) : !cfg ? (
+        )}
+
+        {!cfg && !loadErr ? (
           <div className="card"><div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取语音配置…</div></div>
         ) : (
           <>
@@ -384,7 +401,10 @@ export default function VoiceConfig({ onBack }: Props) {
               </div>
               <div className="lrn-inline-note">
                 <Clock3 size={13} />
-                {usage ? <>今日（{usage.day}）已合成 {usage.chars} 字 / {usage.calls} 次，缓存命中 {usage.cacheHits} 次；语音识别 {usage.asrCalls} 次</> : '今日用量读取中…'}
+                {usage
+                  ? <>今日（{usage.day}）已合成 {usage.chars} 字 / {usage.calls} 次，缓存命中 {usage.cacheHits} 次；语音识别 {usage.asrCalls} 次</>
+                  /* 用量是桥侧的实时计数：桥没在跑时别一直显示"读取中…"，说清楚为什么没有 */
+                  : loadErr ? '今日用量读不到（要桥在运行时才有这份计数）' : '今日用量读取中…'}
               </div>
               <div className="lrn-actions">
                 <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void save()}>
@@ -425,8 +445,8 @@ export default function VoiceConfig({ onBack }: Props) {
               </div>
               {ROLE_ORDER.map((role) => {
                 const rc = models[role] ?? { baseUrl: '', model: '', apiKey: '' };
-                const meta = (cfg.roles ?? []).find((x) => x.role === role);
-                const saved = cfg.models?.[role];
+                const meta = (view.roles ?? []).find((x) => x.role === role);
+                const saved = view.models?.[role];
                 // 音色设计 / 音色复刻与语音合成是**同一家服务、同一把密钥**（主人确认：请求地址一样的），
                 // 所以这两栏留空就自动跟随「语音合成」，不必重复填。
                 const followsTts = role !== 'tts';
@@ -437,7 +457,7 @@ export default function VoiceConfig({ onBack }: Props) {
                       <label className="field-row">
                         <span className="f-label">请求地址</span>
                         <input className="input" type="text"
-                          placeholder={followsTts ? '留空即跟随「语音合成」的地址（同一家服务）' : (cfg.presets?.tokenPlanCn ?? '')}
+                          placeholder={followsTts ? '留空即跟随「语音合成」的地址（同一家服务）' : (view.presets?.tokenPlanCn ?? '')}
                           value={rc.baseUrl}
                           onChange={(e) => setModels({ ...models, [role]: { ...rc, baseUrl: e.target.value } })} />
                       </label>

@@ -784,8 +784,23 @@ export function reconcileWithDsh(opts = {}) {
     });
     const floor = fl(meter.reconcileFloor.get(sid));
     const mine = fl(meter.sessionSums.get(sid));
-    const grown = sumOf(dshNow) > sumOf(floor);
-    if (!grown) continue;                                            // 没增长（或本会话已对过账）
+    /* 【修对账棘轮】以前只看"DSH 总量 > 水位"就认定有缺口，再逐桶补 max(0, dshNow[桶] − max(桥侧[桶], 水位[桶]))。
+     * 逐桶 max(0,·) 是**单向棘轮**：桥侧某个桶记多了（快照重放把同一 step 记成两条不同签名之类）
+     * 永远扣不回来，而另一个桶的缺口还会继续补 —— 于是会话总量单调漂到 DSH 之上、再也回不去。
+     *
+     * 线上实测（取回 /root/qq-bridge/state/token-usage.jsonl 离线复算，session-724f5d85）：
+     *   桥侧终身 34,165,004（prompt 2,787,439 / cacheRead 31,316,032 / completion 61,533）
+     *   DSH  终身 31,788,012（prompt 2,291,293 / cacheRead 29,437,696 / completion 59,023）→ 桥侧多 2,376,992
+     * 其中 2026-09-18 13:35:13 那条补记行（prompt=476,993、cacheRead=0）落在当日，使面板「今日已用」
+     * 比 DSH 自己记的当日用量（21,562,418，与提供方控制台 21,563,440 只差 1,022 的结算延迟）多 476,993。
+     *
+     * 所以先把**总量**比一遍：桥侧总量已不低于 DSH 总量就不补；要补也把"逐桶差额之和"限制在总缺口内。
+     * 离线验证（只读导入本模块、stateDir/projcache 指向临时目录）：现状实现补记 4,700 后总量超 DSH 2,003；
+     * 本修法补记 2,697（正好等于总缺口），总量与 DSH 相等。 */
+    const mineSum = sumOf(mine), floorSum = sumOf(floor), dshSum = sumOf(dshNow);
+    const baseSum = Math.max(mineSum, floorSum);
+    if (dshSum <= baseSum) continue;                                 // 总量没有缺口 → 绝不因某个桶有缺口再补
+    const deficit = dshSum - baseSum;                                 // 总量缺口：补记总量不得超过它
     const recent = nowTs - mtime <= maxAgeMs;
     // 桥侧有基准 → 正常对账；没有基准时，只有"确实是本桥工作区里的会话 + 最近还在动"
     // 才算数（例如子代理会话：桥没跟它的帧，但量是这套机器人花的）。
@@ -801,11 +816,20 @@ export function reconcileWithDsh(opts = {}) {
       cacheRead: Math.max(mine.cacheRead, floor.cacheRead),
       cacheWrite: Math.max(mine.cacheWrite, floor.cacheWrite)
     };
-    const delta = {
+    // 逐桶取缺口，但**合计不得超过 deficit**（否则一样会把总量推到 DSH 之上），按缺口比例分配。
+    const gaps = {
       prompt: Math.max(0, dshNow.prompt - base.prompt),
       completion: Math.max(0, dshNow.completion - base.completion),
       cacheRead: Math.max(0, dshNow.cacheRead - base.cacheRead),
       cacheWrite: Math.max(0, dshNow.cacheWrite - base.cacheWrite)
+    };
+    const gapSum = gaps.prompt + gaps.completion + gaps.cacheRead + gaps.cacheWrite;
+    const scale = gapSum > deficit ? deficit / gapSum : 1;
+    const delta = {
+      prompt: Math.floor(gaps.prompt * scale),
+      completion: Math.floor(gaps.completion * scale),
+      cacheRead: Math.floor(gaps.cacheRead * scale),
+      cacheWrite: Math.floor(gaps.cacheWrite * scale)
     };
     const dTokens = sumOf(delta);
     if (dTokens <= 0) continue;

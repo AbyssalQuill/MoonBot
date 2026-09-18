@@ -36,6 +36,23 @@ const pick = (...ks: string[]) => (o: any): string => {
 };
 /** 兼容桥侧 { ok, result:{...} } 与直接对象两种回包 */
 const unwrap = (r: any): any => (isObj(r?.result) ? r.result : isObj(r) ? r : {});
+/** 【2026-09-19 主人要求改写】读学习配置失败时的**第二行说明**（提示条里的一句，不是文档）。
+ *  以前这里是一句写死的「学习接口来自桥侧新版本：请先更新并启动桥接…」——
+ *  它把"桥没在运行"和"桥版本旧"混成一件，于是桥只是没启动的人会去更新一个不需要更新的桥。
+ *  现在按服务端给的 code 分两种说法，各说清"现在不能做什么 + 下一步做什么"：
+ *    · bridge-offline：对端根本没应答（进程没起 / 隧道没建 / 超时）→ 去把桥启动起来；
+ *    · bridge-stale  ：桥答了，但它的版本里没有这条路由 → 这才是要更新桥代码的那种。 */
+const learningErrDetail = (code: string, hasCfg: boolean): string => {
+  if (code === 'bridge-offline') {
+    // 分两种：从来没读到过（下面显示的是默认值）/ 读到过、这次重读失败（下面还是上次的值）。
+    // 这两种都不该假装知道桥上的当前值，所以句子分开写。
+    return hasCfg
+      ? '桥没在运行，这次重读没成功：下面还是上次读到的值，可以继续看和改。启动桥（首页「一键启动整套」，远端就先点「连接」）后点重试。'
+      : '桥没在运行，这份配置暂时读不到：下面字段里是默认值，不是桥上保存的设置。启动桥（首页「一键启动整套」，远端就先点「连接」）后点重试。';
+  }
+  if (code === 'bridge-stale') return '桥在运行，但它的版本里没有学习接口：把桥代码更新到最新并重启桥，再点重试。';
+  return '点重试重新读一次；若一直失败，看上面那句里的具体原因。';
+};
 /** api() 抛出的 HTTP 错误 → 人话：404 基本等于「管理端还没转发这条桥接口」，
  *  直接抛 `API /xx -> HTTP 404` 会让主人以为桥坏了，这里补一句可落地的说明。 */
 const apiErrText = (e: any): string => {
@@ -217,6 +234,14 @@ const normHHMM = (raw: any): string => String(raw ?? '')
 export default function Learning({ onBack }: Props) {
   const [cfg, setCfg] = useState<any>(null);
   const [loadErr, setLoadErr] = useState<string>('');
+  /** 【2026-09-19】读配置失败时带上桥侧返回的 code（'bridge-offline' / 'bridge-stale'），
+   *  用来把"桥没在跑"和"桥版本旧"分开说 —— 这两件事的下一步完全不同，混在一句里
+   *  会把只是没启动桥的人指去升级桥。 */
+  const [loadErrCode, setLoadErrCode] = useState<string>('');
+  /** 桥没在运行、但那**文件本身**读到了（服务端直读/直写 state/learning-config.json）：
+   *  值是服务端回来的 fallback 来源（'local-file' = 本机那份 / 'remote-file' = 服务端那份，经 SSH），
+   *  空串 = 正常（配置是从桥控制台取的）。这时配置照常可看可改，只有依赖桥运行时的部分用不了。 */
+  const [bridgeDown, setBridgeDown] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
   // 【2026-09-16 修「按钮串台」】以前整页只有一个 busy，黑话区与人格区共用，于是：
   //   ① 两个区块的「保存配置」是**同一个 handler**（body 里 slang + persona 一起提交）→ 点黑话区的保存会连带写人格配置；
@@ -458,8 +483,8 @@ export default function Learning({ onBack }: Props) {
       const r: any = await slangBatchDelete([id]);
       const err = firstErr(r);
       if (err) {
-        // 桥侧「一条都匹配不到」回的是 404，而管理端代理把桥的 404 统一改写成 code='bridge-stale'、
-        // 文案"目标桥版本过旧或未连接" —— 对"这条词已经不在了"这种正常结果来说很误导。
+        // 桥侧「一条都匹配不到」回的是 404，而管理端代理把桥的 404 统一改写成 code='bridge-stale'
+        //（文案是"桥在运行，但没有这条接口（HTTP 404）…"）—— 对"这条词已经不在了"这种正常结果来说很误导。
         // 按契约把话说明白：两种可能都写出来，不猜死是哪一种。
         const stale = r?.code === 'bridge-stale' && /404/.test(String(r?.detail ?? ''));
         const why = stale
@@ -494,10 +519,14 @@ const clampHrs = (v: any): number => {
     try {
       const r = await getLearningConfig();
       const e = firstErr(r);
-      if (e) { setLoadErr(e); setCfg(null); return; }
+      if (e) { setLoadErr(e); setLoadErrCode(String((r as any)?.code ?? '')); setBridgeDown(''); setCfg(null); return; }
       const c = isObj(r.config) ? r.config : r; // 兼容 {config:{...}} 与直接配置对象
       setCfg(c);
       setLoadErr('');
+      setLoadErrCode('');
+      // 服务端在"桥没在跑、改用文件兜底"时会带 bridgeDown=true + fallback（local-file / remote-file）：
+      // 配置是真值、可看可改，但依赖桥运行时的功能不可用 —— 界面据此标出来，而不是假装一切正常。
+      setBridgeDown((r as any)?.bridgeDown === true && typeof (r as any)?.fallback === 'string' ? String((r as any).fallback) : '');
       const s = isObj(c?.slang) ? c.slang : {};
       const p = isObj(c?.persona) ? c.persona : {};
       setSlgEnabled(s.enabled !== false);
@@ -512,7 +541,7 @@ const clampHrs = (v: any): number => {
       setPerTime(String(p.timeHHMM ?? ''));
       setQqText(Array.isArray(p.targetQQ) ? p.targetQQ.join('\n') : '');
     } catch (err: any) {
-      setLoadErr(String(err?.message ?? err)); setCfg(null);
+      setLoadErr(String(err?.message ?? err)); setLoadErrCode(''); setBridgeDown(''); setCfg(null);
     }
   };
 
@@ -587,7 +616,11 @@ const clampHrs = (v: any): number => {
     });
     const e = firstErr(r);
     if (e) { setMsg(`保存失败：${e}`); return; }
-    setMsg('黑话学习配置已保存');
+    // 桥没在跑时服务端是直接写那份配置文件的（本机 / 服务端，见 server 的 learningConfigRoute）：
+    // 写成功了，但"桥还没读到"要说清楚，别让人以为已经生效。
+    setMsg((r as any)?.bridgeDown === true
+      ? `桥没在运行：已写入${(r as any)?.fallback === 'remote-file' ? '服务端' : '本机'} qq-bridge/state/learning-config.json，桥下次启动或下一轮学习时生效`
+      : '黑话学习配置已保存');
     await loadConfig();
     await refreshSlangLib(true);   // 只刷新黑话侧（含学习状态机），不碰人格 / 画像
   });
@@ -605,7 +638,9 @@ const clampHrs = (v: any): number => {
     });
     const e = firstErr(r);
     if (e) { setMsg(`保存失败：${e}`); return; }
-    setMsg('人格学习配置已保存');
+    setMsg((r as any)?.bridgeDown === true
+      ? `桥没在运行：已写入${(r as any)?.fallback === 'remote-file' ? '服务端' : '本机'} qq-bridge/state/learning-config.json，桥下次启动或下一轮学习时生效`
+      : '人格学习配置已保存');
     await loadConfig();
     await refreshStatus(true);
   });
@@ -696,16 +731,41 @@ const clampHrs = (v: any): number => {
             {/* ============ 左：学习配置与操作 ============ */}
             <div className="card">
               <div className="card-title"><Activity size={17} /> 黑话 / 人格学习</div>
-              {loadErr ? (
+              {/* 【2026-09-19 主人要求：桥不可达不该让配置页变成不可用】
+                  以前这里是 `loadErr ? <错误块> : <>...全部配置字段...</>` —— 桥一停，整块学习配置
+                  （黑话定时 / 人格学习 / 目标 QQ）连同"保存配置"一起消失，只剩一句错误提示。
+                  现在拆开：**错误归错误，配置照常显示、照常能改**。
+                  桥没在跑时服务端会直接读写本机 qq-bridge/state/learning-config.json（见 server/index.js
+                  的 learningConfigRoute），所以配置里显示的就是真实值，保存也确实写得进去；
+                  真正依赖桥运行时的只有"立即学习 / 停止 / 学习状态 / 黑话库 / 用量"这几处，单独标注。 */}
+              {bridgeDown && (
+                <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
+                  <AlertTriangle size={13} /> <b>桥没在运行</b>：下面这份配置直接读自
+                  <code>{bridgeDown === 'remote-file' ? ' 服务端 qq-bridge/state/learning-config.json' : ' 本机 qq-bridge/state/learning-config.json'}</code>
+                  ，<b>能看、能改，保存也会写进去</b>（桥下次启动或下一轮学习就会用到）。
+                  但"立即学习 / 停止 / 学习状态 / 黑话库 / 用量"这些要桥在跑才能用 —— 桥起来后点
+                  <button type="button" className="btn btn-sm" style={{ margin: '0 4px' }}
+                    disabled={slangBusy !== null || personaBusy !== null}
+                    onClick={() => { void loadConfig(); void refreshStatus(true); void refreshPortrait(true); void refreshSlangLib(true); }}>
+                    <RefreshCw size={12} /> 重新读取
+                  </button>
+                  即可。
+                </div>
+              )}
+              {loadErr && (
                 <div className="lrn-error">
                   <AlertTriangle size={15} />
-                  <div style={{ flex: 1 }}>{loadErr}<div className="lrn-error-detail">学习接口来自桥侧新版本：请先更新并启动桥接（本地或远端），且该桥需支持 /api/learning-config 等学习 API。</div></div>
+                  <div style={{ flex: 1 }}>
+                    {loadErr}
+                    <div className="lrn-error-detail">{learningErrDetail(loadErrCode, !!cfg)}</div>
+                  </div>
                   <button className="btn btn-sm btn-danger" disabled={slangBusy !== null || personaBusy !== null} onClick={() => { setLoadErr(''); loadConfig(); }}>
                     <RefreshCw size={13} /> 重试
                   </button>
                 </div>
-              ) : (
-                <>
+              )}
+
+              <>
                   {/* 黑话定时学习 */}
                   <div className="lrn-block">
                     <div className="lrn-block-title">黑话定时学习</div>
@@ -850,7 +910,6 @@ const clampHrs = (v: any): number => {
                   {/* 群友画像学习：目标自动从聊天记录里筛，落回 profiles 表 → 群友画像页立刻可见 */}
                   <PortraitLearnBlock />
                 </>
-              )}
             </div>
 
             {/* ============ 右：人格学习状态（与左卡片等高；上下两栏：人格学习 / 画像学习；超出滚动；点开看完整资料）
@@ -1449,7 +1508,7 @@ function UsagePanel() {
           const res = side.result || {};
           if (res.reason) return `${name}：${res.reason}`;
           const add = num(res.addedTokens);
-          return add > 0 ? `${name}：补记 ${num(res.added)} 笔 / ${fmtFull(add)} tokens` : `${name}：无差额，与 DSH 一致`;
+          return add > 0 ? `${name}：补记 ${num(res.added)} 笔 / ${fmtFull(add)} tokens` : `${name}：无差额（桥侧累计已达 DSH 自己的会话累计，不代表与提供方控制台一致）`;
         }
         if (!reason) return '';
         return reason.includes(name) ? reason : `${name}：${reason}`;
@@ -1589,12 +1648,28 @@ function UsagePanel() {
     : '北京 00:00 换日';
   const note = typeof report?.note === 'string' && report.note ? report.note : '';
   // 与 DSH 对账状态（桥侧每 5 分钟自动跑一次；标题栏那个按钮是手动再跑一次）
+  //
+  // 【2026-09-18 修「文案让人以为面板 = 提供方控制台」】原文案两处不准确：
+  //  ①「逐会话与 DSH 完全一致」——对账比的只是 **DSH 自己**的会话级累计
+  //     （DSH home 下 storages/session_projcache/sessions/*.json 的 record.rows.tokenUsage.val.totals），
+  //     **不是**提供方控制台；而且桥侧 reconcileWithDsh 按"桶"补差额，只保证「桥侧累计 ≥ DSH 累计」。
+  //  ②「平台控制台因结算延迟可能略差几秒的量」——实测不是几秒的量。2026-09-18 19:07:03 的实测数据：
+  //     · 面板 21,842,584（= 服务端桥 today.billedTotal；本机那份对当日贡献为 0，故合计就是它）；
+  //     · 同一窗口按 DSH 自己落的事件日志（sessions/<slug>/session-*/*.jsonl.zstd 里
+  //       assistant/chunk|message 的 usage，按 turn/step 取最终值）逐 step 合计 = 21,562,418；
+  //     · 提供方控制台 = 21,563,440（与 DSH 逐 step 只差 1,022 = 0.005% —— 这才是"结算延迟"的量级）。
+  //     → 面板比 DSH/控制台多 476,993，且**正好等于 1 条对账补记行**
+  //       （session-724f5d85，2026-09-18 13:35:13，prompt=476,993、cacheRead=0）；
+  //       桥侧 reconcileWithDsh 的逐桶 max(0, dsh−桥侧) 是**单向棘轮**：某个桶记多了永远扣不回来
+  //       （该会话桥侧终身 34,165,004 vs DSH 31,788,012，多 2,376,992），而补记行又按"对账时刻"
+  //       写 tsMs，于是这一笔落在当日、把「今日已用」推高。
+  //     所以文案必须写明口径，不能再承诺"与提供方控制台一致"。
   const rcLast = isObj(report?.reconcile?.last) ? report.reconcile.last : null;
   const rcText = rcLast
-    ? `已与 DSH 对账：${bjClock(num(rcLast.at))} 扫描 ${num(rcLast.scanned)} 个会话 · `
+    ? `已与 DSH 的会话级计数对账：${bjClock(num(rcLast.at))} 扫描 ${num(rcLast.scanned)} 个会话 · `
       + (num(rcLast.addedTokens) > 0
-        ? `补记 ${fmtFull(num(rcLast.addedTokens))} tokens（桥侧此前漏记的帧）`
-        : '逐会话与 DSH 完全一致')
+        ? `本次补记 ${fmtFull(num(rcLast.addedTokens))} tokens（桥侧漏记的帧）`
+        : '本次无差额')
     : '';
 
   return (
@@ -1608,7 +1683,7 @@ function UsagePanel() {
           </button>
           <button
             className="btn btn-sm" disabled={rcBusy} onClick={doReconcile}
-            title="拿 DSH 自己记的每个会话累计用量与桥侧对账，补上被漏记的 usage 帧（幂等，可反复点）"
+            title="拿 DSH 自己记的每个会话累计用量与桥侧对账，补上桥侧漏记的 usage 帧（只比对 DSH 自己的会话累计，不比对提供方控制台；补记按对账时刻计入当日）"
           >
             {rcBusy ? <Loader2 size={13} className="spin" /> : <Scale size={13} />} 与 DSH 对账
           </button>
@@ -1616,7 +1691,15 @@ function UsagePanel() {
       </div>
 
       {rcMsg && <div className="lrn-note lrn-note-soft">{rcMsg}</div>}
-      {!rcMsg && rcText && <div className="lrn-note lrn-note-soft">{rcText}（每 5 分钟自动对账一次；平台控制台因结算延迟可能略差几秒的量）</div>}
+      {/* 【2026-09-18】口径必须写出来：对账只比 DSH 自己记的会话累计，**不比对提供方控制台**；
+          补记行按"对账时刻"计入当日，当日数字因此可能高于控制台（实测 2026-09-18 高 476,993）。
+          以前这里写「平台控制台因结算延迟可能略差几秒的量」，把 47 万的差说成"几秒"，是错的。 */}
+      {!rcMsg && rcText && (
+        <div className="lrn-note lrn-note-soft">
+          {rcText}（对账口径 = 桥侧累计 ↔ DSH 自己记的会话累计，<b>不比对提供方控制台</b>；每 5 分钟自动跑一次。
+          补记行按"对账时刻"计入当日，且桥侧某个桶一旦记多就扣不回来，所以当日数字可能高于控制台）
+        </div>
+      )}
 
       {note && <div className="lrn-note lrn-note-soft">{note}</div>}
 
@@ -1639,6 +1722,9 @@ function UsagePanel() {
             {todayUsed === 0 ? '今日暂无记录' : `未命中 ${fmtFull(num(today.prompt))} · 命中 ${fmtFull(num(today.cacheRead))} · 输出 ${fmtFull(num(today.completion))}`}
             {/* 平台（小米 MiMo 控制台）按 UTC 日结算 = 北京 08:00 换日；这里并列显示自然日合计，方便对数 */}
             {calTotal > 0 && <><br />平台口径（{dayStartLabel}）· 自然日 00:00 起合计 {fmtFull(calTotal)}</>}
+            {/* 【2026-09-18】这行是实测教训：上面那个数**不一定**等于提供方控制台 ——
+                它含 DSH 对账补记行（按对账时刻计入当日），桥侧记多的桶又扣不回来。实测当日高出 476,993。 */}
+            <br />含 DSH 对账补记，可能与提供方控制台不一致
           </div>
         </div>
         <div className="lrn-stat">

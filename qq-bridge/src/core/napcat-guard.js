@@ -118,6 +118,9 @@ function containerInfo() {
 let rkeyProbeDead = false;
 let rkeyProbeCycles = 0;
 const RKEY_RETRY_EVERY = 30;
+/** 固定改用 get_status 之后，传给 probeStatusFallback 的"前因"只用于**兜底也探不通**时的 detail
+ *  （那时候人需要知道这不是 rkey 的锅）；探通时不再把它写进 detail —— 前因是长期状态，见 guardStatus().probeMode。 */
+const README_WHY_STATUS = '本平台 rkey 接口不可用（已知结构性故障），守护已固定改用 get_status';
 
 /**
  * 探针：get_rkey。优先走 NapCat HTTP（3000），没配 httpUrl 时退回已连上的 OneBot WS。
@@ -133,8 +136,18 @@ const RKEY_RETRY_EVERY = 30;
  * 后果（实测）：守护连着 20+ 次判"探针失败"，达到阈值就 `重启容器 napcat`，
  * 于是**一个假信号把好好的 QQ 反复重启** —— 而"掉线"正是主人最在意的问题。
  * 所以：get_rkey 失败时**再看一眼 get_status**，只要 NapCat 说自己 online && good，
- * 就当探针通过（detail 里写清楚"rkey 探针自身故障"），只有 get_status 也说不在线才算真失败。
+ * 就当探针通过，只有 get_status 也说不在线才算真失败。
  * 上面那段"已知故障就不再调它"是这一版的进一步收敛（见 rkeyProbeDead 的说明）。
+ *
+ * 【2026-09-19 主人要求：别再把这件已成定局的事每轮都报一次】
+ * 早先这里要求 detail 里写清楚"rkey 探针自身故障"，于是管理端「会话守护」卡长期挂着一行
+ * "rkey 探针自身故障（…本轮跳过…）但 get_status 报 online&&good"，看起来像每 60 秒又出一次事。
+ * 既然已经确认它是**结构性故障**、并且已经**永久跳过**对它的调用，那它就不是异常，
+ * 而是本平台固定的长期降级状态。现在的口径：
+ *   · 探通时 detail 只写**这次探到的结果**（`get_status：online=true good=true（未掉线）`）；
+ *   · "本平台用不了 rkey、已固定改用 get_status" 由 guardStatus().probeMode='status' 带出去，
+ *     在管理端**静态说明一次**（见 NapcatTokensCard 里那段固定说明），不跟着实时状态反复刷；
+ *   · 只有**兜底也探不通**（真的异常）时，才把前因写进 detail 帮人定位。
  */
 export async function probeNapcatOnce() {
   const { httpUrl = '', accessToken = '' } = nap();
@@ -163,42 +176,56 @@ export async function probeNapcatOnce() {
       if (rkeyFallback.test(detail)) {
         if (!rkeyProbeDead) log(`[napcat-guard] get_rkey 存在结构性故障（${detail.slice(0, 90)}）→ 之后不再每轮调用它，避免把 NapCat 日志刷满；改为只探 get_status，每 ${RKEY_RETRY_EVERY} 轮复检一次`);
         rkeyProbeDead = true;
-        return await probeStatusFallback(base, accessToken, detail);
+        return await probeStatusFallback(base, accessToken, README_WHY_STATUS);
       }
       return { ok: false, detail };
     } catch (error) {
       const detail = `HTTP 探针异常：${error?.message ?? error}`;
       if (rkeyFallback.test(detail)) {
         rkeyProbeDead = true;
-        return await probeStatusFallback(base, accessToken, detail);
+        return await probeStatusFallback(base, accessToken, README_WHY_STATUS);
       }
       return { ok: false, detail };
     }
   }
   if (base && skipRkey) {
     // 已知故障期：不再白调 get_rkey，直接看 get_status
-    return await probeStatusFallback(base, accessToken, 'get_rkey 已知结构性故障，本轮跳过（不再刷日志）');
+    return await probeStatusFallback(base, accessToken, README_WHY_STATUS);
   }
   if (typeof callAction === 'function') {
     // 已知结构性故障期：WS 这条路同样不再白调 get_rkey（它会以异常形式回来，同样刷日志）
-    if (skipRkey) return await probeStatusFallback('', accessToken, 'get_rkey 已知结构性故障，本轮跳过（不再刷日志）', true);
+    if (skipRkey) return await probeStatusFallback('', accessToken, README_WHY_STATUS, true);
     try {
       const r = await callAction('get_rkey', { count: 1 }, 12000);
       const data = r?.data ?? r;
       if (Array.isArray(data) && data.length) return { ok: true, detail: `rkey ${data.length} 组（WS）` };
       const detail = `WS 返回：${JSON.stringify(r).slice(0, 160)}`;
-      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, detail, true); }
+      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, README_WHY_STATUS, true); }
       return { ok: false, detail };
     } catch (error) {
       const detail = `WS 探针异常：${error?.message ?? error}`;
-      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, detail, true); }
+      if (rkeyFallback.test(detail)) { rkeyProbeDead = true; return await probeStatusFallback('', accessToken, README_WHY_STATUS, true); }
       return { ok: false, detail };
     }
   }
   return { ok: false, detail: '没配 napcat.httpUrl，也没有可用的 OneBot 连接，无法探活' };
 }
 
-/** get_rkey 自身故障时的兜底探针：只看 NapCat 自己报的 online/good。 */
+/** get_rkey 自身故障时的兜底探针：只看 NapCat 自己报的 online/good。
+ *
+ *  【2026-09-19 主人要求：这段不该每轮都当异常展示】
+ *  上一版把"rkey 探针自身故障"写进了**每次探活的 detail**，于是管理端「NapCat 会话守护」卡里
+ *  长期挂着这么一条：
+ *    rkey 探针自身故障（get_rkey 已知结构性故障，本轮跳过（不再刷日志）），但 get_status 报 online&&good
+ *      —— 判为未掉线，不重启 / 连续失败：0 / 2 次
+ *  可它不是"这一轮出了问题"，而是**本平台固定的长期降级**：既然已经确认 get_rkey 是结构性故障
+ *  并永久跳过它（见 rkeyProbeDead），"rkey 探针坏了"就不再是异常，而是一个已经处理完的既定事实。
+ *  把它塞进实时状态里，只会让主人每次点开都以为又出事了。
+ *  改法：detail 只报**这次真正探到的结果**（谁、看到什么）；"本平台用不了 rkey、固定改用 get_status"
+ *  这件事由 guardStatus().probeMode 带出去，在界面上**静态说明一次**。
+ *
+ *  why 参数保留：只在**这次兜底也没探通**（真的异常）时才能塞进 detail —— 那时候人需要知道
+ *  "这不是 rkey 的锅、是登录态/连接的问题"。 */
 async function probeStatusFallback(base, accessToken, why, viaWs = false) {
   try {
     const call = viaWs
@@ -215,11 +242,12 @@ async function probeStatusFallback(base, accessToken, why, viaWs = false) {
     const j = await call();
     const d = j?.data ?? j;
     if (d && d.online === true && d.good === true) {
-      return { ok: true, detail: `rkey 探针自身故障（${String(why).slice(0, 60)}），但 get_status 报 online&&good —— 判为未掉线，不重启` };
+      // 正常路径：只报探到的事实，不提前因（前因是长期状态，见 guardStatus().probeMode / 界面静态说明）
+      return { ok: true, detail: 'get_status：online=true good=true（未掉线）' };
     }
-    return { ok: false, detail: `rkey 探针故障且 get_status 未报在线：${JSON.stringify(j).slice(0, 160)}` };
+    return { ok: false, detail: `get_status 未报在线：${JSON.stringify(j).slice(0, 160)}` };
   } catch (error) {
-    return { ok: false, detail: `rkey 探针故障，get_status 兜底也失败：${error?.message ?? error}` };
+    return { ok: false, detail: `get_status 探活失败（${String(why).slice(0, 40)}）：${error?.message ?? error}` };
   }
 }
 
@@ -336,6 +364,10 @@ export function guardStatus() {
     autoHeal: Boolean(autoHeal),
     autoHealSource: st.autoHealOverride === null || st.autoHealOverride === undefined ? 'auto' : 'manual',
     verdict,
+    /** 【2026-09-19】当前探活口径：'rkey' = 走 NapCat 的 get_rkey；'status' = 本平台 rkey 结构性故障、
+     *  已**固定**改用 get_status（见 rkeyProbeDead）。这是"已知的长期降级"，不是本轮异常：
+     *  管理端据此在守护卡里**静态说明一次**，而不是把这句话塞进每次探活的 detail 反复刷。 */
+    probeMode: rkeyProbeDead ? 'status' : 'rkey',
     lastProbeAt: st.lastProbeAt,
     lastProbeOk: st.lastProbeOk,
     lastProbeDetail: st.lastProbeDetail,
@@ -478,7 +510,7 @@ export function startNapcatGuard() {
   timer = setInterval(() => { guardTick().catch((error) => log(`[napcat-guard] 心跳异常：${error?.message ?? error}`)); }, ms);
   timer.unref?.();
   const pw = passwordFallbackInfo();
-  log(`[napcat-guard] 已启动：每 ${Math.round(ms / 1000)}s 用 get_rkey 探活，连续 ${cfg.failThreshold} 次失败判定会话异常；免扫码回退登录=${pw.configured ? '已配置' : '未配置（默认不自动重启）'}`);
+  log(`[napcat-guard] 已启动：每 ${Math.round(ms / 1000)}s 探活一次，连续 ${cfg.failThreshold} 次失败判定会话异常；探针先试 get_rkey，本平台该接口结构性故障时会固定改用 get_status（见状态里的 probeMode）；免扫码回退登录=${pw.configured ? '已配置' : '未配置（默认不自动重启）'}`);
   // 启动先探一次，免得要等一个周期
   guardTick().catch(() => {});
 }

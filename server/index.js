@@ -4,7 +4,7 @@ import { Client } from 'ssh2';
 import { createServer, connect } from 'net';
 import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
-import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync } from 'fs';
+import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync, renameSync } from 'fs';
 import { join, dirname, extname, basename, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { fileURLToPath } from 'url';
@@ -4212,39 +4212,273 @@ app.get('/api/ssh/status', async (req, res) => {
 });
 
 
-/** 统一透传：桥不可达/路由缺失(404)/响应非 JSON → 结构化失败；其余把桥响应 JSON 原样回给 GUI */
-async function proxyToBridgeConsole(_req, res, target) {
-  const t = resolveBridgeTarget();
-  let token = null;
-  if (t.kind === 'remote') token = await getRemoteBridgeToken(t.server, t.conn);
-  else token = t.token;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), Number(target.timeoutMs) > 0 ? Number(target.timeoutMs) : 30000);
-  let resp;
-  try {
-    resp = await fetch(t.base + target.path, {
-      method: target.method || 'GET',
-      headers: { 'Content-Type': 'application/json', ...(token ? { 'x-console-token': token } : {}) },
-      body: target.body === undefined ? undefined : JSON.stringify(target.body),
-      signal: ctrl.signal,
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    console.error(`[learning proxy] ${target.method || 'GET'} ${target.path} 失败:`, e?.message || e);
-    return res.json({ success: false, code: 'bridge-offline', message: '目标桥不可达：请确认桥接进程已启动、远端连接与隧道正常', detail: String(e?.message || e) });
-  }
-  clearTimeout(timer);
-  const text = await resp.text();
-  let json = null;
-  try { json = text ? JSON.parse(text) : null; } catch { /* 非 JSON */ }
-  if (!json || resp.status === 404) {
-    return res.json({ success: false, code: 'bridge-stale', message: '目标桥版本过旧或未连接', detail: `HTTP ${resp.status}${json === null ? '（响应非 JSON）' : ''}` });
-  }
-  res.json(json);
+/* ── 桥控制台统一透传 ────────────────────────────────────────────────────────
+ * 【2026-09-19 把两件事分家 · 主人反馈】"桥没在运行"和"桥在跑但版本里没有这条接口"
+ * 是**完全不同的两件事**，以前两条失败路径都被写成"不可达 / 版本过旧"，于是
+ * 桥只是没启动的人会被指去升级一个其实不需要升级的桥。现在的口径：
+ *   · 对端根本没应答（fetch 直接抛：ECONNREFUSED / fetch failed / 隧道没建）→ code='bridge-offline'
+ *     message 明确说"桥没在运行"并给出下一步（启动桥 / 连隧道）；
+ *   · 桥应答了，但没有这条路由（404）或回的不是 JSON → code='bridge-stale'（**只有这种才是版本旧**）。
+ * 两条都带 detail 原始错误用于排查；message 只讲"现在不能做什么 + 下一步做什么"，长篇说明留给页面。
+ * 另外：整段都包在 try 里 —— getRemoteBridgeToken 抛错时以前会变成未捕获的 rejection，
+ * Express 4 不会自动兜住，那条请求会一直挂着不返回（前端表现为"转圈不动"）。 */
+
+/** 对端"根本没在监听"的判定。只有这种情况才允许对桥侧配置文件做本机磁盘兜底
+ *  （超时/令牌错说明桥在跑，直接写文件会和运行中的桥抢，绝不能兜底）。 */
+function bridgeNotListening(detail) {
+  return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket hang up|fetch failed|other side closed/i.test(String(detail || ''));
 }
 
-app.get('/api/learning/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning-config', method: 'GET' }));
-app.post('/api/learning/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning-config', method: 'PUT', body: req.body ?? {} }));
+/** 取桥控制台响应（**不写 res**）：成功 { json, target }；失败 { fail, target }。永不抛。
+ *  返回结构而不是直接 res.json，是为了让个别路由（学习配置）能在"本机桥确实没起来"时改走磁盘兜底。 */
+async function callBridgeConsole(target) {
+  let t = null;
+  try { t = resolveBridgeTarget(); } catch (e) {
+    return {
+      target: null,
+      fail: { success: false, code: 'bridge-offline', message: '找不到可用的桥目标：本机没找到 qq-bridge 目录，也没有已连接的服务器', detail: String(e?.message || e) },
+    };
+  }
+  const where = t.kind === 'remote' ? `远端桥（隧道 ${t.base}）` : `本机桥（${t.base}）`;
+  try {
+    let token = null;
+    if (t.kind === 'remote') token = await getRemoteBridgeToken(t.server, t.conn);
+    else token = t.token;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), Number(target.timeoutMs) > 0 ? Number(target.timeoutMs) : 30000);
+    let resp;
+    try {
+      resp = await fetch(t.base + target.path, {
+        method: target.method || 'GET',
+        headers: { 'Content-Type': 'application/json', ...(token ? { 'x-console-token': token } : {}) },
+        body: target.body === undefined ? undefined : JSON.stringify(target.body),
+        signal: ctrl.signal,
+      });
+    } finally { clearTimeout(timer); }
+    const text = await resp.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { /* 非 JSON */ }
+    if (!json || resp.status === 404) {
+      // 桥回答了 → 它**在跑**。这里才轮到"版本旧"的说法。
+      return {
+        target: t,
+        fail: {
+          success: false, code: 'bridge-stale',
+          message: `桥在运行，但没有这条接口（HTTP ${resp.status}）：把桥代码更新到最新并重启桥，再点重试。`,
+          detail: `HTTP ${resp.status}${json === null ? '（响应非 JSON）' : ''}`,
+        },
+      };
+    }
+    return { target: t, json };
+  } catch (e) {
+    // 把 undici 的 cause.code（ECONNREFUSED 等）也带进 detail —— 只写 "fetch failed" 没法判断是
+    // "没进程在听"还是"超时卡住"，而这两种的处理方式完全不同。
+    const detail = `${e?.message ?? e}${e?.cause?.code ? ` (${e.cause.code})` : ''}`;
+    console.error(`[bridge proxy] ${target.method || 'GET'} ${target.path} 失败:`, detail);
+    if (bridgeNotListening(detail)) {
+      const message = t.kind === 'remote'
+        ? `远端桥没在运行，或 Bridge 控制台隧道（13100）没通：${t.base} 无响应。先在 SSH 配置页点「连接」并确认四个隧道都在，或切到本机桥，然后点重试。`
+        : `本机桥没在运行：${t.base} 无响应，这份数据要从桥上取。启动桥（首页「一键启动整套」）后点重试。`;
+      return { target: t, fail: { success: false, code: 'bridge-offline', message, detail } };
+    }
+    // 桥应答过但这次没取到数（超时 / 令牌不对）：既不等于"没在跑"，也不等于"版本旧"，别乱扣帽子。
+    return {
+      target: t,
+      fail: {
+        success: false, code: 'bridge-offline',
+        message: `${where}这次没取到数（超时或控制台令牌不对）。确认桥上控制台令牌与管理端一致后点重试。`,
+        detail,
+      },
+    };
+  }
+}
+
+/** 统一透传：桥不可达/路由缺失(404)/响应非 JSON → 结构化失败；其余把桥响应 JSON 原样回给 GUI */
+async function proxyToBridgeConsole(_req, res, target) {
+  const r = await callBridgeConsole(target);
+  if (r.fail) { res.json(r.fail); return; }
+  res.json(r.json);
+}
+
+/* ── 学习配置（桥侧 state/learning-config.json）──────────────────────────────
+ * 【2026-09-19 主人要求：桥停了配置也要能看能改】
+ * 这份配置的**权威副本在桥那边**（qq-bridge/state/learning-config.json），正常路径永远先走桥控制台。
+ * 但"桥没在监听"（对端 ECONNREFUSED，不是超时、也不是令牌错）时，管理端直接读写**那个文件本身**：
+ *   · 本机桥 → 直接读写 <bridgeDir>/state/learning-config.json；
+ *   · 远端桥 → 经**已有的 SSH 连接**读写服务端同名文件（复用 remoteReadText / remoteWriteTextVerified，
+ *     与 /api/ssh/bridge-config 写 config.json 是同一套"临时文件 → 备份 → 原子 mv → 回读比对"）。
+ * 为什么可以这么写：
+ *   · 桥侧每个模块都是"现读现用"这个文件（persona-learn.js / slang.js / portrait-learn.js 每次
+ *     fs.readFileSync，写回是先读后合并），所以文件改了，桥下一次启动或下一轮学习就会用到；
+ *   · 桥没在跑 → 没有第二个写者，不存在互相覆盖（超时/令牌错这两种"桥其实在跑"的情况**不会**兜底，
+ *     见 learningConfigRoute 的门槛，避免和运行中的桥抢文件）。
+ * 注意：下面的白名单/合并规则必须与 qq-bridge/src/core/console-server.js 的
+ * `sanitizeLearningConfigBody` + `loadLearningConfig` 保持同口径（改一处要改两处），
+ * 否则"桥在跑"和"桥没跑"两种情况下的合法值会不一样。 */
+const LEARNING_DEFAULT = {
+  slang: { enabled: true, timeHHMM: '00:00', autoResearch: true, liveWindowExtract: false, lastLearnAtMs: 0, autoIntervalEnabled: false, autoIntervalHours: 24 },
+  persona: { enabled: true, targetQQ: [], autoIntervalEnabled: false, autoIntervalHours: 24, timeHHMM: '', lastRunAtMs: 0 },
+  portrait: { enabled: true, minMessages: 10, maxTargets: 20, windowHours: 720, autoIntervalEnabled: false, autoIntervalHours: 24, timeHHMM: '', lastRunAtMs: 0 },
+};
+const LEARNING_TOP_KEYS = new Set(['slang', 'persona', 'portrait']);
+const LEARNING_SLANG_KEYS = new Set(['enabled', 'timeHHMM', 'autoResearch', 'liveWindowExtract', 'autoIntervalEnabled', 'autoIntervalHours']);
+const LEARNING_PERSONA_KEYS = new Set(['enabled', 'targetQQ', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
+const LEARNING_PORTRAIT_KEYS = new Set(['enabled', 'minMessages', 'maxTargets', 'windowHours', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
+const localLearningFile = () => join(findBridgeDir(), 'state', 'learning-config.json');
+/** 桥 state 目录下的相对路径（**POSIX 形式**，远端 SSH 上拼路径要用它） */
+const LEARNING_STATE_REL = 'state/learning-config.json';
+/** QQ 号规范化（与桥侧 normalizeQQList 同口径：1~11 位纯数字、去重、上限 100） */
+function normalizeQQListLocal(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of arr) {
+    const s = String(raw ?? '').trim();
+    if (!/^\d{1,11}$/.test(s) || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+    if (out.length >= 100) break;
+  }
+  return out;
+}
+/** 把一份 learning-config.json 的内容规范化成界面要的完整结构（本机与远端共用同一套规则）：
+ *  缺文件/损坏 → 默认结构；类型不对 → 用默认值；与桥侧 loadLearningConfig 同口径。 */
+function normalizeLearningFile(file) {
+  const out = JSON.parse(JSON.stringify(LEARNING_DEFAULT));
+  if (!file || typeof file !== 'object' || Array.isArray(file)) return out;
+  const clampH = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(720, Math.max(1, Math.round(n))) : 24; };
+  const isHHMM = (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v ?? ''));
+  for (const [group, keys, def] of [['slang', LEARNING_SLANG_KEYS, out.slang], ['persona', LEARNING_PERSONA_KEYS, out.persona], ['portrait', LEARNING_PORTRAIT_KEYS, out.portrait]]) {
+    const src = file[group];
+    if (!src || typeof src !== 'object' || Array.isArray(src)) continue;
+    for (const k of keys) {
+      const v = src[k];
+      if (typeof def[k] === 'boolean') def[k] = typeof v === 'boolean' ? v : def[k];
+      else if (k === 'autoIntervalHours') def[k] = clampH(v);
+      else if (k === 'timeHHMM') def[k] = group === 'slang' ? (isHHMM(v) ? v : def[k]) : (String(v ?? '').trim() === '' || isHHMM(v) ? String(v ?? '').trim() : def[k]);
+      else if (k === 'targetQQ') def[k] = normalizeQQListLocal(v);
+      else if (typeof def[k] === 'number') def[k] = Number.isFinite(Number(v)) ? Number(v) : def[k];
+    }
+  }
+  // lastLearnAtMs / lastRunAtMs 由桥侧模块自己维护，这里只读不写（与桥的白名单一致）
+  for (const [g, k] of [['slang', 'lastLearnAtMs'], ['persona', 'lastRunAtMs'], ['portrait', 'lastRunAtMs']]) {
+    const v = file[g]?.[k];
+    if (Number.isFinite(Number(v))) out[g][k] = Math.max(0, Math.round(Number(v)));
+  }
+  return out;
+}
+function readLocalLearningConfig() {
+  let file = null;
+  try { file = JSON.parse(readFileSync(localLearningFile(), 'utf-8')); } catch { file = null; }
+  return normalizeLearningFile(file);
+}
+/** 与桥侧 sanitizeLearningConfigBody 同规则的白名单合并（未知键/非法值 → 抛错，交给路由翻成人话） */
+function mergeLocalLearningConfig(body, cur) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('请求体必须是 JSON 对象');
+  for (const k of Object.keys(body)) if (!LEARNING_TOP_KEYS.has(k)) throw new Error(`不支持的字段：${k}（仅允许 slang / persona / portrait）`);
+  const next = JSON.parse(JSON.stringify(cur));
+  const clampH = (v) => { const n = Number(v); if (!Number.isFinite(n) || n <= 0) throw new Error('autoIntervalHours 必须是数字（1~720 小时）'); return Math.min(720, Math.max(1, Math.round(n))); };
+  for (const [group, keys] of [['slang', LEARNING_SLANG_KEYS], ['persona', LEARNING_PERSONA_KEYS], ['portrait', LEARNING_PORTRAIT_KEYS]]) {
+    const src = body[group];
+    if (src === undefined) continue;
+    if (!src || typeof src !== 'object' || Array.isArray(src)) throw new Error(`${group} 必须是对象`);
+    for (const k of Object.keys(src)) if (!keys.has(k)) throw new Error(`${group} 不支持字段：${k}（lastLearnAtMs / lastRunAtMs 由桥侧模块自行维护，禁止覆盖）`);
+    for (const [k, v] of Object.entries(src)) {
+      if (typeof next[group][k] === 'boolean') {
+        if (typeof v !== 'boolean') throw new Error(`${group}.${k} 必须是布尔值`);
+        next[group][k] = v;
+      } else if (k === 'autoIntervalHours') next[group][k] = clampH(v);
+      else if (k === 'timeHHMM') {
+        const s = String(v ?? '').trim().replace(/[：:]/g, ':');
+        if (s === '' && group !== 'slang') { next[group][k] = ''; continue; }
+        const m = /^(\d{1,2}):(\d{1,2})$/.exec(s);
+        if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) throw new Error(`${group}.timeHHMM 必须是 24 小时制 HH:MM（00:00–23:59）`);
+        next[group][k] = `${String(Number(m[1])).padStart(2, '0')}:${String(Number(m[2])).padStart(2, '0')}`;
+      } else if (k === 'targetQQ') {
+        if (!Array.isArray(v)) throw new Error('persona.targetQQ 必须是数组');
+        next[group][k] = normalizeQQListLocal(v);
+      } else if (typeof next[group][k] === 'number') {
+        const n = Number(v);
+        if (!Number.isFinite(n)) throw new Error(`${group}.${k} 必须是数字`);
+        next[group][k] = group === 'portrait' ? Math.round(n) : n;
+      } else next[group][k] = v;
+    }
+  }
+  return next;
+}
+/** 本机桥没在监听时的兜底读写；成功 → 桥控制台同形状的 { ok:true, config }，失败 → { ok:false, error } */
+function localLearningFallback(method, body) {
+  const file = localLearningFile();
+  try {
+    const cur = readLocalLearningConfig();
+    if (method === 'GET') return { ok: true, config: cur, fallback: 'local-file' };
+    const next = mergeLocalLearningConfig(body ?? {}, cur);
+    mkdirSync(dirname(file), { recursive: true });
+    // 原子替换（写 .tmp → rename）：半截文件会让桥下次启动读到坏配置，与桥侧 atomicWriteJson 同一做法
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2));
+    renameSync(tmp, file);
+    mlog(`[learning] 桥未运行 → 已直接写入本机 ${file}（桥下次启动/下一轮学习即生效）`);
+    return { ok: true, config: next, fallback: 'local-file' };
+  } catch (e) {
+    return { ok: false, error: `${method === 'GET' ? '读取' : '保存'}本机学习配置失败（${file}）：${e?.message ?? e}` };
+  }
+}
+
+/** 远端桥没在监听时的兜底读写：走**已有的 SSH 连接**读写服务端 state/learning-config.json。
+ *  用的是 /api/ssh/bridge-config 那套已验证过的远端读写（临时文件 → 备份 → 原子 mv → 回读比对），
+ *  所以失败绝不会留下半个文件，也不会谎报"已保存"。 */
+async function remoteLearningFallback(target, method, body) {
+  const { server, conn } = target;
+  if (!conn) return { ok: false, error: '服务端未连接（先在 SSH 配置页点「连接」），读不到服务端的学习配置' };
+  try {
+    const dir = await getRemoteBridgeDir(server, conn);
+    if (!dir) return { ok: false, error: '服务器上没找到 qq-bridge 目录，没法直接读写学习配置' };
+    const file = `${dir}/${LEARNING_STATE_REL}`;
+    if (!safeRemotePath(file)) return { ok: false, error: `远端路径不合法：${file}` };
+    const cur = await remoteReadText(conn, file);
+    // 只有"读不到"这一种失败要拦（权限/连接），"文件不存在"按默认结构处理（与桥侧 loadLearningConfig 一致）
+    if (!cur.ok && !cur.missing) return { ok: false, error: `读服务端学习配置失败（${file}）：${cur.error || ''}` };
+    let parsed = null;
+    if (cur.ok) { try { parsed = JSON.parse(cur.text); } catch { parsed = null; } }
+    const curCfg = normalizeLearningFile(parsed);
+    if (method === 'GET') return { ok: true, config: curCfg, fallback: 'remote-file', path: file };
+    const next = mergeLocalLearningConfig(body ?? {}, curCfg);
+    const w = await remoteWriteTextVerified(conn, file, JSON.stringify(next, null, 2));
+    if (!w.ok) return { ok: false, error: `写服务端学习配置失败（${file}）：${w.error || ''}` };
+    // 回读比对：只认"回读内容与提交内容一致"，否则如实报失败（绝不谎报已保存）
+    let back = null;
+    try { back = JSON.parse(w.readback || 'null'); } catch { back = null; }
+    if (!back || canonicalJson(back) !== canonicalJson(next)) {
+      return { ok: false, error: `已写入服务端学习配置，但回读比对不一致（${file}），请刷新后核对` };
+    }
+    mlog(`[learning] 桥未运行 → 已直接写入服务端 ${file}（备份 ${w.backup || '无'}；桥下次启动/下一轮学习即生效）`);
+    return { ok: true, config: next, fallback: 'remote-file', path: file, backup: w.backup };
+  } catch (e) {
+    return { ok: false, error: `服务端学习配置读写异常：${e?.message ?? e}` };
+  }
+}
+
+/** 学习配置：桥优先；只有"桥确实没在监听"（不是超时、不是令牌错）才回退直接读写那份文件 */
+async function learningConfigRoute(req, res, method) {
+  const r = await callBridgeConsole({ path: '/api/learning-config', method: method === 'GET' ? 'GET' : 'PUT', body: method === 'GET' ? undefined : (req.body ?? {}) });
+  if (!r.fail) { res.json(r.json); return; }
+  const bridgeDown = r.fail.code === 'bridge-offline' && bridgeNotListening(r.fail.detail);
+  if (!bridgeDown) {
+    // 桥应答了但接口不对（版本旧）、或超时/令牌错（桥其实在跑）→ 谁都不能替它写文件，如实报错
+    res.json({ ...r.fail, success: false, ok: false, error: r.fail.message });
+    return;
+  }
+  const f = r.target?.kind === 'remote'
+    ? await remoteLearningFallback(r.target, method, req.body ?? {})
+    : localLearningFallback(method, req.body ?? {});
+  // 读到了配置就带上"桥没在跑"的说明一起回给界面（界面据此把依赖运行时的部分标成不可用）；
+  // 连兜底都失败（磁盘/权限/连接/校验）才真的算失败。
+  res.json(f.ok ? { ...f, bridgeDown: true } : { success: false, ok: false, code: 'bridge-offline', error: f.error, message: f.error });
+}
+
+app.get('/api/learning/config', (req, res) => learningConfigRoute(req, res, 'GET'));
+app.post('/api/learning/config', (req, res) => learningConfigRoute(req, res, 'POST'));
 app.post('/api/learning/slang', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/slang', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/persona', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona', method: 'POST', body: req.body ?? {} }));
 app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/portrait', method: 'POST', body: req.body ?? {} }));
@@ -4392,10 +4626,46 @@ function mergeTokenReports(a, b) {
   return out;
 }
 
+/** 计费日键：与桥侧 token-meter.billingKey 同一口径 —— 把时刻减去 offset 分钟再取**北京日期**。
+ *  offset=480（默认）= UTC 自然日 = 北京时每天 08:00 换日，正是提供方控制台的口径。 */
+function billingDayKeyOf(ms, offsetMinutes = 480) {
+  const off = Number.isFinite(Number(offsetMinutes)) ? Number(offsetMinutes) : 480;
+  return new Date(Number(ms) - off * 60000 + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
+/** 缓存的服务端报告是不是"当前计费日"的：优先用桥侧给的 dayWindow.key，取不到就用缓存写入时刻估算。 */
+function remoteCachedDay(cache) {
+  const report = isObj(cache?.report) ? cache.report : null;
+  const off = Number(report?.dayWindow?.offsetMinutes);
+  const offset = Number.isFinite(off) ? off : 480;
+  const now = billingDayKeyOf(Date.now(), offset);
+  const key = typeof report?.dayWindow?.key === 'string' && report.dayWindow.key ? report.dayWindow.key : '';
+  if (key) return { key, now, staleDay: key !== now };
+  const at = Number(cache?.at);
+  if (Number.isFinite(at) && at > 0) {
+    const cached = billingDayKeyOf(at, 480);
+    return { key: cached, now: billingDayKeyOf(Date.now(), 480), staleDay: cached !== billingDayKeyOf(Date.now(), 480) };
+  }
+  return { key: '', now, staleDay: false }; // 两个都判断不出来 → 保持旧行为（仍计入合计）
+}
+
+/** 把报告里"当日窗口"的字段清零（dates 历史曲线保留）：跨日复用缓存时，不让上一个计费日的数字
+ *  混进今天的合计 —— 实测这类混入不是小数（一天的用量可达数千万 token），比结算延迟大几个数量级。 */
+function zeroDayScoped(rep) {
+  if (!isObj(rep)) return rep;
+  const out = JSON.parse(JSON.stringify(rep));
+  if (isObj(out.today)) for (const k of TOKEN_REPORT_NUM_FIELDS) out.today[k] = 0;
+  if (Array.isArray(out.todayHourly)) {
+    for (const h of out.todayHourly) if (isObj(h)) for (const k of TOKEN_REPORT_NUM_FIELDS) h[k] = 0;
+  }
+  if (out.todayEstimatedTotal !== undefined) out.todayEstimatedTotal = 0;
+  return out;
+}
+
 app.get('/api/learning/token-report', async (_req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
-  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null, remoteStale: false, remoteAt: 0 };
+  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null, remoteStale: false, remoteStaleDay: false, remoteAt: 0 };
 
   // ① 本机那份：永远保留（哪怕服务器连上了）——以前 SSH 模式把这块整个吞掉了
   try {
@@ -4410,6 +4680,12 @@ app.get('/api/learning/token-report', async (_req, res) => {
   // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因。
   //    取不到时（未连接 / 隧道不在 / 请求失败）回退到**上一次成功同步的服务端报告**：
   //    服务端停着不会再消耗，那份数字仍然准确，只是不再增长 —— 否则合计会突然只剩本机。
+  //
+  //    【2026-09-18 修跨日重复累加】缓存里存的是"上次同步那一刻的 report"，它带的是**那天的** today。
+  //    如果缓存来自上一个计费日（换日 08:00 之后一直没连上服务器很常见），再把它的 today 并进合计，
+  //    等于把昨天的量算进今天 —— 一天的用量是数千万 token 级别，面板会瞬间虚高一大截。
+  //    所以这里按「缓存报告的计费日 vs 当前计费日」判断：同一天仍按主人要求计入合计；
+  //    跨了日就不并入当日（那份数字照样显示在「服务端」卡上，并写明它是哪一天的）。
   const rt = resolveRemoteBridgeTarget();
   const useRemoteCache = (prefix) => {
     const c = remoteTokenCacheFor(connected);
@@ -4418,7 +4694,11 @@ app.get('/api/learning/token-report', async (_req, res) => {
     out.remoteStale = true;
     out.remoteAt = c.at;
     out.remoteServer = { id: c.serverId, name: c.serverName, host: c.host };
-    out.remoteReason = `${prefix}，显示上次同步到的服务端用量（${fmtCacheTime(c.at)}），仍计入合计`;
+    const day = remoteCachedDay(c);
+    out.remoteStaleDay = day.staleDay === true;
+    out.remoteReason = out.remoteStaleDay
+      ? `${prefix}，这里显示上次同步到的服务端用量（${fmtCacheTime(c.at)}，计费日 ${day.key}）—— 那是上一个计费日的数字，不计入今日合计`
+      : `${prefix}，显示上次同步到的服务端用量（${fmtCacheTime(c.at)}），仍计入合计`;
     return true;
   };
   if (!rt) {
@@ -4444,7 +4724,7 @@ app.get('/api/learning/token-report', async (_req, res) => {
     }
   }
 
-  out.total = mergeTokenReports(out.local, out.remote);
+  out.total = mergeTokenReports(out.local, out.remoteStaleDay ? zeroDayScoped(out.remote) : out.remote);
   // 兼容旧前端/旧字段：顶层 report = 合计（只有一边时就是那一边）
   out.report = out.total || out.local || out.remote || null;
   res.json(out);
@@ -4529,7 +4809,8 @@ app.get('/api/learning/token-stream', async (req, res) => {
       signal: ctrl.signal,
     });
     if (!resp.ok || !resp.body) {
-      send('stream-error', { message: `目标桥不可达或版本过旧（HTTP ${resp.status}）` });
+      // 桥回答了但状态码不对 → "桥在跑但这台桥上没有/取不到这条流"，不是"不可达"；两种分开说，别混成一句
+      send('stream-error', { message: `桥在运行，但用量推流没取到（HTTP ${resp.status}）：把桥代码更新到最新再重启桥，或直接看「用量统计」的汇总数字。` });
       return res.end();
     }
     const reader = resp.body.getReader();

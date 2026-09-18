@@ -421,8 +421,10 @@ function mcpLabel(fullName: string) {
   burstIntervalMinMsLegacy: '更旧的键名（桥里的键名 burstIntervalMinMsLegacy），任何版本都不生效。看到它说明这份配置是从很旧的版本抄过来的，'
     + '可以在「JSON 进阶」页直接删掉。',
   // —— NapCat 会话守护（guard）：定期探活、假死就重启容器自愈 ——
-  'guard.enabled': 'NapCat 会话守护总开关（桥里的键名 guard.enabled，默认开）。开着的时候桥会定期发一次 get_rkey 探活：'
-    + '该接口每次都真的请求 QQ 服务器（对别人不可见），连续失败达到阈值就判定"会话假死"并重启容器自愈。',
+  'guard.enabled': 'NapCat 会话守护总开关（桥里的键名 guard.enabled，默认开）。开着的时候桥会定期探一次活：'
+    + '探针优先用 NapCat 的 get_rkey（它每次都真的请求 QQ 服务器、对别人不可见），连续失败达到阈值就判定"会话假死"并重启容器自愈。'
+    + '若该平台的 get_rkey 自身有结构性故障（接口直接抛错，与掉线无关），守护会自动固定改用 get_status 判定在线状态 —— '
+    + '这时管理端「会话守护」卡里会写一句静态说明，探活照常进行，不需要你处理。',
   probeIntervalMs: '探活间隔（毫秒，桥里的键名 guard.probeIntervalMs，默认 60000 = 1 分钟）：每隔这么久探一次活。'
     + '调密了会频繁打扰 QQ 服务器，一般不用动。',
   failThreshold: '连续失败几次判定假死（桥里的键名 guard.failThreshold，默认 2）：达到这个次数才动手自愈，避免网络抖一下就把容器重启了。',
@@ -518,6 +520,12 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   const [target, setTarget] = useState<'local' | 'remote'>('local');
   const [remoteMeta, setRemoteMeta] = useState<{ dir?: string; path?: string; notes?: string[]; message?: string }>({});
   const [cfg, setCfg] = useState<any>(null);
+  /** 【2026-09-19 修「读失败时整页空白」】以前 load() 没有 try/catch：读配置抛错（config.json 损坏、
+   *  服务端没连上、接口 500）时 cfg 一直是 null，而每个页签都是 `cfg && <Tab/>` 写法 ——
+   *  于是页面只剩页签栏，一个字都不说，看起来像"配置页坏了"。现在错误有地方落：一条可重试的提示。
+   *  注意这跟"桥有没有在跑"无关：这份配置读的是磁盘上的 qq-bridge/config.json。 */
+  const [loadErr, setLoadErr] = useState('');
+  const [loading, setLoading] = useState(true);
   const [persona, setPersona] = useState('');
   const [speechRules, setSpeechRules] = useState('');
   const [personaHasFile, setPersonaHasFile] = useState(false);
@@ -550,37 +558,47 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   useEffect(() => { load(); }, []);
 
   const load = async () => {
-    // 连上服务器 → 读**服务端** /root/qq-bridge/config.json（经已有 SSH 连接，不新建连接）
-    const r: any = remote
-      ? await getRemoteBridgeConfig(remote.id)
-      : await getBridgeConfig();
-    const c = r.config || {};
-    if (remote) {
-      setTarget('remote');
-      setRemoteMeta({ dir: r.dir, path: r.path, notes: r.notes, message: r.ok ? '' : (r.message || '读取服务端配置失败') });
-      if (!r.ok) { setMsg('读取服务端配置失败：' + (r.message || '未知原因')); }
-    } else {
-      setTarget('local');
-      setRemoteMeta({});
+    setLoading(true);
+    setLoadErr('');
+    try {
+      // 连上服务器 → 读**服务端** /root/qq-bridge/config.json（经已有 SSH 连接，不新建连接）
+      const r: any = remote
+        ? await getRemoteBridgeConfig(remote.id)
+        : await getBridgeConfig();
+      const c = r.config || {};
+      if (remote) {
+        setTarget('remote');
+        setRemoteMeta({ dir: r.dir, path: r.path, notes: r.notes, message: r.ok ? '' : (r.message || '读取服务端配置失败') });
+        if (!r.ok) { setMsg('读取服务端配置失败：' + (r.message || '未知原因')); }
+      } else {
+        setTarget('local');
+        setRemoteMeta({});
+      }
+      // 保证模型区“识图模型 / API Key”输入框总是可见（留空即默认）
+      if (!c.dsh) c.dsh = {};
+      if (c.dsh.apiKey === undefined) c.dsh.apiKey = '';
+      if (c.dsh.visionModel === undefined) c.dsh.visionModel = '';
+      if (!c.dsh.model) c.dsh.model = '';
+      if (!c.dsh.provider) c.dsh.provider = '';
+      // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
+      if (c.ownerQQ === null || c.ownerQQ === undefined) c.ownerQQ = '';
+      // DSH 里实际生效的模型段（推理档位下拉用它识别"已经是 off/xhigh/max"这类档位）
+      DSH_EFFECTIVE = (r as any).dshEffective && typeof (r as any).dshEffective === 'object' ? (r as any).dshEffective : {};
+      // 每个服务商的模型清单（切服务商时模型列表跟着换）
+      const dm = (r as any).dshModels;
+      DSH_MODELS = dm && typeof dm === 'object' && dm.providers && typeof dm.providers === 'object' ? dm : { providers: {} };
+      setCfg(c);
+      setPersona(r.persona || '');
+      setSpeechRules(r.speechRules || '');
+      setPersonaHasFile(!!r.personaHasFile);
+      setSpeechHasFile(!!r.speechHasFile);
+    } catch (e: any) {
+      // 【2026-09-19】读失败必须说出来。以前这里会直接抛出 promise 未处理，cfg 一直是 null，
+      // 每个页签又都是 `cfg && <Tab/>`，于是页面变成"只有页签栏"的空壳 —— 连"读失败了"都不显示。
+      setLoadErr(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
     }
-    // 保证模型区“识图模型 / API Key”输入框总是可见（留空即默认）
-    if (!c.dsh) c.dsh = {};
-    if (c.dsh.apiKey === undefined) c.dsh.apiKey = '';
-    if (c.dsh.visionModel === undefined) c.dsh.visionModel = '';
-    if (!c.dsh.model) c.dsh.model = '';
-    if (!c.dsh.provider) c.dsh.provider = '';
-    // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
-    if (c.ownerQQ === null || c.ownerQQ === undefined) c.ownerQQ = '';
-    // DSH 里实际生效的模型段（推理档位下拉用它识别"已经是 off/xhigh/max"这类档位）
-    DSH_EFFECTIVE = (r as any).dshEffective && typeof (r as any).dshEffective === 'object' ? (r as any).dshEffective : {};
-    // 每个服务商的模型清单（切服务商时模型列表跟着换）
-    const dm = (r as any).dshModels;
-    DSH_MODELS = dm && typeof dm === 'object' && dm.providers && typeof dm.providers === 'object' ? dm : { providers: {} };
-    setCfg(c);
-    setPersona(r.persona || '');
-    setSpeechRules(r.speechRules || '');
-    setPersonaHasFile(!!r.personaHasFile);
-    setSpeechHasFile(!!r.speechHasFile);
   };
 
   /** 保存通路：local → 本机 /api/bridge/config（原行为不变）；remote → /api/ssh/bridge-config（服务端）。
@@ -895,6 +913,31 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
             <BookOpen size={14} style={{ verticalAlign: -2, marginRight: 6 }} /> 说明文档
           </button>
         </div>
+
+        {/* 【2026-09-19】读配置失败不再"什么都不显示"：给一条可重试的提示。
+            这份配置读的是磁盘上的 qq-bridge/config.json（本机 / 服务端），**不经过桥进程** ——
+            所以桥没在跑时它照常能读能改；读不到是另外的原因（文件损坏 / 服务端没连 / 接口报错），
+            这里把原始原因原样显示，别让人以为配置页整个坏了。 */}
+        {loadErr && (
+          <div className="card">
+            <div className="lrn-error">
+              <AlertTriangle size={15} />
+              <div style={{ flex: 1 }}>
+                读取配置失败：{loadErr}
+                <div className="lrn-error-detail">
+                  这份配置读的是 {remote ? '服务端 /root/qq-bridge/config.json' : '本机 qq-bridge/config.json'} 这个文件本身，
+                  <b>不需要桥在运行</b>；读不到通常是文件损坏、目录不对{remote ? '，或 SSH 没连上' : ''}。处理完点「重试」。
+                </div>
+              </div>
+              <button className="btn btn-sm btn-danger" disabled={loading} onClick={() => void load()}>
+                <RotateCcw size={13} /> 重试
+              </button>
+            </div>
+          </div>
+        )}
+        {!cfg && !loadErr && (
+          <div className="card"><div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取配置…</div></div>
+        )}
 
         {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} writeConfig={(next) => writeBridge({ config: next })} onCfgChange={setCfg} />}
         {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} />}
@@ -1249,7 +1292,11 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
               <DocSection title="常见问题">
                 <ul>
-                  <li><b>保存提示「目标桥不可达」</b>：桥没在跑。先确认 NapCat 已登录（QQ 在线）、DSH 已启动，再启动 QQ-Bridge，或直接用首页「一键启动整套」。</li>
+                  <li><b>提示「桥没在运行」</b>（学习/语音/NapCat 那几页读桥侧数据时）：桥没在跑，那份数据要从桥上取。
+                    先确认 NapCat 已登录（QQ 在线）、DSH 已启动，再启动 QQ-Bridge，或直接用首页「一键启动整套」。
+                    本页的配置读的是磁盘上的 config.json，<b>不受影响</b>，桥停着也能看能改。</li>
+                  <li><b>提示「桥在运行，但没有这条接口」</b>：<b>这才是版本旧</b>（桥答了 404/非 JSON）。
+                    把桥代码更新到最新并重启桥即可 —— 别跟上一句混起来，桥没启动时不需要更新。</li>
                   <li><b>模型不回话</b>：看隔离 DSH 日志/隔离 home 的 .credentials.yaml 是否配了 DEEPSEEK_API_KEY；NapCat 是否在线。</li>
                   <li><b>端口</b>：管理端 1921 · NapCat 6099/3000/3001 · 隔离 DSH 10721（实例配置里可改）· 桥 3100。</li>
                   <li><b>重启顺序</b>：重启管理器会连带停掉它托管的 DSH / NapCat / 桥。若隔离 DSH 端口被残留进程占住（新实例秒退、桥一直刷连接失败），按「杀掉占用 10721 的进程 → 删 <code>qq-bridge/state/bridge.lock</code> → 启动 DSH → 启动桥」的顺序恢复。</li>

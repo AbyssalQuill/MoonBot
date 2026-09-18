@@ -53,10 +53,13 @@ function tsToClock(ms?: number | null): string {
   return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
 }
 
-/** verdict → 文案 + 颜色。ok=绿 / suspect=黄 / dead=红；healing 由前端在"点了立即自愈"时自己显示。 */
-function verdictInfo(verdict?: string): { text: string; color: string; note: string } {
+/** verdict → 文案 + 颜色。ok=绿 / suspect=黄 / dead=红；healing 由前端在"点了立即自愈"时自己显示。
+ *  【2026-09-19】探针文案不再写死 get_rkey：本平台 get_rkey 是结构性故障，守护已永久改用
+ *  get_status 探活（probeMode='status'），还说"需要 rkey 有返回"会让人以为探针坏了。 */
+function verdictInfo(verdict?: string, probeMode?: string): { text: string; color: string; note: string } {
+  const how = probeMode === 'status' ? 'get_status' : 'get_rkey';
   switch (String(verdict || '')) {
-    case 'ok': return { text: '正常', color: 'var(--nc-success-600, #16a34a)', note: '最近一次探针通过（get_rkey 有返回）' };
+    case 'ok': return { text: '正常', color: 'var(--nc-success-600, #16a34a)', note: `最近一次探活通过（${how} 有返回）` };
     case 'suspect': return { text: '疑似异常', color: 'var(--nc-warning-500, #d97706)', note: '探针失败次数还没到阈值，再失败就会自愈' };
     case 'dead': return { text: '会话已死', color: 'var(--nc-danger-600)', note: '连续失败已达阈值 —— QQ 侧登录态多半已失效' };
     case 'healing': return { text: '自愈中', color: 'var(--nc-warning-500, #d97706)', note: '正在重启 NapCat 并等它登回来' };
@@ -284,7 +287,7 @@ export default function NapcatTokensCard() {
   const rowStyle = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const };
 
   /* ===== 会话守护的展示态（都在渲染里算，避免多存一份可能过期的 state） ===== */
-  const vi = verdictInfo(healing ? 'healing' : guard?.verdict);
+  const vi = verdictInfo(healing ? 'healing' : guard?.verdict, guard?.probeMode);
   const healthDetail = guard?.lastProbeDetail ? String(guard.lastProbeDetail) : '（桥侧没写探针细节）';
   const healCount = Array.isArray(guard?.heals) ? guard.heals.length : 0;
   const containerDown = Boolean(guard?.container?.status && guard.container.status !== 'running');
@@ -429,152 +432,170 @@ export default function NapcatTokensCard() {
         )}
       </div>
 
-      {!err && st && (
-        <>
-          {/* ============ 卡 2/2：NapCat 会话守护 ============
-              桥侧每 60 秒 get_rkey 探活，连续失败自动重启容器。
-              为什么要在管理端露出来：QQ 把登录态作废时 NapCat 可能**一条错都不报**，
-              WebUI 上 isLogin/online 还是 true，消息却发不出去 —— 当天静默了 50 分钟没人发现。
-              这张卡只放守护自己的东西：状态机 / 探针 / 自愈次数与开关 / 立即自愈 / 二维码。 */}
-          <div className="card">
-            <div className="card-title">
-              <Activity size={17} /> NapCat 会话守护
-              <span className="lrn-updated">每 {Math.max(1, Math.round(Number(guard?.probeIntervalMs ?? 60000) / 1000))} 秒用 get_rkey 探活，连续失败自动重启容器</span>
+      {/* 【2026-09-19 修】会话守护卡**不再挂在令牌卡的读取结果下面**。
+          以前是 `{!err && st && (卡2)}`：桥一停，令牌卡读不到 → err 有值 → 这张守护卡整张都不渲染，
+          于是"桥不可达"看起来像是"会话守护这个功能没了"。两张卡各自独立，谁的错谁自己显示。 */}
+      {/* ============ 卡 2/2：NapCat 会话守护 ============
+          桥侧每 60 秒探活一次（本平台 rkey 接口结构性故障，已改用 get_status），连续失败自动重启容器。
+          为什么要在管理端露出来：QQ 把登录态作废时 NapCat 可能**一条错都不报**，
+          WebUI 上 isLogin/online 还是 true，消息却发不出去 —— 当天静默了 50 分钟没人发现。
+          这张卡只放守护自己的东西：状态机 / 探针 / 自愈次数与开关 / 立即自愈 / 二维码。 */}
+      <div className="card">
+        <div className="card-title">
+          <Activity size={17} /> NapCat 会话守护
+          <span className="lrn-updated">
+            每 {Math.max(1, Math.round(Number(guard?.probeIntervalMs ?? 60000) / 1000))} 秒用
+            {guard?.probeMode === 'status' ? ' get_status ' : ' get_rkey '}探活，连续失败自动重启容器
+          </span>
+        </div>
+
+        {/* rkey 探针的静态说明：**只在这一处出现一次**。
+            本平台 get_rkey 是结构性故障（NapCat 侧取 rkey 的实现自己抛异常，跟"掉线"无关），
+            守护已永久改用 get_status 判定登录态。既然是已知的长期降级、不是异常，
+            就不该跟着每次探活的实时状态一直刷 —— 那是"每看一眼都以为又出事"。 */}
+        {guard?.probeMode === 'status' && (
+          <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.7 }}>
+            本平台 <code>rkey</code> 探针不可用（NapCat 取 rkey 的接口自身抛错，与掉线无关），
+            已改用 <code>get_status</code> 判定在线状态 —— 这是长期生效的固定做法，不是本轮的故障，不用处理。
+          </div>
+        )}
+
+        {guardErr ? (
+          <div className="lrn-error">
+            <AlertTriangle size={15} />
+            <div style={{ flex: 1 }}>
+              会话守护状态读不到：{guardErr}
+              <div className="lrn-error-detail">
+                守护状态是<b>桥在运行时</b>的实时数据，读不到就先确认桥起没起来（首页「一键启动整套」）；
+                桥起来后点「重试」即可，不用改任何配置。
+              </div>
+            </div>
+            <button className="btn btn-sm" disabled={guardBusy} onClick={() => void loadGuard()}><RefreshCw size={13} /> 重试</button>
+          </div>
+        ) : !guard ? (
+          <div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取会话守护状态…</div>
+        ) : (
+          <>
+            <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
+              会话健康：
+              <span style={{ color: vi.color, fontWeight: 700 }}>{vi.text}</span>
+              <span style={{ color: 'var(--nc-foreground-400)' }}>（{vi.note}）</span>
+              {/* 桥侧 verdict 还有 disabled / unknown 两种；容器本身的状态单列一行更直观 */}
+              {containerDown && (
+                <span style={{ color: 'var(--nc-danger-600)' }}>
+                  　· 容器 {guard?.container?.name || 'napcat'} 当前是 {guard?.container?.status}，先去首页确认 NapCat 起没起来
+                </span>
+              )}
+              <br />
+              最近探针：{tsToClock(guard?.lastProbeAt)}
+              {guard?.lastProbeAt ? <span style={{ color: 'var(--nc-foreground-400)' }}>{guard?.lastProbeOk ? ' ✅ 通过' : ' ⚠️ 失败'}</span> : null}
+              　结果：<code>{healthDetail}</code>
+              　连续失败：{Number(guard?.consecutiveFails ?? 0)} / {Number(guard?.failThreshold ?? 0)} 次
+              <br />
+              自愈：累计 <b>{healCount}</b> 次
+              （桥侧只留最近 20 条记录）
+              　最近一次：{tsToClock(guard?.lastHealAt)}　结果：{healResultText(guard?.lastHealResult)}
             </div>
 
-            {guardErr ? (
-              <div className="lrn-error">
-                <AlertTriangle size={15} />
-                <div style={{ flex: 1 }}>会话守护不可用：{guardErr}</div>
-                <button className="btn btn-sm" disabled={guardBusy} onClick={() => void loadGuard()}><RefreshCw size={13} /> 重试</button>
-              </div>
-            ) : !guard ? (
-              <div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取会话守护状态…</div>
-            ) : (
-              <>
-                <div className="lrn-inline-note" style={{ display: 'block', lineHeight: 1.75 }}>
-                  会话健康：
-                  <span style={{ color: vi.color, fontWeight: 700 }}>{vi.text}</span>
-                  <span style={{ color: 'var(--nc-foreground-400)' }}>（{vi.note}）</span>
-                  {/* 桥侧 verdict 还有 disabled / unknown 两种；容器本身的状态单列一行更直观 */}
-                  {containerDown && (
-                    <span style={{ color: 'var(--nc-danger-600)' }}>
-                      　· 容器 {guard?.container?.name || 'napcat'} 当前是 {guard?.container?.status}，先去首页确认 NapCat 起没起来
-                    </span>
-                  )}
-                  <br />
-                  最近探针：{tsToClock(guard?.lastProbeAt)}
-                  {guard?.lastProbeAt ? <span style={{ color: 'var(--nc-foreground-400)' }}>{guard?.lastProbeOk ? ' ✅ 通过' : ' ⚠️ 失败'}</span> : null}
-                  　结果：<code>{healthDetail}</code>
-                  　连续失败：{Number(guard?.consecutiveFails ?? 0)} / {Number(guard?.failThreshold ?? 0)} 次
-                  <br />
-                  自愈：累计 <b>{healCount}</b> 次
-                  （桥侧只留最近 20 条记录）
-                  　最近一次：{tsToClock(guard?.lastHealAt)}　结果：{healResultText(guard?.lastHealResult)}
-                </div>
-
-                {/* 有 alert 时红条显著提示，并显示 reason 原文。
-                    level='needs-login'（QQ 已掉登录态、重启救不了）用更重的配色，并把二维码直接摆出来给人扫。 */}
-                {guard?.alert && (
-                  <div className="lrn-error" style={alertBoxStyle(needsLogin)}>
-                    <Siren size={needsLogin ? 17 : 15} />
-                    <div style={{ flex: 1, lineHeight: 1.7 }}>
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                        <b style={{ fontSize: needsLogin ? 14 : undefined }}>
-                          会话守护告警 · {alertLevelText(guard.alert.level)}
-                        </b>
-                        <span className="lrn-updated" style={{ marginLeft: 0 }}>{guard.alert.ts || ''}</span>
-                      </div>
-                      <div style={{ marginTop: 2 }}>{guard.alert.reason || '（桥侧没有给出原因）'}</div>
-
-                      {needsLogin && (
-                        <div style={{ marginTop: 4, fontWeight: 700 }}>
-                          QQ 未登录，需要扫码/完成验证 —— 光靠自动自愈救不回来（重启只会把验证流程打断，再重启也没用）。
-                        </div>
-                      )}
-
-                      {(needsLogin || guard.alert.qrPath) && (
-                        <div style={{ marginTop: 2, color: 'var(--nc-foreground-500)' }}>
-                          <Lock size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
-                          {needsLogin
-                            ? '用手机 QQ 扫下面的码即可恢复登录。'
-                            : '需要重新扫码才能登录。'}
-                          二维码文件在 <code>{guard.alert.qrPath || qr?.path || '（桥还没导出）'}</code>
-                          （NapCat WebUI 里也能看到）。
-                        </div>
-                      )}
-
-                      {/* ===== 二维码本体：needs-login 时自动抓一次，可手动重取（NapCat 会定期换新码） ===== */}
-                      {needsLogin && (
-                        <div style={{ marginTop: 10 }}>
-                          {qrBusy && !qr?.dataUrl && (
-                            <div className="lrn-inline-note" style={{ marginTop: 0 }}>
-                              <Loader2 size={13} className="spin" /> 正在从 NapCat 容器里取二维码…
-                            </div>
-                          )}
-                          {qr?.dataUrl && (
-                            <>
-                              <img
-                                src={qr.dataUrl}
-                                alt="NapCat 登录二维码：用手机 QQ 扫码恢复登录"
-                                style={{
-                                  display: 'block', margin: '0 auto', maxWidth: '100%', width: 240,
-                                  height: 'auto', background: '#fff', padding: 8, borderRadius: 10,
-                                  border: '1px solid var(--nc-divider)',
-                                }}
-                              />
-                              <div style={{ textAlign: 'center', fontSize: 11.5, color: 'var(--nc-foreground-400)', marginTop: 4 }}>
-                                二维码会过期，扫不出来就点「重新获取二维码」
-                                {qr?.path ? <>　文件：<code>{qr.path}</code>{typeof qr.bytes === 'number' ? `（${qr.bytes} 字节）` : ''}</> : null}
-                              </div>
-                            </>
-                          )}
-                          {qrErr && (
-                            <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)', marginTop: 2 }}>
-                              暂时没有可扫的二维码：{qrErr}
-                              （通常说明 NapCat 这会儿没在等登录，或容器刚重建还没来得及出码；稍后再点一次「重新获取二维码」）
-                            </div>
-                          )}
-                          <div className="lrn-actions" style={{ marginTop: 8 }}>
-                            <button className="btn btn-sm" disabled={qrBusy}
-                              onClick={() => void fetchQr(loginQrStamp || 'manual')}>
-                              {qrBusy ? <Loader2 size={13} className="spin" /> : <QrCode size={13} />} 重新获取二维码
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+            {/* 有 alert 时红条显著提示，并显示 reason 原文。
+                level='needs-login'（QQ 已掉登录态、重启救不了）用更重的配色，并把二维码直接摆出来给人扫。 */}
+            {guard?.alert && (
+              <div className="lrn-error" style={alertBoxStyle(needsLogin)}>
+                <Siren size={needsLogin ? 17 : 15} />
+                <div style={{ flex: 1, lineHeight: 1.7 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <b style={{ fontSize: needsLogin ? 14 : undefined }}>
+                      会话守护告警 · {alertLevelText(guard.alert.level)}
+                    </b>
+                    <span className="lrn-updated" style={{ marginLeft: 0 }}>{guard.alert.ts || ''}</span>
                   </div>
-                )}
+                  <div style={{ marginTop: 2 }}>{guard.alert.reason || '（桥侧没有给出原因）'}</div>
 
-                <div className="cfg-fields" style={{ marginTop: 8 }}>
-                  <label className="switch-row">
-                    <input type="checkbox" checked={guard?.autoHeal === true} disabled={guardBusy || healing}
-                      onChange={(e) => void toggleAutoHeal(e.target.checked)} />
-                    <span>自动自愈</span>
-                    <em>
-                      探针连续失败 {Number(guard?.failThreshold ?? 0)} 次（约 {Math.max(1, Math.round(Number(guard?.failThreshold ?? 0) * Number(guard?.probeIntervalMs ?? 60000) / 60000))} 分钟）就重启 NapCat 容器自愈。
-                      关掉后只报警不动手（上面那行状态照常更新）。
-                      {guard?.autoHealSource === 'manual' ? '（当前是手动设定值）' : '（当前跟随桥配置）'}
-                    </em>
-                  </label>
-                </div>
+                  {needsLogin && (
+                    <div style={{ marginTop: 4, fontWeight: 700 }}>
+                      QQ 未登录，需要扫码/完成验证 —— 光靠自动自愈救不回来（重启只会把验证流程打断，再重启也没用）。
+                    </div>
+                  )}
 
-                <div className="lrn-actions" style={rowStyle}>
-                  <button className="btn btn-primary btn-sm" disabled={guardBusy || healing} onClick={() => void healNow()}>
-                    {healing ? <Loader2 size={14} className="spin" /> : <Siren size={14} />} {healing ? '自愈进行中…' : '立即自愈'}
-                  </button>
-                  <button className="btn btn-sm" disabled={guardBusy || healing} onClick={() => void loadGuard()}>
-                    <RefreshCw size={13} /> 刷新守护状态
-                  </button>
+                  {(needsLogin || guard.alert.qrPath) && (
+                    <div style={{ marginTop: 2, color: 'var(--nc-foreground-500)' }}>
+                      <Lock size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
+                      {needsLogin
+                        ? '用手机 QQ 扫下面的码即可恢复登录。'
+                        : '需要重新扫码才能登录。'}
+                      二维码文件在 <code>{guard.alert.qrPath || qr?.path || '（桥还没导出）'}</code>
+                      （NapCat WebUI 里也能看到）。
+                    </div>
+                  )}
+
+                  {/* ===== 二维码本体：needs-login 时自动抓一次，可手动重取（NapCat 会定期换新码） ===== */}
+                  {needsLogin && (
+                    <div style={{ marginTop: 10 }}>
+                      {qrBusy && !qr?.dataUrl && (
+                        <div className="lrn-inline-note" style={{ marginTop: 0 }}>
+                          <Loader2 size={13} className="spin" /> 正在从 NapCat 容器里取二维码…
+                        </div>
+                      )}
+                      {qr?.dataUrl && (
+                        <>
+                          <img
+                            src={qr.dataUrl}
+                            alt="NapCat 登录二维码：用手机 QQ 扫码恢复登录"
+                            style={{
+                              display: 'block', margin: '0 auto', maxWidth: '100%', width: 240,
+                              height: 'auto', background: '#fff', padding: 8, borderRadius: 10,
+                              border: '1px solid var(--nc-divider)',
+                            }}
+                          />
+                          <div style={{ textAlign: 'center', fontSize: 11.5, color: 'var(--nc-foreground-400)', marginTop: 4 }}>
+                            二维码会过期，扫不出来就点「重新获取二维码」
+                            {qr?.path ? <>　文件：<code>{qr.path}</code>{typeof qr.bytes === 'number' ? `（${qr.bytes} 字节）` : ''}</> : null}
+                          </div>
+                        </>
+                      )}
+                      {qrErr && (
+                        <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)', marginTop: 2 }}>
+                          暂时没有可扫的二维码：{qrErr}
+                          （通常说明 NapCat 这会儿没在等登录，或容器刚重建还没来得及出码；稍后再点一次「重新获取二维码」）
+                        </div>
+                      )}
+                      <div className="lrn-actions" style={{ marginTop: 8 }}>
+                        <button className="btn btn-sm" disabled={qrBusy}
+                          onClick={() => void fetchQr(loginQrStamp || 'manual')}>
+                          {qrBusy ? <Loader2 size={13} className="spin" /> : <QrCode size={13} />} 重新获取二维码
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {guardMsg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{guardMsg}</div>}
-              </>
+              </div>
             )}
-          </div>
 
-        </>
-      )}
+            <div className="cfg-fields" style={{ marginTop: 8 }}>
+              <label className="switch-row">
+                <input type="checkbox" checked={guard?.autoHeal === true} disabled={guardBusy || healing}
+                  onChange={(e) => void toggleAutoHeal(e.target.checked)} />
+                <span>自动自愈</span>
+                <em>
+                  探针连续失败 {Number(guard?.failThreshold ?? 0)} 次（约 {Math.max(1, Math.round(Number(guard?.failThreshold ?? 0) * Number(guard?.probeIntervalMs ?? 60000) / 60000))} 分钟）就重启 NapCat 容器自愈。
+                  关掉后只报警不动手（上面那行状态照常更新）。
+                  {guard?.autoHealSource === 'manual' ? '（当前是手动设定值）' : '（当前跟随桥配置）'}
+                </em>
+              </label>
+            </div>
+
+            <div className="lrn-actions" style={rowStyle}>
+              <button className="btn btn-primary btn-sm" disabled={guardBusy || healing} onClick={() => void healNow()}>
+                {healing ? <Loader2 size={14} className="spin" /> : <Siren size={14} />} {healing ? '自愈进行中…' : '立即自愈'}
+              </button>
+              <button className="btn btn-sm" disabled={guardBusy || healing} onClick={() => void loadGuard()}>
+                <RefreshCw size={13} /> 刷新守护状态
+              </button>
+            </div>
+            {guardMsg && <div className="lrn-inline-note" style={{ marginTop: 6 }}>{guardMsg}</div>}
+          </>
+        )}
+      </div>
     </div>
   );
 }

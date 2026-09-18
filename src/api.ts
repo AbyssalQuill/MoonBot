@@ -160,6 +160,10 @@ export interface NapcatGuard {
   lastProbeAt?: number;
   lastProbeOk?: boolean;
   lastProbeDetail?: string;
+  /** 【2026-09-19】探活实际用的口径：'rkey' = NapCat 的 get_rkey；'status' = 本平台 get_rkey
+   *  结构性故障（取 rkey 的实现自身抛异常，与"掉线"无关），守护已**永久改用** get_status。
+   *  这是"已知的降级状态"，界面只在一处静态说明里提一次，不再每轮当异常展示。 */
+  probeMode?: 'rkey' | 'status';
   consecutiveFails?: number;
   failThreshold?: number;
   probeIntervalMs?: number;
