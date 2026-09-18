@@ -81,6 +81,7 @@ import { resolveVideo, buildVideoCard, videoSearch, parseVideoUrl, extractVideoU
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from '../lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from '../lib/social-timeline.js';
 import { createMediaDomain } from './media.js';
+import { toJpegCover } from '../lib/jpeg-cover.js';
 import {
   DOC_TMP_HOST_DIR, DOC_TMP_CONTAINER_DIR, MAX_DOCX_CHARS, docxQuota,
   loadDocxQuota, docxQuotaReserve, docxQuotaCommit, writeDocxToMount,
@@ -3086,7 +3087,9 @@ export function startConsoleServer() {
                     title,
                     artist,
                     image: String(body.image ?? '').trim(),
-                    musicUrl: String(body.musicUrl ?? body.url ?? '').trim()
+                    musicUrl: String(body.musicUrl ?? body.url ?? '').trim(),
+                    // 允许按次指定签名服务要的"平台身份"（qq / custom）—— 实测两者在手机端的封面表现不同
+                    cardType: String(body.cardType ?? '').trim()
                   });
                   if (qqPlan?.primary) { musicPlan = qqPlan; seg = qqPlan.primary; }
                   else log(`[rich] QQ 音乐未能生成卡片 ${key}: ${qqPlan?.note ?? '无卡片形态'} —— 改发官方分享链接文本`);
@@ -3285,7 +3288,8 @@ export function startConsoleServer() {
                 ctime,
                 desc: locContent || (locApp === 'amap' ? '高德地图' : '腾讯地图'),
                 jumpUrl: mapLink,
-                preview: mapImg,
+                // 【2026-09-19 主人定稿】preview 必须是 JPG 手机端才显示；静态地图默认给的是 PNG，过一层"输出 JPEG"的代理
+                preview: toJpegCover(mapImg, { w: 600, h: 400, fit: 'cover' }),
                 tag: locApp === 'amap' ? '高德' : '腾讯地图',
                 // 腾讯地图那个图标就是它自家分享卡里的 sourcelogo（miniapp.gtimg.cn/generated-icon/wx7643…）
                 tagIcon: locApp === 'amap'

@@ -6,6 +6,7 @@ import { log } from '../lib/log.js';
 import { enqueueSend } from './send-chain.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
+import { toJpegCover } from '../lib/jpeg-cover.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -28,8 +29,23 @@ export function normalizeCoverUrl(raw, size = 300) {
   if (!u) return '';
   if (/^http:\/\//i.test(u)) u = u.replace(/^http:\/\//i, 'https://');
   // 只给网易云图补缩略参数（别人家的 CDN 参数语义不同，不猜）
-  if (/music\.126\.net\//i.test(u) && !/[?&]param=/i.test(u)) {
-    u += `${u.includes('?') ? '&' : '?'}param=${size}y${size}`;
+  /* 【2026-09-19 修「手机端没封面」的核心一处】**必须带 `type=jpg`**。
+   * 线上逐参数实测（头 3 字节魔数：ffd8ff=JPEG / 89504e=PNG）：
+   *   （无参数）                                 89504e  4,410,875 字节  ← 原图是 4.4MB 的 **PNG**
+   *   ?param=300y300                             89504e    210,146 字节  ← 缩了，但还是 PNG
+   *   ?imageView=1&thumbnail=300x300             89504e    210,146 字节  ← 仍是 PNG
+   *   ?imageView=1&thumbnail=300x300&type=jpg    **ffd8ff**   20,913 字节  ← 真 JPEG（只有这个形态）
+   * 也就是说：网易云封面**写着 .jpg、content-type 也报 image/jpg，字节其实是 PNG** ——
+   * 手机端按内容判格式、于是不渲染（电脑端宽容所以能看）。加 `type=jpg` 让网易云自己转成 JPEG 即可，
+   * 不用第三方代理（第三方代理会让签名服务取图变慢，实测把卡片拖到超时降级）。 */
+  if (/music\.126\.net\//i.test(u)) {
+    if (/[?&]type=jpg/i.test(u)) {
+      // 已经带着 type=jpg 了，别重复拼
+    } else if (/[?&]imageView=/i.test(u)) {
+      u += /[?&]thumbnail=/i.test(u) ? '&type=jpg' : `&thumbnail=${size}x${size}&type=jpg`;
+    } else {
+      u += `${u.includes('?') ? '&' : '?'}imageView=1&thumbnail=${size}x${size}&type=jpg`;
+    }
   }
   return u;
 }
@@ -123,7 +139,12 @@ export function createMediaDomain(cfg) {
             ...(cfg.napcat?.accessToken ? { authorization: `Bearer ${cfg.napcat.accessToken}` } : {})
           },
           body: JSON.stringify(params),
-          signal: AbortSignal.timeout(15000)
+          /* 【2026-09-19 修「网易云卡发成纯链接」】这个超时**覆盖整条发送链**（含 buildMusicCard 里的
+           * 取歌详情 + 解析音频直链 + 封面探活）。原来 15s 太紧：网易云那条光解析就要十几秒
+           * （neteaseSongDetails 8s + 音频直链候选），线上实测直接把卡片拖成 `card=link`
+           * （日志 `music 卡片降级 card=link（The operation was aborted due to timeout）`）。
+           * 放宽到 45s —— 宁可慢一点，也不要"默默降级成一条没有封面的链接"。 */
+          signal: AbortSignal.timeout(45000)
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
@@ -181,6 +202,54 @@ export function createMediaDomain(cfg) {
     try { return /(^|\.)(qpic\.cn|qq\.com|ugcimg\.cn)$/i.test(new URL(u).hostname); } catch { return false; }
   }
 
+  /* 【2026-09-19 主人定稿】**卡片 preview 里的封面必须是 JPG，手机端才显示**。
+   * 各来源格式并不统一（实测：y.qq.com→image/jpeg、网易云 p2.music.126.net→**image/jpg** 非标准、
+   * 静态地图→**image/png**），所以要过一层"输出 JPEG 的图片代理"（见 lib/jpeg-cover.js）。
+   *
+   * ⚠️ 代价必须压到零：**已经是 JPEG 就直接返回，一次网络都不多花**（探测结果由 pickImage 带进来）。
+   * 早先那版对每个封面都额外探一次原始 URL + 探一次代理 URL，整整多了 2×8s 串行等待 ——
+   * 直接把卡片发送拖到 15s 超时、**网易云卡降级成纯链接**（线上实测 05:25:51）。
+   * 现在：JPEG 的封面零开销；只有真不是 JPEG 的（静态地图）才包一层代理，且不再回探。 */
+  function ensureJpegCover(cover, ct = '', opts = {}, magic = '') {
+    const raw = String(cover ?? '').trim();
+    if (!raw) return '';
+    /* 【2026-09-19 实测·这是"QQ 音乐卡手机没封面"的最终根因】
+     * 签名服务（NapCat 的 `musicSignUrl`，线上默认 http://106.55.0.102:10087/）**要自己去取我们给的 image URL**
+     * 才能拼出 Ark。而 **`y.qq.com` / `y.gtimg.cn` 的封面它取不到**（那几个域做防盗链）→ 卡片直接构造失败
+     * → 桥这边降级成一条纯链接 → 手机端自然没有封面。线上四对照实测：
+     *
+     *   A custom + y.qq.com 原始封面   → card=link（卡片失败）
+     *   B qq     + y.qq.com 原始封面   → card=link（卡片失败）
+     *   C qq     + 网易云 CDN 封面      → card=primary ✅
+     *   D custom + 网易云 CDN 封面      → card=primary ✅
+     *   E custom + **代理过的 y.qq 封面** → card=primary ✅，且 preview 变成 **qq.ugcimg.cn**（签名服务转存了！）
+     *   F custom + 代理过的 y.gtimg 封面 → card=primary ✅，同样 qq.ugcimg.cn
+     *
+     * 也就是说：**图能被签名服务取到 → 它转存到 qq.ugcimg.cn → 卡片与封面上手机都正常**；
+     * 取不到 → 整张卡失败。所以腾讯自家那两个音乐 CDN 的封面**必须过一层公共图片代理**再交出去。
+     * （qq.ugcimg.cn 也正是主人从 B 站/高德/腾讯地图分享进来的**真卡**用的封面域名。） */
+    const SIGN_UNFETCHABLE = /^https?:\/\/(y\.gtimg\.cn|y\.qq\.com)\//i;
+    if (SIGN_UNFETCHABLE.test(raw)) {
+      const wrapped = toJpegCover(raw, { force: true, ...opts });
+      if (wrapped && wrapped !== raw) {
+        log(`[cover] 腾讯音乐封面签名服务取不到（防盗链）→ 走代理交给它，它会转存到 qq.ugcimg.cn：${raw.slice(0, 70)}`);
+        return wrapped;
+      }
+    }
+    /* 其余来源**按字节魔数判断**，不是按扩展名 / content-type：
+     * 线上实测网易云的封面 URL 是 `….jpg?param=300y300`、content-type 报 `image/jpg`，
+     * 但头三字节是 `89504e`（PNG）—— 手机端按内容判格式，于是不渲染，电脑端宽容所以能显示。
+     * （网易云自己的解法：URL 加 `imageView=1&thumbnail=300x300&type=jpg` 它就返回真 JPEG，见 normalizeCoverUrl。） */
+    const isJpeg = magic ? /^ffd8ff$/i.test(magic) : /^image\/jpe?g$/i.test(String(ct));
+    if (isJpeg) return raw;
+    const wrapped2 = toJpegCover(raw, { force: true, ...opts });
+    if (wrapped2 && wrapped2 !== raw) {
+      log(`[cover] 封面不是 JPEG（magic=${magic || '未知'} ct=${ct || '未知'}）→ 走代理转成真 JPEG：${raw.slice(0, 70)}`);
+      return wrapped2;
+    }
+    return raw;
+  }
+
   /**
    * 封面候选逐个探活：返回**第一个真能取到的**（200 + `image/*`）。
    *
@@ -203,28 +272,40 @@ export function createMediaDomain(cfg) {
    * 而 `y.qq.com` 是腾讯主域、更稳。所以统一改写成 `y.qq.com`；别的域名（网易云、p.qpic.cn…）原样不动。 */
   const preferStableQqCover = (u) => String(u ?? '').trim().replace(/^https?:\/\/y\.gtimg\.cn\//i, 'https://y.qq.com/');
 
-  async function firstWorkingImage(candidates) {
+  /** 探一个图片 URL：{ ok, ct, magic, status }。
+   *  **magic** = 头 3 字节的十六进制。为什么要它：线上实测网易云的封面 URL 写着 `.jpg`、
+   *  content-type 也报 `image/jpg`，**但字节是 PNG**（magic `89504e`）—— 光看扩展名和 content-type
+   *  分不出来，而手机端正是按内容判断、于是不渲染（这就是"电脑能看手机不行"的最后一个原因）。 */
+  async function probeImage(u) {
+    try {
+      const res = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0', range: 'bytes=0-16' }, signal: AbortSignal.timeout(6000) });
+      const ct = String(res.headers.get('content-type') || '');
+      let magic = '';
+      try { magic = Buffer.from(await res.arrayBuffer()).subarray(0, 3).toString('hex'); } catch { try { res.body?.cancel(); } catch {} }
+      return { ok: (res.ok || res.status === 206) && /^image\//i.test(ct), ct, magic, status: res.status };
+    } catch (error) {
+      return { ok: false, ct: '', magic: '', status: 0, err: String(error?.message ?? error) };
+    }
+  }
+
+  /** 挑一个能取到的封面，并把它**实际的 content-type** 一并带回来（后面判断要不要转 JPG 用）。 */
+  async function pickImage(candidates) {
     const list = [...new Set(candidates.map((u) => String(u ?? '').trim()).filter(Boolean))];
-    if (!list.length) return '';
+    if (!list.length) return { url: '', ct: '', magic: '' };
     for (let round = 0; round < 2; round += 1) {
       for (const u of list) {
-        try {
-          const res = await fetch(u, {
-            headers: { 'user-agent': 'Mozilla/5.0', range: 'bytes=0-128' },
-            signal: AbortSignal.timeout(6000)
-          });
-          const ct = String(res.headers.get('content-type') || '');
-          try { res.body?.cancel(); } catch {}
-          if ((res.ok || res.status === 206) && /^image\//i.test(ct)) return u;
-          log(`[cover] 候选封面取不到（${res.status} ${ct.slice(0, 20)}），换下一个：${u.slice(0, 90)}`);
-        } catch (error) {
-          log(`[cover] 候选封面探测异常（${error?.message ?? error}）：${u.slice(0, 90)}`);
-        }
+        const p = await probeImage(u);
+        if (p.ok) return { url: u, ct: p.ct, magic: p.magic };
+        log(`[cover] 候选封面取不到（${p.status} ${String(p.ct).slice(0, 20)}${p.err ? ' ' + p.err : ''}），换下一个：${u.slice(0, 90)}`);
       }
       if (round === 0) await sleep(800);
     }
     log(`[cover] 所有候选封面都探不到，兜底用第一个：${list[0].slice(0, 90)}`);
-    return list[0];
+    return { url: list[0], ct: '', magic: '' };
+  }
+
+  async function firstWorkingImage(candidates) {
+    return (await pickImage(candidates)).url;
   }
 
   /** 外部图 → QQ 图床 URL（失败就原样返回，绝不让卡片因此发不出去）。 */
@@ -323,7 +404,10 @@ export function createMediaDomain(cfg) {
     const usable = (u) => /^https?:\/\//i.test(u) && !/music\.163\.com\/404/i.test(u) && !/\/404(\?|$)/i.test(u);
     for (const src of [meting, official]) {
       try {
-        const res = await fetch(src, { redirect: 'manual', headers: NETEASE_HEADERS, signal: AbortSignal.timeout(8000) });
+        // 官方那个端点实测对所有歌都恒 302 到 /404（等于死的），给它短超时就行，
+        // 别为了一个已知的坏候选再白等 8 秒（那 8 秒最终会算进卡片发送的总超时里）。
+        const to = src === official ? 3500 : 8000;
+        const res = await fetch(src, { redirect: 'manual', headers: NETEASE_HEADERS, signal: AbortSignal.timeout(to) });
         const loc = res.headers.get('location');
         try { await res.body?.cancel(); } catch {}
         if (loc && usable(loc)) {
@@ -505,7 +589,8 @@ export function createMediaDomain(cfg) {
        * 它就照着抄），于是卡片挂的是另一首歌的封面。
        * 所以优先级改回来：**桥自己解析出来的封面优先**，模型的 `image` 只当最后一档兜底。
        * 探测（firstWorkingImage）照旧 —— 它能同时解决"y.gtimg.cn 间歇性 404"。 */
-      const cover = await firstWorkingImage([song.cover, explicitCover]);
+      const coverPick = await pickImage([song.cover, explicitCover]);
+      const cover = coverPick.url;
       const title = song?.title || givenTitle || '网易云音乐';
       const artist = song?.artist || givenArtist || '';
       const link = `${title}${artist ? ' ' + artist : ''} https://music.163.com/#/song?id=${pid}`;
@@ -533,7 +618,7 @@ export function createMediaDomain(cfg) {
         url: String(cfg?.social?.send?.neteaseJumpUrl ?? 'page').trim().toLowerCase() === 'direct' ? (song.audio || song.url) : song.url,
         audio: song.audio,
         title,
-        image: await ensureQqHostedImage(cover)
+        image: await ensureQqHostedImage(ensureJpegCover(cover, coverPick.ct, { w: 300, h: 300, fit: 'cover' }, coverPick.magic))
       };
       if (artist) data.singer = artist;
       return {
@@ -563,12 +648,17 @@ export function createMediaDomain(cfg) {
       const artist = song?.artist || givenArtist || '';
       const url = song?.url || `https://y.qq.com/n/ryqq/songDetail/${encodeURIComponent(pid)}`;
       const link = `${title}${artist ? ' ' + artist : ''} ${url}`;
-      const cardType = String(process.env.QQBRIDGE_QQMUSIC_CARD ?? '').trim() === 'qq' ? 'qq' : 'custom';
+      /* 卡片类型 = 走签名服务时要的"平台身份"。
+       * 【2026-09-19 实测】网易云（type=163）在手机端**封面能显示**，而 QQ 音乐用 type=custom 时
+       * 封面（真 JPEG、magic ffd8ff）**手机端仍不显示** —— 差别就在这个 type。
+       * 所以做成可切换：`social.send.qqMusicCard = 'qq'|'custom'`（或环境变量 QQBRIDGE_QQMUSIC_CARD）。 */
+      const cardType = String(opts?.cardType || process.env.QQBRIDGE_QQMUSIC_CARD || cfg?.social?.send?.qqMusicCard || '').trim() === 'qq' ? 'qq' : 'custom';
       const qqExplicitCover = String(opts?.image ?? '').trim();
       /* **桥自己解析的那张优先**（聚合站按 songmid/歌名回检匹配过，肯定是这首歌的），
        * 调用方传的 `image` 只兜底 —— 它是从聊天记录里别的卡片抄来的话就gg了（主人实测"封面不对"就是这么来的）。
        * `song.coverExplicit` 是解析器专门留的"调用方传的那张"（不能和 song.cover 混）。 */
-      const qqCover = preferStableQqCover(await firstWorkingImage([song?.cover, song?.coverExplicit, qqExplicitCover]));
+      const qqPick = await pickImage([song?.cover, song?.coverExplicit, qqExplicitCover]);
+      const qqCover = preferStableQqCover(qqPick.url);
       /* 【2026-09-19 修「QQ音乐又没封面」——真因是**卡片根本没生成**】
        * 线上现场：请求 `musicId=0039MnYb0qxYhV`，聚合站返回的最佳匹配却是
        * `songDetail/004Fs2FP1EvZYc`（另一个版本，songmid 不同）→ 被"按 songmid 回检"判为对不上
@@ -589,7 +679,7 @@ export function createMediaDomain(cfg) {
           note: '连封面都拿不到，发官方分享链接（QQ 客户端自己渲染卡片）'
         };
       }
-      const data = { type: cardType, url, title, image: await ensureQqHostedImage(qqCover) };
+      const data = { type: cardType, url, title, image: await ensureQqHostedImage(ensureJpegCover(qqCover, qqPick.ct, { w: 300, h: 300, fit: 'cover' }, qqPick.magic)) };
       if (song?.audio) data.audio = song.audio;
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
