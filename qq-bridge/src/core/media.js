@@ -68,6 +68,99 @@ export function normalizeMediaUrl(raw) {
   return /^http:\/\//i.test(u) ? u.replace(/^http:\/\//i, 'https://') : u;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 音乐分享卡：**照抄真机分享的形状**（2026-09-19 定稿）
+ *
+ * 【为什么推翻了之前所有写法】手机端一直"没出图"，而电脑端正常。真因**不是封面 URL**
+ * —— 我前后试遍了原始 y.qq.com、wsrv 代理、qq.ugcimg.cn 转存、网易云 PNG/JPEG，
+ * 全都一样没图。主人从**手机 App 分享进来的两张真卡**才给出答案（现场抓的原始 Ark）：
+ *
+ *   QQ音乐    分享 → app=com.tencent.tuwen.lua, view=news, meta.news,
+ *                    jumpUrl=https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq…
+ *                    preview=https://pic.ugcimg.cn/0210d0f2bd805547b519bce78eecf897/jpg1
+ *   网易云音乐 分享 → app=com.tencent.tuwen.lua, view=news, meta.news,
+ *                    jumpUrl=https://y.music.163.com/m/song?id=2041026502&…
+ *                    preview=https://pic.ugcimg.cn/6534c6954eb16462f326c1e774db1002/jpg1
+ *
+ * 也就是说：**真机分享根本不是 `com.tencent.music.lua`，而是 `com.tencent.tuwen.lua` +
+ * `view=news` + `meta.news` 的"图文卡"**。我们一直拼的 `music.lua` 那个版式，
+ * **手机端就不画封面**（电脑端宽容，所以你看到"电脑上都有"）。
+ * 交叉印证：位置卡当初拼的就是这个 tuwen/news 形状，主人确认手机上正常显示；
+ * 群里真人从 B 站分享的卡是 `com.tencent.miniapp_01`，同样能出图。
+ * 三张真卡能出图、零张 music.lua 能出图 —— 差别是**版式**，不是图片。
+ *
+ * 【顺带修掉的"将要访问"】真卡的 jumpUrl 用的是**手机播放页**
+ * （`i.y.qq.com/v8/playsong.html?...songmid=…` / `y.music.163.com/m/song?id=…`），
+ * 点开直接进播放器；我们之前用的是**桌面歌页** `y.qq.com/n/ryqq/songDetail/…`，
+ * 那才会被 QQ 盖上"将要访问"那层安全页。照抄真卡就同时解决了这条。
+ *
+ * 关于 `token`：真卡里那张是分享方签的 32 位十六进制，我们签不出来 ——
+ * 用同格式的随机值顶上（位置卡就是这么做的，主人确认能正常渲染）。
+ * ⚠️ 所以调用方**必须保留纯链接兜底**：万一 QQ 校验 token 把卡拒了，分享动作不能整体失败。
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/** 各平台在 QQ 里的「应用身份」——appid / 显示名 / 官方图标，全部抄自真机分享卡。 */
+export const SHARE_APP = {
+  qqmusic: {
+    appid: 100497308,
+    tag: 'QQ音乐',
+    tagIcon: 'https://p.qpic.cn/qqconnect/0/app_100497308_1626060999/100?max-age=2592000&t=0'
+  },
+  netease: {
+    appid: 100495085,
+    tag: '网易云音乐',
+    tagIcon: 'https://i.gtimg.cn/open/app_icon/00/49/50/85/100495085_100_m.png'
+  }
+};
+
+/** QQ 音乐的**手机播放页**（真卡用的就是这个；桌面歌页会被"将要访问"拦一层）。 */
+export function qqMobilePlayUrl(songmid) {
+  const mid = String(songmid ?? '').trim();
+  if (!mid) return '';
+  return 'https://i.y.qq.com/v8/playsong.html?platform=11&appshare=android_qq&appversion=20080008'
+    + `&hosteuin=null&songmid=${encodeURIComponent(mid)}&type=0&appsongtype=1&_wv=1&source=qq&ADTAG=qfshare`;
+}
+
+/** 网易云的**手机歌曲页**（同理，照抄真卡）。 */
+export function neteaseMobileSongUrl(id) {
+  const sid = String(id ?? '').trim();
+  return sid ? `https://y.music.163.com/m/song?id=${encodeURIComponent(sid)}` : '';
+}
+
+/**
+ * 拼一张与真机分享**同形**的图文卡（tuwen.lua + view:news + meta.news）。
+ * 返回可直接发送的 OneBot json 段；字段顺序也照真卡排（便于日后比对）。
+ */
+export function buildShareNewsCard({ platform = 'qqmusic', title = '', desc = '', jumpUrl = '', preview = '', uin = '' }) {
+  const app = SHARE_APP[platform] ?? SHARE_APP.qqmusic;
+  const ctime = Math.floor(Date.now() / 1000);
+  const hex = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
+  const news = {
+    app_type: 1,
+    appid: app.appid,
+    ctime,
+    desc,
+    jumpUrl,
+    preview,
+    tag: app.tag,
+    tagIcon: app.tagIcon,
+    title
+  };
+  if (uin) news.uin = uin;
+  const card = {
+    app: 'com.tencent.tuwen.lua',
+    bizsrc: 'qqconnect.sdkshare',
+    config: { ctime, forward: 1, token: hex(), type: 'normal' },
+    extra: { app_type: 1, appid: app.appid, ...(uin ? { uin } : {}) },
+    meta: { news },
+    prompt: `[分享]${title || '音乐'}`.slice(0, 60),
+    ver: '0.0.0.1',
+    view: 'news'
+  };
+  return { type: 'json', data: { data: JSON.stringify(card) } };
+}
+
+
 /**
  * 音乐分享的发送梯子：**卡片 → NapCat 原生卡片 → 纯链接**。
  * 需求：卡片发不出去时分享动作不能整体失败，必须还能落到一条能点开的官方链接。
@@ -112,8 +205,50 @@ export async function sendMusicCardWithFallback({ key, plan = null, seg = null, 
 
 export function createMediaDomain(cfg) {
 
+  /* 音乐分享卡的版式：`share`（默认）= 照抄真机分享的图文卡（tuwen/news，手机端才画封面）；
+   * 其余值 = 旧的 `music.lua` 卡片（手机端不画封面，桌面歌页还会被"将要访问"拦一层）。
+   * 一键回退：`social.send.musicCardStyle = 'music'` 或环境变量 QQBRIDGE_MUSIC_CARD_STYLE=music。 */
+  const MUSIC_CARD_STYLE = String(
+    process.env.QQBRIDGE_MUSIC_CARD_STYLE ?? cfg?.social?.send?.musicCardStyle ?? 'share'
+  ).trim().toLowerCase();
+
+  /* ── 同一张卡短时间内的**重复发送**防护（2026-09-19）───────────────────────────
+   * 现场：主人说"重发两个音乐"，结果每条都发了两遍（08:23:00/05 一次，08:23:23/34 又一次）。
+   * 日志里的原因很清楚：
+   *   08:22:42 [default] 回合卡死判定：session-16a704b5… 完全静默超过 180s（无任何事件），强制隔离
+   *   08:22:42 [default] 卡死会话已隔离 → private:***（下次唤醒重建新会话）
+   *   08:22:44 [default] private:*** 轮换后首轮唤醒，注入完整 prompt（含最近 24 条窗口，轮换加长）
+   * 也就是：桥判定旧回合卡死 → 轮换成新会话 → **把最近 24 条（含那条"重发两个音乐"）重新喂给模型**；
+   * 而**旧回合其实还活着**，它也把卡片发完了 → 两条路各发一遍。
+   *
+   * 【为什么在这里兜而不是去改隔离逻辑】隔离是必要的（真卡死的会话必须能救），
+   * 而"救援时把同一批消息再喂一遍"是它的设计前提 —— 在 DSH 那边没有可靠办法确认
+   * 旧回合是否真的停下。所以加一道**幂等网**：同一会话 + 同一段内容，短时间内只发一次。
+   * 窗口 60s：线上这两次重复相隔 23s/29s；而"主人明确要求再发一遍"通常也远超过这个间隔。 */
+  const RICH_DEDUPE_MS = Number(process.env.QQBRIDGE_RICH_DEDUPE_MS ?? 60000);
+  const richRecent = new Map(); // `${key}|${JSON(seg)}` -> { at, messageId }
+
   // 发送富文本/卡片消息段（music/contact/location/json/xml/dice/rps），与文本/表情共用发送链。
   async function sendRich(key, seg, options = {}) {
+    /* 去重只看**内容本身**（不含 replyTo/at —— 那些是每次调用的装饰，不影响"是不是同一张卡"）。
+     * 被挡下来时返回上一次的结果与 messageId，调用方拿到的回执与真发出去那次一致，
+     * 不会因为"跳过了"而误判成发送失败。 */
+    const dedupeKey = `${key}|${JSON.stringify(seg)}`;
+    if (RICH_DEDUPE_MS > 0) {
+      const prev = richRecent.get(dedupeKey);
+      if (prev && Date.now() - prev.at < RICH_DEDUPE_MS) {
+        log(`[rich] 疑似重复发送，已跳过（${Math.round((Date.now() - prev.at) / 1000)}s 前刚发过同一张卡）${key}：${String(seg?.type)}`);
+        return { messageId: prev.messageId ?? null, deduped: true };
+      }
+      // 顺手清掉过期项，避免这张表无限长
+      for (const [k, v] of richRecent) if (Date.now() - v.at >= RICH_DEDUPE_MS) richRecent.delete(k);
+    }
+    const out = await sendRichOnce(key, seg, options);
+    if (RICH_DEDUPE_MS > 0) richRecent.set(dedupeKey, { at: Date.now(), messageId: out?.messageId ?? null });
+    return out;
+  }
+
+  async function sendRichOnce(key, seg, options = {}) {
     const [kind, id] = key.split(':');
     const segments = [];
     const replyToMessageId = options.replyToMessageId;
@@ -614,12 +749,31 @@ export function createMediaDomain(cfg) {
         image: await ensureQqHostedImage(ensureJpegCover(cover, coverPick.ct, { w: 300, h: 300, fit: 'cover' }, coverPick.magic))
       };
       if (artist) data.singer = artist;
+      /* 【2026-09-19 定稿】默认发**图文卡**（tuwen/news，照抄真机分享的形状）——
+       * `music.lua` 那个版式手机端不画封面，见文件上方 buildShareNewsCard 的说明。
+       * 想回到旧的 music.lua 卡：`social.send.musicCardStyle = 'music'`（或环境变量 QQBRIDGE_MUSIC_CARD_STYLE=music）。 */
+      if (MUSIC_CARD_STYLE !== 'music') {
+        const seg = buildShareNewsCard({
+          platform: 'netease',
+          title,
+          desc: artist,
+          jumpUrl: neteaseMobileSongUrl(pid),
+          preview: data.image
+        });
+        return {
+          title,
+          primary: seg,
+          native,
+          link,
+          note: '桥拼 163 图文卡（tuwen/news，与网易云 App 分享同形：手机端才画封面、点开进手机播放页）'
+        };
+      }
       return {
         title,
         primary: { type: 'music', data },
         native,
         link,
-        note: '桥拼 163 卡片（https 封面 + 300×300 缩略图，避免手机端白框）'
+        note: '桥拼 163 卡片（music.lua 版式 —— 手机端不画封面，仅在 social.send.musicCardStyle=music 时使用）'
       };
     }
 
@@ -676,6 +830,31 @@ export function createMediaDomain(cfg) {
       if (song?.audio) data.audio = song.audio;
       if (artist) data.singer = artist;
       if (cardType === 'custom') data.content = artist || 'QQ音乐';
+      /* 【2026-09-19 定稿】默认发**图文卡**（tuwen/news，照抄真机分享的形状）。
+       * 真卡（主人从 QQ 音乐 App 分享进来的）是：
+       *   app=com.tencent.tuwen.lua / view=news / meta.news
+       *   jumpUrl=https://i.y.qq.com/v8/playsong.html?...songmid=…   ← 手机播放页，不是桌面歌页
+       *   preview=<封面>
+       * 而 `music.lua`（我们之前一直发的）**手机端不画封面**；桌面歌页还会被 QQ 盖一层
+       * "将要访问"的安全页 —— 两条都是照着真卡改掉的。 */
+      if (MUSIC_CARD_STYLE !== 'music') {
+        const seg = buildShareNewsCard({
+          platform: 'qqmusic',
+          title,
+          desc: artist,
+          jumpUrl: qqMobilePlayUrl(pid),
+          preview: data.image
+        });
+        return {
+          title,
+          primary: seg,
+          native: null,
+          link,
+          note: song?.audio
+            ? 'QQ 音乐图文卡（tuwen/news，与 QQ音乐 App 分享同形：手机端才画封面、点开进手机播放页）'
+            : 'QQ 音乐图文卡（tuwen/news；没有解析到可播放直链，点开进手机播放页听）'
+        };
+      }
       return {
         title,
         primary: { type: 'music', data },
