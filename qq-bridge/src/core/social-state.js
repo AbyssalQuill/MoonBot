@@ -211,6 +211,34 @@ export function isInSleepWindow() {
   return cur >= startMin || cur < endMin; // 跨午夜
 }
 
+/**
+ * 启动时给"没见过当前人设版本"的会话标记一次补注入（2026-09-20）。
+ *
+ * 为什么需要：人设 / 发言规则已经由 lib/preset-compose.js 合成进系统提示词，唤醒正文**不再重复注入**
+ * 那整份文本；但这两种情况必须补一次，否则会话会一直用旧人设：
+ *   ① 桥停机期间主人改了 persona.md / speech-rules.md —— 老会话的系统提示词是旧版；
+ *   ② 本次升级之前建的会话（那时正文每次都注入，会话里没有任何"见过哪一版"的记录）。
+ * 判据是 `_personaSeenStamp !== 当前版本`；补过一次就会把 stamp 记上，此后不再重复注入。
+ * @param {string} currentStamp persona.md|speech-rules.md 的版本号（wake-send 的 runtimeOverrideStamp()）
+ * @returns {number} 被标记的会话数
+ */
+export function markStalePersonaReinjects(currentStamp) {
+  if (!currentStamp) return 0;
+  let n = 0;
+  try {
+    for (const [key, st] of social.conversations.entries()) {
+      if (!st) continue;
+      if ((st._personaSeenStamp || '') === currentStamp) continue;
+      if (st._personaNeedsReinject === true) continue;
+      st._personaNeedsReinject = true;
+      n += 1;
+      log(`[preset] ${key} 标记补注入（会话记录的人设版本=${st._personaSeenStamp || '无'}）`);
+    }
+    if (n) saveSocialState();
+  } catch (e) { log('[preset] 标记补注入失败:', e?.message ?? e); }
+  return n;
+}
+
 // ── DND 免打扰时段（cfg 层 social.dndWindows，北京时间实时判定） ─────────
 // 解析免打扰配置 v（三形态）：
 //   undefined  -> 默认 [{ start:'23:00', end:'08:00' }]（整夜免打扰）
@@ -339,6 +367,10 @@ export function saveSocialState() {
         _promptInjected: st._promptInjected === true,
         /* 【2026-09-19 修「对话中途也注入首轮提示词」】这个字段必须落盘，理由见下面默认值那行的注释。 */
         _promptOverrideStamp: (typeof st._promptOverrideStamp === 'string' && st._promptOverrideStamp) ? st._promptOverrideStamp : '',
+        /* 【2026-09-20】人设已合成进系统提示词 → 唤醒正文默认不再重复注入。这两个字段记录
+         * "这个会话见过哪一版人设 / 要不要再补一次"（详见 wake-send.js 里 buildWakePrompt 的注释）。 */
+        _personaSeenStamp: (typeof st._personaSeenStamp === 'string' && st._personaSeenStamp) ? st._personaSeenStamp : '',
+        _personaNeedsReinject: st._personaNeedsReinject === true,
         _standbySessionId: st._standbySessionId || null,
         _standbyWarming: st._standbyWarming === true,
         _mediaAttachedSeq: Number(st._mediaAttachedSeq) || 0,
@@ -483,6 +515,11 @@ export function getSocialState(key) {
        * 而 bridge.log 里「人设/发言规则已更新 → 重新注入完整 prompt」在 16:08~17:57 之间刷了 12 次，
        * 且 state 里所有会话都**没有** `_promptOverrideStamp` 这个字段。 */
       _promptOverrideStamp: '', // 注入完整 prompt 时的人设文件版本号（mtime:size），人设一变就重新注入
+      /* 【2026-09-20】人设已合成进系统提示词，唤醒正文不再无条件重复它：
+       *   _personaSeenStamp   = 这个会话的系统提示词/正文里"见过"的人设版本（默认空 = 还没记过）
+       *   _personaNeedsReinject = 要不要在下一次完整注入时补一遍（人设刚改 / 重启前就存在的老会话） */
+      _personaSeenStamp: '',
+      _personaNeedsReinject: false,
       _standbySessionId: null, // 已预建并预热的"下一代会话"id（轮换时直接切换）
       _standbyWarming: false, // 预热创建/请求进行中标记（防重入）
       lastActionAt: 0,
@@ -597,6 +634,8 @@ export function loadSocialState() {
           _promptInjected: val._promptInjected === true,
           // 【2026-09-19】读回来也要认这个字段，否则重启后它又变回 undefined → 又触发"人设已更新"。
           _promptOverrideStamp: (typeof val._promptOverrideStamp === 'string' && val._promptOverrideStamp) ? val._promptOverrideStamp : '',
+          _personaSeenStamp: (typeof val._personaSeenStamp === 'string' && val._personaSeenStamp) ? val._personaSeenStamp : '',
+          _personaNeedsReinject: val._personaNeedsReinject === true,
           _standbySessionId: (typeof val._standbySessionId === 'string' && val._standbySessionId) ? val._standbySessionId : null,
           _standbyWarming: val._standbyWarming === true,
           _mediaAttachedSeq: Number(val._mediaAttachedSeq) || 0,

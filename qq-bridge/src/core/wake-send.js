@@ -4,6 +4,8 @@ import { fmtBeijing } from '../lib/time.js';
 import { log, appendActivity } from '../lib/log.js';
 import { isDirectedAtAi } from '../lib/social-timeline.js';
 import { withTimeout } from '../lib/async.js';
+// 【2026-09-20】人设/发言规则已合成进系统提示词，靠这个判定"正文里还要不要再重复一遍"
+import { getComposedPersonaStamp } from '../lib/preset-compose.js';
 import { currentMode, selfNickname, isSessionAllowedInCurrentMode } from './mode.js';
 import { state, saveState } from './config.js';
 import { createStandbySession, ensureSession } from './dsh-session.js';
@@ -282,6 +284,20 @@ export function runtimeOverrideStamp() {
   return `${runtimeOverrideCache['persona.md']?.key || ''}|${runtimeOverrideCache['speech-rules.md']?.key || ''}`;
 }
 
+/**
+ * 唤醒正文要不要再带一遍 [PERSONA] / [SPEECH RULES]（纯判定，供测试与 buildWakePrompt 共用）。
+ *
+ * 背景：人设与发言规则已经由 lib/preset-compose.js 合成进**系统提示词**（新会话一建起来就带着），
+ * 而唤醒正文这一份只是"改完人设立即对正在跑的会话生效"的补丁。所以：
+ *   · preset 里那份就是当前版本、且这个会话没有待补标记 → **不注入**（省掉 10KB 级的重复文本）；
+ *   · preset 里那份过时了（刚改完人设、还没合成）或这个会话被标记要补 → 注入一次。
+ * @param {{composedStamp?: string, currentStamp?: string, needsReinject?: boolean}} o
+ */
+export function shouldInjectPersonaBlock({ composedStamp = '', currentStamp = '', needsReinject = false } = {}) {
+  const inSystemPrompt = !!composedStamp && composedStamp === currentStamp;
+  return !inSystemPrompt || needsReinject === true;
+}
+
 function buildRuntimeOverrideBlock() {
   const personaText = readRuntimeOverrideFile('persona.md');
   const speechText = readRuntimeOverrideFile('speech-rules.md');
@@ -398,8 +414,29 @@ export function buildWakePrompt(key, reason) {
   // 【2026-09-12 规则搬家】原 protocolNote（2,886 字符的「回合协议」：➤ 哨兵含义、读/发/收尾步骤、
   // 步数预算、等待工具禁令）已整段搬进系统提示词的 [WAKE DATA] / [WAKE TYPES] 两段。
   // 现在唤醒正文只留数据行：[Token] + [Wake ...]/[Unread n]/[Mid-turn]/[Note]...，不再携带规则散文。
-  // 动态覆盖段：本地 persona.md / speech-rules.md（若存在）放在数据之后，清晰分隔，避免与 preset persona 冲突
-  const baseWithProtocol = base + buildRuntimeOverrideBlock();
+  /* 动态覆盖段：本地 persona.md / speech-rules.md。
+   * 【2026-09-20 主人要求"都合并进系统提示词了，这些就别重复了"】以前这里**无条件**把整份人设
+   * （实测一条首连正文里 [PERSONA]+[SPEECH RULES] 就有 10KB 量级）塞进唤醒正文。可是从 1.1.x 起，
+   * 人设与发言规则已经由 lib/preset-compose.js **合成进系统提示词**（新建会话一建起来就带着），
+   * 于是新会话的首连正文等于把同一份东西又说一遍 —— 纯浪费，还容易和系统提示词里那份"打架"。
+   * 现在的判据（两条都成立才不注入）：
+   *   ① preset 里合成的那份**就是当前版本**（getComposedPersonaStamp() === runtimeOverrideStamp()）；
+   *   ② 这个会话没有"需要重新注入"的标记（人设文件刚被改过 / 重启前就存在的老会话）。
+   * 任何一条不成立就照旧注入一次（改完人设立即生效这条路不能丢），注入完把状态记回会话。 */
+  const ovStampNow = runtimeOverrideStamp();
+  const composedStamp = getComposedPersonaStamp();
+  const stOv = getSocialState(key);
+  const personaInSystemPrompt = !!composedStamp && composedStamp === ovStampNow;
+  const needPersonaBlock = shouldInjectPersonaBlock({
+    composedStamp, currentStamp: ovStampNow, needsReinject: stOv._personaNeedsReinject === true,
+  });
+  const baseWithProtocol = base + (needPersonaBlock ? buildRuntimeOverrideBlock() : '');
+  if (needPersonaBlock) {
+    log(`[wake] ${key} 注入人设/发言规则（preset 里那份${personaInSystemPrompt ? '是当前版本但会话标记需要重注入' : '不是当前版本'}）`);
+  } else {
+    log(`[wake] ${key} 跳过人设/发言规则注入（系统提示词里已是当前版本 ${ovStampNow.slice(0, 24)}…）`);
+  }
+  if (stOv) { stOv._personaSeenStamp = ovStampNow; stOv._personaNeedsReinject = false; }
   // 【2026-09-12 规则搬家】每种唤醒原因的"该怎么做"全部写进系统提示词 [WAKE TYPES]（第 1~14 条），
   // 注入这边只留一行**数据**（原因 + 必需的事实）。首轮也只注入一次，之后全是哨兵轮数据行。
   if (reason === 'bootstrap') {
@@ -1075,6 +1112,8 @@ export async function sendWakePrompt(key, reason) {
   if (st._promptInjected && ovStamp !== (st._promptOverrideStamp || '')) {
     log(`[default] ${key} 人设/发言规则已更新 → 重新注入完整 prompt（新人设立即生效）`);
     st._promptInjected = false;
+    // 人设刚被改过 → 这个会话的系统提示词里那份已经过时，下一次完整注入必须再带一遍正文覆盖段
+    st._personaNeedsReinject = true;
     saveSocialState();
   }
   // 重启后未读恢复：内存 unread 为空但 SQLite chat_messages 里存在晚于“最近已读水位”的新入向消息时，

@@ -106,7 +106,7 @@ import {
 } from './core/memory.js';
 import {
   evaluateWakeTrigger, buildWakePrompt, sendWakePrompt, steerIntoRunningTurn,
-  initWakeCore, setWakeApi, setWakeDeliver,
+  initWakeCore, setWakeApi, setWakeDeliver, runtimeOverrideStamp,
 } from './core/wake-send.js';
 import { resolveGroupMemberName, resolveReplyInfo, expandIncomingForwardPreview, setMessageCacheBot } from './core/message-cache.js';
 import {
@@ -213,6 +213,8 @@ import {
   startDeliveryWatchdog,
   // 主人改了插话概率 → 立刻同步到正在跑的会话（只动 source=owner 的，见 social-state.js）
   applyOwnerWakeProbabilityToSessions,
+  // 人设已合成进系统提示词 → 启动时给"没见过当前人设版本"的会话标记一次补注入
+  markStalePersonaReinjects,
   clearSocialTimers, clearAllSocialTimers,
 } from './core/social-state.js';
 import {
@@ -518,6 +520,14 @@ async function main() {
     const r = applyOwnerWakeProbabilityToSessions();
     if (r.updated) log(`[config] 启动时同步插话概率：更新 ${r.updated} 个会话（其中覆盖模型自定的 ${r.overridden} 个）`);
   } catch (e) { log('[config] 启动同步插话概率失败:', e?.message ?? e); }
+
+  /* 启动时给"没见过当前人设版本"的会话标记一次补注入（2026-09-20）。
+   * 人设/发言规则已经合成进系统提示词，唤醒正文默认不再重复注入它；但桥停机期间改过
+   * persona.md / speech-rules.md 的话，老会话的系统提示词是旧版、新写的又不在里面 —— 必须补一次。 */
+  try {
+    const r = markStalePersonaReinjects(runtimeOverrideStamp());
+    if (r) log(`[preset] 启动时标记 ${r} 个会话需要在下一轮补注入人设/发言规则`);
+  } catch (e) { log('[preset] 启动标记补注入失败:', e?.message ?? e); }
 
   // QQ 侧（NapCat OneBot WebSocket 客户端）
   const bot = new OneBotWsClient({

@@ -77,6 +77,21 @@ export function readOverrideFiles(root) {
   return { persona: read('persona.md'), speechRules: read('speech-rules.md') };
 }
 
+/** 人设 / 发言规则的"版本号"：每个文件 mtimeMs:size，`|` 分隔。
+ *  【必须与 core/wake-send.js::runtimeOverrideStamp() 的格式逐字一致】——那边用它判断
+ *  "唤醒正文里的那份是不是已经过时了"，这边用它记下"preset 里合成的是哪一版"。 */
+export function overrideStampOf(root) {
+  const one = (name) => {
+    try { const s = fs.statSync(path.join(root, name)); return `${s.mtimeMs}:${s.size}`; } catch { return ''; }
+  };
+  return `${one('persona.md')}|${one('speech-rules.md')}`;
+}
+
+/** 当前**已合成进 preset**的人设/发言规则版本号（每次 syncPresetOverrides 时更新，含"内容没变"的情况）。
+ *  见 core/wake-send.js 里的用法：一致就说明新会话的系统提示词里已经带着这一份，唤醒正文里不必重复。 */
+let composedPersonaStamp = '';
+export function getComposedPersonaStamp() { return composedPersonaStamp; }
+
 /** 把 home 里已安装的 preset 重新合成一次（幂等；内容没变就不写盘） */
 export function syncPresetOverrides({ home, root, log = () => {} } = {}) {
   const file = path.join(String(home || ''), '.agent-presets', 'default', 'agent.cordis.yml');
@@ -84,6 +99,8 @@ export function syncPresetOverrides({ home, root, log = () => {} } = {}) {
   let cur = '';
   try { cur = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, error: `读不到 ${file}：${e?.message ?? e}` }; }
   const { persona, speechRules } = readOverrideFiles(root);
+  // 无论内容变没变，都记下"preset 里现在是哪一版" —— wake-send 靠它决定要不要求唤醒正文重复注入。
+  composedPersonaStamp = overrideStampOf(root);
   const next = composePresetText(cur, { persona, speechRules });
   const info = { ok: true, file, changed: next !== cur, personaChars: persona.trim().length, speechChars: speechRules.trim().length };
   if (!info.changed) return info;
