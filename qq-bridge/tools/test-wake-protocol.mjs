@@ -23,7 +23,8 @@ fs.mkdirSync(path.join(sandbox, 'state'), { recursive: true });
 fs.writeFileSync(path.join(sandbox, 'config.json'), JSON.stringify({
   ownerQQ: '123456789',
   dsh: { baseUrl: 'http://127.0.0.1:10721' },
-  social: { enabled: true, steerEnabled: true },
+  // 唤醒概率用的就是主人配置里的 recommendedProbability：测试里固定 0.42，方便断言 [WakeRef] 行
+  social: { enabled: true, steerEnabled: true, wake: { recommendedProbability: 0.42 } },
   // 访问控制：唤醒调度会先过白名单（沙箱里必须显式放行主人私聊，否则 wake 直接被跳过）
   allow: { private: ['123456789'], group: [] },
   deny: { private: [], group: [] },
@@ -110,6 +111,11 @@ check('B9 哨兵轮 < 800 字符（原约 2KB 含规则；2026-09-19 起还要�
  * 哨兵轮（= 绝大多数唤醒）没有 → 概率实际要等会话轮换（~10 轮）才重掷一次，
  * 表现就是"设了 0.6 却几乎看不到表情包/语音"。现在哨兵轮也必须带抽签行。 */
 check('B10 哨兵轮带 [Meme] 抽签行（这就是本轮修复）', /^\[Meme\] /m.test(sentinel), JSON.stringify(sentinel));
+/* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】
+ * [WakeRef] 行必须每轮都在（首轮 + 哨兵轮），并且写着主人配置的那个数字 ——
+ * 否则模型拿不到它，就会一直沿用自己上一轮拍的概率，主人在界面上改等于没改。 */
+check('B10b 哨兵轮带 [WakeRef] 主人插话概率行', /\[WakeRef\][^\n]*插话概率=0\.42/.test(sentinel), JSON.stringify(sentinel.split('\n').filter((l) => l.includes('WakeRef'))));
+check('B10c 首轮也带 [WakeRef]', /\[WakeRef\][^\n]*插话概率=0\.42/.test(first));
 // 把概率拧到 1 / 0，哨兵轮必须分别给出 HIT / MISS —— 证明它真的每轮现掷，而不是照抄首轮结论
 const stickerCfg = (cfg.social && cfg.social.sticker) || (cfg.social.sticker = {});
 stickerCfg.enabled = true;
@@ -246,6 +252,30 @@ for (const rel of srcFiles) {
   const afterEdit = delivered[0]?.text ?? '';
   check('G4 人设文件变更后自动重新注入完整 prompt', /改名鲸/.test(afterEdit));
   check('G5 重新注入时不再带旧人设', !/测试鲸/.test(afterEdit));
+}
+
+/* ── H. 主人改插话概率 → 正在跑的会话立刻跟上（只动 source=owner 的）──────────
+ * 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】这一节的现场是：
+ * 界面上把概率从 0.05 改成 0.2，但已经聊过的会话一直用旧值（模型早就自己定过一个 prob），
+ * 于是"改了没反应"。现在给概率带来源标记：owner 的跟着配置走，model 的保留模型的选择。 */
+{
+  const mk = (key, prob, src) => {
+    const s = socialMod.getSocialState(key);
+    const def = socialMod.defaultWakeConfig();
+    s.wakeConfig = { ...def, triggers: { ...def.triggers, probability: prob, probabilitySource: src } };
+    return s;
+  };
+  const sOwner = mk('group:900001', 0.05, 'owner');
+  const sModel = mk('group:900002', 0.33, 'model');
+  cfg.social.wake.recommendedProbability = 0.2;
+  const r = socialMod.applyOwnerWakeProbabilityToSessions();
+  check('H1 owner 会话立刻用新值', sOwner.wakeConfig.triggers.probability === 0.2, String(sOwner.wakeConfig.triggers.probability));
+  check('H2 model 会话保留它自己定的值', sModel.wakeConfig.triggers.probability === 0.33, String(sModel.wakeConfig.triggers.probability));
+  check('H3 返回统计里两边都算到', r.updated >= 1 && r.kept >= 1, JSON.stringify(r));
+  // 再把概率调回去，确认是"双向"的（不是只能改一次）
+  cfg.social.wake.recommendedProbability = 0.07;
+  socialMod.applyOwnerWakeProbabilityToSessions();
+  check('H4 再改一次也生效（双向）', sOwner.wakeConfig.triggers.probability === 0.07, String(sOwner.wakeConfig.triggers.probability));
 }
 
 try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* Windows 占用忽略 */ }

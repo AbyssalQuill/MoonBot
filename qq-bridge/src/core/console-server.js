@@ -1783,6 +1783,15 @@ export function startConsoleServer() {
         if (next.triggers.probability !== undefined) {
           next.triggers.probability = Math.min(1, Math.max(0, Number(next.triggers.probability) || 0));
         }
+        /* 【2026-09-19 修「主人在界面上改插话概率没用」】记下这个值是谁定的：
+         *   · 模型显式传了 triggers.probability → source=model（它看着语境定的，保留）；
+         *   · 没传、由桥按主人配置填的 → source=owner（主人改配置时**立刻**跟着变，见 core/social-state.js 的
+         *     applyOwnerWakeProbabilityToSessions）。
+         * 以前没有这个来源标记，session 一律照抄旧值，于是"改了概率永远不生效"。 */
+        const explicitProb = !!(input.triggers && typeof input.triggers === 'object' && 'probability' in input.triggers);
+        next.triggers.probabilitySource = explicitProb
+          ? 'model'
+          : (current.triggers?.probabilitySource === 'model' ? 'model' : 'owner');
         // 归一化拍一拍触发（只接受布尔，防脏字符串被当成 true）
         if (input.triggers && typeof input.triggers === 'object' && 'poke' in input.triggers) {
           next.triggers.poke = input.triggers.poke === true;

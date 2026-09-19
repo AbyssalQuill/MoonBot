@@ -100,10 +100,13 @@ ok('搜索路径不塞 Referer（仍走代理）', srcSearch.every((s) => !s.ref
 
 /* ───────────────────────── 离线：登录 cookie 层（按名字搜画师） ───────────────────────── */
 console.log('\n=== 6. cookie 规整（三种写法都要认，换行要清掉）===');
-eq('整条 cookie 串原样保留（只留认识的键）', cleanPixivCookie('PHPSESSID=abc123; p_ab_id=7; other=1'), 'PHPSESSID=abc123; p_ab_id=7');
-eq('只给会话值 → 自动补 PHPSESSID=', cleanPixivCookie('12345678_abcdefghijklmnop'), 'PHPSESSID=12345678_abcdefghijklmnop');
-eq('带 PHPSESSID= 前缀照收', cleanPixivCookie('PHPSESSID=xyz_987654321'), 'PHPSESSID=xyz_987654321');
-eq('复制时带上的换行/tab 被清掉（换行进请求头会弄坏请求）', cleanPixivCookie('PHPSESSID=abc\r\ndef\t'), 'PHPSESSID=abc def');
+/* ⚠️ 这些 fixture 故意带上 `FIXTURE` 字样：打包脱敏环节会扫"看起来像真凭据"的字符串
+ * （tools/sanitize-full-payload.mjs 的 SECRET_PATTERNS），带 FIXTURE 的占位值会被跳过。
+ * 改这些示例值时别把 FIXTURE 去掉，否则安装包构建会因为"疑似密钥残留"而拒绝出包。 */
+eq('整条 cookie 串原样保留（只留认识的键）', cleanPixivCookie('PHPSESSID=FIXTUREabc123; p_ab_id=7; other=1'), 'PHPSESSID=FIXTUREabc123; p_ab_id=7');
+eq('只给会话值 → 自动补 PHPSESSID=', cleanPixivCookie('FIXTURE_12345678_abcdefghijklmnop'), 'PHPSESSID=FIXTURE_12345678_abcdefghijklmnop');
+eq('带 PHPSESSID= 前缀照收', cleanPixivCookie('PHPSESSID=FIXTURE_xyz_987654321'), 'PHPSESSID=FIXTURE_xyz_987654321');
+eq('复制时带上的换行/tab 被清掉（换行进请求头会弄坏请求）', cleanPixivCookie('PHPSESSID=FIXTUREabc\r\ndef\t'), 'PHPSESSID=FIXTUREabc def');
 eq('空值 → 空串', cleanPixivCookie('   '), '');
 ok('超长被截断（不让凭证面无限大）', cleanPixivCookie(`PHPSESSID=${'a'.repeat(5000)}`).length <= 2000);
 

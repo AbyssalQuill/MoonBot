@@ -279,6 +279,24 @@ function buildRuntimeOverrideBlock() {
   return parts.length ? `\n${parts.join('\n\n')}\n\n` : '';
 }
 
+/**
+ * 「主人配置的插话概率 / 当前生效值 / 来源」这一行（2026-09-19）。
+ * 首轮**与哨兵轮都要带**：模型每轮都用 qq_set_wake_config 重设唤醒条件，拿不到这个数字就会一直
+ * 沿用自己上一轮拍的值 —— 主人在界面上改概率等于没改（这就是"插话概率改了不生效"的机制原因）。
+ * 来源标记的语义：owner = 主人配置（照它填）；model = 模型自己按语境定的（继续用它的）。
+ */
+function wakeRefLine(key) {
+  const st = getSocialState(key);
+  const tr = st?.wakeConfig?.triggers ?? {};
+  const ownerProb = Number(cfgRef.social?.wake?.recommendedProbability) || 0;
+  const cur = Number(tr.probability) || 0;
+  const src = tr.probabilitySource === 'model' ? 'model' : 'owner';
+  return `[WakeRef] 主人配置的普通消息插话概率=${ownerProb}（当前生效=${cur}，来源=${src}）`
+    + (src === 'model'
+      ? '；qq_set_wake_config 时若不特别指定，请改回主人的值。'
+      : '；qq_set_wake_config 时把 triggers.probability 填成这个值。');
+}
+
 export function buildWakePrompt(key, reason) {
   const st = getSocialState(key);
   // 【2026-09-12】首轮也要带 `[OWNER]` 标记：persona 的 [OWNER MODE] 只认这个标记，
@@ -350,7 +368,7 @@ export function buildWakePrompt(key, reason) {
   if (wcTr.question) wcTriggers.push('question');
   if (wcTr.poke) wcTriggers.push('poke');
   if (Number(wcTr.probability) > 0) wcTriggers.push(`prob${wcTr.probability}`);
-  const wakeLine = `[Wake] ${wcMode}, ${wcTime}${wcTriggers.length ? ` trg:${wcTriggers.join('/')}` : ''}\n\n`;
+  const wakeLine = `[Wake] ${wcMode}, ${wcTime}${wcTriggers.length ? ` trg:${wcTriggers.join('/')}` : ''}\n${wakeRefLine(key)}\n\n`;
   const gInfoText = key.startsWith('group:') ? formatGroupInfoLine(key.split(':')[1]) : '';
   const groupListText = formatGroupListLine();
       // 【2026-09-12 规则搬家】原 rulesShort（12 条：跨会话读取/转达/@/提醒/撤回/长文 docx/
@@ -1460,9 +1478,10 @@ export async function sendWakePrompt(key, reason) {
       saveSocialState();
     }
     /* 抽签行（语音/表情包）在哨兵轮里的落点：每个片段都以 '\n' 开头，这里也补一个，
-     * 再把抽签行自己的尾部换行去掉，避免和 unreadLine 之间多出一个空行。 */
+     * 再把抽签行自己的尾部换行去掉，避免和 unreadLine 之间多出一个空行。
+     * 同一处还带上 [WakeRef]（主人配的插话概率）——见 wakeRefLine 的说明，它必须每轮都在。 */
     const diceLines = voiceTurnHint(key) + memeTurnHint(key);
-    const diceBlock = diceLines ? `\n${diceLines.replace(/\n+$/, '')}` : '';
+    const diceBlock = `\n${wakeRefLine(key)}${diceLines ? '\n' + diceLines.replace(/\n+$/, '') : ''}`;
 
     // 工具全关的兜底（几乎不会发生）：没有 unread 工具就回退到两行说明版，避免哨兵悬空。
     const tools = cfgRef.social?.tools;

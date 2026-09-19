@@ -204,6 +204,8 @@ import {
   formatParticipation, suggestQuietMs, PEER_TYPING_HOLD_MAX_MS, scheduleWake,
   scheduleReplyCheck, buildWakeReminderPrompt,
   startDeliveryWatchdog,
+  // 主人改了插话概率 → 立刻同步到正在跑的会话（只动 source=owner 的，见 social-state.js）
+  applyOwnerWakeProbabilityToSessions,
   clearSocialTimers, clearAllSocialTimers,
 } from './core/social-state.js';
 import {
@@ -446,6 +448,15 @@ async function main() {
 
   loadSocialState();
 
+  /* 启动时把"主人配置的插话概率"同步到已有会话（2026-09-19 主人要求"插话概率等所有概率都要改好落地"）：
+   * 老会话数据里没有来源标记，以前会一直用历史上存下来的那个值（常见是模型早期拍的 0.12），
+   * 主人后来在界面上改成 0.05/0.2 也永远不会变。这里在启动时对齐一次：
+   * 只有被模型显式指定过概率（probabilitySource==='model'）的会话才保留原值。 */
+  try {
+    const r = applyOwnerWakeProbabilityToSessions();
+    if (r.updated || r.kept) log(`[config] 启动时同步插话概率：更新 ${r.updated} 个会话，保留模型自定的 ${r.kept} 个`);
+  } catch (e) { log('[config] 启动同步插话概率失败:', e?.message ?? e); }
+
   // QQ 侧（NapCat OneBot WebSocket 客户端）
   const bot = new OneBotWsClient({
     url: cfg.napcat.wsUrl,
@@ -649,6 +660,16 @@ async function main() {
         if (changed.some((k) => k.startsWith('dsh'))) {
           resetVisionModelApplications();
           log('[config] 模型配置已变化，已清空会话模型缓存（下一轮起用新模型）');
+        }
+        /* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】主人一改唤醒概率/活跃概率，
+         * 正在跑的会话必须**立刻**跟着变 —— 否则界面上改了数字，已经聊过的会话照旧用旧值
+         * （那正是"改了概率没反应"的机制原因）。只更新 source=owner 的会话；
+         * 模型自己定过概率的会话保留它的选择（它看着语境定的，不该被静默覆盖）。 */
+        if (changed.some((k) => k === 'social.wake.recommendedProbability' || k === 'social.wake.activeProbability' || k.startsWith('social.wake'))) {
+          try {
+            const r = applyOwnerWakeProbabilityToSessions();
+            if (r.updated || r.kept) log(`[config] 插话概率同步：更新 ${r.updated} 个会话，保留模型自定的 ${r.kept} 个`);
+          } catch (e) { log('[config] 同步插话概率失败:', e?.message ?? e); }
         }
       },
     });

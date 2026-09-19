@@ -65,7 +65,14 @@ export function defaultWakeConfig() {
       question: w.recommendedQuestion !== false,
       poke: w.recommendedPoke !== false,
       anyMessage: defaultMode === 'active',
-      probability: Math.min(1, Math.max(0, Number(w.recommendedProbability) || 0))
+      probability: Math.min(1, Math.max(0, Number(w.recommendedProbability) || 0)),
+      /* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】
+       * 这个值有两个来源：① 主人配置里的 recommendedProbability（这里叫 owner）；
+       * ② 模型自己按语境用 qq_set_wake_config 定的值（model）。
+       * 以前分不清是谁给的 → 主人在界面上改概率，已经聊过的会话永远不会变（模型早就自己定过一个值）。
+       * 现在带上来源标记：source=owner 的会话会在配置热加载时**立刻**跟着新值走；
+       * source=model 的会话保留模型的选择（模型是看着语境定的，不该被静默覆盖）。 */
+      probabilitySource: 'owner'
     },
     batchWindowMs: Math.max(1000, Number(w.batchWindowMs) || 8000),
     lastWakeAt: 0,
@@ -76,8 +83,39 @@ export function defaultWakeConfig() {
   };
 }
 
-// 软重置唤醒配置：保留当前"模式"（活跃/潜水）与关键触发条件（指定成员/关键词/概率），
-// 只把其余参数回归推荐默认——用于"无行动/连续未设置唤醒"等兜底场景，
+/**
+ * 把主人配置里的"普通消息插话概率"应用到**正在跑的会话**上（2026-09-19）。
+ *
+ * 为什么需要：这个概率有两个来源（主人的 recommendedProbability / 模型自己定的值），
+ * 现在靠 `triggers.probabilitySource` 区分。主人一改配置，source=owner 的会话立刻跟着变；
+ * source=model 的会话保留模型的选择（它是看着语境定的，静默覆盖会让模型的判断失效）。
+ * 由 bridge.js 的 config 热加载回调在 `social.wake` 变化时调用。
+ * @returns {{updated:number, kept:number}}
+ */
+export function applyOwnerWakeProbabilityToSessions() {
+  const w = cfgRef?.social?.wake ?? {};
+  const ownerProb = Math.min(1, Math.max(0, Number(w.recommendedProbability) || 0));
+  const activeProb = Math.min(1, Math.max(0, Number(w.activeProbability) || 0));
+  let updated = 0;
+  let kept = 0;
+  for (const [key, st] of social.conversations.entries()) {
+    const tr = st?.wakeConfig?.triggers;
+    if (!tr) continue;
+    if (tr.probabilitySource === 'model') { kept += 1; continue; }
+    // 活跃模式用 activeProbability（它本来就是"墙上说的活跃概率"），潜水模式用 recommendedProbability
+    const want = st.wakeConfig?.mode === 'active' && activeProb > 0 ? activeProb : ownerProb;
+    if (Number(tr.probability) !== want) {
+      tr.probability = want;
+      tr.probabilitySource = 'owner';
+      updated += 1;
+      log(`[config] 插话概率已按主人配置更新 ${key}: ${want}（来源=owner）`);
+    }
+  }
+  if (updated) saveSocialState();
+  return { updated, kept };
+}
+
+// 软重置唤醒配置：保留当前"模式"（活跃/潜水）与关键触发条件（指定成员/关键词/概率），// 只把其余参数回归推荐默认——用于"无行动/连续未设置唤醒"等兜底场景，
 // 避免把用户或管理员显式设置的活跃模式冲成默认潜水（默认潜水会让人以为机器人突然失联）。
 export function softResetWakeConfig(st) {
   const old = st.wakeConfig || {};
@@ -98,7 +136,9 @@ export function softResetWakeConfig(st) {
       poke: oldTr.poke === true || def.triggers.poke,
       speakerIds: normalizeSpeakerIds(oldTr.speakerIds),
       keywords: Array.isArray(oldTr.keywords) ? oldTr.keywords.map((k) => String(k).slice(0, 100)).filter(Boolean).slice(0, 50) : def.triggers.keywords,
-      probability: Number.isFinite(prevProb) && prevProb > 0 ? Math.min(1, Math.max(0, prevProb)) : def.triggers.probability
+      probability: Number.isFinite(prevProb) && prevProb > 0 ? Math.min(1, Math.max(0, prevProb)) : def.triggers.probability,
+      // 软重置要保留"这个概率是谁定的"：模型定的就继续归模型，主人配置来的就继续跟主人配置走
+      probabilitySource: oldTr.probabilitySource === 'model' ? 'model' : 'owner'
     },
     wakeCount: old.wakeCount || 0,
     noActionCount: 0,
