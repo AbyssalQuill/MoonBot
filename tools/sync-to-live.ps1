@@ -101,7 +101,7 @@ foreach ($d in $bridgeDests) {
   if ($n -gt 0) { Write-Host ("  removed " + $n + " dev-only file(s) from " + $toolsDir) }
 }
 
-# 1d) 撤掉模板角色卡（2026-09-19）：出厂改带 22 个真实角色包，_template 反而会在「角色库导入」里
+# 1d) 撤掉模板角色卡（2026-09-19）：出厂改带 21 个真实角色包 + 1 张散装卡，_template 反而会在「角色库导入」里
 # 抢走列表、让新机器看着像空库。Copy-Item 只加不删，所以旧 payload 里残留的那一份必须在这里显式清掉
 # —— 与上面 dev-only 清理同一套路。
 Write-Host '=== 1d) retire the _template character pack from payload characters/ ==='
