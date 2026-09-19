@@ -191,9 +191,6 @@ const mustHave = [
   ['活跃时段规则（原 rulesShort 第 11 条）', /qq_set_activity_hours/],
   ['系统配置键规则（原 rulesShort 第 12 条）', /proactiveEnabled/],
   // 【2026-09-13 主人要求：默认人设改为 "You are a helpful assistant"，不要小鲸鱼】
-  ['默认人设是通用助手', /You are a helpful assistant/],
-  ['默认人设放在 DEFAULT CHARACTER 段里', /\[DEFAULT CHARACTER[^\n]*\]\s*\n\s*You are a helpful assistant/],
-  ['默认人设明确"没有名字/吉祥物/设定"', /no persona name, no mascot, no roleplay register|no name, no mascot and no lore/],
   ['主人段落不再有撒娇/顺从注册', null],
 ];
 for (const [label, re] of mustHave) {
@@ -202,6 +199,12 @@ for (const [label, re] of mustHave) {
 }
 // 鲸鱼身份必须清零（表情工具现在叫 qq_send_meme / qq_meme_search，名字里也不带鲸鱼了）
 const whaleHits = preset.split(/\r?\n/).filter((l) => /小鲸鱼|鲸鱼娘|大肥鱼|whale-girl|ᗜ|本鱼/.test(l));
+/* 【2026-09-19 主人要求】系统提示词里**不再内置默认人设**：
+ * 原来这三条断言要求提示词里有 "You are a helpful assistant" 与 [DEFAULT CHARACTER] 段 —— 那是旧契约。
+ * 现在改成反向断言：既不能有默认角色段，又必须明确"没有人设时不要自己编、不要扮演"。 */
+check('D 系统提示词不再内置默认人设（无 [DEFAULT CHARACTER] 段）', !/\[DEFAULT CHARACTER/.test(preset));
+check('D 没有人设时写明"不扮演、别自己编"', /\[NO PERSONA[^\n]*\]/.test(preset) && /(invent nothing|role-play nothing|no default character)/i.test(preset));
+check('D 仍保留"没有名字/吉祥物/语域/口头禅"的约束', /(no name|no persona name)[^\n]{0,60}(mascot|register|catchphrases)/i.test(preset));
 check('D 预设里不再有鲸鱼身份字样', whaleHits.length === 0, whaleHits.map((l) => l.trim().slice(0, 80)).join(' / '));
 check('D 主人段落已中性化（不再有撒娇/顺从/娇羞注册）', !/撒娇|顺从|娇羞|配合调情|装可怜/.test(preset));
 check('D 默认人设不含表情符号要求（ᗜ 之类）', !/ᗜ/.test(preset));
@@ -270,8 +273,10 @@ for (const rel of srcFiles) {
   cfg.social.wake.recommendedProbability = 0.2;
   const r = socialMod.applyOwnerWakeProbabilityToSessions();
   check('H1 owner 会话立刻用新值', sOwner.wakeConfig.triggers.probability === 0.2, String(sOwner.wakeConfig.triggers.probability));
-  check('H2 model 会话保留它自己定的值', sModel.wakeConfig.triggers.probability === 0.33, String(sModel.wakeConfig.triggers.probability));
-  check('H3 返回统计里两边都算到', r.updated >= 1 && r.kept >= 1, JSON.stringify(r));
+  /* 【2026-09-19 改口径】主人保存的概率现在覆盖**所有**会话，包括"模型自己定过"的那些
+   * （主人反馈："我调的 0.15，唤醒词里带的好像是 0.08" —— 旧口径保留了模型的值，看起来就是没生效）。 */
+  check('H2 model 会话也被主人配置覆盖', sModel.wakeConfig.triggers.probability === 0.2, String(sModel.wakeConfig.triggers.probability));
+  check('H3 统计：updated 有、kept 为 0、overridden 记一笔', r.updated >= 2 && r.kept === 0 && r.overridden >= 1, JSON.stringify(r));
   // 再把概率调回去，确认是"双向"的（不是只能改一次）
   cfg.social.wake.recommendedProbability = 0.07;
   socialMod.applyOwnerWakeProbabilityToSessions();
