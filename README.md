@@ -2,7 +2,7 @@
 
 Windows 桌面应用，用于部署和管理 QQ 机器人。把 NapCat、QQ 桥接层、DeepSeek Harness 与模型服务商整合为一个可安装程序，提供图形化配置、进程编排、日志查看与远程部署。
 
-当前版本 **1.0.0**，产品名 MoonBot Pro，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)，本版发布说明（可直接用作 GitHub Release 正文）见 [docs/release-1.0.0.md](docs/release-1.0.0.md)。
+当前版本 **1.2.0**，产品名 MoonBot Pro，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)，1.0.0 那版的发布说明留档在 [docs/release-1.0.0.md](docs/release-1.0.0.md)。
 
 <p>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
@@ -283,7 +283,7 @@ MoonBot Public/
 
 ### 安装包
 
-1.0.0 提供两份产物，文件名不带版本号后缀：
+安装包两份产物，文件名不带版本号后缀：
 
 | 产物 | 内容 | 适用场景 |
 | --- | --- | --- |
