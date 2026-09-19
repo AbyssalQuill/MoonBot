@@ -48,15 +48,17 @@ try {
     step(20, now - 3 * hourMs),
     step(30, now - 2 * hourMs),
     prune(40, now - 1 * hourMs, 500),
+    // 摘要压缩（把最老一段聊天换成 <compacted-summary>）：与剪枝是两条路径，要分开统计
+    { type: 'compaction/summary', seq: 41, time: now - 0.9 * hourMs, data: { compactionId: 'c1', summary: [{ type: 'text', text: '摘要' }], shadowedRange: { start: 10, end: 30 }, shadowedSeqs: [10, 20, 30], shadowedTokenCount: 4000 } },
     step(50, now - 0.5 * hourMs),
   ]);
   await check('decodeSessionLog 能把多帧拼回来', () => {
     const text = decodeSessionLog(logA);
     const lines = text.split('\n').filter(Boolean);
-    assert.equal(lines.length, 8, `应当解出 8 行，实际 ${lines.length}`);
+    assert.equal(lines.length, 9, `应当解出 9 行，实际 ${lines.length}`);
     assert.equal(JSON.parse(lines[2]).type, 'tool/result');
   });
-  await check('summarizeSessionLog：剪枝量 + 后续请求重读', () => {
+  await check('summarizeSessionLog：剪枝量 + 后续请求重读 + 摘要另算', () => {
     const s = summarizeSessionLog(decodeSessionLog(logA));
     assert.equal(s.pruneEvents, 2);
     assert.equal(s.prunedTotal, 1500);
@@ -66,6 +68,9 @@ try {
     assert.equal(b.pruneEvents, 2);
     // 第一次剪枝(seq12)之后有 step 20/30/50（3 次）+ 第二次剪枝(seq40)之后有 step 50（1 次）
     assert.equal(b.rereadSaved, 1000 * 3 + 500 * 1);
+    // 摘要压缩（把最老一段聊天换成 <compacted-summary>）是另一条路径，单独统计
+    assert.equal(b.summaryEvents, 1);
+    assert.equal(b.summarizedTokens, 4000);
   });
 
   console.log('\n== ② 扫描 → 汇总 ==');

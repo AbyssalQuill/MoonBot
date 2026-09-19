@@ -100,14 +100,19 @@ export function summarizeSessionLog(text) {
   }
   const steps = evs.filter((e) => e?.type === 'step/start').map((e) => ({ seq: Number(e.seq) || 0, time: Number(e.time) || 0 }));
   const prunes = evs.filter((e) => e?.type === 'compaction/prune');
+  /* 【2026-09-19 主人问"永久会话真的没问题吗，对话也会压缩吗"】摘要压缩（把最老一段聊天换成
+   * <compacted-summary>）是另一条路径，事件是 compaction/summary（同样带 shadowedTokenCount）——
+   * 单独统计出来，面板就能如实说明"聊天被摘要过几次、盖掉了多少 token"。 */
+  const summaries = evs.filter((e) => e?.type === 'compaction/summary');
   const buckets = new Map();
   const bump = (day, field, v) => {
     if (!day) return;
-    const b = buckets.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0 };
-    b[field] += v;
+    const b = buckets.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
+    b[field] = (b[field] || 0) + v;
     buckets.set(day, b);
   };
   let prunedTotal = 0;
+  let summarizedTotal = 0;
   for (const p of prunes) {
     const tokens = num(p?.data?.shadowedTokenCount);
     if (!tokens) continue;
@@ -122,7 +127,14 @@ export function summarizeSessionLog(text) {
       bump(billingKey(s.time), 'rereadSaved', tokens);
     }
   }
-  return { buckets, pruneEvents: prunes.length, prunedTotal, steps: steps.length };
+  for (const s of summaries) {
+    const tokens = num(s?.data?.shadowedTokenCount);
+    const time = Number(s.time) || Date.now();
+    if (tokens) summarizedTotal += tokens;
+    bump(billingKey(time), 'summaryEvents', 1);
+    if (tokens) bump(billingKey(time), 'summarizedTokens', tokens);
+  }
+  return { buckets, pruneEvents: prunes.length, prunedTotal, summaryEvents: summaries.length, summarizedTotal, steps: steps.length };
 }
 
 function listSessionLogs(root) {
@@ -227,6 +239,7 @@ export async function reconcileContextSavings(opts = {}) {
           size: st.size,
           days: Object.fromEntries(sum.buckets),
           pruneEvents: sum.pruneEvents,
+          summaryEvents: sum.summaryEvents,
         });
         scanned += 1;
       } catch (e) {
@@ -254,13 +267,15 @@ function reuseOrMark(prev, st) {
 export function getContextSavings(days = 7) {
   const todayKey = billingKey(Date.now());
   const byDay = new Map();
-  let lifetime = { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0 };
+  let lifetime = { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
   for (const rec of live.files.values()) {
     for (const [day, b] of Object.entries(rec.days ?? {})) {
-      const cur = byDay.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0 };
+      const cur = byDay.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
       cur.prunedTokens += num(b?.prunedTokens);
       cur.pruneEvents += num(b?.pruneEvents);
       cur.rereadSaved += num(b?.rereadSaved);
+      cur.summarizedTokens += num(b?.summarizedTokens);
+      cur.summaryEvents += num(b?.summaryEvents);
       byDay.set(day, cur);
     }
   }
@@ -268,8 +283,10 @@ export function getContextSavings(days = 7) {
     lifetime.prunedTokens += b.prunedTokens;
     lifetime.pruneEvents += b.pruneEvents;
     lifetime.rereadSaved += b.rereadSaved;
+    lifetime.summarizedTokens += b.summarizedTokens;
+    lifetime.summaryEvents += b.summaryEvents;
   }
-  const today = byDay.get(todayKey) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0 };
+  const today = byDay.get(todayKey) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
   const list = [...byDay.entries()]
     .filter(([k]) => k && k !== todayKey)
     .sort((a, b) => (a[0] < b[0] ? 1 : -1))

@@ -1486,6 +1486,9 @@ function UsageSourceCard({ title, src, badge, highlight }: { title: string; src:
 
 function UsagePanel() {
   const [report, setReport] = useState<any>(null);
+  /* 【2026-09-19 修"剪枝那一行不显示"】它挂在**响应顶层**（r.contextSavings），不在 total 里 ——
+   * 原来写成 report?.contextSavings（report = total），永远取不到 → 整行不渲染。 */
+  const [savings, setSavings] = useState<any>(null);
   const [split, setSplit] = useState<{ local: any | null; remote: any | null; total: any | null; localReason: string; remoteReason: string; remoteServer: any } | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1544,6 +1547,7 @@ function UsagePanel() {
         remoteServer: isObj(r?.remoteServer) ? r.remoteServer : null,
       };
       setSplit(next);
+      setSavings(isObj(r?.contextSavings) ? r.contextSavings : null);
       if (!total) {
         setErr([next.localReason, next.remoteReason].filter(Boolean).join('；') || '两侧桥都没有取到用量数据');
         return;
@@ -1634,6 +1638,11 @@ function UsagePanel() {
   // 「今日已用」= 真实计费量，**不把字符估算并进来**（估算只在下方单独一行说明）。
   const todayUsed = todayReal;
   const todayProj = report && report.todayEstimatedTotal !== undefined ? num(report.todayEstimatedTotal) : todayUsed;
+  const linearProj = num(report?.todayLinearEstimatedTotal);
+  const projBy = String(report?.projectedBy || '');
+  /* 对账补记（reconciled）单独报：那些行是桥侧漏记后补的，可能属于更早的用量却落在今天 ——
+   * 主人对上提供方控制台时，先看这个数就知道差在哪。老桥没有该字段时为 0。 */
+  const reconciledToday = num(today.reconciledTotal);
   const dayAvg = days.length ? days.reduce((a, d) => a + d.real + d.est, 0) / days.length : 0;
   const realSum = days.reduce((a, d) => a + d.real, 0);
   const estSum = days.reduce((a, d) => a + d.est, 0);
@@ -1647,9 +1656,7 @@ function UsagePanel() {
     ? `北京 ${String(Math.floor(dayStartMin / 60)).padStart(2, '0')}:${String(dayStartMin % 60).padStart(2, '0')} 换日`
     : '北京 00:00 换日';
   const note = typeof report?.note === 'string' && report.note ? report.note : '';
-  /* 上下文剪枝省下的量（实测）：本机 + 服务端合并后的那一份；老桥没有该字段时为 null（那块不显示）。
-   * 结构见 api.ts 的 ContextSavings —— 数字全是桥侧从真实事件里记的，前端不做任何估算。 */
-  const savings = isObj(report?.contextSavings) ? report.contextSavings : null;
+  /* 上下文剪枝省下的量（实测）：组件 state 里的 `savings`（响应顶层字段），前端不做任何估算。 */
   // 与 DSH 对账状态（桥侧每 5 分钟自动跑一次；标题栏那个按钮是手动再跑一次）
   //
   // 【2026-09-18 修「文案让人以为面板 = 提供方控制台」】原文案两处不准确：
@@ -1722,8 +1729,13 @@ function UsagePanel() {
             <>今日还没有触发过剪枝（0 token）——工具结果超过阈值后才会剪，剪完这两天就能看到数字。</>
           )}
           {savings.lifetime.rereadSaved > 0 && <> 近 {savings.windowDays ?? 7} 天累计：剪掉 {fmtFull(savings.lifetime.prunedTokens)} · 少读 {fmtFull(savings.lifetime.rereadSaved)}（{fmtFull(savings.lifetime.pruneEvents)} 次）。</>}
-          <br />口径与用量同一套计费日（{dayStartLabel}）：读的是 **DSH 自己的会话日志**（{fmtFull(num(savings.scannedFiles))} 份在扫），
-          幂等重算、桥重启不丢；只算工具结果的剪枝，**不含**摘要压缩那部分。
+          {/* 【2026-09-19 主人问"对话也会压缩吗"】会 —— 但那是**另一条路径**：剪枝只动工具结果，
+              聊天本身超过阈值时才会把最老一段换成 <compacted-summary>（要花一次模型调用）。这里如实报数。 */}
+          {num(savings.today.summaryEvents) > 0
+            ? <> 另外今日还发生过 <b>{fmtFull(num(savings.today.summaryEvents))} 次聊天摘要压缩</b>（把最老一段聊天换成摘要，盖掉 {fmtFull(num(savings.today.summarizedTokens))} token）——这是"聊天本身太大"时才走的路径，细节仍可用 qq_get_recent_messages 从桥的记忆库里翻。</>
+            : <> 今日<b>没有</b>发生过聊天摘要压缩（0 次）——只剪了工具历史，聊天记录逐字保留。</>}
+          <br />口径与用量同一套计费日（{dayStartLabel}）：读的是 DSH 自己的会话日志（{fmtFull(num(savings.scannedFiles))} 份在扫），
+          幂等重算、桥重启不丢。
         </div>
       )}
 
@@ -1746,22 +1758,32 @@ function UsagePanel() {
           <div className="lrn-stat-v">{fmtFull(todayUsed)}</div>
           <div className="lrn-stat-s">
             {todayUsed === 0 ? '今日暂无记录' : `未命中 ${fmtFull(num(today.prompt))} · 命中 ${fmtFull(num(today.cacheRead))} · 输出 ${fmtFull(num(today.completion))}`}
-            {/* 平台（小米 MiMo 控制台）按 UTC 日结算 = 北京 08:00 换日；这里并列显示自然日合计，方便对数 */}
-            {calTotal > 0 && <><br />平台口径（{dayStartLabel}）· 自然日 00:00 起合计 {fmtFull(calTotal)}</>}
-            {/* 【2026-09-18】这行是实测教训：上面那个数**不一定**等于提供方控制台 ——
-                它含 DSH 对账补记行（按对账时刻计入当日），桥侧记多的桶又扣不回来。实测当日高出 476,993。 */}
-            <br />含 DSH 对账补记，可能与提供方控制台不一致
+            {/* 【2026-09-19 主人说"token 虚高"】把两个"看着像虚高"的来源直接摊开写：
+                ① 对账补记（桥侧漏记、事后按 DSH 会话累计补的行，时间戳取 DSH 那次动会话的时刻，
+                   可能属于**更早**的用量却落在今天）—— 单独报数，方便对上提供方控制台；
+                ② 自然日 00:00 起的总量（含 00:00–08:00 那一段，而平台把那段算在**昨天**）。 */}
+            {reconciledToday > 0 && <><br />其中对账补记 {fmtFull(reconciledToday)}（{num(today.reconciledSamples)} 笔，可能属于更早的用量）</>}
+            {calTotal > 0 && (
+              <>
+                <br />北京自然日 00:00 起合计 {fmtFull(calTotal)} —— 其中 00:00–08:00 那段平台算在<b>昨天</b>，
+                所以这个数比上面大是正常的，不要当成两笔
+              </>
+            )}
           </div>
         </div>
         <div className="lrn-stat">
           <div className="lrn-stat-t">今日预计</div>
           <div className="lrn-stat-v lrn-stat-proj">{fmtFull(todayProj)}</div>
-          <div className="lrn-stat-s">按当前速率外推，仅供参考</div>
+          <div className="lrn-stat-s">
+            {projBy === 'shape' ? '按最近 7 天同一时段的平均用量推算剩余时段（夜里几乎不烧 token，线性外推会明显偏高）' : '按当前速率线性外推，仅供参考、偏高' }
+            {todayProj !== todayUsed && <>（已用 {fmtFull(todayUsed)}）</>}
+            {linearProj > 0 && projBy === 'shape' && <>；线性外推口径为 {fmtFull(linearProj)}</>}
+          </div>
         </div>
         <div className="lrn-stat lrn-stat-azure">
           <div className="lrn-stat-t">近 {days.length || 7} 日日均</div>
           <div className="lrn-stat-v">{fmtFull(dayAvg)}</div>
-          <div className="lrn-stat-s">未命中 + 缓存命中 + 输出，按平台计费日聚合</div>
+          <div className="lrn-stat-s">未命中 + 缓存命中 + 输出，按平台计费日聚合（{dayStartLabel} 换日）</div>
         </div>
       </div>
 
@@ -2041,6 +2063,18 @@ function TokenPanel({ hours }: { hours: HourStat[] }) {
   useEffect(() => { try { localStorage.setItem(COST_KEY, JSON.stringify(cfg)); } catch { /* 忽略 */ } }, [cfg]);
   const patch = (p: Partial<CostCfg>) => setCfg((c) => ({ ...c, ...p }));
   const m = useLiveCost(hours, cfg);
+  /* 【2026-09-19 主人说"token 虚高"】预算区的假设命中率默认 98%，与实测（约 89%）差得太远，
+   * 会把预算金额算低、也让人以为"实测与假设"是两套互相矛盾的口径。第一次打开时用**实测值**兜底；
+   * 主人自己改过（localStorage 里有 old 标记）就不再覆盖。 */
+  const autoRef = useRef(false);
+  useEffect(() => {
+    if (autoRef.current) return;
+    autoRef.current = true;
+    if (m.measuredRate === null) return;
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(COST_KEY)) return;   // 主人手动调过 → 不覆盖
+    const r = Math.max(0.3, Math.min(0.999, m.measuredRate));
+    setCfg((c) => (Math.abs(c.hitRate - r) < 0.005 ? c : { ...c, hitRate: Number(r.toFixed(3)) }));
+  }, [m.measuredRate]);
 
   if (!hours.length || m.dayTotal === 0) {
     return (

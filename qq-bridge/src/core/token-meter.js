@@ -118,11 +118,20 @@ const meter = {
   reconcileFloor: new Map(),
   reconcileLast: null,   // 最近一次对账结果 { at, scanned, added, addedTokens, sessions[] }
   dshHome: null,         // DSH home（用于定位 projcache）；未设置 = 不对账
-  lastErr: null
+  lastErr: null,
+  slotByDay: new Map(),  // 计费日 -> 24 个时段槽的用量（外推用；见 slotOf）
 };
 
 function emptyAgg() {
-  return { prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0, cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0 };
+  return {
+    prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0,
+    cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0,
+    /* 【2026-09-19 主人反馈"token 虚高"】对账补记（reconciled）单独记账：
+     * 那些行是"桥侧漏记、事后按 DSH 的会话累计补上"的用量，时间戳取的是 DSH 那次动会话的 mtime ——
+     * 它可能属于**更早的**用量，却落在今天这一桶里。面板把这一块单独显示出来，
+     * 主人就能对上提供方控制台时心里有数（"今日已用里有多少是补记的"）。 */
+    reconciledTotal: 0, reconciledSamples: 0,
+  };
 }
 
 /** 把一条真实行并入聚合：cacheRead>0 的行单独再记一份「实测子集」，
@@ -141,6 +150,11 @@ function addReal(agg, rec) {
     agg.cachePrompt += rec.prompt;
     agg.cacheCompletion += rec.completion;
     agg.cacheSamples += 1;
+  }
+  // 对账补记单独记一份（见 emptyAgg 的注释：它可能属于更早的用量，却落在当天的桶里）
+  if (rec.reconciled) {
+    agg.reconciledTotal += rec.prompt + rec.completion + cr + (rec.cacheWrite || 0);
+    agg.reconciledSamples += 1;
   }
 }
 
@@ -181,7 +195,10 @@ function parseLine(line) {
       total: num(rec.total),
       cacheRead: num(rec.cacheRead),
       cacheWrite: num(rec.cacheWrite),
-      est: rec.est === true
+      est: rec.est === true,
+      /* 【2026-09-19】对账补记标记必须原样带进来：面板要单独报"今日已用里有多少是补记的"
+       * （这类行的时间戳取 DSH 那次动会话的时刻，可能属于更早的用量却被算进今天）。 */
+      reconciled: rec.reconciled === true
     };
   } catch { return null; }
 }
@@ -246,6 +263,23 @@ function applyToMemory(rec) {
     else addReal(ha, rec);
     meter.hours.set(h, ha);
   }
+  /* 【2026-09-19 修"今日预计虚高"】按「计费日内的时段槽」累计历史用量，
+   * 供外推时用**同一时段的近 7 天平均**估算剩余时段 —— 机器人夜里几乎不烧 token，
+   * 原来那套"按时间线性外推"等于假设凌晨也按白天速率烧，18 点就能推出一整天的 2 倍多。 */
+  const slot = slotOf(rec.tsMs);
+  if (slot >= 0) {
+    let arr = meter.slotByDay.get(key);
+    if (!arr) { arr = new Array(24).fill(0); meter.slotByDay.set(key, arr); }
+    arr[slot] += rec.est ? rec.total : (rec.prompt + rec.completion + (rec.cacheRead || 0) + (rec.cacheWrite || 0));
+  }
+}
+/** 计费日内的时段槽 0..23：0 = 换日那一刻（默认北京 08:00），按北京时钟小时推进 */
+function slotOf(tsMs, offsetMin = meter.dayOffsetMin) {
+  const startBjMinutes = ((offsetMin % 1440) + 1440) % 1440;
+  const startHour = Math.floor(startBjMinutes / 60);
+  const h = bjHourOf(tsMs);
+  const slot = ((h - startHour) % 24 + 24) % 24;
+  return Number.isFinite(slot) ? slot : -1;
 }
 
 /** 'YYYY-MM-DD' + 偏移天数 → 'YYYY-MM-DD'（用北京日正午避免时区边界误差） */
@@ -287,6 +321,9 @@ function ensureInit() {
   meter.hoursDate = '';
   meter.lastReal.clear();
   meter.sessionSums.clear();
+  /* 时段槽（外推用）也是派生状态：重读文件必须清掉，否则换一个 stateDir 重新 init 时会
+   * 把上一份数据的"习惯曲线"带过来（测试里就复现过：新目录只有今天的行，却被判成"历史够用"）。 */
+  meter.slotByDay.clear();
   for (const line of lines) {
     const rec = parseLine(line);
     if (rec) applyToMemory(rec);
@@ -625,16 +662,21 @@ export function getTokenReport(days = 7, opts) {
   const nowTs = o.nowMs != null ? Number(o.nowMs) : Date.now();
   const todayKey = billingKey(nowTs);
 
-  const zero = () => ({ prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0, cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0 });
+  const zero = () => ({
+    prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0,
+    cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0, reconciledTotal: 0, reconciledSamples: 0,
+  });
   const dates = [];
   for (const key of dateKeyList(n, nowTs)) {
     const agg = meter.days.get(key) ?? zero();
-    dates.push({ date: key, prompt: agg.prompt, completion: agg.completion, total: agg.total, estTotal: agg.estTotal, cacheRead: agg.cacheRead, cacheWrite: agg.cacheWrite, cachePrompt: agg.cachePrompt, cacheCompletion: agg.cacheCompletion, cacheSamples: agg.cacheSamples, samples: agg.samples });
+    dates.push({ date: key, prompt: agg.prompt, completion: agg.completion, total: agg.total, estTotal: agg.estTotal, cacheRead: agg.cacheRead, cacheWrite: agg.cacheWrite, cachePrompt: agg.cachePrompt, cacheCompletion: agg.cacheCompletion, cacheSamples: agg.cacheSamples, samples: agg.samples, reconciledTotal: agg.reconciledTotal, reconciledSamples: agg.reconciledSamples });
   }
   const tAgg = meter.days.get(todayKey) ?? zero();
   const today = {
     total: tAgg.total, estTotal: tAgg.estTotal, prompt: tAgg.prompt, completion: tAgg.completion,
     cacheRead: tAgg.cacheRead, cacheWrite: tAgg.cacheWrite, cachePrompt: tAgg.cachePrompt, cacheCompletion: tAgg.cacheCompletion, cacheSamples: tAgg.cacheSamples, samples: tAgg.samples,
+    /* 其中"对账补记"占多少（可能属于更早的用量，见 emptyAgg 注释）——面板要能对上提供方控制台 */
+    reconciledTotal: tAgg.reconciledTotal, reconciledSamples: tAgg.reconciledSamples,
     // 提供方 total_tokens 口径（四项相加），并把估算单独留在 estTotal —— 估算绝不并入计费数
     billedTotal: tAgg.prompt + tAgg.completion + tAgg.cacheRead + tAgg.cacheWrite,
   };
@@ -644,7 +686,36 @@ export function getTokenReport(days = 7, opts) {
   const sinceStart = (((bjMinutes(nowTs) - startBjMinutes) % 1440) + 1440) % 1440;
   const elapsedFraction = Math.max(0, Math.min(1, sinceStart / 1440));
   const base = today.total + today.estTotal;
-  const todayEstimatedTotal = elapsedFraction <= 0.05 ? base : Math.round(base / elapsedFraction);
+  /* 线性外推（老口径）：把"当前速率"当成全天速率 —— 机器人夜里几乎不用，这个值系统性偏高，保留只为对照 */
+  const todayLinearEstimatedTotal = elapsedFraction <= 0.05 ? base : Math.round(base / elapsedFraction);
+  /* 【2026-09-19 修"今日预计虚高"】按**同一时段的近 7 天平均**估剩余时段：
+   *   · 时段槽 = 计费日内的第几个小时（0 = 换日那一刻，默认北京 08:00）；
+   *   · 历史取最近 7 个计费日里、该槽的平均用量（不含今天）；
+   *   · 剩余槽的预估之和 + 今日已用 = 预计；
+   *   · 历史不足（新装/刚清过日志）时退回线性外推，并在 note 里说明用了哪种。
+   * 实测差异：本机 2026-09-18 那天按线性外推 18:00 得到 1.9 亿，按时段平均只有 6 千多万（对数）。 */
+  const slotNow = slotOf(nowTs);
+  let remainingEstimate = 0;
+  let remainingSlots = 0;
+  let slotSamples = 0;
+  if (slotNow >= 0) {
+    const pastDays = [...meter.slotByDay.entries()].filter(([k]) => k < todayKey).sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 7);
+    for (let s = slotNow + 1; s < 24; s += 1) {
+      remainingSlots += 1;
+      let sum = 0;
+      let cnt = 0;
+      for (const [, arr] of pastDays) { if (arr && arr[s] > 0) { sum += arr[s]; cnt += 1; } }
+      if (cnt > 0) { slotSamples += cnt; remainingEstimate += sum / cnt; }
+    }
+    if (pastDays.length) remainingEstimate = remainingEstimate * (pastDays.length / Math.max(1, pastDays.length));
+  }
+  const shapeUsable = slotSamples >= 3 && remainingSlots > 0;
+  /* 时段法只在"有历史 + 今天确实在按同样的节奏走"时更可信：
+   * 若今日已用已远超"历史同时段"的水平（异常大的一天），两者取大，别把明显更多的一天报小。 */
+  const todayEstimatedTotal = shapeUsable
+    ? Math.max(base, Math.round(base + remainingEstimate))
+    : todayLinearEstimatedTotal;
+  const projectedBy = shapeUsable ? 'shape' : (elapsedFraction <= 0.05 ? 'none' : 'linear');
 
   const nowHour = bjHourOf(nowTs);
   const todayHourly = [];
@@ -664,10 +735,17 @@ export function getTokenReport(days = 7, opts) {
   };
   const windowText = `计费日口径：北京时 ${dayWindow.startBj} 换日（对齐提供方控制台${meter.dayOffsetMin === 480 ? '，即 UTC 自然日' : ''}）；分时图仍按北京自然日`;
   const note = base > 0
-    ? `${windowText}。${elapsedFraction <= 0.05 ? '今日记录尚少（<5% 时间），暂不外推，直接显示当前值' : '按当前速率外推,仅供参考'}`
+    ? `${windowText}。${projectedBy === 'shape'
+      ? '「今日预计」按最近 7 天同一时段的平均用量估算剩余时段（机器人夜里几乎不烧 token，线性外推会明显偏高）'
+      : projectedBy === 'linear'
+        ? '习惯曲线还没攒够（缺少近 7 天同时段数据），「今日预计」暂按当前速率线性外推，仅供参考、偏高的可能性大'
+        : '今日记录尚少（<5% 时间），暂不外推，直接显示当前值'}`
     : `${windowText}。今日暂无用量记录（尚未收到 usage 帧或可估算的 transcript）`;
 
-  return { dates, today, todayEstimatedTotal, todayHourly, note, dayWindow, reconcile: tokenReconcileStatus() };
+  return {
+    dates, today, todayEstimatedTotal, todayLinearEstimatedTotal, projectedBy, todayHourly, note, dayWindow,
+    reconcile: tokenReconcileStatus(),
+  };
 }
 
 /** 数据文件绝对路径（诊断/展示用） */

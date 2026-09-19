@@ -221,6 +221,10 @@ export interface ContextSavingsBucket {
   pruneEvents: number;
   /** 这些被剪掉的内容本来会在后续每一次请求里被重读 —— 累计少读的 token（实测 cacheRead 口径） */
   rereadSaved: number;
+  /** 【另一条路径】摘要压缩：最老一段聊天被换成 <compacted-summary> 时盖掉的 token */
+  summarizedTokens?: number;
+  /** 摘要压缩发生了几次 */
+  summaryEvents?: number;
 }
 export interface ContextSavings {
   today: ContextSavingsBucket;
