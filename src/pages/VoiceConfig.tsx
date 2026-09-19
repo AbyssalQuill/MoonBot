@@ -102,6 +102,35 @@ export default function VoiceConfig({ onBack }: Props) {
   const [asrLanguage, setAsrLanguage] = useState('auto');
   const [models, setModels] = useState<Record<string, { baseUrl: string; model: string; apiKey: string }>>({});
 
+  /* ── 目标侧：本机 / 服务端（2026-09-19）────────────────────────────────────────────
+   * 语音配置存在**桥那边的** state/voice-config.json。机器人跑在服务器上时，如果这一页写的是本机，
+   * 主人改了概率也永远不会生效（实测踩到：服务端是 enabled=true / 0.5，本机却是另一份）。
+   * 所以这里给一个显式目标：默认"连上服务器就用服务端"，选择记在 localStorage。
+   * 试听/测试也走同一侧（否则会出现"配置在服务端、试听用的却是本机音色"的错位）。 */
+  const [scope, setScope] = useState<'local' | 'remote'>('local');
+  const [scopeInfo, setScopeInfo] = useState<{ activeServerId: string; activeName: string; connected: boolean }>({ activeServerId: '', activeName: '', connected: false });
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const c = await api<any>('/config');
+        const sid = String(c?.activeServerId || '');
+        const srv = (c?.servers || []).find((s: any) => s.id === sid);
+        const connected = Boolean(c?.connected);
+        setScopeInfo({ activeServerId: sid, activeName: String(srv?.name || srv?.host || ''), connected });
+        const saved = localStorage.getItem('qbm.voiceScope');
+        if (saved === 'local' || saved === 'remote') setScope(saved);
+        else setScope(connected && sid ? 'remote' : 'local');
+      } catch { /* 读不到就按本机 */ }
+    })();
+  }, []);
+  const scopeQuery = () => (scope === 'remote' && scopeInfo.activeServerId
+    ? `scope=remote&serverId=${encodeURIComponent(scopeInfo.activeServerId)}`
+    : 'scope=local');
+  const withScope = (p: string) => p + (p.includes('?') ? '&' : '?') + scopeQuery();
+  const scopeBody = () => ({ scope, ...(scope === 'remote' && scopeInfo.activeServerId ? { serverId: scopeInfo.activeServerId } : {}) });
+  const pickScope = (s: 'local' | 'remote') => { setScope(s); try { localStorage.setItem('qbm.voiceScope', s); } catch { /* 忽略 */ } void load(); };
+
   // 试听
   // 【2026-09-15 修按钮状态机】试听**每个按钮各自一份**忙碌状态（pvBusy[来源]=true）：
   // 以前所有试听按钮共用 busy 一个字符串 + disabled={busy!==null}，点一个全场变灰像"全都在试听"。
@@ -144,8 +173,10 @@ export default function VoiceConfig({ onBack }: Props) {
     setLoadErr('');
     try {
       const [c, v] = await Promise.all([
-        api<VoiceCfg>('/voice/config'),
-        api<{ ok?: boolean; builtin?: any[]; custom?: CustomVoice[] }>('/voice/voices'),
+        // withScope 必须固定在依赖里（见下面 deps）：useCallback 会捕获首次渲染的闭包，
+        // 不把 scope 放进 deps 就会出现"切到服务端了、读的还是本机"的错位。
+        api<VoiceCfg>(withScope('/voice/config')),
+        api<{ ok?: boolean; builtin?: any[]; custom?: CustomVoice[] }>(withScope('/voice/voices')),
       ]);
       if (!c || (c as any).ok !== true) { setLoadErr(pickErr(c)); return; }
       if (((v as any)?.ok) !== true) { setLoadErr(pickErr(v)); return; }
@@ -155,7 +186,8 @@ export default function VoiceConfig({ onBack }: Props) {
     } catch (e: any) {
       setLoadErr(pickErr(e));
     }
-  }, [applyCfg]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyCfg, scope, scopeInfo.activeServerId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -178,7 +210,7 @@ export default function VoiceConfig({ onBack }: Props) {
           ...(models[r]?.apiKey ? { apiKey: models[r].apiKey } : {}),
         }])),
       };
-      const r = await api<VoiceCfg>('/voice/config', { method: 'PUT', body: JSON.stringify(patch) });
+      const r = await api<VoiceCfg>(withScope('/voice/config'), { method: 'PUT', body: JSON.stringify({ ...patch, ...scopeBody() }) });
       if ((r as any)?.ok !== true) { setMsg(`保存失败：${pickErr(r)}`); return; }
       // 【兼容旧桥】回包若没带 send.allVoice（老桥不认识这个字段，只回它认识的字段），
       // 就按刚提交的值显示，别让开关"自己弹回关"；带了 allVoice 则一律以桥回的为准。
@@ -193,7 +225,7 @@ export default function VoiceConfig({ onBack }: Props) {
   const runTest = async (role: string) => {
     setBusy(`test-${role}`);
     try {
-      const r = await api<any>('/voice/test', { method: 'POST', body: JSON.stringify({ role }) });
+      const r = await api<any>('/voice/test', { method: 'POST', body: JSON.stringify({ role, ...scopeBody() }) });
       setMsg(r?.ok !== true ? `测试失败：${pickErr(r)}` : `测试通过：${r.detail ?? 'ok'}`);
     } catch (e: any) { setMsg(`测试失败：${pickErr(e)}`); }
     finally { setBusy(null); }
@@ -205,7 +237,7 @@ export default function VoiceConfig({ onBack }: Props) {
     if (pvBusy[key]) return;                       // 同一按钮防重复点击，别的按钮不受影响
     setPvBusy((m) => ({ ...m, [key]: true }));
     try {
-      const r = await api<any>('/voice/preview', { method: 'POST', body: JSON.stringify(body) });
+      const r = await api<any>('/voice/preview', { method: 'POST', body: JSON.stringify({ ...body, ...scopeBody() }) });
       if (r?.ok !== true) { setMsg(`试听失败：${pickErr(r)}`); return; }
       setPreview({ url: `data:${r.mime || 'audio/mpeg'};base64,${r.audioBase64}`, label });
       setPvSeq((n) => n + 1);                      // 换 key → 就算音频和上次完全一样也会重新播放
@@ -242,6 +274,7 @@ export default function VoiceConfig({ onBack }: Props) {
           name: newName.trim(), kind,
           description: kind === 'design' ? newDesc.trim() : '',
           sampleBase64: kind === 'clone' ? (sample?.base64 ?? '') : '',
+          ...scopeBody(),   // 音色库也要存到"当前编辑的那一侧"
         }),
       });
       if (r?.ok !== true) { setMsg(`保存音色失败：${pickErr(r)}`); return; }
@@ -256,7 +289,7 @@ export default function VoiceConfig({ onBack }: Props) {
   const removeVoice = async (v: CustomVoice) => {
     setBusy(`del-${v.id}`);
     try {
-      const r = await api<any>(`/voice/voices?id=${encodeURIComponent(v.id)}`, { method: 'DELETE' });
+      const r = await api<any>(withScope(`/voice/voices?id=${encodeURIComponent(v.id)}`), { method: 'DELETE' });
       if (r?.ok !== true) { setMsg(`删除失败：${pickErr(r)}`); return; }
       setMsg(`已删除音色「${v.name}」`);
       await load();
@@ -320,6 +353,34 @@ export default function VoiceConfig({ onBack }: Props) {
           <div className="card"><div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取语音配置…</div></div>
         ) : (
           <>
+            {/* ───────── 目标侧（本机 / 服务端）─────────
+                【2026-09-19 主人报"语音概率设置不生效"的另一半】语音配置存在**桥那边的**
+                state/voice-config.json。这一页原来没得选、也不显示写的是哪一侧：机器人跑在服务器上时，
+                改的可能是本机那份，于是"改了没反应"。现在显式列出目标并可切换，读/写/试听/音色库全部走同一侧。 */}
+            <div className="notice-bar" style={{ display: 'block', borderColor: 'var(--nc-primary-400)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <b>当前编辑目标：</b>
+                <button
+                  className={scope === 'local' ? 'btn btn-primary' : 'btn btn-soft'}
+                  onClick={() => pickScope('local')}
+                >本机</button>
+                <button
+                  className={scope === 'remote' ? 'btn btn-primary' : 'btn btn-soft'}
+                  onClick={() => pickScope('remote')}
+                  disabled={!scopeInfo.activeServerId}
+                  title={scopeInfo.activeServerId ? '' : '还没配置/选择服务器'}
+                >服务端{scopeInfo.activeName ? `（${scopeInfo.activeName}）` : ''}</button>
+                {scope === 'remote' && !scopeInfo.connected ? (
+                  <span className="badge badge-info">服务器当前未连接 —— 保存会失败并明确报错，不会偷偷写到本机</span>
+                ) : null}
+              </div>
+              <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.7 }}>
+                语音配置存在<b>桥所在那台机器</b>的 <code>state/voice-config.json</code>。
+                <b>机器人跑在服务器上，就要选「服务端」</b>，否则改的是本机那份、机器人那边不会变。
+                试听 / 测试 / 音色库也都跟着这里的选择走。
+              </div>
+            </div>
+
             {/* ───────── 总开关与发送设置 ───────── */}
             <div className="card">
               <div className="card-title"><Mic size={17} /> 语音能力</div>
@@ -490,7 +551,7 @@ export default function VoiceConfig({ onBack }: Props) {
                           onClick={async () => {
                             setBusy(`clear-${role}`);
                             try {
-                              const r = await api<any>('/voice/config', { method: 'PUT', body: JSON.stringify({ enabled, clearKeys: [role] }) });
+                              const r = await api<any>(withScope('/voice/config'), { method: 'PUT', body: JSON.stringify({ enabled, clearKeys: [role], ...scopeBody() }) });
                               if (r?.ok !== true) { setMsg(`清空失败：${pickErr(r)}`); return; }
                               applyCfg(r); setMsg(`已清空「${roleName(role, meta?.label)}」的密钥`);
                             } catch (e: any) { setMsg(`清空失败：${pickErr(e)}`); }

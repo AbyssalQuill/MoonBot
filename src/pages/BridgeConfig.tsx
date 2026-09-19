@@ -1568,9 +1568,15 @@ function ActivityHoursCard({ cfg, remote, writeConfig, onCfgChange }: {
   };
   useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope, remote?.id]);
 
-  const groups = targets.filter((t) => t.kind === 'group');
-  const privates = targets.filter((t) => t.kind === 'private');
-  const visible = showPrivate ? targets : groups;
+  /* 【2026-09-19 主人要求】这张表**只列白名单内的对象**：
+   * 原来把"桥认识但不在允许名单里"的会话也列出来了（行上标一句"不在允许名单"），
+   * 于是列表里混着一堆设了也没用的行。现在按桥给的门禁结论过滤（`allowed === false` 一律不显示），
+   * 并把被隐藏的数量写出来 —— 用户想给它设时段，第一步应该是先把它加进允许名单。 */
+  const allowedTargets = targets.filter((t) => t.allowed !== false);
+  const hiddenCount = targets.length - allowedTargets.length;
+  const groups = allowedTargets.filter((t) => t.kind === 'group');
+  const privates = allowedTargets.filter((t) => t.kind === 'private');
+  const visible = showPrivate ? allowedTargets : groups;
 
   /** 保存单个对象的时段（留空 = 不限） */
   const saveOne = async (key: string) => {
@@ -1662,10 +1668,19 @@ function ActivityHoursCard({ cfg, remote, writeConfig, onCfgChange }: {
           连私聊一起列（{privates.length}）
         </label>
         <span style={{ fontSize: 12, opacity: 0.7 }}>群 {groups.length} 个</span>
+        {hiddenCount > 0 && (
+          <span style={{ fontSize: 12, color: '#d9822b' }} title="这些会话桥认识、但不在允许名单里（或当前模式不允许），设了时段也不会生效，所以不列出来">
+            已隐藏 {hiddenCount} 个不在允许名单里的对象
+          </span>
+        )}
       </div>
 
       {!visible.length && !loading ? (
-        <div className="cfg-card-desc">桥还没认识任何对象 —— 下面填群号加一个，或先在「允许名单」里加群。</div>
+        <div className="cfg-card-desc">
+          {hiddenCount > 0
+            ? `允许名单里还没有对象（另有 ${hiddenCount} 个不在允许名单里的会话已隐藏）。先在「允许名单」里加群，或点下面的「添加群」——它会顺手把群加进允许名单。`
+            : '桥还没认识任何对象 —— 下面填群号加一个，或先在「允许名单」里加群。'}
+        </div>
       ) : (
         <div className="cfg-fields">
           {visible.map((t) => {
@@ -1683,6 +1698,8 @@ function ActivityHoursCard({ cfg, remote, writeConfig, onCfgChange }: {
                   </button>
                   <span style={{ fontSize: 12, opacity: 0.85 }}>时段：{t.windows || '不限'}</span>
                   <span style={{ fontSize: 12, opacity: 0.6 }}>{statusText(t)}</span>
+                  {/* 过滤之后这里理论上不会再有"不在允许名单"的行（见上面的 allowedTargets）；
+                      万一桥那版没给 allowed 字段，仍然把这句提示留着，免得看不出为什么设了没用。 */}
                   {t.kind === 'group' && !t.inAllowList && <span style={{ fontSize: 12, color: '#d9822b' }}>不在允许名单</span>}
                   {!!t.unread && <span style={{ fontSize: 12, opacity: 0.6 }}>未读 {t.unread}</span>}
                 </div>

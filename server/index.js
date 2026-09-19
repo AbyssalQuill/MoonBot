@@ -4258,9 +4258,9 @@ function bridgeNotListening(detail) {
 
 /** 取桥控制台响应（**不写 res**）：成功 { json, target }；失败 { fail, target }。永不抛。
  *  返回结构而不是直接 res.json，是为了让个别路由（学习配置）能在"本机桥确实没起来"时改走磁盘兜底。 */
-async function callBridgeConsole(target) {
+async function callBridgeConsole(target, forcedTarget = null) {
   let t = null;
-  try { t = resolveBridgeTarget(); } catch (e) {
+  try { t = forcedTarget || resolveBridgeTarget(); } catch (e) {
     return {
       target: null,
       fail: { success: false, code: 'bridge-offline', message: '找不到可用的桥目标：本机没找到 qq-bridge 目录，也没有已连接的服务器', detail: String(e?.message || e) },
@@ -4321,10 +4321,43 @@ async function callBridgeConsole(target) {
 }
 
 /** 统一透传：桥不可达/路由缺失(404)/响应非 JSON → 结构化失败；其余把桥响应 JSON 原样回给 GUI */
-async function proxyToBridgeConsole(_req, res, target) {
-  const r = await callBridgeConsole(target);
+async function proxyToBridgeConsole(_req, res, target, forcedTarget = null) {
+  const r = await callBridgeConsole(target, forcedTarget);
   if (r.fail) { res.json(r.fail); return; }
   res.json(r.json);
+}
+
+/**
+ * 语音相关路由的目标（本机 / 服务端）。
+ *
+ * 【2026-09-19 修"语音概率改了不生效"的另一半】语音配置存在**桥那边的** state/voice-config.json。
+ * 这些路由原来一律走 `proxyToBridgeConsole`（内部 resolveBridgeTarget()，"能连服务端就连服务端"），
+ * 表面上没错，但界面从来没告诉用户它写的是哪一侧，也没有显式的本机/服务端切换 ——
+ * 机器人在服务器上时，用户以为改的是机器人的语音概率，实际（连不上服务器时）写在了本机。
+ * 现在支持显式 scope：`?scope=local|remote`（POST 可放 body.scope），不传时保持老行为。
+ */
+function voiceScopeTarget(scope, serverId) {
+  const want = String(scope ?? '').trim().toLowerCase();
+  if (want === 'local') {
+    try { return { kind: 'local', server: null, conn: null, ...getLocalBridgeTarget() }; } catch { return null; }
+  }
+  if (want === 'remote') {
+    const rt = resolveRemoteBridgeTarget();
+    if (!rt) return null;
+    const id = String(serverId ?? '').trim();
+    if (id && rt.server?.id && rt.server.id !== id) return null;   // 只支持"当前已连上的那台"
+    return { kind: 'remote', ...rt };
+  }
+  return null;   // 没指定 scope = 保持老行为（由 resolveBridgeTarget 决定）
+}
+/** 从 query / body 里取 scope 与 serverId（POST 的 scope 放 body 里） */
+function voiceScopeOf(req) {
+  const b = req.body ?? {};
+  return {
+    scope: req.query?.scope ?? b.scope,
+    serverId: req.query?.serverId ?? b.serverId,
+    explicit: (req.query?.scope ?? b.scope) !== undefined,
+  };
 }
 
 /* ── 学习配置（桥侧 state/learning-config.json）──────────────────────────────
@@ -4515,13 +4548,38 @@ app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, 
  * 发送与识别由桥里的 MCP 工具带会话令牌调用，不经过管理端。
  * 合成一次可能跑十几秒（语音服务返回整段音频），所以这里把代理超时放宽到 90 秒。 */
 const VOICE_TIMEOUT_MS = 90000;
-app.get('/api/voice/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/config', method: 'GET', timeoutMs: VOICE_TIMEOUT_MS }));
-app.put('/api/voice/config', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/config', method: 'PUT', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
-app.get('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/voices', method: 'GET', timeoutMs: VOICE_TIMEOUT_MS }));
-app.post('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/voices', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
-app.delete('/api/voice/voices', (req, res) => proxyToBridgeConsole(req, res, { path: `/api/voice/voices?id=${encodeURIComponent(String(req.query.id ?? ''))}`, method: 'DELETE', timeoutMs: VOICE_TIMEOUT_MS }));
-app.post('/api/voice/preview', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/preview', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
-app.post('/api/voice/test', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/voice/test', method: 'POST', body: req.body ?? {}, timeoutMs: VOICE_TIMEOUT_MS }));
+/** 语音路由统一入口：带显式 scope 时按 scope 定位（本机 / 当前已连上的服务端）；
+ *  scope=remote 但服务器/隧道不在 → 明确回 400 说清原因，**不**悄悄退化成写本机。 */
+const voiceRoute = (path, method, { withBody = false } = {}) => async (req, res) => {
+  const s = voiceScopeOf(req);
+  let forced = null;
+  if (s.explicit) {
+    forced = voiceScopeTarget(s.scope, s.serverId);
+    if (!forced) {
+      res.json({
+        success: false, ok: false, code: 'target-unavailable',
+        message: s.scope === 'remote'
+          ? '要写服务端语音配置，但服务器/桥隧道当前没连上：先到「服务器」页连上，或把目标切回「本机」。'
+          : '本机桥目标不可用（没找到 qq-bridge 目录）。',
+      });
+      return;
+    }
+  }
+  const body = withBody ? { ...(req.body ?? {}) } : undefined;
+  await proxyToBridgeConsole(req, res, { path, method, body, timeoutMs: VOICE_TIMEOUT_MS }, forced);
+};
+app.get('/api/voice/config', voiceRoute('/api/voice/config', 'GET'));
+app.put('/api/voice/config', voiceRoute('/api/voice/config', 'PUT', { withBody: true }));
+app.get('/api/voice/voices', voiceRoute('/api/voice/voices', 'GET'));
+app.post('/api/voice/voices', voiceRoute('/api/voice/voices', 'POST', { withBody: true }));
+app.delete('/api/voice/voices', (req, res) => {
+  const s = voiceScopeOf(req);
+  const forced = s.explicit ? voiceScopeTarget(s.scope, s.serverId) : null;
+  if (s.explicit && !forced) { res.json({ success: false, ok: false, code: 'target-unavailable', message: '目标不可用（本机桥目录缺失或服务器未连接）' }); return; }
+  void proxyToBridgeConsole(req, res, { path: `/api/voice/voices?id=${encodeURIComponent(String(req.query.id ?? ''))}`, method: 'DELETE', timeoutMs: VOICE_TIMEOUT_MS }, forced);
+});
+app.post('/api/voice/preview', voiceRoute('/api/voice/preview', 'POST', { withBody: true }));
+app.post('/api/voice/test', voiceRoute('/api/voice/test', 'POST', { withBody: true }));
 
 /* 黑话库批量审批（管理端弹窗的三个批量按钮）：桥侧端点早就有了，管理端此前没有转发，
  * 于是界面上的「批量通过 / 批量拒收 / 批量分析」会 404。这里按同路径补三条 POST 代理。 */
