@@ -31,6 +31,14 @@ export const PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n';
 const SUMMARY_MAX_TOKENS = 4096;
 /** 剪枝预算的下限：低于它就会出现"保留的比标记还短"，没有意义 */
 const MIN_TOOL_RESULT_CHARS = 300;
+/* 【2026-09-19 线上事故 · 这个下限是被一次真实的"变慢"逼出来的】
+ * 线上（VPS）的 dshCompaction.thresholdRatio 曾被写成 **0.005**（= 模型窗口的 0.5%）。按 1M 窗口算，
+ * 上下文刚到 ~5k token 就触发一次压缩 —— 等于**每一轮都在压缩**：每次压缩 = 一次额外的模型请求（把整段
+ * 上下文读一遍写摘要）+ 改写会话历史（prompt 前缀缓存全部作废，下一轮只能全量重读）。
+ * 用户体感就是"开了永久会话不轮换以后，模型响应极其缓慢"。同一份配置里 retainRatio 0.012 > threshold
+ * 0.005 还会被 DSH 加载期判非法。
+ * 所以下限从 0.005 抬到 0.02，并在被夹紧时写日志 —— 低于它的配置自动救回来，不再靠人去发现。 */
+const MIN_THRESHOLD_RATIO = 0.02;
 
 /** 把任意配置值夹成合法的压缩策略（纯函数；返回值即可直接生成 YAML 的那组数字） */
 export function normalizeCompaction(raw) {
@@ -40,14 +48,18 @@ export function normalizeCompaction(raw) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
   };
-  // 阈值比例：0.005 ~ 0.5（>0.5 等于没治理；<0.005 在 1M 窗口上约 5k token，太碎）
-  let thresholdRatio = Math.min(0.5, Math.max(0.005, num(src.thresholdRatio, 0.06)));
-  if (thresholdRatio !== num(src.thresholdRatio, 0.06)) notes.push(`thresholdRatio 被夹到 ${thresholdRatio}`);
+  // 阈值比例：0.02 ~ 0.5（>0.5 等于没治理；<0.02 会让每一轮都压缩 —— 见上面的线上事故注释）
+  let thresholdRatio = Math.min(0.5, Math.max(MIN_THRESHOLD_RATIO, num(src.thresholdRatio, 0.06)));
+  if (thresholdRatio !== num(src.thresholdRatio, 0.06)) {
+    notes.push(`thresholdRatio 被夹到 ${thresholdRatio}（低于 ${MIN_THRESHOLD_RATIO} 会每轮都压缩，只会更慢更贵）`);
+  }
   // 逐字保留比例：必须在 (0, thresholdRatio) 开区间内 —— DSH 加载期会校验 retainRatio < thresholdRatio
   const wantRetain = num(src.retainRatio, 0.012);
   let retainRatio = Math.min(thresholdRatio * 0.9, Math.max(0.0005, wantRetain));
   if (retainRatio >= thresholdRatio) { retainRatio = thresholdRatio * 0.2; notes.push(`retainRatio 被夹到 ${retainRatio}`); }
   else if (retainRatio !== wantRetain) notes.push(`retainRatio 被夹到 ${retainRatio}`);
+  // 小数位收敛：0.005*0.9 会算出 0.0045000000000000005 这种值写进 YAML（难看且容易被误读）
+  retainRatio = Math.round(retainRatio * 1e6) / 1e6;
   // 工具结果预算：整数、≥300；head=60%、tail=20%，剩下 20% 留给剪枝标记
   let toolResultMaxChars = Math.round(num(src.toolResultMaxChars, 1500));
   if (toolResultMaxChars < MIN_TOOL_RESULT_CHARS) { toolResultMaxChars = MIN_TOOL_RESULT_CHARS; notes.push(`toolResultMaxChars 被夹到 ${toolResultMaxChars}`); }
@@ -62,6 +74,12 @@ export function normalizeCompaction(raw) {
     notes.push(`toolResultMaxChars 被抬到 ${toolResultMaxChars}（标记长度 ${PRUNE_MARKER.length}）`);
   }
   const str = (v) => String(v ?? '').trim();
+  /* 【2026-09-19 主人要求】摘要一律用**会话主模型 / 全局服务商** —— 不再支持单独指定
+     summarizationProvider / summarizationModel。理由：单独换一个服务商意味着摘要请求要走另一条额度与
+     另一份缓存，实测省不下钱还多一处要配的凭据；老配置里若还留着这两个键，这里只提示、不再写进 patch。 */
+  if (str(src.summarizationProvider) || str(src.summarizationModel)) {
+    notes.push('已忽略 summarizationProvider/summarizationModel：摘要统一用主模型（全局语言模型服务商）');
+  }
   return {
     enabled: src.enabled !== false,
     thresholdRatio,
@@ -69,8 +87,6 @@ export function normalizeCompaction(raw) {
     toolResultMaxChars,
     headChars,
     tailChars,
-    summarizationProvider: str(src.summarizationProvider),
-    summarizationModel: str(src.summarizationModel),
     notes,
   };
 }
@@ -99,10 +115,8 @@ export function buildCompactionRows(p) {
   lines.push(`    maxTokens: ${SUMMARY_MAX_TOKENS}`);
   lines.push('    compactionRetries: 1');
   lines.push('    maxOverflowRetries: 1');
-  if (p.summarizationProvider && p.summarizationModel) {
-    lines.push(`    summarizationProvider: '${p.summarizationProvider.replace(/'/g, "''")}'`);
-    lines.push(`    summarizationModel: '${p.summarizationModel.replace(/'/g, "''")}'`);
-  }
+  /* 不写 summarizationProvider / summarizationModel：留空 = 跟主模型（复用同一服务商与提示词缓存）。
+     2026-09-19 主人要求统一用全局语言模型服务商，改这里（lib/dsh-compaction.js）时别再加回来。 */
   lines.push('- id: tool-result-pruner');
   lines.push('  disabled: false');
   lines.push('  config:');

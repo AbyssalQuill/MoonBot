@@ -467,7 +467,7 @@ export default function VoiceConfig({ onBack }: Props) {
                           onChange={(e) => setModels({ ...models, [role]: { ...rc, baseUrl: e.target.value } })} />
                       </label>
                       <label className="field-row">
-                        <span className="f-label">接口密钥</span>
+                        <span className="f-label">语音模型密钥</span>
                         <input className="input" type="password" autoComplete="new-password"
                           placeholder={saved?.apiKeySet
                             ? `已设置：${saved.apiKeyMasked}（留空=不改）`

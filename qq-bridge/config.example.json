@@ -14,9 +14,7 @@
     "enabled": true,
     "thresholdRatio": 0.06,
     "retainRatio": 0.012,
-    "toolResultMaxChars": 1500,
-    "summarizationProvider": "",
-    "summarizationModel": ""
+    "toolResultMaxChars": 1500
   },
   "napcat": {
     "wsUrl": "ws://127.0.0.1:3001",

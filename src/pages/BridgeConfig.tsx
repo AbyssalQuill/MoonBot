@@ -52,7 +52,7 @@ function providerChoices() {
 const UNNAMED_LABEL = '未登记名称的配置项';
 const LABEL: Record<string, string> = {
   // 模型与推理
-  baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: '接口密钥', model: '主模型',
+  baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: '语言模型密钥', model: '主模型',
   visionModel: '识图模型', reasoningEffort: '推理档位',
   visionBaseUrl: '识图模型请求地址', visionApiKey: '识图模型密钥',
   // NapCat
@@ -108,9 +108,9 @@ const LABEL: Record<string, string> = {
   wakeThreshold: '聊多少轮换新会话', prewarmAhead: '提前几轮预建新会话',
   permanent: '永久会话（不轮换）',
   // 上下文治理（整路径写死：这些字段名只在这一段里出现，但按路径写更醒目、也不会被别处的同名标签顶掉）
+  // 【2026-09-19】不再有 摘要模型服务商 / 摘要模型 两栏：摘要一律用主模型（全局语言模型服务商）。
   'dshCompaction.thresholdRatio': '触发比例', 'dshCompaction.retainRatio': '逐字保留比例',
   'dshCompaction.toolResultMaxChars': '工具结果保留字数',
-  'dshCompaction.summarizationProvider': '摘要模型服务商', 'dshCompaction.summarizationModel': '摘要模型',
   // 表情包 / 等待
   stickerEnabled: '表情包', syncTtlMs: '同步缓存', maxListCount: '列表上限', includeInPrompt: '提示里附带',
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
@@ -346,11 +346,11 @@ function mcpLabel(fullName: string) {
 /** 进阶项说明（点 ⓘ 展开），只给对新手不友好的项加 */const HELP: Record<string, string> = {
   baseUrl: 'DSH（DeepSeek Harness）Web 服务地址。本地内置隔离实例默认 http://127.0.0.1:10721；也可用环境变量 QQB_DSH_BASE_URL 覆盖。不要填桌面端 3210。',
   provider: '模型服务商标识，由 DSH 端已配置的 provider 决定；不确定时保持默认，改错会导致会话建不起来（日志会提示）。',
-  apiKey: '「接口密钥」：这里填的 Key 会在**保存时**写进隔离 DSH 自己的凭据文件（.credentials.yaml，权限 600），变量名按「模型服务商」在 DSH settings.yaml 里声明的 apiKeyEnv 决定（例如服务商 xiaomi-token-plan-cn → XIAOMI_TOKEN_PLAN_CN_API_KEY），并重启 DSH 让新值生效。它**不会**被写进 qq-bridge/config.json，也不会进日志/安装包。留空 = 不动已保存的那份；要删掉点下面那行的「清除已保存的密钥」。注意 DSH 自己的取值优先级是「启动它的进程环境变量 > 凭据文件」：若你在系统里另设过同名环境变量，那个会盖过这里填的。',
+  apiKey: '「语言模型密钥」：**专门给语言模型（聊天本体）用的那一把 Key**。它不写进 qq-bridge/config.json，而是在你点「保存」时由管理端写进**隔离 DSH 自己的凭据文件** `.credentials.yaml`（权限 600，只有本机这个用户读得到），变量名按上面「模型服务商」在 DSH settings.yaml 里声明的 `apiKeyEnv` 决定 —— 例如服务商 `xiaomi-token-plan-cn` → 变量名 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，随后自动重启隔离 DSH 让新值生效（必须重启：DSH 只在启动时读凭据文件）。三个要点：① **留空 = 不动已保存的那份**（不会把已有 Key 清掉），要删掉就点下面那行的「清除已保存的密钥」；② 它**只**影响语言模型，与「识图模型密钥」「语音模型密钥」是三把不同的 Key，互不影响；③ DSH 自身的取值优先级是「启动它的进程环境变量 > 凭据文件」—— 若你在系统里另设过同名环境变量，那个会盖过这里填的。',
   model: '主对话模型。留空由 DSH 默认决定。',
   visionModel: '识图（多模态）模型，用于带图片消息的会话。**语言模型和识图模型是分开配的**：上面「主模型」管文字回话，这里管看图。三种情况——① 三个识图字段全留空：图片按老办法当附件发给主模型（要求主模型本身是多模态的，默认已是）；② 只填「识图模型」不填地址：仍走 DSH 那条路，只是这次会话显式指定这个模型来读图；③ 填了「识图模型请求地址」：桥**直接**用 OpenAI 兼容接口（POST /chat/completions，图片走 image_url 的 data: URL）去问识图模型，把返回的文字描述交给语言模型——这样识图可以用完全不同的厂商/额度，也能给主模型省钱（主模型只收文字）。',
   visionBaseUrl: '识图模型的 **OpenAI 兼容**请求地址，例如 https://api.siliconflow.cn/v1 或 http://127.0.0.1:8000/v1（桥会自己在后面接 /chat/completions，所以填到 /v1 为止，别带 /chat/completions）。**留空 = 不用这条独立通路**，图片按老办法走 DSH 当附件。填了它就必须同时填「识图模型」（否则不知道该调哪个模型）；「识图模型密钥」可留空（本机自建服务通常不要密钥）。',
-  visionApiKey: '识图模型这把独立密钥（只在填了「识图模型请求地址」时用）。它跟着配置保存，用于请求上面那个地址；留空则不带头（本机自建/内网服务用）。注意：它和「接口密钥」是两个不同的东西，互不影响。',
+  visionApiKey: '「识图模型密钥」：识图这条独立通路自己的 Key（只在填了「识图模型请求地址」时用）。它跟着配置保存，用于请求上面那个地址；留空则不带头（本机自建/内网服务用）。注意：它和「语言模型密钥」是两个不同的东西，互不影响。',
   reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。'
     + '下拉里每项都是「英文档位 id · 中文说明」——英文 id 就是真正写进 DSH settings.yaml 的值，保留它是为了配置和文件能对上号：'
     + 'off=关闭思考、none=同「关闭思考」、minimal=最低、low=快但粗略、medium=平衡、high=仔细但慢、xhigh=更高、max=最高。',
@@ -398,23 +398,22 @@ function mcpLabel(fullName: string) {
     + '① 先剪掉超大的工具结果（`tool-result-pruner`）——不发模型请求，聊天记录一个字都不动；'
     + '② 剪完仍超阈值、或提供方报上下文溢出，才把最老一段摘要成 `<compacted-summary>`（`compaction-basic`）。'
     + '阈值一律按「模型窗口的比例」给，换模型自动等比缩放。改这里**立刻生效**（DSH 会热加载那份 patch），不用重启 DSH 或桥。',
-  thresholdRatio: '「触发比例」：上下文用到**模型窗口的百分之多少**就开始治理（默认 0.06）。'
+  thresholdRatio: '「触发比例」：上下文用到**模型窗口的百分之多少**就开始治理（默认 0.06 = 6%）。'
     + '窗口 1M 的模型 ≈ 63k token 触发；窗口 128k 的模型 ≈ 7.7k token 触发 —— 同一个比例换模型自动缩放，不用手改。'
-    + '调小 = 更早清理、账单更省，但模型记得的原文更少；调大 = 保留更多原文，代价是每轮重读更多 token。'
-    + 'DSH 的硬要求：这个值必须**大于**「逐字保留比例」，否则插件会拒绝加载（桥会自动夹到合法范围并写日志）。',
-  retainRatio: '「逐字保留比例」：最近这一部分上下文**原样保留**，压缩只动比它更老的部分（默认 0.012）。'
+    + '调小 = 更早清理、单轮上下文更小，但**别调太小**：低于 0.02（2%）时上下文稍微一涨就触发一次压缩，'
+    + '每次压缩都要额外发一次"读完整段上下文写摘要"的模型请求、并改写会话历史（prompt 前缀缓存随之作废，'
+    + '下一轮只能全量重读）—— 表现就是**模型响应变得极其缓慢**。桥的下限是 0.02，低于它会被自动夹回并写日志。'
+    + '调大 = 保留更多原文，代价是每轮重读更多 token。DSH 的硬要求：这个值必须**大于**「逐字保留比例」，'
+    + '否则插件会拒绝加载（桥会自动夹到合法范围并写日志）。',
+  retainRatio: '「逐字保留比例」：最近这一部分上下文**原样保留**，压缩只动比它更老的部分（默认 0.012 = 1.2%）。'
     + '必须小于「触发比例」。调大 = 最近这段记得更牢、更贵；调小 = 更省，但模型更容易忘掉前几轮的细节。',
   toolResultMaxChars: '「工具结果保留字数」：单个工具结果超过这么多字符（Unicode 码点）就被剪成'
     + '「开头 60% + 一行 `[... tool result middle pruned ...]` + 结尾 20%」（默认 1500）。'
     + '这是**最省 token 的一刀**：QQ 机器人的上下文大头几乎都是工具结果（群成员列表、聊天记录、网页正文、图片信息）。'
     + '剪枝不发模型请求、不动聊天记录，被剪掉的原文本仍留在会话日志里（可回放、可 grep）。'
+    + '代价：每次剪枝都会改写这段历史，命中它之前的前缀缓存随之失效 —— 所以它是个"省 token ↔ 少改写"的折中，'
+    + '工具结果普遍不大（几百字）时可以调大一点（例如 4000），让改写少发生、缓存更容易命中，响应更稳。'
     + 'DSH 的硬要求：保留的头 + 标记 + 尾不能超过这个字数，桥会自动按 60/20 拆并校验。',
-  summarizationProvider: '「摘要模型服务商」+「摘要模型」：指定压缩时用哪个模型写摘要。**两个都留空最省钱** —— '
-    + '空的含义是"沿用本次会话路由到的模型"，DSH 会把会话的系统提示词、工具、被压缩的那段历史原样回放给摘要请求，'
-    + '等于复用了同一份热前缀缓存，只有尾部的压缩指令和摘要是新算的。'
-    + '换成别的厂商/模型会丢掉这份缓存复用（换来的是"用便宜模型写摘要"），非必要别填。',
-  summarizationModel: '「摘要模型」：见上一条「摘要模型服务商」。两个都留空 = 跟主模型（复用热前缀缓存，最省）。'
-    + '要单独指定就得两个都填，只填一个不生效。',
   'dshCompaction.enabled': '总开关：关掉 = 不覆盖 DSH 默认（默认要等上下文用到窗口 80% 才压缩，等于不压缩，上下文会一直涨到轮换为止）。',
   contextWindow: '「首轮带入历史条数」：一个新会话的**第一次**唤醒时，往提示里贴最近多少条聊天记录'
     + '（每个会话只贴这一次，之后各轮只发一行哨兵，不再重贴）。下限 6、普通首轮**上限 24**——'
@@ -781,7 +780,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   const [speechRules, setSpeechRules] = useState('');
   const [personaHasFile, setPersonaHasFile] = useState(false);
   const [speechHasFile, setSpeechHasFile] = useState(false);
-  /** 隔离 DSH 里「接口密钥」到底配没配（后端只回 {env, from, set, len}，**不含密钥本身**） */
+  /** 隔离 DSH 里「语言模型密钥」到底配没配（后端只回 {env, from, set, len}，**不含密钥本身**） */
   const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -863,7 +862,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (!c.social) c.social = {};
       if (!c.social.autoReset || typeof c.social.autoReset !== 'object') c.social.autoReset = {};
       if (c.social.autoReset.permanent === undefined) c.social.autoReset.permanent = false;
-      // 「接口密钥」的真实状态（在隔离 DSH 的凭据文件里，不在 config.json 里）
+      // 「语言模型密钥」的真实状态（在隔离 DSH 的凭据文件里，不在 config.json 里）
       setApiKeyStatus((r as any).apiKeyStatus || null);
       // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
       if (c.ownerQQ === null || c.ownerQQ === undefined) c.ownerQQ = '';
@@ -998,14 +997,14 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       // 实际 DSH 还在用旧模型（"管理端改的模型配置无法默认到 DSH 里"的直接成因之一）。
       // 服务端模式：写的是服务器上的 config.json（桥按 mtime 热加载），返回里带回读比对结果。
       const r = await writeBridge(body);
-      // 「接口密钥」的落地结果要单独说清楚：它不在 config.json 里，而是写进隔离 DSH 的凭据文件
+      // 「语言模型密钥」的落地结果要单独说清楚：它不在 config.json 里，而是写进隔离 DSH 的凭据文件
       const keyNote = (() => {
         const w = r?.apiKeyWrite;
-        if (w && w.ok === false) return ` · 接口密钥未写入：${w.error || '未知原因'}`;
-        if (w && w.ok && w.action === 'set') return ` · 接口密钥已写入隔离 DSH 凭据（${w.env}）`;
-        if (w && w.ok && w.action === 'removed') return ` · 接口密钥已从隔离 DSH 凭据中清除（${w.env}）`;
+        if (w && w.ok === false) return ` · 语言模型密钥未写入：${w.error || '未知原因'}`;
+        if (w && w.ok && w.action === 'set') return ` · 语言模型密钥已写入隔离 DSH 凭据（${w.env}）`;
+        if (w && w.ok && w.action === 'removed') return ` · 语言模型密钥已从隔离 DSH 凭据中清除（${w.env}）`;
         const st = (r?.steps ?? []).find((x: any) => /DSH 凭据/.test(x.step || ''));
-        if (st) return st.ok ? ` · ${st.msg}` : ` · 接口密钥未写入：${st.msg}`;
+        if (st) return st.ok ? ` · ${st.msg}` : ` · 语言模型密钥未写入：${st.msg}`;
         return '';
       })();
       if (target === 'remote') {
@@ -1033,7 +1032,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       const st = (r?.steps ?? []).find((x: any) => /DSH 凭据/.test(x.step || ''));
       if ((w && w.ok) || (st && st.ok)) {
         setCfg((c: any) => (c ? { ...c, dsh: { ...(c.dsh || {}), apiKey: '' } } : c));
-        setMsg(`已清除隔离 DSH 凭据里的接口密钥（${w?.env || st?.msg || ''}）`);
+        setMsg(`已清除隔离 DSH 凭据里的语言模型密钥（${w?.env || st?.msg || ''}）`);
       } else setMsg('清除失败：' + (w?.error || st?.msg || r?.message || '未知原因'));
       await load({ forceRefresh: target === 'remote' });
     } catch (e: any) { setMsg('清除失败：' + (e?.message || '')); }
@@ -1698,7 +1697,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
   /** 活跃时段卡要用：整份配置写回 + 回写页面状态（加群要落进 allow.groups） */
   writeConfig: (next: any) => Promise<any>;
   onCfgChange: (next: any) => void;
-  /** 隔离 DSH 里「接口密钥」的真实状态（只有 env/from/set/len，不含密钥） */
+  /** 隔离 DSH 里「语言模型密钥」的真实状态（只有 env/from/set/len，不含密钥） */
   apiKeyStatus?: { env?: string; from?: string; set?: boolean; len?: number; path?: string; readable?: boolean } | null;
   onClearApiKey?: () => Promise<void>;
   saving?: boolean;
@@ -1710,12 +1709,12 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
     <div className="cfg-grid">
       <GroupCard title="模型与推理" path="dsh" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="连到哪个 DSH、用什么模型回话。服务商默认「自动探测」（即用隔离 DSH 里已配置的官方 DeepSeek），也可显式选 DeepSeek 官方；留空模型即用 DSH 默认。改这里会自动重启隔离 DSH 使其生效。「推理档位」是单次调用耗时与思考 token 最大的一块——实测同一次调用出现过 37 秒，嫌慢/嫌贵先从它和「工具与规则」页的精简名单入手。">
-        {/* 【2026-09-19 主人说"接上它"】接口密钥不再是"保存了但不生效"的空字段：
+        {/* 【2026-09-19 主人说"接上它"】语言模型密钥不再是"保存了但不生效"的空字段：
             保存时写进隔离 DSH 的凭据文件（600），这里显示它到底配没配。 */}
         <div className="cfg-card-desc" style={{ marginTop: 6 }}>
           {apiKeyStatus?.env
             ? <>
-              接口密钥落在{target === 'remote' ? '服务端' : '本机的隔离'} DSH 凭据文件
+              语言模型密钥落在{target === 'remote' ? '服务端' : '本机的隔离'} DSH 凭据文件
               {apiKeyStatus.path ? `（${apiKeyStatus.path}）` : ''}里的 <code>{apiKeyStatus.env}</code>：
               {apiKeyStatus.set
                 ? <b> 已配置（{apiKeyStatus.len} 个字符）</b>
@@ -1726,7 +1725,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
                 ? <> <button type="button" className="btn btn-sm" disabled={saving} onClick={() => { void onClearApiKey(); }}>清除已保存的密钥</button></>
                 : null}
             </>
-            : '接口密钥会随保存写进隔离 DSH 的凭据文件（systemd 环境变量），不再只存不生效。'}
+            : '语言模型密钥会随保存写进隔离 DSH 的凭据文件（systemd 环境变量），不再只存不生效。'}
         </div>
       </GroupCard>
       {/* 【2026-09-15 主人反馈"这个界面不就重复了"】令牌字段**只留下面那张卡**：
@@ -1773,7 +1772,8 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
           cordis.patch.yml（lib/dsh-compaction.js），由 DSH 自己的 compaction-basic + tool-result-pruner 执行。
           为什么不在桥侧删历史：DSH 的会话是内存事件溯源日志，外部改文件只会撞 seq gap / zstd 校验和。 */}
       <GroupCard title="上下文治理（工具历史剪枝）" path="dshCompaction" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="让一个会话能长期用下去又不堆积上下文：上下文用到「触发比例」时，隔离 DSH 先剪掉超大的工具结果（不发模型请求、聊天记录一字不动），剪完仍超阈值才把最老一段摘要成 <compacted-summary>。阈值按模型窗口的比例给，换模型自动缩放。改这里立刻生效（DSH 热加载那份 patch），不用重启 DSH 或桥。" />
+        only={['enabled', 'thresholdRatio', 'retainRatio', 'toolResultMaxChars']}
+        desc="让一个会话能长期用下去又不堆积上下文：上下文用到「触发比例」时，隔离 DSH 先剪掉超大的工具结果（不发模型请求、聊天记录一字不动），剪完仍超阈值才把最老一段摘要成 <compacted-summary>。阈值按模型窗口的比例给，换模型自动缩放。改这里立刻生效（DSH 热加载那份 patch），不用重启 DSH 或桥。摘要是用**主模型**（全局语言模型服务商）写的，没有单独的服务商/模型可配。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
       <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />
