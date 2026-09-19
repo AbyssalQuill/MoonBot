@@ -1,4 +1,4 @@
-# Sync this repo's source into the runtime copies (live install + packaging payloads).
+﻿# Sync this repo's source into the runtime copies (live install + packaging payloads).
 # NOTE: keep this file ASCII-only -- Windows PowerShell 5.1 reads .ps1 as GBK and CJK literals break parsing.
 #
 # No hardcoded paths: everything is derived, so the repo works from any drive/user folder.
