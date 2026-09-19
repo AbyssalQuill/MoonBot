@@ -31,6 +31,10 @@ const STATE_FILE = 'context-savings.json';
 const DAY_OFFSET_ENV = 'QQ_TOKEN_DAY_OFFSET_MIN';
 const DEFAULT_DAY_OFFSET_MIN = 480;
 const DEFAULT_WINDOW_DAYS = 7;
+/* 状态文件格式版本：**统计字段一变就 +1**。
+ * 缓存按 (mtime,size) 判"文件没变就复用"，不改版本号的话，新加的字段对已缓存的老日志永远是 0
+ * —— 真机踩过：加完 retryEvents，扫了 40 份日志全是"复用"，那个字段一直是 0。 */
+const STATE_VERSION = 3;
 const ZSTD_MAGIC_LE = 0xfd2fb528;
 
 const live = {
@@ -104,6 +108,10 @@ export function summarizeSessionLog(text) {
    * <compacted-summary>）是另一条路径，事件是 compaction/summary（同样带 shadowedTokenCount）——
    * 单独统计出来，面板就能如实说明"聊天被摘要过几次、盖掉了多少 token"。 */
   const summaries = evs.filter((e) => e?.type === 'compaction/summary');
+  /* 【2026-09-19 主人拿控制台对数】`llm/retry` = 一次尝试失败后重试：失败的尝试**提供方照计费**、
+   * 但 DSH 不给 usage，所以面板会低这一块（真机：控制台 48,063,224 / 面板 47,919,388，差 143,836，
+   * 同一天正好 2 条 llm/retry）。这里从日志里把次数数出来（可回填历史，不依赖"功能上线之后"）。 */
+  const retries = evs.filter((e) => e?.type === 'llm/retry');
   const buckets = new Map();
   const bump = (day, field, v) => {
     if (!day) return;
@@ -134,7 +142,10 @@ export function summarizeSessionLog(text) {
     bump(billingKey(time), 'summaryEvents', 1);
     if (tokens) bump(billingKey(time), 'summarizedTokens', tokens);
   }
-  return { buckets, pruneEvents: prunes.length, prunedTotal, summaryEvents: summaries.length, summarizedTotal, steps: steps.length };
+  for (const r of retries) {
+    bump(billingKey(Number(r.time) || Date.now()), 'retryEvents', 1);
+  }
+  return { buckets, pruneEvents: prunes.length, prunedTotal, summaryEvents: summaries.length, summarizedTotal, retryEvents: retries.length, steps: steps.length };
 }
 
 function listSessionLogs(root) {
@@ -156,7 +167,7 @@ function persist() {
   try {
     fs.mkdirSync(live.stateDir, { recursive: true });
     const payload = {
-      version: 2,
+      version: STATE_VERSION,
       dshHome: live.dshHome,
       at: Date.now(),
       files: Object.fromEntries([...live.files.entries()].map(([k, v]) => [k, {
@@ -175,7 +186,7 @@ function load() {
   try {
     if (!fs.existsSync(live.file)) return { ok: true, fresh: true };
     const j = JSON.parse(fs.readFileSync(live.file, 'utf8'));
-    if (j?.version !== 2) return { ok: true, migrated: true };   // 旧版（累加器）格式：丢弃，等下一次扫描重算
+    if (j?.version !== STATE_VERSION) return { ok: true, migrated: true };   // 旧版（累加器）格式：丢弃，等下一次扫描重算
     for (const [k, v] of Object.entries(j?.files ?? {})) {
       live.files.set(k, { mtimeMs: Number(v?.mtimeMs) || 0, size: Number(v?.size) || 0, days: v?.days ?? {}, pruneEvents: num(v?.pruneEvents) });
     }
@@ -267,15 +278,16 @@ function reuseOrMark(prev, st) {
 export function getContextSavings(days = 7) {
   const todayKey = billingKey(Date.now());
   const byDay = new Map();
-  let lifetime = { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
+  let lifetime = { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0, retryEvents: 0 };
   for (const rec of live.files.values()) {
     for (const [day, b] of Object.entries(rec.days ?? {})) {
-      const cur = byDay.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
+      const cur = byDay.get(day) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0, retryEvents: 0 };
       cur.prunedTokens += num(b?.prunedTokens);
       cur.pruneEvents += num(b?.pruneEvents);
       cur.rereadSaved += num(b?.rereadSaved);
       cur.summarizedTokens += num(b?.summarizedTokens);
       cur.summaryEvents += num(b?.summaryEvents);
+      cur.retryEvents += num(b?.retryEvents);
       byDay.set(day, cur);
     }
   }
@@ -285,8 +297,9 @@ export function getContextSavings(days = 7) {
     lifetime.rereadSaved += b.rereadSaved;
     lifetime.summarizedTokens += b.summarizedTokens;
     lifetime.summaryEvents += b.summaryEvents;
+    lifetime.retryEvents += b.retryEvents;
   }
-  const today = byDay.get(todayKey) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0 };
+  const today = byDay.get(todayKey) || { prunedTokens: 0, pruneEvents: 0, rereadSaved: 0, summarizedTokens: 0, summaryEvents: 0, retryEvents: 0 };
   const list = [...byDay.entries()]
     .filter(([k]) => k && k !== todayKey)
     .sort((a, b) => (a[0] < b[0] ? 1 : -1))

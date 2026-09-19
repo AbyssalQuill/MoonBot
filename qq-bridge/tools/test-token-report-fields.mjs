@@ -92,7 +92,24 @@ console.log('\n== ③ 没有历史时退回线性外推 ==');
   check('note 明确提示"偏高的可能性大"', () => assert.match(r2.note, /线性外推/));
 }
 
-console.log('\n== ④ 时段映射（换日 08:00 时，北京 0-7 点属于同一个计费日） ==');
+console.log('\n== ④ 重试（llm/retry）：提供方计费、DSH 不给 usage —— 单独记账 ==');
+{
+  const dir4 = path.join(sandbox, 'state4');
+  fs.mkdirSync(dir4, { recursive: true });
+  fs.writeFileSync(path.join(dir4, 'token-usage.jsonl'),
+    JSON.stringify({ tsMs: bj(2026, 9, 19, 9), sessionId: 's1', prompt: 70_000, completion: 0, total: 70_000, cacheRead: 0, cacheWrite: 0, est: false }) + '\n', 'utf8');
+  meter.initTokenMeter({ stateDir: dir4, dayOffsetMinutes: 480 });
+  const r4 = meter.getTokenReport(7, { nowMs });
+  check('平时重试计数为 0', () => assert.equal(r4.today.retryCount, 0));
+  // 投一帧 llm/retry（真实形状：session/event 包着 event）
+  meter.meterTokenFrame({ type: 'session/event', sessionId: 's1', event: { type: 'llm/retry', time: bj(2026, 9, 19, 9, 30), data: { retryId: 'x', turn: 3, step: 4 } } });
+  const r5 = meter.getTokenReport(7, { nowMs: bj(2026, 9, 19, 9, 31) });
+  check('重试被记 1 次', () => assert.equal(r5.today.retryCount, 1));
+  check('估算按该会话上一步的规模（70000）', () => assert.equal(r5.today.retryEstimated, 70_000));
+  check('估算**不进** billedTotal（精确值绝不掺估算）', () => assert.equal(r5.today.billedTotal, 70_000));
+}
+
+console.log('\n== ⑤ 时段映射（换日 08:00 时，北京 0-7 点属于同一个计费日） ==');
 {
   // 北京 2026-09-20 03:00（= UTC 09-19 19:00）仍属于计费日 2026-09-19
   const tsLate = bj(2026, 9, 20, 3);

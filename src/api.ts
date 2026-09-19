@@ -210,6 +210,10 @@ export interface TokenReportSide {
   todayHourly?: Array<Record<string, any>>;
   today?: Record<string, number>;
   todayEstimatedTotal?: number;
+  /** 时段法外推（新口径）；旧桥没有该字段时前端退回 todayEstimatedTotal */
+  todayLinearEstimatedTotal?: number;
+  /** 'shape' = 按最近 7 天同时段平均；'linear' = 线性外推；'none' = 样本太少不外推 */
+  projectedBy?: string;
   dayWindow?: Record<string, any>;
   note?: string;
   [k: string]: any;
@@ -225,6 +229,8 @@ export interface ContextSavingsBucket {
   summarizedTokens?: number;
   /** 摘要压缩发生了几次 */
   summaryEvents?: number;
+  /** 失败后重试的请求次数（提供方照计费、DSH 不给 usage —— 面板比控制台低的主要来源） */
+  retryEvents?: number;
 }
 export interface ContextSavings {
   today: ContextSavingsBucket;

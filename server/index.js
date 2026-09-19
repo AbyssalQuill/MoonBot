@@ -4843,7 +4843,7 @@ app.get('/api/napcat/qr', (req, res) => proxyToBridgeConsole(req, res, { path: '
  * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
  *   { local, remote, total, remoteReason, remoteServer, report(=total，兼容旧前端) }
  * 服务端取不到时**不整条失败**：remote=null + remoteReason 一行原因，本机那份照常返回。 */
-const TOKEN_REPORT_NUM_FIELDS = ['total', 'estTotal', 'prompt', 'completion', 'cacheRead', 'cacheWrite', 'cachePrompt', 'cacheCompletion', 'cacheSamples', 'samples', 'billedTotal', 'reconciledTotal', 'reconciledSamples'];
+const TOKEN_REPORT_NUM_FIELDS = ['total', 'estTotal', 'prompt', 'completion', 'cacheRead', 'cacheWrite', 'cachePrompt', 'cacheCompletion', 'cacheSamples', 'samples', 'billedTotal', 'reconciledTotal', 'reconciledSamples', 'retryCount', 'retryEstimated'];
 
 /** 把"桥连不上"翻译成人话：**连不上是状态（没在运行/隧道没开），不是"失败"（异常）**。
  *  以前这里直接把 `fetch failed` 抛给界面，本机没跑桥时面板上就常挂一行

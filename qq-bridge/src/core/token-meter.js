@@ -120,6 +120,7 @@ const meter = {
   dshHome: null,         // DSH home（用于定位 projcache）；未设置 = 不对账
   lastErr: null,
   slotByDay: new Map(),  // 计费日 -> 24 个时段槽的用量（外推用；见 slotOf）
+  lastBillBySession: new Map(), // 会话 -> 上一条真实请求的计费规模（重试估算用）
 };
 
 function emptyAgg() {
@@ -131,6 +132,8 @@ function emptyAgg() {
      * 它可能属于**更早的**用量，却落在今天这一桶里。面板把这一块单独显示出来，
      * 主人就能对上提供方控制台时心里有数（"今日已用里有多少是补记的"）。 */
     reconciledTotal: 0, reconciledSamples: 0,
+    /* 【2026-09-19】重试（llm/retry）：失败的尝试提供方照计费、DSH 不给 usage —— 单独记账 */
+    retryCount: 0, retryEstimated: 0,
   };
 }
 
@@ -247,6 +250,8 @@ function applyToMemory(rec) {
     s.cacheRead += rec.cacheRead || 0;
     s.cacheWrite += rec.cacheWrite || 0;
     meter.sessionSums.set(rec.sessionId, s);
+    /* 重试估算的参照（见 llm/retry 分支）：这里也更新一份，桥重启后从文件回填时同样有参照值 */
+    if (!rec.est) meter.lastBillBySession.set(rec.sessionId, rec.prompt + rec.completion + (rec.cacheRead || 0) + (rec.cacheWrite || 0));
   }
   const agg = meter.days.get(key) ?? emptyAgg();
   agg.samples += 1;
@@ -324,6 +329,7 @@ function ensureInit() {
   /* 时段槽（外推用）也是派生状态：重读文件必须清掉，否则换一个 stateDir 重新 init 时会
    * 把上一份数据的"习惯曲线"带过来（测试里就复现过：新目录只有今天的行，却被判成"历史够用"）。 */
   meter.slotByDay.clear();
+  meter.lastBillBySession.clear();
   for (const line of lines) {
     const rec = parseLine(line);
     if (rec) applyToMemory(rec);
@@ -541,12 +547,38 @@ export function meterTokenFrame(frame) {
       };
       meter.realSeen.add(sessionId);       // 本回合已有真实计量，回合末不再出估算行
       meter.turnAcc.delete(sessionId);     // 释放暂存
+      // 记下这次真实请求的规模：重试事件的估算用它当参照（见 llm/retry 分支）
+      meter.lastBillBySession.set(sessionId, prompt + completion + cacheRead + cacheWrite);
       const ok = writeRecord(rec);
       return ok ? { recorded: true, kind: 'usage', usage: { prompt, completion, total, cacheRead, cacheWrite } } : { recorded: false, reason: 'io-error' };
     }
 
     const evType = event ? event.type : null;
     const frameType = String(frame.type || '');
+
+    /* 【2026-09-19 实测：面板比提供方控制台低 0.3% 的来源】`llm/retry` = 一次尝试失败后重试。
+     * 失败的尝试**提供方照计费**（输入 token 已经送过去），但 DSH 不会为它产出 usage ——
+     * 于是桥侧、乃至 DSH 自己的会话累计都少这一块。真机现场（2026-09-19）：
+     *   控制台 48,063,224 / 面板 47,919,388，差 143,836；同一天日志里正好有 2 条 llm/retry
+     *   （turn52/step8、turn3/step4），按当时的上下文规模估算每次 ≈ 7 万 token —— 数量级对得上。
+     * 这里只**记账**（次数 + 用该会话上一条真实请求的规模做估算），不冒充精确值：
+     * 面板会把它单独列出来，让主人能用它跟控制台对上号。 */
+    if (evType === 'llm/retry') {
+      const last = meter.lastBillBySession.get(sessionId) || 0;
+      meter.lastBillBySession.set(sessionId, last);
+      const key = billingKey(now);
+      const agg = meter.days.get(key) ?? emptyAgg();
+      agg.retryCount += 1;
+      agg.retryEstimated += last;
+      meter.days.set(key, agg);
+      if (bjKey(now) === bjKey(Date.now())) {
+        const ha = meter.hours.get(bjHourOf(now)) ?? emptyAgg();
+        ha.retryCount += 1;
+        ha.retryEstimated += last;
+        meter.hours.set(bjHourOf(now), ha);
+      }
+      return { recorded: false, kind: 'retry', estimatedTokens: last };
+    }
 
     // 回合开始：复位本会话的估算暂存
     if (evType === 'turn/start') {
@@ -665,11 +697,12 @@ export function getTokenReport(days = 7, opts) {
   const zero = () => ({
     prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0,
     cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0, reconciledTotal: 0, reconciledSamples: 0,
+    retryCount: 0, retryEstimated: 0,
   });
   const dates = [];
   for (const key of dateKeyList(n, nowTs)) {
     const agg = meter.days.get(key) ?? zero();
-    dates.push({ date: key, prompt: agg.prompt, completion: agg.completion, total: agg.total, estTotal: agg.estTotal, cacheRead: agg.cacheRead, cacheWrite: agg.cacheWrite, cachePrompt: agg.cachePrompt, cacheCompletion: agg.cacheCompletion, cacheSamples: agg.cacheSamples, samples: agg.samples, reconciledTotal: agg.reconciledTotal, reconciledSamples: agg.reconciledSamples });
+    dates.push({ date: key, prompt: agg.prompt, completion: agg.completion, total: agg.total, estTotal: agg.estTotal, cacheRead: agg.cacheRead, cacheWrite: agg.cacheWrite, cachePrompt: agg.cachePrompt, cacheCompletion: agg.cacheCompletion, cacheSamples: agg.cacheSamples, samples: agg.samples, reconciledTotal: agg.reconciledTotal, reconciledSamples: agg.reconciledSamples, retryCount: agg.retryCount, retryEstimated: agg.retryEstimated });
   }
   const tAgg = meter.days.get(todayKey) ?? zero();
   const today = {
@@ -677,6 +710,8 @@ export function getTokenReport(days = 7, opts) {
     cacheRead: tAgg.cacheRead, cacheWrite: tAgg.cacheWrite, cachePrompt: tAgg.cachePrompt, cacheCompletion: tAgg.cacheCompletion, cacheSamples: tAgg.cacheSamples, samples: tAgg.samples,
     /* 其中"对账补记"占多少（可能属于更早的用量，见 emptyAgg 注释）——面板要能对上提供方控制台 */
     reconciledTotal: tAgg.reconciledTotal, reconciledSamples: tAgg.reconciledSamples,
+    /* 重试：失败的尝试提供方照计费、DSH 不给 usage。次数是精确的；token 是按该会话上一步规模估算 */
+    retryCount: tAgg.retryCount || 0, retryEstimated: tAgg.retryEstimated || 0,
     // 提供方 total_tokens 口径（四项相加），并把估算单独留在 estTotal —— 估算绝不并入计费数
     billedTotal: tAgg.prompt + tAgg.completion + tAgg.cacheRead + tAgg.cacheWrite,
   };

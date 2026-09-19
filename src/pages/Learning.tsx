@@ -1643,6 +1643,10 @@ function UsagePanel() {
   /* 对账补记（reconciled）单独报：那些行是桥侧漏记后补的，可能属于更早的用量却落在今天 ——
    * 主人对上提供方控制台时，先看这个数就知道差在哪。老桥没有该字段时为 0。 */
   const reconciledToday = num(today.reconciledTotal);
+  /* 重试（llm/retry）：失败的尝试提供方照计费、DSH 不给 usage —— 面板单独列出，用它才能跟控制台对上号。
+   * 次数优先取「剪枝计量」那份（它扫会话日志，可回填历史）；token 估算取桥侧实时记账的那份。 */
+  const retryCountToday = Math.max(num(today.retryCount), num(savings?.today?.retryEvents));
+  const retryEstimatedToday = num(today.retryEstimated);
   const dayAvg = days.length ? days.reduce((a, d) => a + d.real + d.est, 0) / days.length : 0;
   const realSum = days.reduce((a, d) => a + d.real, 0);
   const estSum = days.reduce((a, d) => a + d.est, 0);
@@ -1763,6 +1767,11 @@ function UsagePanel() {
                    可能属于**更早**的用量却落在今天）—— 单独报数，方便对上提供方控制台；
                 ② 自然日 00:00 起的总量（含 00:00–08:00 那一段，而平台把那段算在**昨天**）。 */}
             {reconciledToday > 0 && <><br />其中对账补记 {fmtFull(reconciledToday)}（{num(today.reconciledSamples)} 笔，可能属于更早的用量）</>}
+            {/* 【2026-09-19 主人拿控制台对数】重试是"面板比控制台低"的主要来源：失败的尝试提供方照计费、
+                DSH 不给 usage（实测那天 2 次重试 ≈ 14.4 万 token，正好等于两边的差）。次数精确、token 是估算。 */}
+            {retryCountToday > 0 && (
+              <><br />另有 {retryCountToday} 次重试未计入（失败的尝试提供方照计费、DSH 不给 usage）{retryEstimatedToday > 0 ? `，按上一步规模估算 ≈ ${fmtFull(retryEstimatedToday)}` : ''} —— 与控制台的差额主要来自这里</>
+            )}
             {calTotal > 0 && (
               <>
                 <br />北京自然日 00:00 起合计 {fmtFull(calTotal)} —— 其中 00:00–08:00 那段平台算在<b>昨天</b>，
