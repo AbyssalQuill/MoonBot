@@ -79,6 +79,21 @@
 //   > 内置默认 —— 与 core/config.js 里 dsh.baseUrl 的"配置文件覆盖环境变量"同一套路。
 //   为什么要接配置：桥打包给别人装好后，用户没法方便地改环境变量，而镜像站是第三方、随时可能换域名/挂掉；
 //   改 config.json 一处即可，不用改代码（见 qq-bridge/config.example.json 的 pixiv 段）。
+//
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// 【2026-09-18 实测更正：官网并不需要登录，机房 IP 也没被挡（至少在线上那台 VPS 上）】
+//   上面"官网要登录、机房 IP 常被挡"是本文件最初写的理由，**实测不成立**，逐条留证：
+//     · GET https://www.pixiv.net/ajax/illust/<id>?lang=zh        → 200，带完整 title/userName/tags/xRestrict/aiType
+//     · GET https://www.pixiv.net/ajax/illust/<id>/pages?lang=zh  → 200，逐页给出 urls.original（原图直链）
+//     · GET https://www.pixiv.net/ajax/search/artworks/<kw>?lang=zh → 200，illustManga.data 60 条
+//     · GET https://www.pixiv.net/ajax/user/<uid>/profile/all?lang=zh → 200，body.illusts 是 id→null 的表
+//   **全部不需要 cookie，也不需要 Referer**（带不带 referer 都 200；UA 用 'Mozilla/5.0' 就行）。
+//   唯一真需要 Referer 的是图床 i.pximg.net：不带 `referer: https://www.pixiv.net/` 一律 403 nginx，
+//   带上就 200 —— 所以取图那条路要给 safeFetchBuffer 传 referer（见下面 pixivImageSources）。
+//   ⇒ 现在的分工：**元数据与地址直联官网**（快：100~400ms），**镜像站只当兜底**
+//     （它的 search.php 实测就是 pixiv search 的透传，detail.php 则是它拿自己登录态换来的同一份
+//      ajax 响应；它慢得多：同一张图 2.7~5.7s，还出现过 25s 超时，所以只能兜底）。
+// ══════════════════════════════════════════════════════════════════════════════════════════
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -576,4 +591,225 @@ export function pixivImageCandidates(work, opts = {}) {
   // 最后兜底：就用搜索结果给的那张缩略图（也过代理）
   if (thumb) out.push(pixivProxyUrl(thumb));
   return [...new Set(out)];
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-18 新增：按作品号取图 —— 修「给了 illustId 却试了 0 个地址」】
+ *
+ * 现场（主人报的）：`qq_send_pixiv {illustId:"80643572", size:"original"}` 返回
+ *   `Pixiv 图片下载失败（试了 0 个地址）`，**一个候选都没生成**。
+ * 根因：换 illustId 的那条路只会拼 `work = {id, thumbUrl:''}`（当时注释写着"没有按号取详情的免登录接口"），
+ *   而 `pixivImageCandidates` 是从 **thumbUrl 里的日期路径**推大图地址的 —— thumbUrl 是空串，
+ *   日期路径推不出来，于是 out 里只剩"再兜一次空 thumb"= 0 个候选。
+ *   ⇒ 这条路等于**从来没通过**：不是被风控、也不是地址过期，是压根没地址可试。
+ *
+ * 修法：先按作品号把"下游地址"问出来，再交给 `pixivImageSources` 拼候选。实测可用的来源：
+ *   ① pixiv 直联（首选）：`ajax/illust/{id}` 取元数据、`ajax/illust/{id}/pages` 取**逐页原图直链**。
+ *      实测 `pages` 给出的就是 `https://i.pximg.net/img-original/img/<日期>_p<N>.<ext>` —— 真原图，
+ *      拿它拼地址不用猜日期、也不用猜扩展名（同一作品各页扩展名实测一致，但不同作品有 jpg 也有 png）。
+ *      注意 `ajax/illust/{id}` 的 `urls` 字段**可能整组为 null**（实测：80643572 全 null，
+ *      149807268 齐全），所以**不要**只依赖它 —— 原图地址以 `pages` 为准。
+ *   ② 镜像站兜底：`api/detail.php?id=`（形状与 pixiv 的 ajax 一致，它用自己的登录态取），
+ *      慢（实测 0.9~14s）且偶发超时，只在 ① 失败时用。
+ * 取字节：`i.pximg.net` 需要 `referer: https://www.pixiv.net/`（不带 403），所以直联优先、镜像代理兜底；
+ *   两者返回的字节实测**逐字节相同**（jpg 1,886,996B sha 536c4aeb… / png 696,829B sha c792e5ce…）。
+ *
+ * R-18 闸门：按号取图**不会**经过搜索的本地筛选，所以这里必须自己判 —— 用同一个 `isAdult` 规则
+ *   （xRestrict 缺失/非 0 一律当 R-18）。实测 R-18 作品 `ajax/illust` 仍会 200 且 `xRestrict:1`
+ *   （例：110000000），所以"官网会替我挡"是错的；倒是 `pages` 对 R-18 会 404。
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** 直联 pixiv 时必须带的 Referer（图床防盗链只认它；ajax 本身带不带都行）。 */
+export const PIXIV_REFERER = 'https://www.pixiv.net/';
+const PIXIV_AJAX = 'https://www.pixiv.net/ajax';
+const PIXIV_DIRECT_TIMEOUT_MS = 15000;
+
+/** GET 一个 pixiv/mirror 的 JSON 端点。**不抛 HTTP 状态错**（404 的 JSON 体也要能读到，才能给准话）。 */
+async function fetchPixivJson(url, timeoutMs = PIXIV_DIRECT_TIMEOUT_MS) {
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA, accept: 'application/json,text/plain,*/*', referer: PIXIV_REFERER },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  return { status: res.status, json, text };
+}
+
+/** 把 pixiv ajax（或镜像站同形状）的 body 归一成本模块对外的作品形状。**纯函数，离线可测**。 */
+export function normalizePixivIllustDetail(body, source = 'pixiv') {
+  const b = body ?? {};
+  const id = String(b.id ?? b.illustId ?? '').trim();
+  const tagList = Array.isArray(b.tags?.tags) ? b.tags.tags
+    : Array.isArray(b.tags) ? b.tags : [];
+  const tags = tagList.map((t) => String(t?.tag ?? t ?? '').trim()).filter(Boolean);
+  const out = {
+    id,
+    title: String(b.title ?? b.illustTitle ?? '').trim(),
+    author: String(b.userName ?? '').trim(),
+    authorId: String(b.userId ?? '').trim(),
+    tags,
+    description: String(b.description ?? b.illustComment ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    pageCount: Math.max(1, Number(b.pageCount) || 1),
+    width: Number(b.width) || 0,
+    height: Number(b.height) || 0,
+    illustType: Number(b.illustType) || 0,
+    xRestrict: b.xRestrict,
+    aiType: Number(b.aiType) || 0,
+    createDate: String(b.createDate ?? ''),
+    pageUrl: pixivPageUrl(id),
+    thumbUrl: String(b.urls?.thumb ?? '').trim(),
+    urls: {
+      original: String(b.urls?.original ?? '').trim(),
+      regular: String(b.urls?.regular ?? '').trim(),
+      thumb: String(b.urls?.thumb ?? '').trim(),
+    },
+    source,
+  };
+  // fail-closed：xRestrict 缺失/非 0 都当 R-18（与搜索路径的 isAdult 同一口径）
+  out.adult = isAdult({ xRestrict: out.xRestrict, tags });
+  out.origin = 'detail';
+  return out;
+}
+
+/**
+ * 按作品号取详情（元数据 + 可能的原图地址）。
+ * 顺序：pixiv 直联 → 镜像站 detail.php（兜底）。两者都失败才抛错，并把两边的原话都带上。
+ */
+export async function pixivIllustDetail(id) {
+  const pid = String(id ?? '').trim();
+  if (!/^\d{1,12}$/.test(pid)) throw new Error(`Pixiv 作品号不合法：「${String(id ?? '')}」（应为纯数字，例如 80643572）`);
+  const attempts = [
+    ['pixiv', `${PIXIV_AJAX}/illust/${pid}?lang=zh`],
+    ['mirror', `${pixivBase()}/api/detail.php?id=${pid}`],
+  ];
+  const errors = [];
+  for (const [source, url] of attempts) {
+    try {
+      const r = await fetchPixivJson(url, source === 'mirror' ? TIMEOUT_MS + 10000 : PIXIV_DIRECT_TIMEOUT_MS);
+      const body = r.json?.body;
+      if (r.json?.error || !body || !String(body.id ?? body.illustId ?? '').trim()) {
+        throw new Error(`HTTP ${r.status}${r.json?.error ? '（官网说没这个作品或不让看）' : ''}`);
+      }
+      return normalizePixivIllustDetail(body, source);
+    } catch (e) {
+      errors.push(`${source}: ${e?.message ?? e}`);
+    }
+  }
+  throw new Error(`取 Pixiv 作品 ${pid} 失败 —— ${errors.join('；')}。请核对作品号，或换成关键词搜索（query）。`);
+}
+
+/** 由 p0 原图直链推出同一作品每一页的原图直链。**纯函数，离线可测**（pages 接口失败时的兜底）。 */
+export function deriveOriginalPageUrls(p0, pageCount) {
+  const s = String(p0 ?? '').trim();
+  const m = /^(.*_p)(\d+)(\.[A-Za-z0-9]+)$/.exec(s);
+  if (!m) return [];
+  const n = Math.max(1, Number(pageCount) || 1);
+  const out = [];
+  for (let i = 0; i < n; i += 1) out.push(`${m[1]}${i}${m[3]}`);
+  return out;
+}
+
+/** 原图直链 → master1200 直链。**纯函数，离线可测**。
+ *  实测：master **一律是 .jpg**（png 原图的作品，`..._p0_master1200.png` 是 404，`.jpg` 才是 200/740KB）。 */
+export function pixivMasterUrl(originalUrl) {
+  return String(originalUrl ?? '').trim()
+    .replace('/img-original/img/', '/img-master/img/')
+    .replace(/\.[A-Za-z0-9]+$/, '_master1200.jpg');
+}
+
+/**
+ * 取一个作品的**逐页原图直链**。
+ * ① 官网 `ajax/illust/{id}/pages`（首选，实测 100~400ms，逐页给 urls.original）；
+ * ② 官网 `ajax/illust/{id}` 的 urls.original + `deriveOriginalPageUrls` 推页（① 失败时）；
+ * ③ 镜像站 detail.php 的 urls.original（`pixivIllustDetail` 兜底时已带回来）同样能推。
+ * @returns {Promise<{urls:string[], source:string, note:string}>}
+ */
+export async function pixivIllustOriginals(detail) {
+  const id = String(detail?.id ?? '').trim();
+  const pageCount = Math.max(1, Number(detail?.pageCount) || 1);
+  let note = '';
+  if (id) {
+    try {
+      const r = await fetchPixivJson(`${PIXIV_AJAX}/illust/${id}/pages?lang=zh`);
+      const arr = r.json?.body;
+      if (Array.isArray(arr)) {
+        const urls = arr.map((p) => String(p?.urls?.original ?? '').trim()).filter(Boolean);
+        if (urls.length) return { urls, source: 'pixiv:pages', note };
+        note = `pixiv pages 没给原图地址（HTTP ${r.status}）`;
+      } else {
+        note = `pixiv pages 返回了非预期形状（HTTP ${r.status}）`;
+      }
+    } catch (e) {
+      note = `pixiv pages 失败：${e?.message ?? e}`;
+    }
+  }
+  const p0 = String(detail?.urls?.original ?? '').trim();
+  if (p0) {
+    const derived = deriveOriginalPageUrls(p0, pageCount);
+    if (derived.length) return { urls: derived, source: 'derived', note };
+  }
+  return { urls: [], source: '', note: note || '拿不到原图地址' };
+}
+
+/**
+ * 取一个画师（userId）的公开作品号列表，**新→旧**。
+ *
+ * 为什么需要它：关键词搜索搜的是"标签/标题里出现这个词的作品"，所以搜「米山舞」搜到的是**别人画的、
+ * 打了她名字标签的**图，找不到她本人的作品（主人 2026-09-18 报的正是这件事）。
+ * 找"某人本人的作品"必须走 user 接口：`ajax/user/{uid}/profile/all` 的 `body.illusts` 是 `{id: null}` 表。
+ * 实测：uid=26249081 → 29 条；uid=52021072 → 20 条；uid=533797 → 0 条（该号叫 "Kana"，本来就没作品）。
+ * pixiv 作品号全局递增，所以**按号倒序 = 按投稿时间新→旧**（这里没有 createDate 可用，只能这么排）。
+ * @returns {Promise<{userId:string, ids:string[]}>}
+ */
+export async function pixivUserWorkIds(userId) {
+  const uid = String(userId ?? '').trim();
+  if (!/^\d{1,12}$/.test(uid)) throw new Error(`画师号不合法：「${String(userId ?? '')}」（应为纯数字，例如 26249081）`);
+  const r = await fetchPixivJson(`${PIXIV_AJAX}/user/${uid}/profile/all?lang=zh`);
+  const b = r.json?.body;
+  if (r.json?.error || !b) throw new Error(`取画师 ${uid} 的作品列表失败（HTTP ${r.status}）`);
+  const raw = [...Object.keys(b.illusts ?? {}), ...Object.keys(b.manga ?? {})];
+  const ids = [...new Set(raw.filter((x) => /^\d+$/.test(String(x))).map(String))]
+    .sort((a, b2) => Number(b2) - Number(a));
+  return { userId: uid, ids };
+}
+
+/** 供工具层用的 R-18 判定（与搜索路径同一个函数，避免两处规则漂移）。 */
+export function isAdultWork(item) {
+  return isAdult(item);
+}
+
+/**
+ * 拼出"这张图的字节从哪几个地址能拿到"，**按可靠性排序**（工具层逐个试）。
+ *
+ * 每条是 `{url, referer?}`：带 referer 的走**直联**（要传给 safeFetchBuffer 的第三个参数），
+ * 不带的走镜像站代理。直联在前是因为实测它快一个数量级（60~400ms vs 2.7~5.7s）且字节完全一致；
+ * 镜像代理想吐超时时直联早就成功了。
+ * 最后仍会追加 `pixivImageCandidates` 的老候选（从缩略图推的日期路径），保证"搜索路径"行为不变。
+ *
+ * @param {object} work 作品对象（搜索结果或 `pixivIllustDetail` 的结果）
+ * @param {{page?:number, size?:'master'|'original', originals?:string[]}} opts
+ * @returns {{url:string, referer?:string}[]}
+ */
+export function pixivImageSources(work, opts = {}) {
+  const page = Math.max(0, Number(opts.page) || 0);
+  const size = String(opts.size ?? 'master').toLowerCase() === 'original' ? 'original' : 'master';
+  const out = [];
+  const push = (url, referer) => {
+    const u = String(url ?? '').trim();
+    if (!u || out.some((x) => x.url === u)) return;
+    out.push(referer ? { url: u, referer } : { url: u });
+  };
+  const originals = Array.isArray(opts.originals) ? opts.originals.map((u) => String(u ?? '').trim()).filter(Boolean) : [];
+  const upstream = originals.length ? originals[Math.min(page, originals.length - 1)] : String(work?.urls?.original ?? '').trim();
+  if (upstream) {
+    const target = size === 'original' ? upstream : (String(work?.urls?.regular ?? '').trim() && page === 0
+      ? String(work.urls.regular).trim()
+      : pixivMasterUrl(upstream));
+    push(target, PIXIV_REFERER);   // ① 直联 i.pximg（带 Referer）
+    push(pixivProxyUrl(target));   // ② 镜像站代理兜底（同字节，但慢）
+  }
+  // ③ 老候选：从缩略图推日期路径（搜索路径一直用这套，保持行为不变）
+  for (const u of pixivImageCandidates(work, { page, size })) push(u);
+  return out;
 }

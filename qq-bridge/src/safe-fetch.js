@@ -263,12 +263,23 @@ export function looksLikeImageBuffer(buf) {
  */
 export const MAX_IMAGE_FETCH_BYTES = 15 * 1024 * 1024;
 
-/** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
-export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTES) {
+/**
+ * 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。
+ *
+ * @param {string} urlString
+ * @param {number} [maxBytes]
+ * @param {Record<string,string>|null} [extraHeaders] 追加的请求头。**默认不带**（老调用行为一字不变）。
+ *   存在的唯一理由：有些图床按 Referer 防盗链，不给这个头就一律 403 —— 典型是 i.pximg.net
+ *   （Pixiv 原图站）：实测带 `referer: https://www.pixiv.net/` 是 200，不带是 403 nginx。
+ *   之前 pixiv 取图只能全走第三方镜像站代理，就是因为这里不能带头；现在补上，
+ *   `qq_send_pixiv` 才能直联 pximg 拿**逐字节一致**的原图（见 lib/pixiv.js 顶部）。
+ *   `host` 由本函数自己按 URL 设置，调用方传进来也会被丢掉（防止把 host 改成别的域名）。
+ */
+export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTES, extraHeaders = null) {
   const MAX_REDIRECTS = 5;
   let { url, ip } = await validateFetchUrl(urlString);
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const result = await requestOnceBuffer(url, ip, maxBytes);
+    const result = await requestOnceBuffer(url, ip, maxBytes, extraHeaders);
     if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
       if (!result.redirect) throw new Error(`重定向缺少 Location: ${result.statusCode}`);
       const next = new URL(result.redirect, url).toString();
@@ -286,10 +297,14 @@ export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTE
   throw new Error('重定向次数过多，已停止');
 }
 
-function requestOnceBuffer(url, ip, maxBytes) {
+function requestOnceBuffer(url, ip, maxBytes, extraHeaders = null) {
   return new Promise((resolve, reject) => {
     const mod = url.protocol === 'https:' ? https : http;
     const port = url.port || (url.protocol === 'https:' ? 443 : 80);
+    // 调用方追加的头（现在只有取图时的 referer）：host 一律以 URL 为准，不允许被覆盖。
+    const extra = extraHeaders && typeof extraHeaders === 'object'
+      ? Object.fromEntries(Object.entries(extraHeaders).filter(([k, v]) => k && !/^host$/i.test(k) && v != null))
+      : {};
     const req = mod.request({
       hostname: ip,
       port,
@@ -300,6 +315,7 @@ function requestOnceBuffer(url, ip, maxBytes) {
         'user-agent': 'Mozilla/5.0',
         accept: 'image/*,*/*;q=0.8',
         'accept-language': 'zh-CN,zh;q=0.9',
+        ...extra,
       },
       servername: url.protocol === 'https:' ? url.hostname : undefined,
       rejectUnauthorized: url.protocol === 'https:',

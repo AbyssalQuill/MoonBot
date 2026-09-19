@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -18,7 +19,10 @@ import { napcatImageFileArg } from './lib/napcat-file.js';
 // 【2026-09-18】联网找图：图片搜索引擎（Bing/百度）+ SSRF 安全下载。
 // 两者都是纯函数模块，直接 import；下载复用 safe-fetch（禁内网、限字节、校验真是图片）。
 import { searchImages } from './lib/image-search.js';
-import { pixivSearch, pixivImageCandidates, parsePixivId, pixivPageUrl } from './lib/pixiv.js';
+import {
+  pixivSearch, parsePixivId,
+  pixivIllustDetail, pixivIllustOriginals, pixivImageSources, pixivUserWorkIds,
+} from './lib/pixiv.js';
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 
@@ -2784,15 +2788,18 @@ if (cfg.social?.tools?.pixiv !== false) {
 
   registerTool(
     'qq_send_pixiv',
-    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give query (the bridge searches Pixiv and sends the best hit) or illustId (a Pixiv work id / pixiv.net link you already know). index picks which search hit to send (0 = first). size=master (default, 1200px, safe for QQ) or original (full size, may be several MB). Prefer ONE image per request. The bridge skips R-18/R-18G works.'
+    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id - sends a work by that artist), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size=master (1200px, safe for QQ) or original (the untouched original file); when you give illustId/authorId the default is original, when you only give query the default is master. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
+      + '\n\n【找"某人本人的作品"只能用 authorId】关键词搜的是标题/标签含该词的图（搜「米山舞」多半是别人打了她名字标签的作品）。① 有作品号 → illustId；② 有画师号（pixiv.net/users/<数字>）→ authorId，按投稿时间新→旧取第 index 件；③ 两个都没有 → 先发 ta 任意一件作品，返回里的 authorId 就是画师号。别把画师号当 illustId。'
+      + '\n\n【原图无损】size=original = Pixiv 原图文件本身（直联 pximg 下载、原字节落盘直发，不缩放不转码不二压；返回的 sha256/bytes 就是这次真发出去的字节）。master 才是 1200px jpg。原图 >15MB 会被挡下（返回会说明），改 size=master。'
       + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages 都是在镜像站返回的数据里**本地筛**的（镜像站只认 keyword 和 page），一页 60 条、最多扫 scanPages 页（默认 3、上限 10）；index 选的是**筛完之后**的第几条。想先看清筛选细节（筛掉多少、扫了几页、有哪些候选）就用 qq_pixiv_search。排序只支持投稿时间（date_desc/date_asc/random），**不支持按人气/收藏数**（镜像站没有收藏数）。本工具**永远排除 R-18/R-18G**（刻意不给 r18 参数，避免把不宜内容发进 QQ），需要看 R-18 只用 qq_pixiv_search。',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      query: z.string().optional().describe('搜索关键词（没给 illustId 时用），例如 初音ミク 壁纸。关键词不等于标签，按标签筛请用 tags'),
-      illustId: z.string().optional().describe('Pixiv 作品号或 pixiv.net 链接；给了它就优先按号取图，其它搜索/筛选参数都不生效'),
-      index: z.number().optional().describe('用 query 搜完后发第几条（0 开始，默认 0）。注意这是**筛选之后**结果里的序号：筛选条件一变，index 指向的作品就变了，拿不准就先 qq_pixiv_search 看清楚'),
-      size: z.enum(['master', 'original']).optional().describe('master (default, 1200px) or original (full size)'),
+      query: z.string().optional().describe('搜索关键词（没给 illustId/authorId 时用），例如 初音ミク 壁纸。注意：关键词搜的是标签/标题，搜不到"某人本人的作品"——那种情况用 authorId'),
+      illustId: z.string().optional().describe('Pixiv **作品号**或 pixiv.net/artworks/<数字> 链接（不是画师号）；按号取图，其它搜索/筛选参数不生效，size 默认 original（真原图）'),
+      authorId: z.string().optional().describe('Pixiv **画师号**（pixiv.net/users/<数字>，也可只给数字）：按投稿时间新→旧取 ta 名下第 index 件作品再发。与 illustId 二选一，其它筛选参数不生效'),
+      index: z.number().optional().describe('序号（0 开始，默认 0）：给 authorId 时 = 该画师第几新的作品；给 query 时 = 筛选之后第几条搜索结果'),
+      size: z.enum(['master', 'original']).optional().describe('original = Pixiv 原图文件本身（无损、逐字节直发；给 illustId/authorId 时的默认）；master = 1200px jpg（只给 query 时的默认）。原图 >15MB 会被挡下，改用 master'),
       page: z.number().optional().describe('多图作品发第几页（0 开始，默认 0）。注意这是**作品内的页号**，不是搜索页码'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
       tags: z.array(z.string()).optional().describe('必须**全部命中**的标签（大小写不敏感、子串匹配），例如 ["初音ミク","壁紙"]。传了它就启用本地筛选'),
@@ -2806,47 +2813,115 @@ if (cfg.social?.tools?.pixiv !== false) {
       sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('排序：date_desc=最新优先（默认）/ date_asc=最旧优先 / random=随机。**不支持按人气/收藏数**（镜像站没有收藏数），硬传会回落 date_desc 并写进警告'),
       scanPages: z.number().optional().describe('最多往后翻几页找符合条件的作品：默认 3、上限 10。筛选在本地做，命中太少会自动往后翻'),
     },
-    async ({ key, token, query, illustId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
+    async ({ key, token, query, illustId, authorId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
-        let picked = null;
-        let work = null;
         const wantId = parsePixivId(illustId);
-        if (wantId) {
-          // 只给了作品号：没有"按号取详情"的免登录接口，直接按号拼图片地址发（标题留空）
-          work = { id: wantId, title: '', author: '', thumbUrl: '', pageUrl: pixivPageUrl(wantId) };
-          picked = work;
+        const wantAuthor = String(authorId ?? '').trim();
+        /* size 的默认值分两种来源（2026-09-18 主人定："按号发的必须是原图无损"）：
+         *   · 给了 illustId / authorId = "我就要这一张" → 默认 original（真原图）；
+         *   · 只给 query = "搜一张给我" → 沿用旧的 master（1200px，QQ 友好）。
+         * 显式传 size 时永远以调用方为准。 */
+        const sizeEff = String(size ?? (wantId || wantAuthor ? 'original' : 'master')).toLowerCase() === 'original' ? 'original' : 'master';
+
+        let work = null;
+        let originals = [];       // 逐页原图直链（按号取图时才有）
+        let originalsNote = '';
+        let pickNote = '';
+
+        if (wantId || wantAuthor) {
+          /* ── 按作品号 / 按画师号取图（2026-09-18 修「试了 0 个地址」）────────────────
+           * 旧写法在这里造了个 thumbUrl 为空的对象就往下走，而候选是**从缩略图推日期路径**的，
+           * 于是 0 个候选 —— 这条路从来没通过。现在先按号把详情和原图直链问出来（pixiv 直联优先，
+           * 镜像站兜底），见 lib/pixiv.js 顶部【按作品号取图】。 */
+          if (wantId) {
+            work = await pixivIllustDetail(wantId);
+          } else {
+            const { userId, ids } = await pixivUserWorkIds(wantAuthor);
+            if (!ids.length) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `画师 ${userId} 名下没有公开作品（Pixiv 上这个号没有投稿，或者号填错了）。`
+                    + '要发某个具体作品请用 illustId（作品号）；要按关键词找图请用 query。'
+                    + '提示：pixiv.net/users/<数字> 里的数字才是画师号。',
+                }],
+                isError: true,
+              };
+            }
+            const pick = Math.max(0, Number(index) || 0);
+            const target = ids[pick] || ids[0];
+            work = await pixivIllustDetail(target);
+            pickNote = `画师 ${userId} 名下共 ${ids.length} 件公开作品，按投稿时间新→旧取第 ${pick + 1} 件（${target}）`;
+          }
+          // R-18 闸门：这条路人肉不过搜索的本地筛选，必须自己判（xRestrict 缺失/非 0 都当 R-18）
+          if (work.adult) {
+            return {
+              content: [{
+                type: 'text',
+                text: `作品 ${work.id} 是 R-18/R-18G（xRestrict=${work.xRestrict}${work.tags.length ? '，标签：' + work.tags.slice(0, 6).join('/') : ''}），按规矩不发进 QQ。`,
+              }],
+              isError: true,
+            };
+          }
+          const op = await pixivIllustOriginals(work);
+          originals = op.urls;
+          originalsNote = op.source ? `原图地址来源：${op.source}` : `原图地址没拿到（${op.note}）`;
         } else {
           const q = String(query ?? '').trim();
-          if (!q) return { content: [{ type: 'text', text: '要么给 query（关键词），要么给 illustId（Pixiv 作品号/链接）' }], isError: true };
+          if (!q) {
+            return { content: [{ type: 'text', text: '要么给 illustId（Pixiv 作品号）、authorId（画师号），要么给 query（关键词）' }], isError: true };
+          }
           const r = await pixivSearch(q, {
             limit: 10, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages,
           });
-          picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
-          if (!picked) {
+          work = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
+          if (!work) {
             /* 用了本地筛选时把"筛掉多少 / 扫了几页"一并说清楚，否则模型会以为"Pixiv 上没有这张图"。
              * R-18 那部分单独算，免得和本地筛选条数重复计数。 */
             const localDrop = r.scan ? r.scan.droppedTotal - r.scan.dropped.adult - r.scan.dropped.notR18 : 0;
             const scanInfo = r.scan ? `，筛选条件再筛掉 ${localDrop} 条（已扫 ${r.scan.pagesScanned} 页 / 上限 ${r.scan.scanPagesLimit} 页，全站共 ${r.scan.total} 条）` : '';
             return { content: [{ type: 'text', text: `Pixiv 没搜到「${q}」符合条件的作品（R-18 过滤 ${r.filtered} 条${scanInfo}）。换个更具体的说法或放宽筛选再试。` }] };
           }
-          work = picked;
         }
 
-        /* 候选逐个试：master1200 / 原图 jpg / png / 缩略图 —— 都走站内代理。
-         * 逐个试而不是只试一个，是因为原图扩展名不定、且大图可能超过体积上限。 */
-        const candidates = pixivImageCandidates(work, { page, size });
+        // 作品内页号边界（两条路共用）：越界直接说清楚，别让它变成一次"下载失败"。
+        const pageCount = Math.max(1, Number(work.pageCount) || originals.length || 1);
+        const pageIdx = Math.max(0, Number(page) || 0);
+        if (pageIdx > pageCount - 1) {
+          return {
+            content: [{ type: 'text', text: `作品 ${work.id} 只有 ${pageCount} 页（page 从 0 开始，最大 ${pageCount - 1}）` }],
+            isError: true,
+          };
+        }
+
+        /* 候选逐个试（**按可靠性排序**，见 lib/pixiv.js 的 pixivImageSources）：
+         * ① i.pximg.net 直联（带 Referer，实测 60~400ms，字节与源文件逐字节一致）→
+         * ② 镜像站同名图代理（同字节，但慢，实测 2.7~5.7s，偶发超时）→
+         * ③ 老候选（从缩略图推日期路径，搜索路径一直在用）。
+         * 逐个试而不是只试一个：原图扩展名不定（jpg/png）、大图可能超体积上限、兜底链路可能同时抖动。 */
+        const sources = pixivImageSources(work, { page: pageIdx, size: sizeEff, originals });
         let got = null;
+        let gotFrom = '';
         const tried = [];
-        for (const u of candidates) {
+        for (const s of sources) {
           try {
-            got = await safeFetchBuffer(u, MAX_IMAGE_FETCH_BYTES);
+            got = await safeFetchBuffer(s.url, MAX_IMAGE_FETCH_BYTES, s.referer ? { referer: s.referer } : null);
+            gotFrom = s.url;
             break;
           } catch (e) {
-            tried.push(`${u.slice(0, 90)} → ${e?.message ?? e}`);
+            tried.push(`${s.referer ? '[直联] ' : '[代理] '}${s.url.slice(0, 96)} → ${e?.message ?? e}`);
           }
         }
         if (!got) {
-          return { content: [{ type: 'text', text: `Pixiv 图片下载失败（试了 ${candidates.length} 个地址）：\n${tried.join('\n')}` }], isError: true };
+          const overSize = /超过大小限制/.test(tried.join(' '));
+          return {
+            content: [{
+              type: 'text',
+              text: `Pixiv 图片下载失败（试了 ${sources.length} 个地址）：\n${tried.join('\n')}`
+                + (overSize ? `\n提示：这张图超过本桥单张 ${Math.round(MAX_IMAGE_FETCH_BYTES / 1024 / 1024)}MB 的下载上限，改用 size=master 才能发。` : ''),
+            }],
+            isError: true,
+          };
         }
 
         const buf = got.buffer;
@@ -2854,10 +2929,11 @@ if (cfg.social?.tools?.pixiv !== false) {
           : buf[0] === 0xff ? 'jpg'
             : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
               : 'webp';
+        const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
         const cfgPx = getConfig();
         const tmpRoot = String(cfgPx?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
         fs.mkdirSync(tmpRoot, { recursive: true });
-        const tmpPath = path.join(tmpRoot, `${Date.now()}-pixiv-${picked.id}.${ext}`);
+        const tmpPath = path.join(tmpRoot, `${Date.now()}-pixiv-${work.id}-p${pageIdx}.${ext}`);
         fs.writeFileSync(tmpPath, buf);
 
         const body = { key, messages: [], images: [tmpPath] };
@@ -2874,15 +2950,25 @@ if (cfg.social?.tools?.pixiv !== false) {
             type: 'text',
             text: JSON.stringify({
               ok: true,
-              source: wantId ? 'illustId' : 'search',
-              id: picked.id,
-              title: picked.title || undefined,
-              author: picked.author || undefined,
-              tags: picked.tags?.length ? picked.tags : undefined,
-              pageUrl: picked.pageUrl,
-              size: String(size ?? 'master'),
+              source: wantId ? 'illustId' : (wantAuthor ? 'authorId' : 'search'),
+              pick: pickNote || undefined,
+              id: work.id,
+              page: pageIdx,
+              pageCount,
+              title: work.title || undefined,
+              author: work.author || undefined,
+              // 画师号一并回给模型：拿它就能接着用 authorId 发这位画师的其它/最新作品（见工具说明 ③）
+              authorId: work.authorId || undefined,
+              tags: work.tags?.length ? work.tags : undefined,
+              pageUrl: work.pageUrl,
+              size: sizeEff,
+              // 无损保证：size=original 时发出去的就是 Pixiv 原图文件本身（字节与 sha256 一致，不缩放不转码）
+              lossless: sizeEff === 'original',
               bytes: buf.length,
+              sha256,
               format: ext,
+              fetchedFrom: gotFrom,
+              originalsNote: originalsNote || undefined,
               sent: data?.sent ?? null,
               quoted: data?.quoted ?? null,
             }, null, 2),
