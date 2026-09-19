@@ -1,4 +1,4 @@
-﻿# Sync this repo's source into the runtime copies (live install + packaging payloads).
+# Sync this repo's source into the runtime copies (live install + packaging payloads).
 # NOTE: keep this file ASCII-only -- Windows PowerShell 5.1 reads .ps1 as GBK and CJK literals break parsing.
 #
 # No hardcoded paths: everything is derived, so the repo works from any drive/user folder.
@@ -23,9 +23,9 @@ $srcMgr    = $repoRoot
 # never reach the running install (found the hard way: live preset hash stayed old).
 # 2026-09-12 (later): added 'scripts' and 'plugins' -- qq-bridge/plugins (dsh-qq-hold, qq-mode-console)
 # is loaded at runtime but was NEVER in the sync list, and scripts/ (setup-dsh, check-*) had drifted too.
-# 2026-09-19: 加上 'characters' —— 出厂角色库（21 个角色包 + 1 张散装卡，约 1.5MB）以前只存在于仓库里，
-# 每个安装包 payload 的 qq-bridge\characters 都只剩一个 _template 空模板，于是新装的机器上
-# qq_character_list / read / pack / search 四个只读工具什么都读不到（"换角色玩"直接哑火）。
+# 2026-09-19: added 'characters' -- the factory character library (21 packs + 1 loose card, ~1.5MB) used to
+# live in the repo only, so every payload's qq-bridge\characters held nothing but the _template stub and the
+# four read-only tools (qq_character_list / read / pack / search) had nothing to read on a fresh install.
 $bridgeDirs = @('src', 'tools', 'dsh', 'scripts', 'plugins', 'characters')
 
 # Packaging payloads (relative to the packaging project). runtime-src is the manager-only variant,
@@ -101,9 +101,10 @@ foreach ($d in $bridgeDests) {
   if ($n -gt 0) { Write-Host ("  removed " + $n + " dev-only file(s) from " + $toolsDir) }
 }
 
-# 1d) 撤掉模板角色卡（2026-09-19）：出厂改带 21 个真实角色包 + 1 张散装卡，_template 反而会在「角色库导入」里
-# 抢走列表、让新机器看着像空库。Copy-Item 只加不删，所以旧 payload 里残留的那一份必须在这里显式清掉
-# —— 与上面 dev-only 清理同一套路。
+# 1d) Retire the _template character card: the factory library now ships 21 real packs + 1 loose card, and
+# the stub would win the "character import" listing and make a fresh install look like an empty library.
+# Copy-Item only adds, so a leftover _template in an older payload must be removed explicitly here --
+# same pattern as the dev-only cleanup above.
 Write-Host '=== 1d) retire the _template character pack from payload characters/ ==='
 foreach ($d in $bridgeDests) {
   $charDir = Join-Path $d 'characters'
@@ -199,8 +200,9 @@ if (-not $live) {
   if ($diff -eq 0) { Write-Host ("  source and live qq-bridge/src are identical (" + $n + " files)") } else { Write-Host ("  " + $diff + " differences listed above") }
 
   Write-Host '=== 5) verify: agent preset (persona / WAKE TYPES / RULES) source vs live ==='
-  # 【2026-09-19】live 那份 preset 里的 [PERSONA] / [SPEECH RULES] 段是桥按 persona.md / speech-rules.md
-  # 现场合成的（lib/preset-compose.js），比对前必须先剥掉，否则每次都会误报 "live preset is stale"。
+  # The live preset's [PERSONA] / [SPEECH RULES] blocks are composed by the bridge at runtime from
+  # persona.md / speech-rules.md (lib/preset-compose.js); strip them before comparing, otherwise every run
+  # reports a false "live preset is stale".
   function Strip-ComposeBlock([string]$text) {
     $m = [regex]::Match($text, '(?s)\n?[ \t]*# === qq-bridge persona/rules BEGIN ===.*?# === qq-bridge persona/rules END ===')
     if ($m.Success) { return $text.Remove($m.Index, $m.Length) }
