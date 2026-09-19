@@ -10,11 +10,11 @@
     "visionApiKey": ""
   },
   "dshCompaction": {
-    "_note": "上下文治理（2026-09-19）：桥不直接改 DSH 的历史（DSH 的会话是内存里的事件溯源日志，外部改文件只会撞 seq gap 校验 / zstd 校验和），而是把这一段策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的 compaction-basic + tool-result-pruner 执行。改这里立刻生效（DSH 会热加载那份 patch），不用重启 DSH 或桥。",
+    "_note": "上下文治理（2026-09-19）：桥不直接改 DSH 的历史（DSH 的会话是内存里的事件溯源日志，外部改文件只会撞 seq gap 校验 / zstd 校验和），而是把这一段策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的 compaction-basic + tool-result-pruner 执行。改这里立刻生效（DSH 会热加载那份 patch），不用重启 DSH 或桥。toolResultMaxChars 缺省 8192：单个工具结果超过它就剪成「开头 60% + 标记 + 结尾 20%」，设小了会把整段唤醒协议/状态快照剪成零头。",
     "enabled": true,
     "thresholdRatio": 0.06,
     "retainRatio": 0.012,
-    "toolResultMaxChars": 1500
+    "toolResultMaxChars": 8192
   },
   "napcat": {
     "wsUrl": "ws://127.0.0.1:3001",

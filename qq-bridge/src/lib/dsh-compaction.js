@@ -61,7 +61,9 @@ export function normalizeCompaction(raw) {
   // 小数位收敛：0.005*0.9 会算出 0.0045000000000000005 这种值写进 YAML（难看且容易被误读）
   retainRatio = Math.round(retainRatio * 1e6) / 1e6;
   // 工具结果预算：整数、≥300；head=60%、tail=20%，剩下 20% 留给剪枝标记
-  let toolResultMaxChars = Math.round(num(src.toolResultMaxChars, 1500));
+  // 缺省 8192（与 DSH 插件默认一致）：整段 qq_get_prompt 协议 / 状态快照都能完整留下；
+  // 以前缺省 1500 会把它们剪成 900+300，模型只看到零头（2026-09-19 主人反馈后改）。
+  let toolResultMaxChars = Math.round(num(src.toolResultMaxChars, 8192));
   if (toolResultMaxChars < MIN_TOOL_RESULT_CHARS) { toolResultMaxChars = MIN_TOOL_RESULT_CHARS; notes.push(`toolResultMaxChars 被夹到 ${toolResultMaxChars}`); }
   let headChars = Math.floor(toolResultMaxChars * 0.6);
   let tailChars = Math.floor(toolResultMaxChars * 0.2);
