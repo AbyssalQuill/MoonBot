@@ -1,7 +1,7 @@
 // 出站正文形态：**端到端**回归（真起 console-server + 假 OneBot 端点收消息）
 // 【2026-09-20 主人实测】
-//   · 正文不许显式带换行（代码/诗歌除外）；
-//   · 正文不许是"被序列化的工具参数数组"：能还原就还原成多条气泡，还原不了就 400 硬失败。
+//   · 正文不许是"被序列化的工具参数数组"：能还原就还原成多条气泡，还原不了就 400 硬失败；
+//   · 正文里的显式换行**只写在提示词里**，桥不做正则清洗（主人 2026-09-20 定稿）→ 换行原样透传。
 // 单元判据在 tests/outbound-format.test.js；这里跑的是"真发一次，看 OneBot 到底收到什么"。
 // 跑法：node tests/outbound-send-integration.test.js
 import assert from 'node:assert/strict';
@@ -125,15 +125,15 @@ await t('E2E2 还原不了（只剩引号）→ 400 硬失败，一条都不发'
   assert.equal(received.length, 0, '硬失败时不该有任何消息发出去');
 });
 
-await t('E2E3 正文里的显式换行 → 真发出去时已经是一行', async () => {
+await t('E2E3 正文里的换行原样发出去（换行规矩只在提示词里，桥不做正则清洗）', async () => {
   received.length = 0;
   const r = await post({ key: KEY, messages: '今天天气真好\n要不要出去玩' });
   assert.equal(r.status, 200, `期望 200，实到 ${r.status} ${JSON.stringify(r.json)}`);
   assert.equal(received.length, 1);
-  assert.equal(textsOf(received)[0], '今天天气真好要不要出去玩');
+  assert.equal(textsOf(received)[0], '今天天气真好\n要不要出去玩');
 });
 
-await t('E2E4 代码块原样保留换行', async () => {
+await t('E2E4 多行代码原样发出去', async () => {
   received.length = 0;
   const code = '```js\nconst a = 1;\nconsole.log(a);\n```';
   const r = await post({ key: KEY, messages: code });

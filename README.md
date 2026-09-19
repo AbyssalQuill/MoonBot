@@ -148,14 +148,14 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 
 模型写的正文在**出站那一刻**还会过一遍格式治理（提示词里写清楚 + 桥侧真的拦），落地位置是 `qq-bridge/src/lib/text-safe.js` 与 `qq-bridge/src/core/qq-send.js` 的 `onebotSend`（所有模型正文的唯一出口）。
 
-| 规则 | 行为 | 例外 |
+| 规则 | 谁负责 | 行为 |
 | --- | --- | --- |
-| 不许显式换行 | 正文里的 `\n` 折叠成一行：中文相邻直接连起来，英文/数字之间补一个空格；模型把换行写成字面量 `\n` 也一起还原再折叠 | 代码（``` 围栏 / 多行缩进 / 代码标点）与诗歌诗词（每行等长 ≤12 字，或每行以诗标点收尾）原样保留 |
-| 颜文字要有出处 | 人设（`[PERSONA]` / `[SPEECH RULES]`）没要求就不发颜文字；要求了的话：正文（含标点）≤10 字时跟在同一气泡里，超过 10 字时颜文字**单独一条气泡**，免得 QQ 换行把脸截断 | 这条只写在 preset 的 `[TOOLS] 2c`：桥不猜"人设到底要不要颜文字" |
-| 代码类不分段 | 代码生成与代码解释始终一条气泡，>50 字也不拆成多条短气泡 | 超过单条上限（`social.send.maxMessageChars`）时改用 `qq_send_docx` / `qq_send_forward`，不是拆气泡 |
-| 工具参数数组不能当正文 | `["甲","乙"]` 是工具调用的容器，不是消息内容。发送端点会把它**还原成多条气泡**（含引号嵌套、`{"messages":[…]}` 包装）；实在切不出来就 **400 硬失败**、一条都不发，并回执让模型重传真正的 JSON 数组 | 真要发 JSON/代码本身：用 ``` 代码块包起来（包起来就不算参数形状） |
+| 不许显式换行 | **提示词**（preset `[TOOLS] 2b`） | 一条气泡就是一行：不许写 `\n`、不许空行、不许"段落感"，代码与诗歌/诗词例外。桥不做正则清洗（主人 2026-09-20 定稿"换行不必正则"）—— 模型写什么就发什么，所以这条只靠规则本身 |
+| 颜文字要有出处 | **提示词**（preset `[TOOLS] 2c`） | 人设（`[PERSONA]` / `[SPEECH RULES]`）没要求就不发颜文字；要求了的话：正文（含标点）≤10 字跟在同一气泡里，超过 10 字单独一条气泡，免得 QQ 换行把脸截断。桥不猜"人设到底要不要颜文字" |
+| 代码类不分段 | **提示词**（preset `[TOOLS] 2e`） | 代码生成与代码解释始终一条气泡，>50 字也不拆成多条短气泡；超过单条上限（`social.send.maxMessageChars`）时改用 `qq_send_docx` / `qq_send_forward`，不是拆气泡 |
+| 工具参数数组不能当正文 | **桥侧真的拦**（`src/lib/text-safe.js` + 发送端点 + `onebotSend`） | `["甲","乙"]` 是工具调用的容器，不是消息内容。发送端点会把它**还原成多条气泡**（含引号嵌套、`{"messages":[…]}` 包装）；实在切不出来就 **400 硬失败**、一条都不发，并回执让模型重传真正的 JSON 数组。真要发 JSON/代码本身：用 ``` 代码块包起来（包起来就不算参数形状） |
 
-回归测试：`qq-bridge/tests/outbound-format.test.js`（判据）与 `qq-bridge/tests/outbound-send-integration.test.js`（真起控制台 + 假 OneBot 端点，看实际发出去的正文），preset 内容由 `qq-bridge/tools/test-wake-protocol.mjs` 的 D 组兜住。
+回归测试：`qq-bridge/tests/outbound-format.test.js`（判据，含"换行不该被桥改写"）与 `qq-bridge/tests/outbound-send-integration.test.js`（真起控制台 + 假 OneBot 端点，看实际发出去的正文），preset 内容由 `qq-bridge/tools/test-wake-protocol.mjs` 的 D 组兜住。
 
 ### 人格学习与画像
 

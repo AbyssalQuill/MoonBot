@@ -7,17 +7,16 @@
 ### 修复
 
 - **整串数组被当成一条消息发进 QQ**：模型偶尔把 `qq_send_message` 的 `messages` 整体序列化成一个字符串，里面的引号还是嵌套的（`["直接跟我说就行", "比如"朋友圈活跃19点到23点"", "我帮你设 ᗜ ‸ ᗜ"]`）—— `JSON.parse` 必然失败，旧代码于是把这串数组当"一条消息"原样发了出去。现在发送端点先尝试还原（严格 JSON、`{"messages":[…]}` 包装、以及引号嵌套的容错切分），还原不了就 **400 硬失败**、一条都不发并回执让模型重传真正的数组；即使绕到别的发送工具，`onebotSend` 也会拒发这条正文（`qq-bridge/src/lib/text-safe.js`、`qq-bridge/src/core/console-server.js`、`qq-bridge/src/core/qq-send.js`）。
-- **正文里的显式换行**：`\n`（含被模型写成字面量 `\n` 的）在出站时折叠成一行 —— 中文相邻直接连起来、英文数字之间补空格；只有代码与诗歌/诗词原样保留。折叠发生在引用前缀 `> 原话\n` 拼接**之前**，所以 `quoteMode=prefix` 的引用格式不受影响。
 - **系统提示词的正文格式要求太散**：`[TOOLS]` 新增 2b~2e 四条 —— 不许显式换行（代码/诗歌例外）、颜文字只在人设要求时发且 10 字内联/超 10 字单独一条、工具参数数组当正文是硬失败、代码类生成与解释不分段（>50 字仍一条）。这四条讲的是"正文长什么样"，因此放在管发送工具的 `[TOOLS]` 段，而不是 `[PERSONA]` / `[SPEECH RULES]`（后两者管"你是谁、你怎么打字"）。
 
 ### 变更与不兼容
 
-- 正文格式的**执行权在桥侧**：换行折叠与数组拒发是真的会拦，不再只是提示词里的建议；颜文字那条只写在 preset（桥不判断人设到底要不要颜文字）。
-- `[TOOLS]` 2d 的示例刻意不含颜文字 —— 出厂 preset 里出现 `ᗜ` 之类会破坏"默认人设不带表情符号要求"的既有约束（`tools/test-wake-protocol.mjs` 的鲸鱼清理门禁）。
+- **换行与颜文字只写在提示词里，桥不做正则清洗**（主人 2026-09-20 定稿）：出站正文原样透传，`[TOOLS] 2b` 明确告诉模型"这条在你自己身上，桥发什么就是什么"。`[TOOLS] 2d` 的示例刻意不含颜文字 —— 出厂 preset 里出现 `ᗜ` 之类会破坏"默认人设不带表情符号要求"的既有约束（`tools/test-wake-protocol.mjs` 的鲸鱼清理门禁）。
+- 数组形状（`2d`）是唯一**桥侧真拦**的一条：形状对、能还原就还原成多条气泡，还原不了就 400 拒发。
 
 ### 内部与工程
 
-- 新增回归测试：`qq-bridge/tests/outbound-format.test.js`（15 项判据）、`qq-bridge/tests/outbound-send-integration.test.js`（5 项端到端：真起控制台 + 假 OneBot 端点收消息），并接进 `npm run check`；preset 内容门禁补 5 条（`qq-bridge/tools/test-wake-protocol.mjs`）。
+- 新增回归测试：`qq-bridge/tests/outbound-format.test.js`（判据，含"换行不该被桥改写"）、`qq-bridge/tests/outbound-send-integration.test.js`（端到端：真起控制台 + 假 OneBot 端点收消息），并接进 `npm run check`；preset 内容门禁补 5 条（`qq-bridge/tools/test-wake-protocol.mjs`）。
 - `.gitignore` 忽略 `qq-bridge/tests/.tmp-*/`（测试沙箱每次重建，Windows 上 sqlite 连接要到进程结束才释放，收尾删不掉）。
 
 ## 1.2.0 — 2026-09-19

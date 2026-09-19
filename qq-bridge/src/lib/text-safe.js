@@ -141,69 +141,14 @@ export function unquoteJsonString(value) {
 }
 
 /* ── 出站正文形态治理（2026-09-20 主人实测要求）──────────────────────────────────
- * 三条规矩，都作用在"模型写的正文"上：
- *   ① 正文里不许显式写换行 —— 代码、诗歌/诗词除外（那两类本来就要分行）；
- *   ② 颜文字只在人设要求时发、且短句内联/长句单独一条 —— 这条只写在系统提示词里，
- *      桥不猜"人设到底要不要颜文字"，猜错就是把脸糊在别人的正式话题后面；
- *   ③ 正文不许是"被序列化的工具参数数组"—— 那是容器，不是人话。
- * 入口：onebotSend（所有模型正文的唯一出口）+ POST /api/social/send-message（数组还原）。
+ * 两条规矩，都作用在"模型写的正文"上：
+ *   ① 正文不许是"被序列化的工具参数数组"—— 那是容器，不是人话（**桥侧真拦**，见下）；
+ *   ② 正文里不许显式写换行（代码、诗歌/诗词除外）、颜文字只在人设要求时发且短句内联/
+ *      长句单独一条 —— 这两条**只写在系统提示词里**（preset [TOOLS] 2b / 2c），桥不做正则清洗：
+ *      主人 2026-09-20 定稿"换行不必正则"，而"人设到底要不要颜文字"桥根本猜不出来，
+ *      猜错就是把脸糊在别人的正式话题后面。
+ * 入口：onebotSend（所有模型正文的唯一出口）+ POST /api/social/send-message（数组还原/拒发）。
  */
-
-// 中日韩文字与全角标点：折叠换行时判断"两边要不要补空格"用
-const CJK_CHAR_RE = /[\u2e80-\u303f\u3040-\u30ff\u31c0-\u31ef\u3200-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
-
-/** 这条正文是不是代码？（``` 围栏；或两行以上明显带缩进 / 代码标点） */
-export function looksLikeCodeBlock(text) {
-  const s = String(text ?? '');
-  if (s.includes('```')) return true;
-  const lines = s.split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length < 2) return false;
-  const indented = lines.filter((l) => /^[ \t]{2,}\S/.test(l)).length;
-  const codeish = lines.filter((l) => /[{};]\s*$|^\s*(?:\/\/|#|\$|>)|(?:=>|->|=|\(\))/.test(l)).length;
-  return indented >= 2 || codeish >= 2;
-}
-
-/**
- * 这条正文是不是诗歌/诗词？（短行、无句末标点；两行要求等长，三行以上认诗/词）
- * 判据偏"宁可多保一行、也不拆散一首诗"：普通闲聊被误判成诗的代价只是多一个换行，
- * 真诗被折叠成一行却是内容损坏 —— 所以这里只认两种很窄的形状：
- *   · 每行等长且 ≤12 字（五言/七言/对联）；
- *   · 每行都以诗标点（，。？！、；：）收尾且 ≤14 字（律诗/词）。
- */
-export function looksLikeVerse(text) {
-  const s = String(text ?? '');
-  if (s.length > 160) return false;
-  if (!CJK_CHAR_RE.test(s)) return false;                 // 这套判据只对中文生效（英文两行等长太常见）
-  const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2) return false;
-  const lens = lines.map((l) => [...l].length);
-  if (lens.some((n) => n > 20)) return false;
-  if (lens.every((n) => n === lens[0]) && [4, 5, 7].includes(lens[0])) return true;
-  return lines.every((l) => [...l].length <= 14 && /[，。？！、；：]$/.test(l));
-}
-
-/**
- * 正文里显式写的换行 → 折叠成一行：中文相邻直接连起来，英文/数字之间补一个空格。
- * 代码、诗歌/诗词原样返回；没有换行时原样返回。
- */
-export function collapseExplicitNewlines(text) {
-  const s = String(text ?? '');
-  if (!/\n/.test(s)) return s;
-  if (looksLikeCodeBlock(s) || looksLikeVerse(s)) return s;
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch !== '\n' && ch !== '\r') { out += ch; continue; }
-    let j = i;
-    while (j < s.length && /\s/.test(s[j])) j++;            // 换行两侧的空白一起吃掉
-    const prev = out.replace(/\s+$/, '').slice(-1);
-    const next = s[j] ?? '';
-    out = out.replace(/\s+$/, '');
-    if (prev && next && !CJK_CHAR_RE.test(prev) && !CJK_CHAR_RE.test(next)) out += ' ';
-    i = j - 1;
-  }
-  return out.trim();
-}
 
 // 引号类字符（半角 + 全角 + 弯引号）：容错切分"模型手写数组"时用
 const QUOTE_CLASS = '"\u201c\u201d\u2018\u2019\'';

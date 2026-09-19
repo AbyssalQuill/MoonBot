@@ -1,11 +1,9 @@
-// 出站正文形态：换行折叠 + "被序列化的气泡数组"识别与还原
-// 【2026-09-20 主人实测要求】正文不许显式带换行（代码/诗歌除外）、不许把工具参数数组当正文发出去。
+// 出站正文形态："被序列化的气泡数组"识别与还原
+// 【2026-09-20 主人实测要求】不许把工具参数数组当正文发出去（可还原就还原，还原不了就硬失败）。
+// 注：正文的显式换行只写在系统提示词里（preset [TOOLS] 2b），桥侧不做正则清洗 —— 主人 2026-09-20 定稿。
 // 跑法：node tests/outbound-format.test.js
 import assert from 'node:assert/strict';
 import {
-  collapseExplicitNewlines,
-  looksLikeCodeBlock,
-  looksLikeVerse,
   splitSerializedBubbles,
   looksLikeSerializedBubbleArray,
 } from '../src/lib/text-safe.js';
@@ -63,51 +61,24 @@ t('A8 形状对但切不出气泡 → 仍是数组形状（端点据此 400 硬�
   assert.equal(splitSerializedBubbles('["", ""]'), null);
 });
 
-/* ── B. 显式换行折叠：普通正文压成一行，代码/诗歌原样保留 ─────────────────────────── */
+/* ── B. 换行不归桥管（主人 2026-09-20 定稿）：正文的 \n 原样透传，规则只在提示词里 ────── */
 
-t('B1 中文相邻：换行直接连起来（不留空格）', () => {
-  assert.equal(collapseExplicitNewlines('今天天气真好\n要不要出去玩'), '今天天气真好要不要出去玩');
-  assert.equal(collapseExplicitNewlines('第一行\n\n第二行'), '第一行第二行');
-  assert.equal(collapseExplicitNewlines('我帮你设 ᗜ ‸ ᗜ\n晚安'), '我帮你设 ᗜ ‸ ᗜ晚安');
+t('B1 正文里的换行原样发出去（桥不做正则清洗）', () => {
+  const src = '今天天气真好\n要不要出去玩';
+  assert.equal(looksLikeSerializedBubbleArray(src), false);
+  assert.equal(splitSerializedBubbles(src), null);
 });
 
-t('B2 英文/数字相邻：换行换成一个空格', () => {
-  assert.equal(collapseExplicitNewlines('hello\nworld'), 'hello world');
-  assert.equal(collapseExplicitNewlines('version 1.2.0\n   build ok'), 'version 1.2.0 build ok');
+t('B2 多行代码/诗歌也不会被桥改写（它只管"是不是数组"）', () => {
+  const code = '```js\nconst a = 1;\nconsole.log(a);\n```';
+  assert.equal(looksLikeSerializedBubbleArray(code), false);
+  assert.equal(splitSerializedBubbles(code), null);
+  const poem = '床前明月光\n疑是地上霜';
+  assert.equal(looksLikeSerializedBubbleArray(poem), false);
 });
 
-t('B3 没有换行的正文原样返回', () => {
-  assert.equal(collapseExplicitNewlines('就一句话'), '就一句话');
-  assert.equal(collapseExplicitNewlines(''), '');
-});
-
-t('B4 代码原样保留（围栏 / 缩进 / 代码标点）', () => {
-  const fenced = '```js\nconst a = 1;\nconsole.log(a);\n```';
-  assert.equal(collapseExplicitNewlines(fenced), fenced);
-  const indented = 'function f() {\n  return 1;\n}';
-  assert.equal(collapseExplicitNewlines(indented), indented);
-  assert.equal(looksLikeCodeBlock(indented), true);
-});
-
-t('B5 诗歌/诗词原样保留（等长行、诗标点收尾）', () => {
-  const wuyan = '床前明月光\n疑是地上霜';
-  assert.equal(collapseExplicitNewlines(wuyan), wuyan);
-  const lvshi = '春眠不觉晓，\n处处闻啼鸟。';
-  assert.equal(collapseExplicitNewlines(lvshi), lvshi);
-  assert.equal(looksLikeVerse(wuyan), true);
-  assert.equal(looksLikeVerse(lvshi), true);
-});
-
-t('B6 被模型拆行的普通闲聊 → 折叠（不是诗）', () => {
-  assert.equal(looksLikeVerse('今天天气真好\n要不要出去玩'), false);
-  assert.equal(collapseExplicitNewlines('好的\n我知道\n马上来'), '好的我知道马上来');
-  assert.equal(collapseExplicitNewlines('这个是长句子的说明文字\n下一行也是普通说明文字'), '这个是长句子的说明文字下一行也是普通说明文字');
-});
-
-t('B7 代码类/长技术文本 >50 字不分段（换行折叠不改字数上限）', () => {
-  const long = '这个函数的第一个参数是 key，第二个参数是 token，两个都必须传，缺一个就会 403，返回体里会告诉我们到底缺了哪一个。';
-  assert.equal(long.length > 50, true);
-  assert.equal(collapseExplicitNewlines(long), long);
+t('B3 多行数组（排版过的 JSON）不算"被序列化的一条正文"', () => {
+  assert.equal(looksLikeSerializedBubbleArray('[\n  "a",\n  "b"\n]'), false);
 });
 
 for (const [name, fn] of cases) {

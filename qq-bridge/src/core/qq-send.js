@@ -3,7 +3,7 @@
 import { qqTextSeg } from '../lib/onebot-ws.js';
 import { sweepMessageArtifacts, cleanOutboundText, redactKnownTokensOnly } from '../lib/outbound-text.js';
 import { splitForQQ } from '../md-to-plain.js';
-import { escapeCqText, tokenDisclosureIn, collapseExplicitNewlines, looksLikeSerializedBubbleArray } from '../lib/text-safe.js';
+import { escapeCqText, tokenDisclosureIn, looksLikeSerializedBubbleArray } from '../lib/text-safe.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { withTimeout, sleep } from '../lib/async.js';
@@ -226,14 +226,6 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     rawMessage = redactKnownTokensOnly(rawMessage0);
   }
   if (artifactFaceId != null) segments.push({ type: 'face', data: { id: artifactFaceId } });
-  /* 【2026-09-20 主人要求】正文里不许显式写换行（代码、诗歌/诗词除外）。
-   * 放在这里、而不是 quotePrefix 之后：引用前缀 `> 原话\n` 自带一个**真换行**，
-   * 折叠必须在它拼上去之前做完，否则 prefix 引用模式（见 quoteModeOf）会被压成一行。
-   * 字面量 "\n"（模型偶尔把换行写成两个字符）先还原成真换行再折叠 —— 这与
-   * escapeCqText 后面的处理方向一致，只是提前到这里，好让折叠看得见它。 */
-  const preFold = rawMessage;
-  rawMessage = collapseExplicitNewlines(rawMessage.replace(/\\r\\n|\\n|\\r/g, '\n'));
-  if (rawMessage !== preFold) log(`[send] ${kind}:${id} 正文里的显式换行已折叠为一行（代码/诗歌例外）`);
   // prefix 引用：把"被引用原文"当正文前缀一起发出去（纯文字气泡，不依赖 QQ 的 reply 段）
   if (quotePrefix) rawMessage = quotePrefix + rawMessage;
   if (imagePath) {
