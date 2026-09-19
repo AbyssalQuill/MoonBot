@@ -585,6 +585,12 @@ body textarea.json-text, body .log-viewer, body .log-line {
   padding: 6px 11px; border-radius: 8px; margin-top: 8px;
 }
 .lrn-note-soft { background: hsl(339.13 92% 96.5% / .85); color: var(--nc-foreground-400); }
+/* 【2026-09-19 主人反馈"这段前端排版乱"】.lrn-note 是 flex 单行（一个图标 + 一句话），
+ * 拿它装多行/多段内容时，每个文本节点和 <b> 都变成独立 flex 项、还按居中排列 ——
+ * 于是句子里出现"今日 / 没有 / 发生过"这种被拆开的断行。多行说明一律加这个类改成块级。 */
+.lrn-note-block { display: block; align-items: initial; line-height: 1.7; }
+.lrn-note-block > div + div { margin-top: 3px; }
+.lrn-note-muted { opacity: .78; font-size: 11.5px; }
 
 /* ===== BridgeConfig v3.9：人设 / 发言规则双卡（并列等高） ===== */
 .dp-grid {

@@ -1709,9 +1709,10 @@ function UsagePanel() {
           补记行按"对账时刻"计入当日，当日数字因此可能高于控制台（实测 2026-09-18 高 476,993）。
           以前这里写「平台控制台因结算延迟可能略差几秒的量」，把 47 万的差说成"几秒"，是错的。 */}
       {!rcMsg && rcText && (
-        <div className="lrn-note lrn-note-soft">
-          {rcText}（对账口径 = 桥侧累计 ↔ DSH 自己记的会话累计，<b>不比对提供方控制台</b>；每 5 分钟自动跑一次。
-          补记行按"对账时刻"计入当日，且桥侧某个桶一旦记多就扣不回来，所以当日数字可能高于控制台）
+        <div className="lrn-note lrn-note-soft lrn-note-block">
+          <div>
+            {rcText}（对账口径 = 桥侧累计 ↔ DSH 自己记的会话累计，<b>不比对提供方控制台</b>；每 5 分钟自动跑一次。补记行按"对账时刻"计入当日，且桥侧某个桶一旦记多就扣不回来，所以当日数字可能高于控制台）
+          </div>
         </div>
       )}
 
@@ -1721,25 +1722,30 @@ function UsagePanel() {
           那些请求本来都要把这些内容重读一遍（计费 cacheRead），剪掉就不再付。
           为 0 时也显示一行，让人看得出"这个开关在、只是还没触发过"。 */}
       {savings && (
-        <div className="lrn-note lrn-note-soft">
-          ✂️ <b>上下文剪枝（实测）</b>：
-          {savings.today.prunedTokens > 0 ? (
-            <>
-              今日已从上下文里剪掉 <b>{fmtFull(savings.today.prunedTokens)}</b> token（{fmtFull(savings.today.pruneEvents)} 次剪枝）；
-              这些内容本来会在之后每一次请求里被重读，按真实请求数累计 —— <b>今日少读 {fmtFull(savings.today.rereadSaved)} token</b>
-              {todayUsed > 0 && `（相当于今日已用的 ${((savings.today.rereadSaved / todayUsed) * 100).toFixed(1)}%）`}。
-            </>
-          ) : (
-            <>今日还没有触发过剪枝（0 token）——工具结果超过阈值后才会剪，剪完这两天就能看到数字。</>
-          )}
-          {savings.lifetime.rereadSaved > 0 && <> 近 {savings.windowDays ?? 7} 天累计：剪掉 {fmtFull(savings.lifetime.prunedTokens)} · 少读 {fmtFull(savings.lifetime.rereadSaved)}（{fmtFull(savings.lifetime.pruneEvents)} 次）。</>}
+        <div className="lrn-note lrn-note-soft lrn-note-block">
+          <div>
+            ✂️ <b>上下文剪枝（实测）</b>：
+            {savings.today.prunedTokens > 0 ? (
+              <>
+                今日已从上下文里剪掉 <b>{fmtFull(savings.today.prunedTokens)}</b> token（{fmtFull(savings.today.pruneEvents)} 次）；
+                这些内容本来会在之后每一次请求里被重读 —— <b>今日少读 {fmtFull(savings.today.rereadSaved)} token</b>
+                {todayUsed > 0 && `（相当于今日已用的 ${((savings.today.rereadSaved / todayUsed) * 100).toFixed(1)}%）`}。
+              </>
+            ) : (
+              <>今日还没有触发过剪枝（0 token）——工具结果超过阈值后才会剪。</>
+            )}
+            {(savings.lifetime.rereadSaved > 0) ? <> 近 {savings.windowDays ?? 7} 天累计：剪掉 {fmtFull(savings.lifetime.prunedTokens)} · 少读 {fmtFull(savings.lifetime.rereadSaved)}（{fmtFull(savings.lifetime.pruneEvents)} 次）。</> : null}
+          </div>
           {/* 【2026-09-19 主人问"对话也会压缩吗"】会 —— 但那是**另一条路径**：剪枝只动工具结果，
               聊天本身超过阈值时才会把最老一段换成 <compacted-summary>（要花一次模型调用）。这里如实报数。 */}
-          {num(savings.today.summaryEvents) > 0
-            ? <> 另外今日还发生过 <b>{fmtFull(num(savings.today.summaryEvents))} 次聊天摘要压缩</b>（把最老一段聊天换成摘要，盖掉 {fmtFull(num(savings.today.summarizedTokens))} token）——这是"聊天本身太大"时才走的路径，细节仍可用 qq_get_recent_messages 从桥的记忆库里翻。</>
-            : <> 今日<b>没有</b>发生过聊天摘要压缩（0 次）——只剪了工具历史，聊天记录逐字保留。</>}
-          <br />口径与用量同一套计费日（{dayStartLabel}）：读的是 DSH 自己的会话日志（{fmtFull(num(savings.scannedFiles))} 份在扫），
-          幂等重算、桥重启不丢。
+          <div>
+            {num(savings.today.summaryEvents) > 0
+              ? <>聊天摘要压缩：今日发生过 <b>{fmtFull(num(savings.today.summaryEvents))} 次</b>（把最老一段聊天换成摘要，盖掉 {fmtFull(num(savings.today.summarizedTokens))} token）——细节仍可用 qq_get_recent_messages 从桥的记忆库里翻。</>
+              : <>聊天摘要压缩：今日 <b>0 次</b>（只剪了工具历史，聊天记录逐字保留）。</>}
+          </div>
+          <div className="lrn-note-muted">
+            口径与用量同一套计费日（{dayStartLabel}）；读的是 DSH 自己的会话日志（当前扫 {fmtFull(num(savings.scannedFiles))} 份），幂等重算、桥重启不丢。
+          </div>
         </div>
       )}
 
