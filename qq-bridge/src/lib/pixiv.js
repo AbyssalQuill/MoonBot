@@ -673,14 +673,74 @@ export function configPixivCookie() {
   }
 }
 
-/** 当前生效的 pixiv 登录 cookie。**每次现读** config.json：贴完新 cookie 不用重启 MCP 子进程。 */
+/**
+ * 当前生效的 pixiv 登录 cookie。**每次现读** config.json：贴完新 cookie 不用重启 MCP 子进程。
+ * `QQBRIDGE_PIXIV_COOKIE_OFF=1` 可以强制"没有登录态"（自检/验证缓存兜底时用，也方便临时停用而不删配置）。
+ */
 export function pixivCookie() {
+  if (String(process.env.QQBRIDGE_PIXIV_COOKIE_OFF ?? '').trim() === '1') return '';
   return configPixivCookie() || cleanPixivCookie(process.env.QQBRIDGE_PIXIV_COOKIE);
 }
 
 /** 是否配了登录 cookie（只回布尔，**绝不回值**）。 */
 export function pixivLoggedIn() {
   return pixivCookie().length > 0;
+}
+
+/* ── 「名字 → 画师号」本地缓存（2026-09-19）────────────────────────────────────────────
+ * 主人只愿意填一次 cookie，而 cookie 迟早会过期（还没法自动续 —— 续期要账号密码）。
+ * 但 cookie 其实**只用来解一次名字**：解出来之后，按画师号发作品、取原图全都不需要登录态。
+ * 所以把每次成功解出的候选表按名字落盘 —— cookie 掉了，已经查过的名字照样能用。
+ * 文件：<qq-bridge>/state/pixiv-artists.json（原子写；最多留 500 条，超出按时间淘汰最旧的）。 */
+const ARTIST_CACHE_PATH = process.env.QQBRIDGE_PIXIV_CACHE_PATH
+  ? path.resolve(String(process.env.QQBRIDGE_PIXIV_CACHE_PATH))
+  : path.resolve(__dirname, '..', '..', 'state', 'pixiv-artists.json');
+const ARTIST_CACHE_MAX = 500;
+
+/** 读缓存（读不到/坏文件都当空表，绝不让它把搜索搞挂）。 */
+export function readArtistCache() {
+  try {
+    const j = JSON.parse(fs.readFileSync(ARTIST_CACHE_PATH, 'utf8'));
+    return j && typeof j === 'object' && j.names && typeof j.names === 'object' ? j.names : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 按名字取缓存条目（返回 users 数组或 null）。 */
+export function artistCacheGet(name) {
+  const key = normalizeArtistName(name);
+  const hit = readArtistCache()[key];
+  if (!hit || !Array.isArray(hit.users) || !hit.users.length) return null;
+  return { at: Number(hit.at) || 0, users: hit.users, name: String(hit.name ?? name) };
+}
+
+/** 写入一条缓存（原子写；失败只记不抛 —— 缓存不该把主流程搞挂）。 */
+export function artistCacheSet(name, users) {
+  if (!Array.isArray(users) || !users.length) return false;
+  const key = normalizeArtistName(name);
+  if (!key) return false;
+  try {
+    const all = readArtistCache();
+    all[key] = { at: Date.now(), name: String(name), users };
+    const keys = Object.keys(all);
+    if (keys.length > ARTIST_CACHE_MAX) {
+      keys.sort((a, b) => (Number(all[a]?.at) || 0) - (Number(all[b]?.at) || 0));
+      for (const k of keys.slice(0, keys.length - ARTIST_CACHE_MAX)) delete all[k];
+    }
+    fs.mkdirSync(path.dirname(ARTIST_CACHE_PATH), { recursive: true });
+    const tmp = `${ARTIST_CACHE_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ v: 1, names: all }, null, 2));
+    fs.renameSync(tmp, ARTIST_CACHE_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 缓存里已经记住多少个名字（诊断/自检用）。 */
+export function artistCacheSize() {
+  return Object.keys(readArtistCache()).length;
 }
 
 /**
@@ -1059,12 +1119,16 @@ async function enrichArtistWorks(users, limit = 8) {
 export async function pixivSearchUsersByName(name) {
   const w = String(name ?? '').trim();
   if (!w) throw new Error('要搜的画师名不能为空');
+  // ① 先查本地缓存：命中就完全不碰网络、也不要求登录态（cookie 过期后已查过的名字照样能用）
+  const cached = artistCacheGet(w);
+  if (cached) return { query: w, endpoint: 'cache', users: cached.users, cached: true, cachedAt: cached.at };
   if (!pixivLoggedIn()) {
-    throw new Error('按名字找画师需要 pixiv 登录态：在 config.json 的 pixiv.cookie 里填一个会话 cookie（免费号即可）。'
+    throw new Error('按名字找画师需要 pixiv 登录态：在 config.json 的 pixiv.cookie 里填一个会话 cookie（免费号即可，填一次即可）。'
       + '没登录态时只能改用 authorId（画师号，如 1554775）或作品链接（pixiv.net/artworks/<数字>）；'
-      + '关键词搜索搜的是"标题/标签含该名字"的作品，找不到作者本人。');
+      + '关键词搜索搜的是"标题/标签含该名字"的作品，找不到作者本人。'
+      + '（已经查过的名字有本地缓存，不受登录态影响。）');
   }
-  // 首选实测可用的那条；后面两条是历史形状，留着当兜底（pixiv 随时可能改）
+  // 首选实测可用的那条；后面那条是历史形状，留着当兜底（pixiv 随时可能改）
   const ends = [pixivUserSearchUrl(w), `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`];
   const tried = [];
   for (const url of ends) {
@@ -1073,7 +1137,8 @@ export async function pixivSearchUsersByName(name) {
       const users = parsePixivUserSearch(r.json);
       if (users.length) {
         await enrichArtistWorks(users);
-        return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users };
+        artistCacheSet(w, users);   // 解开一次就记住：cookie 掉了也能用（主人只填一次的意思）
+        return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users, cached: false };
       }
       const why = r.json?.error ? `error=${String(r.json.message ?? '').slice(0, 40)}` : '无 users 字段';
       tried.push(`${url.replace(PIXIV_AJAX, '')} → HTTP ${r.status} ${why}`);

@@ -75,6 +75,8 @@ import { state, loadConfig, loadState, saveState, watchConfigFile } from './core
 import { acquireLock, releaseLock } from './core/runtime.js';
 import { enqueueSend, currentSendChain } from './core/send-chain.js';
 import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './core/qq-send.js';
+// Pixiv 登录态自检：cookie 失效时主动提醒主人（主人只填一次，掉了要有人告诉他），见 core/pixiv-watch.js
+import { startPixivCookieWatch } from './core/pixiv-watch.js';
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from './lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from './lib/social-timeline.js';
 import { createMediaDomain } from './core/media.js';
@@ -343,6 +345,18 @@ async function main() {
   // buildMusicCard 也交给管理端/工具链路：音乐卡片的字段解析与降级梯子都放在 media 域里（唯一实现）
   const { sendRich, musicSearch, buildMusicCard } = createMediaDomain(cfg);
   setConsoleMedia(sendRich, musicSearch, buildMusicCard);
+
+  /* Pixiv 登录态看护：只在"配了 cookie 但它失效了"时才给主人发一条私聊提醒（最多一天一次）。
+   * 主人只肯填一次 cookie，而 cookie 没法自动续 —— 那就至少别让他自己去发现它过期了。 */
+  try {
+    startPixivCookieWatch({
+      logger: (m) => log(m),
+      ownerKey: () => (cfg.ownerQQ ? `private:${cfg.ownerQQ}` : ''),
+      send: (key, text) => sendToQQ(key, text),
+    });
+  } catch (error) {
+    log('[pixiv] 登录态看护启动失败（不影响主流程）:', error?.message ?? error);
+  }
 
   if (!cfg.allow.private.length && !cfg.allow.groups.length && cfg.allowAllWhenEmpty) {
     log('⚠️  白名单为空且 allowAllWhenEmpty=true：将转发所有私聊/群聊消息给 agent');

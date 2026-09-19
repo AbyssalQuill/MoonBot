@@ -35,11 +35,13 @@ const stateMod = await import(url('core/session-state.js'));
 const socialMod = await import(url('core/social-state.js'));
 const modeMod = await import(url('core/mode.js'));
 const wakeMod = await import(url('core/wake-send.js'));
+const diceMod = await import(url('core/send-dice.js'));
 const textSafeMod = await import(url('lib/text-safe.js'));
 
 const cfg = cfgMod.loadConfig();
 modeMod.initModeCore(cfg);
 wakeMod.initWakeCore(cfg);
+diceMod.initSendDice(cfg);
 socialMod.initSocialCore(cfg);
 
 let fails = 0;
@@ -103,7 +105,37 @@ check('B5 没有 ➤', !/➤/.test(sentinel));
 check('B6 没有【令牌】', !/【令牌】/.test(sentinel));
 check('B7 没有内联收尾规则（qq_wait_for_messages 那段）', !/qq_wait_for_messages/.test(sentinel));
 check('B8 没有内联"reply and close in the SAME step"', !/SAME step/.test(sentinel));
-check('B9 哨兵轮 < 320 字符（原约 2KB 含规则）', sentinel.length < 320, `实测 ${sentinel.length}`);
+check('B9 哨兵轮 < 800 字符（原约 2KB 含规则；2026-09-19 起还要带抽签行）', sentinel.length < 800, `实测 ${sentinel.length}`);
+/* 【2026-09-19 修「概率设置不生效」的回归】抽签行原先只在"首轮完整注入"里掷一次，
+ * 哨兵轮（= 绝大多数唤醒）没有 → 概率实际要等会话轮换（~10 轮）才重掷一次，
+ * 表现就是"设了 0.6 却几乎看不到表情包/语音"。现在哨兵轮也必须带抽签行。 */
+check('B10 哨兵轮带 [Meme] 抽签行（这就是本轮修复）', /^\[Meme\] /m.test(sentinel), JSON.stringify(sentinel));
+// 把概率拧到 1 / 0，哨兵轮必须分别给出 HIT / MISS —— 证明它真的每轮现掷，而不是照抄首轮结论
+const stickerCfg = (cfg.social && cfg.social.sticker) || (cfg.social.sticker = {});
+stickerCfg.enabled = true;
+stickerCfg.sendProbability = 1;
+stickerCfg.sendCooldownMs = 0;
+delivered.length = 0;
+await wakeMod.sendWakePrompt(KEY, 'private');
+const hitText = delivered[0]?.text ?? '';
+check('B11 概率 1 → 哨兵轮出现 [Meme] dice HIT', /\[Meme\] dice HIT/.test(hitText), JSON.stringify(hitText.split('\n').filter((l) => l.startsWith('[Meme]'))));
+stickerCfg.sendProbability = 0;
+delivered.length = 0;
+await wakeMod.sendWakePrompt(KEY, 'private');
+const missText = delivered[0]?.text ?? '';
+check('B12 概率 0 → 哨兵轮出现 [Meme] dice MISS', /\[Meme\] dice MISS/.test(missText), JSON.stringify(missText.split('\n').filter((l) => l.startsWith('[Meme]'))));
+check('B13 刚发过一次就登记（用于冷却判定）', (() => {
+  stickerCfg.sendProbability = 1;
+  stickerCfg.sendCooldownMs = 180000;   // 冷却要真的开着，否则永远是 HIT
+  diceMod.noteMemeSent(KEY);
+  return true;
+})());
+delivered.length = 0;
+await wakeMod.sendWakePrompt(KEY, 'private');
+const cdText = delivered[0]?.text ?? '';
+check('B14 冷却中 → 哨兵轮显示 cooldown', /\[Meme\] cooldown/.test(cdText), JSON.stringify(cdText.split('\n').filter((l) => l.startsWith('[Meme]'))));
+stickerCfg.sendProbability = 0.3;
+stickerCfg.sendCooldownMs = 180000;
 
 /* ── C. 无未读的哨兵轮（空唤醒）：保留主人点名的那种一行式说明 ────────── */
 delivered.length = 0;
@@ -114,7 +146,8 @@ const emptyWake = delivered[0]?.text ?? '';
 console.log(`—— 空唤醒：${JSON.stringify(emptyWake.slice(0, 200))}`);
 check('C1 空唤醒仍是数据形态（[Wake proactiveCheck] + [Unread 0]）', /\[Wake proactiveCheck\]/.test(emptyWake) && /\[Unread 0\] nothing new to answer/.test(emptyWake));
 check('C2 空唤醒没有 ➤', !/➤/.test(emptyWake));
-check('C3 空唤醒 < 260 字符', emptyWake.length < 260, `实测 ${emptyWake.length}`);
+check('C3 空唤醒 < 600 字符（含抽签行后的上限）', emptyWake.length < 600, `实测 ${emptyWake.length}`);
+check('C4 空唤醒也带 [Meme] 抽签行（每轮都掷）', /^\[Meme\] /m.test(emptyWake));
 
 /* ── D. 规则确实搬进了系统提示词（搬走 ≠ 删掉） ────────────────────────── */
 const presetPath = path.join(REPO, 'dsh', 'agent-presets', 'default', 'agent.cordis.yml');
