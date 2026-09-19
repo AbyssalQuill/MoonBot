@@ -311,14 +311,15 @@ export function loadConfig() {
 
   // social.meme 也要深合并：旧 config.json 完全没有这一段时，不能因为外层 spread 丢掉默认值；
   // personaPacks 是"角色 -> 包 id 数组"的映射，单独再合一层，避免用户只写一个角色就把别的角色顶掉。
+  // （packs 归一化放在对象字面量之后做：同一个键在字面量里出现两次会被 check-scope 判为重复键。）
+  const rawMeme = cfg.social?.meme ?? {};
   cfg.social.meme = {
     enabled: true,
-    packs: [],
     activePersona: '',
-    ...(cfg.social?.meme ?? {}),
-    packs: Array.isArray(cfg.social?.meme?.packs) ? cfg.social.meme.packs.map(String) : [],
-    personaPacks: { ...((cfg.social?.meme?.personaPacks) ?? {}) }
+    ...rawMeme,
+    personaPacks: { ...((rawMeme.personaPacks) ?? {}) }
   };
+  cfg.social.meme.packs = (Array.isArray(rawMeme.packs) ? rawMeme.packs : []).map(String).filter(Boolean);
 
   return cfg;
 }

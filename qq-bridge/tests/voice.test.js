@@ -150,8 +150,30 @@ t('群聊语音：走到 send_group_msg，报文里是 record 段 + group_id', a
   }
 });
 
-t('私聊语音：走 send_private_msg + user_id，带引用时先加 reply 段', async () => {
+/* 【2026-09-20 按现契约改写】这条原来断言"带引用时先加 reply 段" —— 那是 `quoteMode=native` 的老行为。
+ * 现契约（voice.js:1044 那段注释，线上实测）是：语音**默认丢弃引用段**（QQ 渲染不了 [reply+record]，
+ * 会变成"有引用框、没语音"的空气泡），只有把 social.send.quoteMode 显式设成 native 才保留。
+ * 旧断言留着会让 npm run check 一直红，所以拆成两条：默认 = 只发 record；native = 才先 reply。 */
+t('私聊语音：走 send_private_msg + user_id；默认丢弃引用段（只发 record）', async () => {
   const file = tmpAudio();
+  voice.initVoiceCore(null);
+  const stub = stubFetch(() => ({ body: { status: 'ok', retcode: 0, data: { message_id: 1 } } }));
+  try {
+    await voice.sendVoiceToOneBot('private:10001', file, { replyToMessageId: '555' });
+    assert.match(stub.calls[0].url, /\/send_private_msg$/);
+    assert.equal(stub.calls[0].payload.user_id, 10001);
+    assert.equal(stub.calls[0].payload.message[0].type, 'record');
+    assert.equal(stub.calls[0].payload.message.length, 1, '默认不该带 reply 段');
+    assert.ok(!stub.calls[0].payload.message.some((s) => s.type === 'reply'));
+  } finally {
+    stub.restore();
+    fs.unlinkSync(file);
+  }
+});
+
+t('私聊语音：quoteMode=native 时才保留 reply 段（reply 在前、record 在后）', async () => {
+  const file = tmpAudio();
+  voice.initVoiceCore({ social: { send: { quoteMode: 'native' } } });
   const stub = stubFetch(() => ({ body: { status: 'ok', retcode: 0, data: { message_id: 1 } } }));
   try {
     await voice.sendVoiceToOneBot('private:10001', file, { replyToMessageId: '555' });
@@ -162,6 +184,7 @@ t('私聊语音：走 send_private_msg + user_id，带引用时先加 reply 段'
     assert.equal(stub.calls[0].payload.message[1].type, 'record');
   } finally {
     stub.restore();
+    voice.initVoiceCore(null);
     fs.unlinkSync(file);
   }
 });
