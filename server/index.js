@@ -2668,7 +2668,13 @@ app.post('/api/ssh/sync', async (req, res) => {
             }
           } catch (e) { steps.push({ step: '表情包合并', ok: false, msg: e.message }); }
         }
-        const restartB = await sshExecCapture(conn, "cd /root/qq-bridge && nohup bash start-bridge.sh </dev/null >/dev/null 2>&1 & sleep 4; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-up || echo bridge-down", 30000);
+        /* 【2026-09-19 修「重启远端桥其实没重启」】原来是直接 `nohup bash start-bridge.sh`：
+         * `start-bridge.sh` 不会替你杀旧进程，于是旧桥继续占着 3100，新起的那个实例只能报
+         * `控制台服务错误: listen EADDRINUSE` 然后自己退出 —— 而这里的检查只看
+         * `pgrep 'node src/bridge.js'` 有没有命中，**旧桥正好命中**，所以界面永远显示"重启成功"，
+         * 实际上新代码一行都没生效（实测服务器两次同步都是这样）。现在先按命令行关键字停掉旧桥、
+         * 等它退干净再起新的，并把"新进程 pid + 到 NapCat 3001 的连接数"一起回报，让成功可验证。 */
+        const restartB = await sshExecCapture(conn, "pkill -f 'node src/bridge[.]js'; sleep 3; cd /root/qq-bridge && nohup bash start-bridge.sh </dev/null >/dev/null 2>&1 & sleep 8; P=$(pgrep -f 'node src/bridge[.]js' | head -1); C=$(ss -tn 2>/dev/null | grep -c ':3001'); if [ -n \"$P\" ]; then echo \"bridge-up pid=$P napcat-conn=$C\"; else echo bridge-down; fi", 60000);
         steps.push({ step: '重启远端桥', ok: restartB.ok && String(restartB.out || '').includes('bridge-up'), msg: String(restartB.out || restartB.error || '') });
         await resumeLocal('重启本地桥');
       } finally {
