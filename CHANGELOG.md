@@ -14,7 +14,8 @@
 
 ### 修复
 
-- **模型"像是不记得工具怎么调、也忘了规矩"：工具结果被剪得太狠**。`dshCompaction.toolResultMaxChars` 原来是 1500 —— 单个工具结果超过 1500 字就被剪成「开头 900 + 剪枝标记 + 结尾 300」，而 `qq_get_prompt` 返回的整段唤醒协议、状态快照、角色卡、贴纸清单动辄几 KB，模型每轮只看到零头。现在**代码默认值与出厂配置都改成 8192**（与 DSH 插件默认一致）：整段协议 / 快照完整保留，真正超大的（图片 base64、超长历史）照旧剪掉。桥会热加载并重写隔离 DSH home 的 `cordis.patch.yml`，不用重启 DSH、也不打断正在聊的会话。顺带把系统提示词 [TOOLS] 那行的示例点名到具体工具（含 `qq_social_state`）—— 实测模型曾自造 `qq_get_social_state` 这个名字（代码库里不存在），这条对**新会话**生效。
+- **群里 @ 了机器人它却不回（免打扰时段漏消息）**：唤醒理由的判定把"群里说什么都接"（`anyMessage`）排在被 @ 前面 —— 群一旦转成全活跃，"@ 机器人"也被标成 `anyMessage`，而免打扰时段只放行真实触发（@ / 提问 / 点名 / 拍一拍 / 私聊），`anyMessage` 在拦截名单里，于是被 @ 也被跳过。现在 **@ 永远优先标成 `atMention`**（引用回复机器人同理），免打扰时段照常响应；提示词也按"被 @"来答，`[Undelivered draft]` 补发提示才认得它。回归测试 `qq-bridge/tests/wake-trigger.test.js`（含"免打扰名单里不许出现真实触发"的源码级断言）已进 `npm run check`。
+- **模型"像是不记得工具怎么调、也忘了规矩"：工具结果被剪得太狠**。`dshCompaction.toolResultMaxChars` 原来是 1500 —— 单个工具结果超过 1500 字就被剪成「开头 900 + 剪枝标记 + 结尾 300」，而 `qq_get_prompt` 返回的整段唤醒协议、状态快照、角色卡、贴纸清单动辄几 KB，模型每轮只看到零头。现在**代码默认值与出厂配置都改成 8192**（与 DSH 插件默认一致）；桥会热加载并重写隔离 DSH home 的 `cordis.patch.yml`，不用重启 DSH、也不打断正在聊的会话。顺带把系统提示词 [TOOLS] 那行的示例点名到具体工具（含 `qq_social_state`）—— 实测模型曾自造 `qq_get_social_state` 这个名字（代码库里不存在），这条对**新会话**生效。
 - **表情包发现没跟随符号链接**：服务器上 `<meme-packs>/<包里>` 是指向别处的软链，而 `readdir(..., { withFileTypes: true })` 的 Dirent 不跟随链接（`isDirectory()` 为 false）→ 整份包被跳过，工具回"本机没装内置表情包"。现在改用 `statSync` 判目录（桥侧与管理端同一口径），并加进多包回归测试。
 - **全新机器上"装了 21 个角色包，四个角色工具却一个都读不到"**：`social.charactersDir` 没配时，角色库根以前固定指向 `~/Downloads/characters/characters` —— 那是"主人自己放角色库的地方"，新机器上根本不存在，而真正装着出厂包的 `<安装目录>\resources\runtime\qq-bridge\characters` 谁都没看。现在按"存在即用"回落：用户库 → 出厂库 → 老默认；配了 `social.charactersDir` 就完全以它为准。
 - **导入列表和模型读的库不再是两套**：管理端「角色库导入」的扫描根以前是"桥目录 characters 排最前"，出厂库随包进 runtime 之后就永远胜出 —— 你往自己那份库里新加的角色**不会出现在导入列表里**，而模型侧四个工具读的却是用户那份。现在只要配了 `social.charactersDir`，导入列表就以它为准，两边看到同一个库。
@@ -31,7 +32,9 @@
 
 ### 变更与不兼容
 
-- 表情包搜索结果行多了一段 `[包 id]`（`文件名 [分类] [包 id] 描述`）；`qq_meme_search` 与 `qq_send_meme` 各多一个可选 `pack` 参数。
+- **斜杠指令统一英文**：新增 `/set active [HH:MM-HH:MM]`（这段时间活跃，其余只回 @）与 `/set diving [HH:MM-HH:MM]`（这段时间潜水，其余活跃），**不带时段 = 全天**；`/set mode active|diving` 保留为等价老写法。中英混写的旧写法全部移除：`/slang 学习`、`/slang 停止`（改用 `/slang learn`、`/slang stop`）、`/set mode 活跃`、`/set mode 潜水`、`/op del 删除|取消|撤销|解`（改用 `/op del` / `/op remove`），作息时段的分隔符也不再认「年」「到」。`sleep` 那一套（`/set sleep 01:00-06:00`、`/set sleep 30m`、`/set wake`、`/set cancel`）照旧。
+- 删掉过期的 `qq-bridge/QQ聊天角色设定.md`：概率早已改成桥侧掷骰（`core/send-dice.js`），那份手写参数表不再对应任何真实行为。
+- 内置表情包的搜索结果行多了一段 `[包 id]`（`文件名 [分类] [包 id] 描述`）；`qq_meme_search` 与 `qq_send_meme` 各多一个可选 `pack` 参数。
 - 包 id 取 `manifest.json` 的 `id`，目录名不再等于 id；出厂包 `whale-fanart-001` 的目录名与 id 不变。
 - 出厂角色卡由模板 `_template` 换成 21 个真实角色包 —— 管理端「角色库导入」列出的默认内容随之改变。
 - **上传的表情包在后装目录 `meme-packs/` 里，升级不会覆盖**；出厂包在 `meme/` 里，随更新整体替换（界面里出厂包只提供禁用不提供删除）。
