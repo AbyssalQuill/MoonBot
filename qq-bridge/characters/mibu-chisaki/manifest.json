@@ -1,0 +1,58 @@
+{
+  "slug": "mibu-chisaki",
+  "name": "壬生千咲",
+  "name_ja": "壬生千咲（みぶ ちさき）",
+  "game": "RIDDLE JOKER / リドルジョーカー",
+  "game_en": "RIDDLE JOKER",
+  "brand": "YUZUSOFT",
+  "release_year": 2018,
+  "cv": "夏和小",
+  "built_at": "2026-09-04T20:30:00+08:00",
+  "last_updated": "2026-09-04T20:30:00+08:00",
+  "sources": ["moegirl-wiki", "hikarifield-official-cn", "qiuwenbaike", "hatena-review", "ameblo-review", "hokago-moegames-review", "bilibili-考据", "yuzusoft-asmr"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 17,
+    "artifact": 194,
+    "impression": 71,
+    "total": 282,
+    "evidence_ratio": 0.748
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.748,
+    "conflict_count": 6,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.374 + 0.07 = 0.844（预估）。证据率如实统计：千咲为次要女主（唯一可攻略配角），公开资料量少于主线女主，verbatim占比较低。"
+  },
+  "timelines_available": [
+    "过去（独生女成长/父母双职工/想交星幽使朋友）",
+    "共通线（与七海结为挚友·光与暗属性人格/憧憬在原兄妹）",
+    "千咲ルート（痴汉事件·チーム・トッパン→服选デート→全肯定→夺吻告白→秘密的约定）",
+    "AFTER：千咲（与秘密共处的恋人）",
+    "后日谈（官方ASMR《壬生千咲はいつでも先輩を癒したい》2024设定：治愈系恋人日常）"
+  ],
+  "character_traits": {
+    "mbti": "ESFJ（推测：外向社交/情感先行/务实照顾人）",
+    "appearance": "赤髪ロング/娇小贫相(ぺったん娘)/元气笑容/适合身型的时尚穿搭",
+    "archetype": "元气学妹/交际花/コミュ力お化け/唯一可攻略无能力者/直球进攻系恋爱担当/时尚达人/独生女想要哥哥",
+    "core_conflict": "想走进能力者的世界vs永远是普通人/想知道恋人的一切vs选择不问的信任",
+    "signature_phrases": [
+      "チーム・トッパン——痴漢許すまじ特別捜査班！",
+      "啊——周防学姐的胸也很小呢",
+      "先輩、先輩！",
+      "……可我是男的啊！",
+      "保持原样的我就很好……？",
+      "适合自己身型的衣服，比流行更重要"
+    ]
+  },
+  "rating": "良好（预估）",
+  "supplement_suggestions": [
+    "如获得千咲线完整剧本文本，可提升verbatim占比",
+    "官方未公布身高/瞳色数值，如获柚子社设定集（VFB）资料可补全外貌",
+    "官方ASMR《壬生千咲はいつでも先輩を癒したい》详细内容可用于充实后日谈记忆"
+  ]
+}

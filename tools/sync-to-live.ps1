@@ -23,7 +23,10 @@ $srcMgr    = $repoRoot
 # never reach the running install (found the hard way: live preset hash stayed old).
 # 2026-09-12 (later): added 'scripts' and 'plugins' -- qq-bridge/plugins (dsh-qq-hold, qq-mode-console)
 # is loaded at runtime but was NEVER in the sync list, and scripts/ (setup-dsh, check-*) had drifted too.
-$bridgeDirs = @('src', 'tools', 'dsh', 'scripts', 'plugins')
+# 2026-09-19: 加上 'characters' —— 出厂角色库（21 个角色包 + 1 张散装卡，约 1.5MB）以前只存在于仓库里，
+# 每个安装包 payload 的 qq-bridge\characters 都只剩一个 _template 空模板，于是新装的机器上
+# qq_character_list / read / pack / search 四个只读工具什么都读不到（"换角色玩"直接哑火）。
+$bridgeDirs = @('src', 'tools', 'dsh', 'scripts', 'plugins', 'characters')
 
 # Packaging payloads (relative to the packaging project). runtime-src is the manager-only variant,
 # so it carries no qq-bridge and is filtered out of the bridge list below.
@@ -96,6 +99,21 @@ foreach ($d in $bridgeDests) {
     }
   }
   if ($n -gt 0) { Write-Host ("  removed " + $n + " dev-only file(s) from " + $toolsDir) }
+}
+
+# 1d) 撤掉模板角色卡（2026-09-19）：出厂改带 22 个真实角色包，_template 反而会在「角色库导入」里
+# 抢走列表、让新机器看着像空库。Copy-Item 只加不删，所以旧 payload 里残留的那一份必须在这里显式清掉
+# —— 与上面 dev-only 清理同一套路。
+Write-Host '=== 1d) retire the _template character pack from payload characters/ ==='
+foreach ($d in $bridgeDests) {
+  $charDir = Join-Path $d 'characters'
+  if (-not (Test-Path $charDir)) { Write-Host ("  SKIP (no characters dir: " + $charDir + ")"); continue }
+  $stale = Join-Path $charDir '_template'
+  if (Test-Path $stale) { Remove-Item -LiteralPath $stale -Recurse -Force; Write-Host ("  removed retired pack " + $stale) }
+  $packs = @(Get-ChildItem -LiteralPath $charDir -Directory -Force | Where-Object { -not $_.Name.StartsWith('_') })
+  $n = (Get-ChildItem -LiteralPath $charDir -Recurse -File | Measure-Object).Count
+  $bytes = (Get-ChildItem -LiteralPath $charDir -Recurse -File | Measure-Object -Property Length -Sum).Sum
+  Write-Host ("  characters packs=" + $packs.Count + " files=" + $n + " bytes=" + $bytes + "  -> " + $charDir)
 }
 
 Write-Host '=== 2) manager server/ (whole dir minus node_modules) + dist ==='

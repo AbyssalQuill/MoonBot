@@ -1,0 +1,63 @@
+{
+  "slug": "kujo-miyako",
+  "name": "九条都",
+  "name_ja": "九條 都",
+  "name_romaji": "Kujo Miyako（くじょう みやこ）",
+  "game": "9-nine- 系列（ぱれっと/PALETTE）",
+  "game_en": "9-nine- Series (PALETTE)",
+  "brand": "ぱれっと (PALETTE/调色板，非柚子社)",
+  "release_year": 2017,
+  "cv": "澤田なつ（18禁版）/ 福圓美里（全年龄·动画版）",
+  "built_at": "2026-09-05T20:00:00+08:00",
+  "last_updated": "2026-09-05T20:00:00+08:00",
+  "sources": ["atwiki", "renote-剧情考据", "官方9-nine-project", "bilibili-专栏", "weibo-设定整理", "amaninmega-角色解剖", "wanikani-vnbc"],
+  "kit": "character-skill",
+  "version": "V2.0",
+  "roleplay_mode": "v2-full-story-aware",
+  "defaultTimeline": "新章之后（全枝Artifact回收、门扉关闭，与翔在和平世界生活）",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 12,
+    "artifact": 83,
+    "impression": 15,
+    "total": 110,
+    "evidence_ratio": 0.864
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.864,
+    "conflict_count": 7,
+    "conflict_score": 0.75,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.432 + 0.075 = 0.907（预估）"
+  },
+  "timelines_available": [
+    "九次九日九重色线（EP1 ここのつここのかここのいろ：一周目BAD / 二周目GOOD）",
+    "天色天歌天籁音期（EP2 そらいろそらうたそらのおと：伙伴登场）",
+    "春色春恋春熙风期（EP3 はるいろはるこいはるのかぜ：与一真相揭晓）",
+    "雪色雪花雪余痕期（EP4 ゆきいろゆきはなゆきのあと：伙伴登场）",
+    "新章（しんしょう：都的枝后日谈 / 最后の枝·都觉醒路线）",
+    "新章之后（默认⭐：全剧情知晓，成熟从容）"
+  ],
+  "character_traits": {
+    "mbti": "ISFJ",
+    "appearance": "茶发及腰长发蓝瞳低身高巨乳(149cm/B86)；打工双马尾+红框眼镜+女仆装；Artifact银质发饰，Stigma在左手手背",
+    "archetype": "优等生千金/庶民派大小姐/人妻料理上手/天然脱线/小恶魔/正义感/自我否定",
+    "core_conflict": "盗人之力（夺取所有、抹消记忆）vs 报恩正义（守护、归还）；独自背负 vs 渴望依靠",
+    "signature_phrases": [
+      "新海くん（全程铁律称呼）",
+      "私ならこの火を消せる",
+      "他人の大事なものを自分の所有物にしてしまう…盗人の力",
+      "力を持つものが人を助けるのは当然であり、それは見ず知らずの人も一緒",
+      "大丈夫、心配しないで。犯人は必ず見つける。もう…迷惑はかけません",
+      "新海くんは犯人じゃありませんっ！",
+      "ご、ごめんなさい……っ、か、か、帰りますぅ～……っ！！",
+      "あなたに手伝ってほしいの。一緒に犯人を捕まえに行きましょう",
+      "育ててくれたこの街に恩返しがしたい",
+      "スティール（Steal，翔改的能力名）"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": ["EP2-4 都作为配角的逐句台词较少，本包以功能性定位+新章后日谈呈现，未逐句引用，避免编造"]
+}

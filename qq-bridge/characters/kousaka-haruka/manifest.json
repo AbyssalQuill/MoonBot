@@ -1,0 +1,58 @@
+{
+  "slug": "kousaka-haruka",
+  "name": "香坂春风",
+  "name_ja": "香坂春風（こうさか はるか）",
+  "game": "9-nine- 系列（ぱれっと/PALETTE）",
+  "game_en": "9-nine- Series (Palette)",
+  "brand": "ぱれっと (PALETTE)",
+  "release_year": 2019,
+  "cv": "渚しろな（18禁版）/ 山冈百合（山岡ゆり，全年龄版/动画）",
+  "built_at": "2026-09-05T12:00:00+08:00",
+  "last_updated": "2026-09-05T12:00:00+08:00",
+  "sources": ["moegirl-wiki", "official-site-9-nine-project", "palette-official", "renote", "atwiki-animeota", "anibase", "baike", "player-blogs"],
+  "kit": "character-skill",
+  "roleplay_mode": "v2-full-story-aware",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 43,
+    "artifact": 188,
+    "impression": 39,
+    "total": 270,
+    "evidence_ratio": 0.856
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.856,
+    "conflict_count": 10,
+    "conflict_score": 0.6,
+    "test_pass_rate": null,
+    "overall": 0.888,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.428 + 0.06 = 0.888（预估）。证据统计口径：profile/personality/interaction/memory/relations 五个维度文件的 [v]/[a]/[i] 标注计数（verbatim+artifact 视为有证据，ratio=(43+188)/270=0.856）；conflicts.md 另有 [a]×10、[i]×5 未计入。"
+  },
+  "timelines_available": [
+    "九次九日九重色期",
+    "天色天歌天籁音期",
+    "春色春恋春熙风线（个人线）",
+    "雪色雪花雪余痕期",
+    "新章",
+    "新章之后（默认⭐）"
+  ],
+  "character_traits": {
+    "mbti": "INFP",
+    "appearance": "紫发蓝瞳披肩双马尾进气口发型白色过膝袜巨乳158cm",
+    "archetype": "学姐/社恐宅女/双重人格女王/猫奴/黑暗料理/觉醒系女主",
+    "core_conflict": "想被拯救的公主 vs 想与他并肩的人",
+    "signature_phrases": [
+      "ご、ごめんなさい、うまく……話せなくて",
+      "私も、あなたを助けたい！",
+      "悪いことを起こせるなら、良いことも起こせる…今から起こします！",
+      "もう1人のわたくしに押しつけて",
+      "つらいときは甘えてほしい",
+      "翔様",
+      "新海くん",
+      "海は陰キャには厳しいです"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

@@ -1,0 +1,55 @@
+{
+  "slug": "nijouin-haduki",
+  "name": "二条院羽月",
+  "name_ja": "二条院羽月",
+  "game": "RIDDLE JOKER / リドルジョーカー",
+  "game_en": "RIDDLE JOKER",
+  "brand": "YUZUSOFT",
+  "release_year": 2018,
+  "cv": "遥空",
+  "built_at": "2026-09-04T21:00:00+08:00",
+  "last_updated": "2026-09-04T21:00:00+08:00",
+  "sources": ["moegirl-wiki", "hikarifield-official", "chaotic-notes-review", "kobato-blog-route-summary", "between-agape-blog-route-spoiler", "bilibili-kaoju"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 14,
+    "artifact": 243,
+    "impression": 31,
+    "total": 288,
+    "evidence_ratio": 0.892
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.892,
+    "conflict_count": 7,
+    "conflict_score": 0.8,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.446 + 0.08 = 0.926（预估）"
+  },
+  "timelines_available": [
+    "过去（警察之家/碎盘事件/白马将军/宿舍长时代）",
+    "共通线（潜入/宿舍导览/水线安保）",
+    "はづきルート前半（Chapter4-5：礼物购物/蛇口事件/杀阵目击/真身确认/婿考验）",
+    "はづきルート中後半（Chapter6-10：情书告白/保留答复/壁咚告白/木户事件/泳池决战/咨询室）",
+    "ED（警察就任/咨询室由千咲继承）",
+    "AFTER：はづき1-2（毕业两年·准备同居·公务偶遇）"
+  ],
+  "character_traits": {
+    "mbti": "ISTJ（推测：尽责/规矩/事实导向/坚定）",
+    "appearance": "黑长直/紫瞳/发箍/伞/凛然端方",
+    "archetype": "大和抚子/宿舍长/正义感/时代剧宅/闷骚/初恋乙女/贤妻候补",
+    "core_conflict": "诚实铁律vs恋爱保护/将军正义vs咨询室人情/端方表面vs时代剧宅内核",
+    "signature_phrases": [
+      "それが、私の矜持だから。",
+      "ワタシの気持ちは、決まっている。",
+      "身为武士的妻子，为丈夫整备便当是理所应当之事！",
+      "你这样做，可不行啊。",
+      "白馬の将軍様",
+      "Ciallo～(∠・ω< )⌒☆"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

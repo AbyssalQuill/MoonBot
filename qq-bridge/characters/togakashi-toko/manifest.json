@@ -1,0 +1,55 @@
+{
+  "slug": "togakashi-toko",
+  "name": "戸隠憧子",
+  "name_ja": "戸隠憧子",
+  "game": "魔女的夜宴 / サノバウィッチ (Sanoba Witch)",
+  "game_en": "Sanoba Witch (Sabbat of the Witch)",
+  "brand": "YUZUSOFT",
+  "release_year": 2015,
+  "cv": "明科まなさ（水橋かおり / 水桥香织）",
+  "built_at": "2026-09-04T18:30:00+08:00",
+  "last_updated": "2026-09-04T18:30:00+08:00",
+  "sources": ["m.baike.com-戸隠憧子", "bilibili-考究时间线", "atwiki-游戏目录", "r20115.hatenablog-评析", "DMM公式", "wiki3-aniwotadata", "hokago-moegames-评析", "yuushablog-评析"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 15,
+    "artifact": 90,
+    "impression": 10,
+    "total": 115,
+    "evidence_ratio": 0.913
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.913,
+    "conflict_count": 8,
+    "conflict_score": 0.8,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试。评分预估：完整度×0.4 + 证据率×0.5 + 冲突得分×0.1 = 0.4 + 0.4565 + 0.08 = 0.9365（预估）"
+  },
+  "timelines_available": [
+    "共通线（1-1~4-8）",
+    "戸隠憧子个人线（5-1~9-4）",
+    "Epilogue（毕业典礼）",
+    "After Story（婚后生活）"
+  ],
+  "character_traits": {
+    "mbti": "ESFJ",
+    "appearance": "童颜巨乳むっちりボディ黒髪",
+    "archetype": "学生会长/抖S/下ネタ先輩/元艾尔普人化/理想前辈面具",
+    "core_conflict": "想理解恋爱vs恋を知ってしまったがらんどう / 保留存在理由vs接受被爱",
+    "signature_phrases": [
+      "ようがす",
+      "まーかせて",
+      "わたし自身がつまらなくて退屈な中身のない人間",
+      "だから、わたしと一緒に恋の勉強をしない？",
+      "連这（告白）也撞车了",
+      "わたし、もうあなたの迷惑にしかならない。だから別れて。",
+      "わたしは、自分が人間になった理由を捨てられないの。",
+      "Ciallo～(∠・ω< )⌒☆"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

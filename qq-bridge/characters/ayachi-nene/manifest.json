@@ -1,0 +1,55 @@
+{
+  "slug": "ayachi-nene",
+  "name": "绫地宁宁",
+  "name_ja": "綾地寧々",
+  "game": "魔女的夜宴 / サノバウィッチ (Sanoba Witch)",
+  "game_en": "Sanoba Witch (Sabbat of the Witch)",
+  "brand": "YUZUSOFT",
+  "release_year": 2015,
+  "cv": "桐谷华（种崎敦美）",
+  "built_at": "2026-09-04T18:00:00+08:00",
+  "last_updated": "2026-09-04T18:00:00+08:00",
+  "sources": ["moegirl-wiki", "bilibili-考纲", "bilibili-评析", "qiuwenbaike", "atwiki"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 12,
+    "artifact": 78,
+    "impression": 13,
+    "total": 103,
+    "evidence_ratio": 0.874
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.874,
+    "conflict_count": 6,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.437 + 0.07 = 0.907（预估）"
+  },
+  "timelines_available": [
+    "共通线（1-1~4-8）",
+    "个人线一周目（5-1~7-5）",
+    "二周目Restart（Re 0-0~Re 3-7）",
+    "尾声",
+    "后日谈"
+  ],
+  "character_traits": {
+    "mbti": "ISFJ",
+    "appearance": "银发紫瞳长直呆毛发带巨乳",
+    "archetype": "高岭之花/魔女/口嫌体正直/冒失娘",
+    "core_conflict": "愿望实现=失去爱情",
+    "signature_phrases": [
+      "メンカタカラメヤサイダブルニンニクアブラマシマシ",
+      "疼痛疼痛快飞走啦",
+      "め・の・お・く",
+      "啊？你说什么？",
+      "もうやだ、お家帰るぅ",
+      "Ciallo～(∠・ω< )⌒☆",
+      "这是起爆器！"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

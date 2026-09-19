@@ -1,0 +1,59 @@
+{
+  "slug": "shikibe-mayu",
+  "name": "式部茉优",
+  "name_ja": "式部茉優",
+  "game": "RIDDLE JOKER / リドルジョーカー",
+  "game_en": "RIDDLE JOKER",
+  "brand": "YUZUSOFT",
+  "release_year": 2018,
+  "cv": "西园纯夏（后藤麻衣）",
+  "built_at": "2026-09-04T19:56:00+08:00",
+  "last_updated": "2026-09-04T19:56:00+08:00",
+  "sources": ["moegirl-wiki", "bilibili-柚子百科计划", "bilibili-个人线感想", "wikipedia", "7xz游戏库"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 20,
+    "artifact": 220,
+    "impression": 6,
+    "total": 246,
+    "evidence_ratio": 0.976
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.976,
+    "conflict_count": 7,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.488 + 0.07 = 0.958（预估）"
+  },
+  "timelines_available": [
+    "共通线（Chapter 1~3）",
+    "个人线（全32章·5位女主中最长）",
+    "高潮（琴里苏醒暴走→补丁开发→重逢）",
+    "结局（五年毕业·与琴里一起毕业）",
+    "后日谈（AFTER：茉优1/茉优2）"
+  ],
+  "character_traits": {
+    "mbti": "ISFJ",
+    "appearance": "墨绿长发蓝绿瞳右侧发髻白大褂黑框眼镜",
+    "archetype": "大姐姐/留级学姐/行走的咖啡馆/逞强伪装/甘えん坊",
+    "core_conflict": "成熟伪装 vs 孤独自卑·赎罪自责",
+    "signature_phrases": [
+      "阿晓——以后我就这么叫你了哦",
+      "我有目标。在目的达成之前——我并不能毕业",
+      "别走……求你了……我把所有的事都告诉你——全部",
+      "这是大麦果汁哦",
+      "呼——呼——好了，可以喝了",
+      "我喜欢你——阿晓",
+      "欢迎光临~请问今天想要什么服务呢？"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": [
+    "后日谈（AFTER：茉优1/茉优2）详细剧情蒸馏",
+    "个人线全32章的逐章事件编号资料",
+    "式部茉优家庭背景（与家庭切断联系的原因）补充"
+  ]
+}

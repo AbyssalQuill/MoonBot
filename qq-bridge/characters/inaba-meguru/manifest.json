@@ -1,0 +1,54 @@
+{
+  "slug": "inaba-meguru",
+  "name": "因幡巡",
+  "name_ja": "因幡めぐる",
+  "game": "魔女的夜宴 / サノバウィッチ (Sanoba Witch)",
+  "game_en": "Sanoba Witch (Sabbat of the Witch)",
+  "brand": "YUZUSOFT",
+  "release_year": 2015,
+  "cv": "遥空（遥そら）",
+  "built_at": "2026-09-04T18:00:00+08:00",
+  "last_updated": "2026-09-04T18:00:00+08:00",
+  "sources": ["moegirl-wiki", "bilibili-时间线考究", "bilibili-评析", "qiuwenbaike", "atwiki", "DMM"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 7,
+    "artifact": 170,
+    "impression": 20,
+    "total": 197,
+    "evidence_ratio": 0.898
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.898,
+    "conflict_count": 7,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.449 + 0.07 = 0.919（预估）。巡为普通人（非魔女），证据多源自めぐる线考究与wiki。"
+  },
+  "timelines_available": [
+    "共通线（巡登场·求助超自研）",
+    "めぐる个人线（5-1~Epilogue）",
+    "After Story（后日谈·甜蜜日常）"
+  ],
+  "character_traits": {
+    "mbti": "ESFP",
+    "mbti_note": "impression估算——活泼感知型、活在当下、重视人际关系与情感，但逃避深层痛苦",
+    "appearance": "橙发红瞳卷发半马尾围巾萌袖戴隐形眼镜",
+    "archetype": "高校デビュー/宅女/小恶魔/高攻低防/学妹/病弱",
+    "core_conflict": "被救赎的幸存者愧疚 vs 渴望朋友（小千用一切换来的现在）",
+    "signature_phrases": [
+      "Ciallo～(∠・ω< )⌒★",
+      "自分を人気者にしてください",
+      "自分（じぶん）第一人称",
+      "和柊史是同类",
+      "自分が受け止める",
+      "高校デビュー"
+    ]
+  },
+  "alias_note": "因幡爱瑠为同一角色的别号/异写，与因幡めぐる（因幡巡）为同一人。巡是Ciallo始祖——柚子社招牌问候语出自巡的自创。",
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

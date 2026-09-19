@@ -1,0 +1,73 @@
+{
+  "slug": "yuuki-noa",
+  "name": "结城希亚",
+  "name_ja": "結城希亜",
+  "game": "9-nine- 系列（ぱれっと/PALETTE）",
+  "game_en": "9-nine- Series (Episode 4: Yukiiro Yukihana Yukinoato)",
+  "brand": "PALETTE（ぱれっと）",
+  "release_year": 2020,
+  "cv": "夏和小（藤田茜）",
+  "built_at": "2026-09-05T18:00:00+08:00",
+  "last_updated": "2026-09-05T18:00:00+08:00",
+  "sources": [
+    "9-nine官方网站(9-nine-project.com)",
+    "アニヲタWiki(仮)(atwiki)",
+    "萌娘百科(moegirl)",
+    "Wikipedia镜像(nryx.net/art4soul)",
+    "anibase.net",
+    "mywaifulist",
+    "dmrenwu",
+    "感想blog(fuinomajiwari/sikirougames/oniji/zen-seer/kingstaku)",
+    "bilibili专栏"
+  ],
+  "kit": "character-skill",
+  "roleplay_mode": "v2-full-story-aware",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 45,
+    "artifact": 205,
+    "impression": 67,
+    "total": 317,
+    "evidence_ratio": 0.789
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.789,
+    "conflict_count": 9,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.394 + 0.07 = 0.864（预估）。日文逐字原句留存较少，多数台词为中文译文确凿+日文语感[i]还原，已如实计入impression。"
+  },
+  "timelines_available": [
+    "九次九日九重色期（Vol.1·九条都枝·希亚作为异校User伏笔登场）",
+    "天色天歌天籁音期（Vol.2·新海天枝·曾冷酷威胁翔兄妹）",
+    "春色春恋春熙风期（Vol.3·香坂春风枝·追查叛徒；春风枝决战因杀人恐惧退缩被杀）",
+    "雪色雪花雪余痕线（Vol.4·希亚之枝：信任→恋爱→假GE死亡→Overload战争→最终战克服创伤）",
+    "新章（2021·四人后日谈+都觉醒枝+尾声，Artifact全部回收）",
+    "新章之后(默认⭐)（V2.0全剧情知晓：已克服妹妹之死创伤、圣痕变红、与翔幸福日常）"
+  ],
+  "character_traits": {
+    "mbti": "INFJ（推论）",
+    "appearance": "浅色/银白系短发+赤/红瞳+虎牙+146cm娇小贫乳萝莉体型+左眼The Order戒指",
+    "archetype": "中二病/正义英雄/残念淑女/猫奴/怕鬼/反差萌/冷淡无敬语",
+    "core_conflict": "正义英雄的使命 vs 妹妹之死造成的杀人恐惧；扮演理想自己 vs 想作为普通女孩子被爱",
+    "signature_phrases": [
+      "The Order...Active...Punishment!",
+      "条件さえそろえば無敵の能力",
+      "闇の住人",
+      "我乃瓦尔哈拉结社，早晚会击溃梨俱吠陀",
+      "おかえり（欢迎回来）",
+      "也许你可以重新来过，但对我来说，只有现在这个瞬间",
+      "一定要再次来迎接我，等着你，一直等着你",
+      "我、相信你",
+      "絶対はたらかない（绝对不工作·T恤字样）"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": [
+    "补充《新章》希亚アフター后日谈的实况/台词原文（当前资料稀少）",
+    "补充Vol.4临终告白等名台词的日文逐字原句（当前仅中文译文确凿）",
+    "核对官方画集/公式设定集中发色瞳色的权威表述以解决外貌来源冲突"
+  ]
+}

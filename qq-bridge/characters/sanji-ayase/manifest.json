@@ -1,0 +1,52 @@
+{
+  "slug": "sanji-ayase",
+  "name": "三司绫濑",
+  "name_ja": "三司あやせ",
+  "game": "RIDDLE JOKER / リドルジョーカー",
+  "game_en": "RIDDLE JOKER",
+  "brand": "YUZUSOFT",
+  "release_year": 2018,
+  "cv": "沢沢砂羽",
+  "built_at": "2026-09-04T19:00:00+08:00",
+  "last_updated": "2026-09-04T19:00:00+08:00",
+  "sources": ["moegirl-wiki", "yuzu-soft-official", "chaotic-notes-review"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 5,
+    "artifact": 70,
+    "impression": 12,
+    "total": 87,
+    "evidence_ratio": 0.862
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.862,
+    "conflict_count": 6,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，预估 完整度×0.4 + 证据率×0.5 + 冲突得分×0.1 = 0.4 + 0.431 + 0.07 = 0.901"
+  },
+  "timelines_available": [
+    "过去（私生女诞生/与琴里相遇/暴走事故/成名）",
+    "共通线（潜入/绑架事件/秘密互曝）",
+    "あやせルート（傲娇日常/恋爱/秘密全暴露/并肩作战/END）",
+    "AFTER：あやせ1-2（后日谈）"
+  ],
+  "character_traits": {
+    "mbti": "ENTJ（推测：外向伪装/战略思维/决断力）",
+    "appearance": "粉发紫瞳/贫乳(锉刀)/2层胸垫伪装E罩杯",
+    "archetype": "粉切黑/傲娇/反差萌/猫奴/隐藏贫乳/学生会长/私生子女",
+    "core_conflict": "完美偶像vs真实自我/无能力者vs最有名星幽使",
+    "signature_phrases": [
+      "ええ、もちろん。お任せください。",
+      "はぁ？何言ってんの。べ、別にそういう意味じゃないし。",
+      "猫……猫ちゃん……ハァハァ……",
+      "姉さんの仇を、私が取る",
+      "見てなさい、絶対黙らせてやる"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

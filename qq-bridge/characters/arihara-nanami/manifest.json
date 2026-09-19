@@ -1,0 +1,53 @@
+{
+  "slug": "arihara-nanami",
+  "name": "在原七海",
+  "name_ja": "在原七海",
+  "game": "RIDDLE JOKER / リドルジョーカー",
+  "game_en": "RIDDLE JOKER",
+  "brand": "YUZUSOFT",
+  "release_year": 2018,
+  "cv": "楠原结衣（くすはらゆい）",
+  "built_at": "2026-09-04T19:30:00+08:00",
+  "last_updated": "2026-09-04T19:30:00+08:00",
+  "sources": ["moegirl-wiki", "yuzu-soft-official", "chaotic-notes-review", "asmr-afterstory"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 5,
+    "artifact": 65,
+    "impression": 10,
+    "total": 80,
+    "evidence_ratio": 0.875
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.875,
+    "conflict_count": 6,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，预估 0.4 + 0.4375 + 0.07 = 0.9075"
+  },
+  "timelines_available": [
+    "过去（被父母利用/被收养/焦炭料理/暗恋/强行加入特勤）",
+    "共通线（潜入/搭档/喂食名场面/千咲好友）",
+    "七海ルート（心理准备打破/坦白/交往/END）",
+    "AFTER：七海1-2（后日谈）",
+    "ASMR后日谈（合为一体）"
+  ],
+  "character_traits": {
+    "mbti": "ISFJ（推测：认真/照顾人/怕生/忠诚）",
+    "appearance": "银发/身材好/猫耳COSPLAY工具",
+    "archetype": "能干的妹妹/怕生/中二/阿宅/黑客/自发电/暗属性",
+    "core_conflict": "妹妹觉悟vs暗恋义兄/能干高スペックvsコミュ力ポンコツ",
+    "signature_phrases": [
+      "はい、あーん。",
+      "私は暗属性だから……千咲は光属性",
+      "お兄ちゃんの世話焼くの、ほんと面倒",
+      "今日も餃子。明日も餃子。明後日も餃子。",
+      "ずっと、一緒にいたい"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

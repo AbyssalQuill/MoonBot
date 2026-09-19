@@ -1,0 +1,68 @@
+{
+  "slug": "kariya-wakan",
+  "name": "仮屋和奏",
+  "name_ja": "仮屋和奏",
+  "name_kana": "かりや わかな",
+  "name_romaji": "Kariya Wakana",
+  "game": "魔女的夜宴 / サノバウィッチ (Sanoba Witch)",
+  "game_en": "Sanoba Witch (Sabbat of the Witch)",
+  "brand": "YUZUSOFT",
+  "release_year": 2015,
+  "cv": "小鸟居夕花（高森奈津美）",
+  "built_at": "2026-09-04T18:00:00+08:00",
+  "last_updated": "2026-09-04T18:00:00+08:00",
+  "sources": ["bilibili-柚子百科计划", "bilibili-时间线探究", "bilibili-评析", "game-intro"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 12,
+    "artifact": 90,
+    "impression": 10,
+    "total": 112,
+    "evidence_ratio": 0.911
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.911,
+    "conflict_count": 6,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.456 + 0.07 = 0.926（预估）"
+  },
+  "timelines_available": [
+    "共通线（1-1~4-4）",
+    "和奏线·分线（4-5~5-7）",
+    "和奏线·告白（6-1）",
+    "和奏线·交往（6-2~6-8）",
+    "Epilogue",
+    "After Story",
+    "其他线客串（共通线感冒让主唱/宁宁Re线猫咪脸等）"
+  ],
+  "character_traits": {
+    "mbti": "ESFP",
+    "appearance": "金发绿瞳短发犬耳状炸毛小巧可爱",
+    "archetype": "青梅竹马/吉他手/好哥们/嘴硬/大胆主动/假小子",
+    "core_conflict": "好哥们面具 vs 深情暗恋；想由自己告白 vs 被先告白",
+    "signature_phrases": [
+      "不要在意，是事故啦",
+      "上次感受太差，重新来一次",
+      "现在不想听",
+      "让我来说",
+      "弹舌音",
+      "猫叫声（にゃっ）",
+      "猫咪脸",
+      "Ciallo～(∠・ω< )⌒☆",
+      "男なんて手の中よ（男人都在我手心里）"
+    ]
+  },
+  "role": {
+    "type": "ex线（After Story）女主角",
+    "surface_role": "配角·男主挚友·吉他手",
+    "actual_role": "独立路线女主角·青梅竹马死灰复燃的恋爱",
+    "is_witch": false,
+    "is_normal_student": true
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}

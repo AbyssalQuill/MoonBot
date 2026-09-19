@@ -1,0 +1,54 @@
+{
+  "slug": "shiiba-tsumugi",
+  "name": "椎叶䌷",
+  "name_ja": "椎葉紬",
+  "game": "魔女的夜宴 / サノバウィッチ (Sanoba Witch)",
+  "game_en": "Sanoba Witch (Sabbat of the Witch)",
+  "brand": "YUZUSOFT",
+  "release_year": 2015,
+  "cv": "黒咲そら（黑咲空 / 又吉爱）",
+  "built_at": "2026-09-04T18:00:00+08:00",
+  "last_updated": "2026-09-04T18:00:00+08:00",
+  "sources": ["moegirl-wiki", "bilibili-考纲", "bilibili-评析", "qiuwenbaike", "atwiki", "DMM-official"],
+  "kit": "character-skill",
+  "dimensions": ["profile", "personality", "interaction", "memory", "relations"],
+  "evidence_summary": {
+    "verbatim": 3,
+    "artifact": 165,
+    "impression": 18,
+    "total": 186,
+    "evidence_ratio": 0.903
+  },
+  "quality_score": {
+    "completeness": 1.0,
+    "evidence_ratio": 0.903,
+    "conflict_count": 7,
+    "conflict_score": 0.7,
+    "test_pass_rate": null,
+    "overall": null,
+    "note": "未执行扮演测试，评分为 完整度×0.4 + 证据率×0.5 + 冲突数得分×0.1 = 0.4 + 0.452 + 0.07 = 0.922（预估）"
+  },
+  "timelines_available": [
+    "共通线（1-1~4-8）",
+    "个人线（5-1~8-7）",
+    "Epilogue（真相+羁绊+圣诞）",
+    "After Story（后日谈·再次成为魔女）"
+  ],
+  "character_traits": {
+    "mbti": "ISFJ",
+    "appearance": "米色长发呆毛头带青绿垂眼幼颜巨乳男装",
+    "archetype": "男装少女/魔女/天然/母性/怒时可怕/纯真/治愈系",
+    "core_conflict": "喜欢可爱服饰 vs 代价不能女装",
+    "signature_phrases": [
+      "大丈夫……大丈夫だから。",
+      "……え？",
+      "赤城……！",
+      "店に売り切れた服が一度だけ再び入ってくる",
+      "柊史君が……好き。",
+      "赤城が人間になれるまで、私が一緒に集めるから。",
+      "Ciallo～(∠・ω< )⌒☆"
+    ]
+  },
+  "rating": "优秀（预估）",
+  "supplement_suggestions": []
+}
