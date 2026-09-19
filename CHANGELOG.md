@@ -2,6 +2,65 @@
 
 本文件按主题归纳 MoonBot 的用户可见变化，不逐条罗列提交标题。版本号遵循语义化版本；分组约定为「新增能力 / 修复 / 变更与不兼容 / 内部与工程」。
 
+## 1.2.0 — 2026-09-19
+
+### 新增能力
+
+- **内置表情包从"单包"改成"多包"**：以前桥只认一个写死的包名（`whale-fanart-001`），主人再传一份表情包进来模型根本看不见。现在一份包 = 一个目录（`manifest.json` + `index.db` + `memes/<分类>/<文件名>`），桥同时认三个位置：出厂包 `<运行目录>/meme/<包目录>/`、后装与上传的包 `<运行目录>/meme-packs/<包目录>/`、角色专属包 `<角色库根>/<角色>/meme-packs/<包目录>/`。`qq_meme_search` 一次搜全部包（结果行带 `[包 id]`，可用 `pack` 只搜一份），`qq_send_meme` 收文件名，也收 `包id/文件名`（`qq-bridge/src/mcp-napcat-safe.js`）。
+- **角色专属表情包**：`social.meme.personaPacks` 把包绑到角色，`social.meme.activePersona` 记当前导进 `persona.md` 的角色。两份包有同名文件时按「角色专属包 → 主人点名的包 → 出厂包」取第一份，并在返回里说明这个名字还存在于哪些包；`social.meme.packs` 非空时只搜点名的包加上当前角色的包。
+- **管理端可以上传自己的表情包**：「常用设置」新增「内置表情包（meme-packs）」卡 —— 选 `.zip` 或整个文件夹上传，服务端自动判定包根、跑规整、缺 `index.db` 自动生成，并回一份逐文件报告（收到多少、入库多少、跳过了哪些、可展开规整脚本输出）；卡片同时显示每个包（出厂 / 全局 / 角色专属 / 坏包）与每个角色绑了哪些包，并按角色勾选保存（`server/index.js`、`src/pages/BridgeConfig.tsx`、`src/api.ts`）。
+- **出厂 21 个角色包**：`qq-bridge/characters/` 随包携带 21 个角色包（每个含 `SKILL.md`、`personality.md`、`profile.md`、`interaction.md`、`relations.md`、`memory.md`、`conflicts.md`、`ULTIMATE_ROLEPLAY_PROMPT.md`、`manifest.json`、`sources/wiki.md`）外加 1 张散装卡，撤掉原来的 `_template` 模板卡。角色库里只有导进 `persona.md` 的那一张会进提示词，其余靠 `qq_character_list/read/pack/search` 按需读。
+- 表情包总开关 `social.meme.enabled`：关掉时 `qq_meme_search` / `qq_send_meme` 干脆不注册给模型（不是调用时才拒绝）。
+
+### 修复
+
+- **表情包"搜得到、发不出"的根因**：规整脚本重建 `index.db` 时漏了 `path` 列，而 `qq_send_meme` 恰恰是拿 `path` 发图。现在表以 `path` 为主键，脚本结尾还会真跑一遍桥侧那两条 SQL 自检，不通过就报错退出。
+- **规整不再吃掉已有描述**：以前按文件名拆词重写 `caption`/`keywords`，会覆盖掉已有的人工/模型描述；现在按「老表 path → 老表 file_name → 去扩展名同名」认领老行并原样保留，只有表里没有的新图才生成兜底描述。
+- 出厂表情包索引与磁盘漂移（184 张图只有 162 行入库）已对齐；顺带发现并隔离了一张与 `angry/` 字节完全相同的 `daily/` 副本。
+- `qq_meme_search` 遇到坏包不再整次失败：跳过读不出来的包继续搜，并在结果里说明跳过了几份。
+- 语音测试与现契约不一致（语音早已默认丢弃引用段，测试还在断言"先加 reply 段"）已按契约改写，并补上 `quoteMode=native` 那一支 —— 之前它让整条自检链一直红。
+
+### 变更与不兼容
+
+- 表情包搜索结果行多了一段 `[包 id]`（`文件名 [分类] [包 id] 描述`）；`qq_meme_search` 与 `qq_send_meme` 各多一个可选 `pack` 参数。
+- 包 id 取 `manifest.json` 的 `id`，目录名不再等于 id；出厂包 `whale-fanart-001` 的目录名与 id 不变。
+- 出厂角色卡由模板 `_template` 换成 21 个真实角色包 —— 管理端「角色库导入」列出的默认内容随之改变。
+- **上传的表情包在后装目录 `meme-packs/` 里，升级不会覆盖**；出厂包在 `meme/` 里，随更新整体替换（界面里出厂包只提供禁用不提供删除）。
+
+### 内部与工程
+
+- 桥侧工具描述改动后重新实测生成 `src/tool-schema-chars.ts`（89 个 napcat 工具 / 84251 字符）。
+- 新增多包回归测试：`qq-bridge/tools/test-meme-search.mjs --multipack`（跨包搜索、`pack` 过滤、同名歧义与角色包优先、`social.meme.packs` 收紧、启动日志）。
+- 新增上传接口集成自测 `tools/test-meme-pack-import.mjs`：把 `server/index.js` 复制进沙箱当运行目录（`RUNTIME_ROOT` 是按文件位置推导的，环境变量改不动），`USERPROFILE` 指向沙箱 home，`QBM_NO_LISTEN=1` 只导出 app 由脚本自己 `listen(0)`。覆盖 zip 与文件夹上传、zip-slip 与坏输入零痕迹、出厂包拒绝删除、`bind` 只动 `social.meme.personaPacks`（保留 BOM 与其它字段）、以及"沙箱里自动重启被安全挡掉"。
+- 表情包上传的"自动重启桥"加了前置判断：`stopInstance` 末尾的 `killByCmdline('bridge.js')` 按命令行关键字杀全机器的 node/qbm-node，管理端与桥不是同一份目录时会**误杀一座不归自己管的桥**，所以只有在确实管着这座桥时才重启。
+- `tools/sync-to-live.ps1` 同步清单加上 `characters`，并显式清掉旧 payload 里残留的 `_template`；该文件注释改回纯 ASCII（它自己要求 ASCII-only：PS 5.1 按 GBK 读 `.ps1`，含中文就依赖 BOM，而编辑工具会丢 BOM）。
+
+## 1.1.0 / 1.1.1（补记）— 2026-09-19
+
+> 这一版的分组当时没有写进本文件（只发在 GitHub Release 说明里），这里按改动主题补记，便于对照。
+
+### 新增能力
+
+- 人设 / 发言规则 / 系统提示词分成三层：人设与发言规则**合成进系统提示词**（`qq-bridge/src/lib/preset-compose.js`，带幂等标记），正在跑的会话则继续走运行时注入那一段。
+- 管理端「角色库导入」与角色库只读工具组的提示词强化：先读 `SKILL.md`，默认库路径 `~/Downloads/characters/characters`，父目录自动下钻一层。
+- 发布工具沉淀：`publish-release.mjs`、`edit-release.mjs`、`api-commit-file.mjs`，以及四个界面/文档审计脚本（工具名、标签、配置说明、README 工具清单）。
+
+### 修复
+
+- **安装器的两个静默失败**：electron-builder 只要定义了 `customRemoveFiles` 就会跳过自己的 `RMDir /r $INSTDIR`，导致旧版卸载**什么都不删**；杀进程的 PowerShell 内联写在 `nsExec` 里被多层引号解析搞坏，导致"无法关闭，请重试"。现在卸载宏自己删并加延迟兜底，杀进程脚本先写 `$PLUGINSDIR` 再用 `-File` 调，名单补上 `guard-node.exe` 与"路径在安装目录内"判据。
+- **更新安装会静默删掉用户数据**：更新时用 `Uninstall.exe /S /KEEP_APP_DATA --updated` 调旧卸载器，现在按 `--updated` 挡掉。
+- 服务端模式读不到 DeepSeek 官方模型：`safeRemotePath` 正则漏 `@`，npm 作用域路径被静默拒；另外官方模型内置在 DSH 包里而不在 `settings.yaml`，旧代码只读后者。
+- 上下文治理阈值被夹到窗口 0.5%，导致**每轮都压缩**、模型响应极慢；桥侧下限提到 2% 并在被夹紧时写日志。
+- 「QQ 工具开关」行集原来只列配置里已有的键（少一大截），现在 = 桥侧全部开关 ∪ 配置已有键，并新增"无独立开关"工具单列一卡；同时删掉 6 个桥侧从来不读的废开关与 4 个对不上开关的标签。
+- 插话概率：旧口径保留"模型自定"的值，导致主人设 0.15 但唤醒词显示 0.08；现在主人保存的值覆盖所有会话。
+- 顶部提示条 6 秒自动收起、文案变化重新计时、点击即关。
+
+### 变更与不兼容
+
+- 系统提示词**不再内置默认人设**（没有 `[PERSONA]` 时不扮演任何角色）。
+- 上下文治理卡去掉"摘要模型服务商 / 摘要模型"两栏（摘要统一用主模型）。
+- 出厂 `persona.md` 为空；管理端「接口密钥」改名「语言模型密钥」。
+
 ## 1.0.0 — 2026-09-18
 
 首个公开发布版本。仓库在这一版之前从内部的 QQ-Bridge 仓库整体迁移而来，所以下面同时覆盖迁移前后的全部改动。
