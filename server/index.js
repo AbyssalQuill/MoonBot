@@ -4872,10 +4872,12 @@ const REMOTE_TOKEN_CACHE_FILE = join(CONFIG_DIR, 'last-remote-token-report.json'
 function readRemoteTokenCache() {
   try { return JSON.parse(readFileSync(REMOTE_TOKEN_CACHE_FILE, 'utf-8')); } catch { return null; }
 }
-function writeRemoteTokenCache(server, report) {
+function writeRemoteTokenCache(server, report, contextSavings = null) {
   try {
     writeFileSync(REMOTE_TOKEN_CACHE_FILE, JSON.stringify({
       serverId: server?.id ?? '', serverName: server?.name ?? '', host: server?.host ?? '', at: Date.now(), report,
+      // 上下文剪枝省下的量（实测）跟着缓存一起存：服务端停着时面板仍能显示上次同步到的节省量
+      contextSavings: isObj(contextSavings) ? contextSavings : null,
     }, null, 2));
   } catch { /* 缓存写失败不影响本次响应 */ }
 }
@@ -4908,7 +4910,9 @@ async function fetchTokenReportFrom(base, token, timeoutMs = 15000) {
     // 桥侧回包是 { ok, report:{...} }；兼容直接返回报告对象的旧桥
     const rep = json && typeof json === 'object' && json.report && typeof json.report === 'object' ? json.report : json;
     if (!rep || typeof rep !== 'object') return { ok: false, error: '响应里没有 report' };
-    return { ok: true, report: rep };
+    // 上下文剪枝省下的量（新桥才带；旧桥没有就是 null，面板相应那块不显示）
+    const savings = json && typeof json === 'object' && isObj(json.contextSavings) ? json.contextSavings : null;
+    return { ok: true, report: rep, contextSavings: savings };
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   } finally { clearTimeout(timer); }
@@ -4950,6 +4954,42 @@ function billingDayKeyOf(ms, offsetMinutes = 480) {
   return new Date(Number(ms) - off * 60000 + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+/* ── 上下文剪枝省下的量（实测；桥侧 core/context-savings.js）────────────────────────
+ * 字段：today/ дни/lifetime 各自 { prunedTokens, pruneEvents, rereadSaved }。
+ * 这里只做两件事：合并两侧（逐日相加）、跨日缓存把当日清零。 */
+const SAVINGS_NUM_FIELDS = ['prunedTokens', 'pruneEvents', 'rereadSaved'];
+function mergeSavingsBucket(a, b) {
+  const out = {};
+  for (const k of SAVINGS_NUM_FIELDS) out[k] = (Number(a?.[k]) || 0) + (Number(b?.[k]) || 0);
+  return out;
+}
+function zeroSavingsDay(s) {
+  if (!isObj(s)) return null;
+  const out = JSON.parse(JSON.stringify(s));
+  if (isObj(out.today)) for (const k of SAVINGS_NUM_FIELDS) out.today[k] = 0;
+  return out;
+}
+function mergeContextSavings(a, b) {
+  if (!isObj(a) && !isObj(b)) return null;
+  if (!isObj(a)) return JSON.parse(JSON.stringify(b));
+  if (!isObj(b)) return JSON.parse(JSON.stringify(a));
+  const out = JSON.parse(JSON.stringify(a));
+  out.today = mergeSavingsBucket(a.today, b.today);
+  out.lifetime = mergeSavingsBucket(a.lifetime, b.lifetime);
+  const map = new Map();
+  for (const item of [...(Array.isArray(a.days) ? a.days : []), ...(Array.isArray(b.days) ? b.days : [])]) {
+    const key = String(item?.date ?? '');
+    if (!key) continue;
+    map.set(key, map.has(key) ? mergeSavingsBucket(map.get(key), item) : { ...item });
+  }
+  out.days = [...map.values()].sort((x, y) => (String(x.date) < String(y.date) ? 1 : -1));
+  out.liveSessions = (Number(a.liveSessions) || 0) + (Number(b.liveSessions) || 0);
+  out.since = a.since || b.since || '';
+  out.dayWindow = a.dayWindow || b.dayWindow;
+  out.scope = 'total';
+  return out;
+}
+
 /** 缓存的服务端报告是不是"当前计费日"的：优先用桥侧给的 dayWindow.key，取不到就用缓存写入时刻估算。 */
 function remoteCachedDay(cache) {
   const report = isObj(cache?.report) ? cache.report : null;
@@ -4982,13 +5022,15 @@ function zeroDayScoped(rep) {
 app.get('/api/learning/token-report', async (_req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
-  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null, remoteStale: false, remoteStaleDay: false, remoteAt: 0 };
+  const out = { ok: true, at: Date.now(), mode: connected && sshConnections.has(connected.id) ? 'ssh' : 'local', local: null, remote: null, total: null, localReason: '', remoteReason: '', remoteServer: null, remoteStale: false, remoteStaleDay: false, remoteAt: 0, contextSavings: null };
+  let remoteSavings = null;
 
   // ① 本机那份：永远保留（哪怕服务器连上了）——以前 SSH 模式把这块整个吞掉了
+  let localSavings = null;
   try {
     const t = getLocalBridgeTarget();
     const r = await fetchTokenReportFrom(t.base, t.token);
-    if (r.ok) out.local = r.report;
+    if (r.ok) { out.local = r.report; localSavings = r.contextSavings || null; }
     else out.localReason = bridgeUnreachableText('local', t.base, r.error);
   } catch (e) {
     out.localReason = bridgeUnreachableText('local', getLocalBridgeTarget().base, String(e?.message || e));
@@ -5011,6 +5053,7 @@ app.get('/api/learning/token-report', async (_req, res) => {
     out.remoteStale = true;
     out.remoteAt = c.at;
     out.remoteServer = { id: c.serverId, name: c.serverName, host: c.host };
+    if (isObj(c.contextSavings)) remoteSavings = c.contextSavings;
     const day = remoteCachedDay(c);
     out.remoteStaleDay = day.staleDay === true;
     out.remoteReason = out.remoteStaleDay
@@ -5030,7 +5073,8 @@ app.get('/api/learning/token-report', async (_req, res) => {
       if (r.ok) {
         out.remote = r.report;
         out.remoteServer = { id: rt.server.id, name: rt.server.name, host: rt.server.host };
-        writeRemoteTokenCache(rt.server, r.report);
+        remoteSavings = r.contextSavings || null;
+        writeRemoteTokenCache(rt.server, r.report, r.contextSavings);
       } else {
         const why = bridgeUnreachableText('remote', rt.base, r.error);
         if (!useRemoteCache(why)) out.remoteReason = why;
@@ -5042,6 +5086,12 @@ app.get('/api/learning/token-report', async (_req, res) => {
   }
 
   out.total = mergeTokenReports(out.local, out.remoteStaleDay ? zeroDayScoped(out.remote) : out.remote);
+  /* 上下文剪枝省下的量（实测）：本机 + 服务端的今日/终身各自相加；跨日缓存那份的 today 清零
+   * （与用量同样口径 —— 昨天的省量不该算进今天）。 */
+  out.contextSavings = mergeContextSavings(
+    localSavings,
+    remoteSavings ? (out.remoteStaleDay ? zeroSavingsDay(remoteSavings) : remoteSavings) : null,
+  );
   // 兼容旧前端/旧字段：顶层 report = 合计（只有一边时就是那一边）
   out.report = out.total || out.local || out.remote || null;
   res.json(out);

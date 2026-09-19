@@ -214,6 +214,25 @@ export interface TokenReportSide {
   note?: string;
   [k: string]: any;
 }
+export interface ContextSavingsBucket {
+  /** 被 DSH compaction/prune 从上下文里剪掉的 token（DSH 自己记的 shadowedTokenCount） */
+  prunedTokens: number;
+  /** 剪枝事件条数 */
+  pruneEvents: number;
+  /** 这些被剪掉的内容本来会在后续每一次请求里被重读 —— 累计少读的 token（实测 cacheRead 口径） */
+  rereadSaved: number;
+}
+export interface ContextSavings {
+  today: ContextSavingsBucket;
+  /** 最近几天（不含今天），按计费日倒序 */
+  days: Array<ContextSavingsBucket & { date: string }>;
+  lifetime: ContextSavingsBucket;
+  /** 当前还有"已剪掉的内容"留在上下文里的会话数 */
+  liveSessions?: number;
+  since?: string;
+  note?: string;
+  [k: string]: any;
+}
 export interface TokenReportResp {
   ok: boolean;
   at?: number;
@@ -224,6 +243,8 @@ export interface TokenReportResp {
   remote: TokenReportSide | null;
   /** 两份合并的合计 */
   total: TokenReportSide | null;
+  /** 上下文剪枝省下的量（**实测**，来自 DSH 的 compaction/prune 事件；老桥没有这个字段） */
+  contextSavings?: ContextSavings | null;
   localReason?: string;
   remoteReason?: string;
   remoteServer?: { id: string; name: string; host: string } | null;

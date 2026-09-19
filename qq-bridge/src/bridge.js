@@ -198,6 +198,8 @@ import {
 } from './core/tunables.js';
 // 上下文治理：把压缩策略写进 DSH home 的 cordis.patch.yml（见该文件顶部为什么不能在桥侧改历史）
 import { syncDshCompactionPatch } from './lib/dsh-compaction.js';
+// 剪枝省下多少（读 DSH 会话日志实测；用量面板那块"剪枝省下"就是它）
+import { initContextSavings, reconcileContextSavings, getContextSavings } from './core/context-savings.js';
 import {
   social, defaultWakeConfig, softResetWakeConfig, initSocialCore,
   preSleepWaitBlocked, computeWakeSafety,
@@ -336,6 +338,33 @@ async function main() {
     }
   } catch (error) {
     log(`[token] 用量对账初始化失败（忽略）: ${error?.message ?? error}`);
+  }
+  /* 【2026-09-19】上下文剪枝省下多少：读 DSH 自己的会话日志（compaction/prune 的 shadowedTokenCount
+   * × 它之后同会话还发生过多少次请求）。这里只做初始化 + 首次扫描，之后由用量面板按需增量刷新。
+   * 为什么不用事件流：官方 rc.1 没有全局广播，桥是逐会话 follow，只覆盖自己映射的会话；
+   * 而会话日志是 DSH 落的权威记录，任何会话的剪枝都算数（真机验证过：日志里 prune 事件带 shadowedTokenCount）。 */
+  try {
+    const dshHomeForSavings = (() => {
+      try {
+        const t = resolveDshTarget();
+        if (t && !t.refusedDesktop && t.home) return t.home;
+      } catch { /* 下面退回环境变量 */ }
+      return process.env.QQB_DSH_HOME || '';
+    })();
+    initContextSavings({ ...cfg, dshHome: dshHomeForSavings });
+    if (dshHomeForSavings) {
+      reconcileContextSavings({ log: (m) => log(`[savings] ${m}`) })
+        .then((r) => {
+          const s = getContextSavings(7);
+          log(`[savings] 剪枝计量就绪：扫描 ${r.scanned ?? 0} 份会话日志（复用 ${r.reused ?? 0} 份），`
+            + `今日已剪掉 ${s.today.prunedTokens} token / 少读 ${s.today.rereadSaved} token`);
+        })
+        .catch((e) => log(`[savings] 首次扫描失败（忽略）: ${e?.message ?? e}`));
+    } else {
+      log('[savings] 未找到 DSH home，跳过剪枝计量（面板不显示该项）');
+    }
+  } catch (error) {
+    log(`[savings] 剪枝计量初始化失败（忽略）: ${error?.message ?? error}`);
   }
   initSessionArchiveCore(cfg);
   try { setConvKeyResolver((sessionId) => reverse.get(String(sessionId)) ?? null); } catch (_) {}

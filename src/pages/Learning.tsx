@@ -1647,6 +1647,9 @@ function UsagePanel() {
     ? `北京 ${String(Math.floor(dayStartMin / 60)).padStart(2, '0')}:${String(dayStartMin % 60).padStart(2, '0')} 换日`
     : '北京 00:00 换日';
   const note = typeof report?.note === 'string' && report.note ? report.note : '';
+  /* 上下文剪枝省下的量（实测）：本机 + 服务端合并后的那一份；老桥没有该字段时为 null（那块不显示）。
+   * 结构见 api.ts 的 ContextSavings —— 数字全是桥侧从真实事件里记的，前端不做任何估算。 */
+  const savings = isObj(report?.contextSavings) ? report.contextSavings : null;
   // 与 DSH 对账状态（桥侧每 5 分钟自动跑一次；标题栏那个按钮是手动再跑一次）
   //
   // 【2026-09-18 修「文案让人以为面板 = 提供方控制台」】原文案两处不准确：
@@ -1698,6 +1701,29 @@ function UsagePanel() {
         <div className="lrn-note lrn-note-soft">
           {rcText}（对账口径 = 桥侧累计 ↔ DSH 自己记的会话累计，<b>不比对提供方控制台</b>；每 5 分钟自动跑一次。
           补记行按"对账时刻"计入当日，且桥侧某个桶一旦记多就扣不回来，所以当日数字可能高于控制台）
+        </div>
+      )}
+
+      {/* 【2026-09-19 主人要求"量化对比"】上下文剪枝省了多少 —— **实测**（不是拿字符数估的）：
+          桥直接读 DSH 落的会话日志（sessions/<slug>/<sessionId>/session.jsonl.zstd），把 compaction/prune 记的
+          shadowedTokenCount 加总，并数出该会话之后还发生过多少次请求（step/start）——
+          那些请求本来都要把这些内容重读一遍（计费 cacheRead），剪掉就不再付。
+          为 0 时也显示一行，让人看得出"这个开关在、只是还没触发过"。 */}
+      {savings && (
+        <div className="lrn-note lrn-note-soft">
+          ✂️ <b>上下文剪枝（实测）</b>：
+          {savings.today.prunedTokens > 0 ? (
+            <>
+              今日已从上下文里剪掉 <b>{fmtFull(savings.today.prunedTokens)}</b> token（{fmtFull(savings.today.pruneEvents)} 次剪枝）；
+              这些内容本来会在之后每一次请求里被重读，按真实请求数累计 —— <b>今日少读 {fmtFull(savings.today.rereadSaved)} token</b>
+              {todayUsed > 0 && `（相当于今日已用的 ${((savings.today.rereadSaved / todayUsed) * 100).toFixed(1)}%）`}。
+            </>
+          ) : (
+            <>今日还没有触发过剪枝（0 token）——工具结果超过阈值后才会剪，剪完这两天就能看到数字。</>
+          )}
+          {savings.lifetime.rereadSaved > 0 && <> 近 {savings.windowDays ?? 7} 天累计：剪掉 {fmtFull(savings.lifetime.prunedTokens)} · 少读 {fmtFull(savings.lifetime.rereadSaved)}（{fmtFull(savings.lifetime.pruneEvents)} 次）。</>}
+          <br />口径与用量同一套计费日（{dayStartLabel}）：读的是 **DSH 自己的会话日志**（{fmtFull(num(savings.scannedFiles))} 份在扫），
+          幂等重算、桥重启不丢；只算工具结果的剪枝，**不含**摘要压缩那部分。
         </div>
       )}
 

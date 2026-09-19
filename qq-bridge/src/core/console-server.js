@@ -5688,7 +5688,18 @@ export function startConsoleServer() {
             return;
           }
           const report = await meterMod.getTokenReport(7);
-          sendJson({ ok: true, report });
+          /* 【2026-09-19】把「上下文剪枝省下多少」一起回给面板：**实测**值，直接读 DSH 自己落的会话日志
+           * （compaction/prune 的 shadowedTokenCount × 后续还发生过多少次请求），不是拿字符数估的。
+           * 扫描是增量的（只重读变过的日志），单独 try：拿不到不该让整份用量报告 503。 */
+          let contextSavings = null;
+          try {
+            const saveMod = await import('../core/context-savings.js');
+            if (typeof saveMod.getContextSavings === 'function') {
+              try { await saveMod.reconcileContextSavings({ log: (m) => log('[savings] ' + m) }); } catch (e) { log(`控制台：剪枝计量扫描失败（忽略）：${e?.message ?? e}`); }
+              contextSavings = saveMod.getContextSavings(7);
+            }
+          } catch (e) { log(`控制台：context-savings 读取失败（忽略）：${e?.message ?? e}`); }
+          sendJson({ ok: true, report, contextSavings });
         } catch (error) {
           log(`控制台：token-report 读取失败：${error?.message ?? error}`);
           sendJson({ ok: false, error: 'token meter unavailable' }, 503);
