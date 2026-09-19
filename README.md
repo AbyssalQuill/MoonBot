@@ -184,6 +184,15 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 - **识别别人的语音**：收到的 `record` 段经 `get_record{out_format:'mp3'}` 转 mp3、`docker cp` 取回宿主再送 ASR（`mimo-v2.5-asr`，`asrLanguage` 默认 `zh`，原始音频 ≤7MB，对应 base64 后约 10MB）。
 - **密钥**：存 `state/voice-config.json`（出厂安装包里被脱敏清空），管理端只回掩码与 `apiKeySet` 布尔值；换 key 走「语音」页或 `PUT /api/voice/config`。不配 key 不影响文字发送，语音相关调用一律降级。
 
+### 内置表情包（meme-packs）
+
+- **一份"表情包"就是一个目录**：`manifest.json`（id / 名字 / tag 列表 / 张数）+ `index.db`（SQLite，表 `memes(path, file_name, tag, caption, keywords, file_hash, mtime, captioned_at)`）+ `memes/<tag>/<文件名>.<ext>`（webp、png、jpg、jpeg、gif）。`qq_meme_search` 是拿 `index.db` 的 caption/keywords 搜、`qq_send_meme` 是拿表里的 `path` 发图，所以**改文件名必须同时重建表**，否则表现就是"搜得到、发不出"。
+- **三处位置都认**（顺序即优先级）：出厂包 `<runtime>/meme/<包目录>/`、后装与上传的包 `<runtime>/meme-packs/<包目录>/`、角色专属包 `<角色库根>/<角色 slug>/meme-packs/<包目录>/`。包 id 取 `manifest.json` 的 `id`（目录名可以与 id 不同）；启动时一份都找不到会往 stderr 打**一行**日志，把尝试过的每条路径都列出来。
+- **多包一起搜**：`qq_meme_search` 返回的每行是 `文件名 [tag] [包 id] 描述`，可以带 `pack` 只搜某一份；`qq_send_meme` 收 `文件名`，也收 `包id/文件名`。两份包里有同名文件时按**角色专属包 → 主人点名的包 → 出厂包**取第一份，并在返回里说明这个名字还存在于哪些包。
+- **角色绑定**：`social.meme.personaPacks` 是「角色 slug → 包 id 数组」，`social.meme.activePersona` 记当前导进 `persona.md` 的角色（管理端导入角色卡时写）。`social.meme.packs` 非空时只搜这些包**加上**当前角色的包，留空 = 全都搜；总开关 `social.meme.enabled=false` 时 `qq_meme_search` / `qq_send_meme` 干脆不注册（模型列表里看不到，不是运行时拒绝）。
+- **规整与重建表**：`qq-bridge/tools/relayout-meme-pack.mjs <包目录>` 按 tag 落位、重建 `index.db`、写 manifest v2，并做三件对账：表↔磁盘一致、桥侧真会跑的那两条 SQL 都能查到、包内文件名唯一。**已有的 caption/keywords 原样保留**（只给表里没有的新图生成兜底描述）；同名且内容完全相同的副本挪进 `.dedup/`（不删，可回滚），同名但内容不同则报错退出、一个文件都不动。
+- **怎么加自己的包**：管理端「工具与规则」页的「内置表情包（meme-packs）」卡可以选 `.zip` 或整个文件夹上传，也可以直接把目录丢进 `<runtime>/meme-packs/`。上传先落到临时目录并跑一遍 `relayout`，失败会保留现场；成功才替换（旧包改名成 `<包目录>.bak-<时间戳>`），然后自动重启桥，新包立刻可用。
+
 ### 部署与克隆
 
 - 一键克隆在 `server/deploy.js`：先在源机打包（桥代码与 `state`、`.dsh` home、NapCat 配置、NapCat 应用本体、QQ 登录态、代理、表情库），再传到目标机解包并接线，最后写 systemd 服务、灌登录态、启动自检。
@@ -230,7 +239,7 @@ MoonBot Public/
 │   ├─ tools/                开发与回归工具（含设备身份固定脚本）
 │   ├─ tests/                单元测试
 │   ├─ docs/                 桥接层文档
-│   ├─ characters/           角色卡模板
+│   ├─ characters/           角色库：一个子目录 = 一个角色包（出厂 22 个）
 │   ├─ config.example.json   出厂配置模板
 │   ├─ music-sign-proxy.py   音乐卡片签名代理
 │   ├─ state/                ⛔ 运行数据：记忆库、社交状态、用量日志
@@ -242,7 +251,8 @@ MoonBot Public/
 ├─ node_modules/             ⛔ 依赖
 ├─ dsh/  dsh-runtime/        ⛔ DSH 源码与依赖
 ├─ napcat-onekey/            ⛔ NapCat 便携版
-├─ meme/                     ⛔ 表情包库
+├─ meme/                     ⛔ 出厂表情包（whale-fanart-001）
+├─ meme-packs/               ⛔ 后装／上传的表情包，一份包一个目录
 ├─ release/                  ⛔ 安装包
 ├─ docs/                     ✅ 只有 release-1.0.0.md 纳入版本管理，
 │                              其余为 ⛔ 内部交接文档（含服务器信息）
@@ -354,8 +364,8 @@ npm run dev
 
 配置页有两类写盘方式，弄混就会出现"我改了但没生效"：
 
-- **点顶部「保存」（写整份 `config.json`）**：常用设置里的全部字段 —— 模型/厂商、NapCat 地址与路径、基础与会话、允许/拒绝名单、唤醒与潜水、发送节奏、上下文与轮换、上下文治理、主动闲聊、等待、打字等待、表情包参数、静默群聊、投递与回合、好友申请、Word 额度，以及「工具与规则」里的工具开关和工具 schema 精简。
-- **卡片自己写盘、不用点顶部保存**：人设（`persona.md` · 点「保存人设」）、发言规则（`speech-rules.md` · 点「保存发言规则」）、群聊活跃时段（点「保存这个」，写的是桥的 `state/activity-windows.json`，不是 `config.json`）、NapCat 鉴权令牌（自己写 NapCat 的配置并重启 NapCat）、表情包上传（写表情库并重启桥）、「保存并重启」（它会先替你点一次顶部保存、再重启 DSH/桥）。
+- **点顶部「保存」（写整份 `config.json`）**：常用设置里的全部字段 —— 模型/厂商、NapCat 地址与路径、基础与会话、允许/拒绝名单、唤醒与潜水、发送节奏、上下文与轮换、上下文治理、主动闲聊、等待、打字等待、表情包参数（收藏表情那一套）、静默群聊、投递与回合、好友申请、Word 额度，以及「工具与规则」里的工具开关与工具 schema 精简；内置表情包的总开关 `social.meme.enabled` 也在这一份里，但**包本身与角色绑定**由下面那张卡自己写盘。
+- **卡片自己写盘、不用点顶部保存**：人设（`persona.md` · 点「保存人设」）、发言规则（`speech-rules.md` · 点「保存发言规则」）、群聊活跃时段（点「保存这个」，写的是桥的 `state/activity-windows.json`，不是 `config.json`）、NapCat 鉴权令牌（自己写 NapCat 的配置并重启 NapCat）、收藏表情上传（写表情库并重启桥）、内置表情包上传与角色绑定（写 `<runtime>/meme-packs/` 与 `social.meme.personaPacks`，并重启桥）、「保存并重启」（它会先替你点一次顶部保存、再重启 DSH/桥）。
 - **会顺手写一份 `config.json` 的两个按钮**：「活跃时段 → 添加群」（把群加进允许名单）、「活跃时段 → 关闭静默，恢复群聊响应」（关 `deepsleep`）—— 它们立刻写盘，不必再点顶部保存。
 - **配置方案页签**：点「存为新方案」只写方案文件；点「套用」写整份 `config.json`（等同一次全局保存）。
 
