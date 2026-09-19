@@ -18,6 +18,19 @@ $procs = @(Get-CimInstance Win32_Process -Filter "Name='qbm-node.exe'" |
   Where-Object { $_.CommandLine -like '*server/index.js*' })
 Write-Host ("manager processes before: " + (($procs | ForEach-Object { $_.ProcessId }) -join ','))
 
+# The close-window guardian is a separate process (guard-node.exe running napcat-guardian.mjs) that
+# watches the BACKEND pid: when that pid dies it waits out its grace period, re-reads the guard file,
+# and -- if no new backend has claimed it -- tears down NapCat + bridge + isolated DSH. Restarting the
+# backend from here therefore used to kill the running bridge and DSH (observed 2026-09-19: a manager
+# restart left the whole local install stopped). Retire the stale guardian first; the new backend arms
+# a fresh one as soon as it listens.
+$guards = @(Get-CimInstance Win32_Process -Filter "Name='guard-node.exe'" |
+  Where-Object { $_.CommandLine -like '*napcat-guardian.mjs*' })
+foreach ($g in $guards) {
+  taskkill /PID $g.ProcessId /F | Out-Null
+  Write-Host ("  retired stale guardian pid " + $g.ProcessId)
+}
+
 foreach ($p in $procs) {
   # /F but NOT /T: children (DSH / bridge / NapCat) must survive - the new manager adopts them by port probe.
   taskkill /PID $p.ProcessId /F | Out-Null

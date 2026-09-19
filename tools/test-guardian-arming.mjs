@@ -30,9 +30,12 @@ async function main() {
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 首次运行 */ }
   fs.mkdirSync(path.join(runtime, 'server'), { recursive: true });
   fs.mkdirSync(path.join(runtime, 'qq-bridge', 'src'), { recursive: true });
-  fs.copyFileSync(path.join(REPO, 'server', 'index.js'), path.join(runtime, 'server', 'index.js'));
-  fs.copyFileSync(path.join(REPO, 'server', 'deploy.js'), path.join(runtime, 'server', 'deploy.js'));
-  fs.copyFileSync(path.join(REPO, 'server', 'napcat-guardian.mjs'), path.join(runtime, 'server', 'napcat-guardian.mjs'));
+  /* 【2026-09-19 修「这项检查一直是红的」】原来只单独拷 index.js / deploy.js / napcat-guardian.mjs ——
+   * 而 index.js 是**静态 import 同目录兄弟文件**的（deploy.js、iso-credential.js、napcat-repair.js …），
+   * 后来新增的 iso-credential.js 没被拷进去，隔离管理器一启动就
+   * `ERR_MODULE_NOT_FOUND: .../iso-credential.js`，于是①就失败了（与守卫逻辑无关）。
+   * 现在整目录拷贝：以后再加兄弟文件也不会漏。 */
+  fs.cpSync(path.join(REPO, 'server'), path.join(runtime, 'server'), { recursive: true });
   fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(runtime, 'node_modules'), 'junction');
   fs.writeFileSync(path.join(runtime, 'qq-bridge', 'config.json'), JSON.stringify({
     ownerQQ: null, dsh: { baseUrl: 'http://127.0.0.1:19999' }, social: { enabled: true },

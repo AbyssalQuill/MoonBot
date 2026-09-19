@@ -44,7 +44,12 @@ const guardFile = argOf('guard-file', '');
 // 现在缺哪个就跳过哪一段清理，宁可少收，绝不误杀。
 const dshPort = Number(argOf('dsh-port', '')) || 0;
 const bridgeScript = argOf('bridge-script', '');   // 本安装的 bridge.js **绝对路径**（只杀这一份，不碰别的安装/别的测试）
-const graceMs = Number(argOf('grace', '6000')) || 6000;
+/* 【2026-09-19 宽限期 6s → 30s】父进程没了以后，守卫会等这么久再二次核对 guard 文件：
+ * 文件里换成别人（新后端）就静默退出，还是自己就认定"应用关了"并开始收 NapCat/桥/DSH。
+ * 6 秒太紧：实测（本机 00:10）后端被杀后新后端要 5~20 秒才起来并武装新守卫，原守卫 6 秒一到就动手，
+ * 把**还活着的桥与隔离 DSH 全收了** —— 表现就是"重启了一次管理端，机器人就哑了"。
+ * 30 秒既盖得住一次重启（kill → 启 → listen → 武装），又仍然做到"关掉应用后一分钟内收干净"。 */
+const graceMs = Number(argOf('grace', '30000')) || 30000;
 /* 【2026-09-18 killOnExit】要不要收 NapCat，由后端按 instances.napcatLocal.killOnExit 传进来。
  * 缺省/非 '0' = 收（保持既有行为：老调用方与回归测试都不传这个参数）。
  * 关掉时**只跳过 NapCat 这一步**，桥与隔离 DSH 的清理照旧 —— 那本来就是守卫的职责，
