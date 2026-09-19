@@ -1101,6 +1101,14 @@ export async function pumpMux() {
                 log(`[rateLimit] ${key} 限流已恢复，取消静默`);
               }
               const undelivered = plain.slice(0, 500);
+              /* 【2026-09-20】裸 `OK` 是**控制令牌**，不是草稿：系统提示词里明确允许"这一轮不需要说话"时
+               * 只输出一个 `OK`（[Preheat] 轮、或已经用工具把话都发完之后收尾）。以前这里不认它，
+               * 于是每一轮裸 OK 都会被记成"写了正文没调发送工具"的未交付草稿，下一轮还往正文里塞一句
+               * `[Undelivered draft] Last round ended with drafted text ("OK…")` —— 又蠢又费 token。 */
+              if (/^ok[.。!！]?$/i.test(String(plain).trim())) {
+                log(`[default] 模型以裸 OK 收尾（本轮无发送工具调用）—— 按"本轮不说话"处理，不记草稿 (${key})`);
+                continue;
+              }
               log(`[default] 模型正文未通过发送工具发出（不再自动转发）(${key}): ${undelivered.slice(0, 60)}`);
               appendActivity(`${key} [undelivered] 模型正文未走发送工具（未转发）：${undelivered.slice(0, 80)}`);
               // 只暂存"用户真实触发"回合的正文：模型可能本想回话却漏调工具 → 下轮给补发提示。

@@ -14,7 +14,8 @@
 
 ### 修复
 
-- **群里 @ 了机器人它却不回（免打扰时段漏消息）**：唤醒理由的判定把"群里说什么都接"（`anyMessage`）排在被 @ 前面 —— 群一旦转成全活跃，"@ 机器人"也被标成 `anyMessage`，而免打扰时段只放行真实触发（@ / 提问 / 点名 / 拍一拍 / 私聊），`anyMessage` 在拦截名单里，于是被 @ 也被跳过。现在 **@ 永远优先标成 `atMention`**（引用回复机器人同理），免打扰时段照常响应；提示词也按"被 @"来答，`[Undelivered draft]` 补发提示才认得它。回归测试 `qq-bridge/tests/wake-trigger.test.js`（含"免打扰名单里不许出现真实触发"的源码级断言）已进 `npm run check`。
+- **人设/发言规则不再在唤醒正文里重复一遍**：从 1.1.x 起这两份已经由 `lib/preset-compose.js` 合成进**系统提示词**（新会话一建起来就带着），可是唤醒正文里仍**无条件**再塞一份 —— 实测一条首连正文里 `[PERSONA]` + `[SPEECH RULES]` 就有 10KB 量级。现在只在"preset 里那份过时了（刚改完人设还没合成）"或"这个会话被标记要补注入（人设刚改 / 桥停机期间改过 / 升级前建的老会话）"时才注入一次；补过就记上版本号，此后不再重复。启动时会自动把"没见过当前人设版本"的会话标记一次（本机启动日志实测标记了 6 个会话）。回归测试 `qq-bridge/tests/persona-inject.test.js`。
+- **系统提示词把"只发 OK、说话必须走工具"写到不容误读**：`[TOOLS]` 第 1 条改成 **NO TEXT. SPEAK ONLY THROUGH TOOLS.**（列出全部发送工具、"你的词必须在工具调用里"、收尾前自检、这轮不说话就只调 `qq_mark_read` 且不写任何文本），第 1b 条改成 **THE ONLY TEXT YOU MAY EVER OUTPUT IS THE BARE TOKEN `OK`**（只能是单独一个 `OK`，不许带标点/句子/总结/解释/草稿，也不许"就这一次"). 配套修了桥侧：以前**裸 `OK`** 会被当成"写了正文没调发送工具"的未交付草稿，下一轮还往正文里塞一句 `[Undelivered draft] …("OK…")`；现在认它是控制令牌，按"本轮不说话"处理。
 - **模型"像是不记得工具怎么调、也忘了规矩"：工具结果被剪得太狠**。`dshCompaction.toolResultMaxChars` 原来是 1500 —— 单个工具结果超过 1500 字就被剪成「开头 900 + 剪枝标记 + 结尾 300」，而 `qq_get_prompt` 返回的整段唤醒协议、状态快照、角色卡、贴纸清单动辄几 KB，模型每轮只看到零头。现在**代码默认值与出厂配置都改成 8192**（与 DSH 插件默认一致）；桥会热加载并重写隔离 DSH home 的 `cordis.patch.yml`，不用重启 DSH、也不打断正在聊的会话。顺带把系统提示词 [TOOLS] 那行的示例点名到具体工具（含 `qq_social_state`）—— 实测模型曾自造 `qq_get_social_state` 这个名字（代码库里不存在），这条对**新会话**生效。
 - **表情包发现没跟随符号链接**：服务器上 `<meme-packs>/<包里>` 是指向别处的软链，而 `readdir(..., { withFileTypes: true })` 的 Dirent 不跟随链接（`isDirectory()` 为 false）→ 整份包被跳过，工具回"本机没装内置表情包"。现在改用 `statSync` 判目录（桥侧与管理端同一口径），并加进多包回归测试。
 - **全新机器上"装了 21 个角色包，四个角色工具却一个都读不到"**：`social.charactersDir` 没配时，角色库根以前固定指向 `~/Downloads/characters/characters` —— 那是"主人自己放角色库的地方"，新机器上根本不存在，而真正装着出厂包的 `<安装目录>\resources\runtime\qq-bridge\characters` 谁都没看。现在按"存在即用"回落：用户库 → 出厂库 → 老默认；配了 `social.charactersDir` 就完全以它为准。
