@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import { api, postConfig, instanceAction, instanceLogs } from '../api';
 import type { ManagerState, DSHIsolatedConfig, NapcatLocalConfig } from '../stores/types';
 import { ArrowLeft, Save, Play, Square, FileText, Loader2 } from 'lucide-react';
@@ -79,7 +80,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
       </div>
 
       <div className="page-body">
-        {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+        <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
         <div className="card">
           {isDsh && dsh ? (

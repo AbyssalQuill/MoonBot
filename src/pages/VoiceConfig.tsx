@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import {
   ArrowLeft, Mic, Volume2, Play, Save, Trash2, Plus, RefreshCw, Loader2, AlertTriangle,
   Zap, Upload, Wand2, FlaskConical, Clock3, Sparkles,
@@ -294,7 +295,7 @@ export default function VoiceConfig({ onBack }: Props) {
       </div>
 
       <div className="page-body">
-        {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+        <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
         {loadErr && (
           /* 【2026-09-19 主人要求】以前这里是 `loadErr ? <错误卡> : <整页表单>` —— 桥一停整页配置直接消失。

@@ -3005,6 +3005,43 @@ export function parseYamlProviderModels(text) {
   return out;
 }
 
+/** 从 dsh-llm-deepseek 源码里抠出内置模型目录（deepseek-official 的模型不在 settings.yaml 里，只能读包）。
+ *  2026-09-19 修：原来只认一个路径（%APPDATA%\\npm\\...），换成"多个候选路径 + 统一解析"，
+ *  并把解析函数抽出来给本地/服务端两处复用。 */
+function parseDeepseekDefaultModels(text) {
+  const s = String(text || '');
+  const i = s.indexOf('DEFAULT_MODELS');
+  if (i < 0) return [];
+  const seg = s.slice(i, i + 8000);
+  const out = [];
+  const re = /\{\s*id:\s*"([^"]+)"[\s\S]*?name:\s*"([^"]+)"/g;
+  let m = null;
+  while ((m = re.exec(seg))) {
+    const block = m[0];
+    out.push({ id: m[1], name: m[2], ...(/inputModalities[\s\S]{0,80}image/.test(block) ? { vision: true } : {}) });
+  }
+  return out;
+}
+
+/** 本机可能的 dsh-llm-deepseek 位置（按出现概率排序；全都只读，读不到就下一个） */
+function deepseekCatalogCandidates(isoHome) {
+  const appdata = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+  const localappdata = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+  const rel = join('node_modules', '@deepseek-ai', 'dsh-llm-deepseek', 'lib', 'index.js');
+  return [
+    join(appdata, 'npm', 'node_modules', '@deepseek-ai', 'dsh', rel),            // npm -g 装的 DSH
+    join(localappdata, 'Programs', 'DeepSeek Harness', 'resources', 'backend', rel), // 桌面端自带的 DSH
+    isoHome ? join(isoHome, rel) : '',                                          // 隔离 home 自己的 node_modules
+  ].filter(Boolean);
+}
+
+/** deepseek-official 的出厂兜底表（连 DSH 包都读不到时用它，保证下拉里不是空的） */
+const FACTORY_DEEPSEEK_MODELS = [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+  { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', vision: true },
+];
+
 /** 隔离 DSH 里**实际可用的模型清单**（按服务商分组），供管理端"切服务商就切模型列表"。
  *  三个来源，逐层兜底，全部只读：
  *   ① 隔离 home 的 settings.yaml：`llm-pi-ai: providers: <id>: models: - id/name …`
@@ -3024,9 +3061,10 @@ export function readDshProviderModels() {
       if (!arr.some((x) => x.id === m.id)) arr.push(m);
     }
   };
+  let isoHome = '';
   // ① settings.yaml（只解析我们认识的那一段结构，不引 YAML 依赖）
   try {
-    const isoHome = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '')
+    isoHome = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '')
       || join(homedir(), '.qq-bridge-manager', 'dsh-isolated-home-official');
     const iso = join(isoHome, 'settings.yaml');
     if (existsSync(iso)) {
@@ -3039,24 +3077,15 @@ export function readDshProviderModels() {
   } catch { /* 读不到就靠下一层兜底 */ }
   // ② DSH 自带的 deepseek 目录（deepseek-official）
   try {
-    const base = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai');
-    const lib = join(base, 'dsh-llm-deepseek', 'lib', 'index.js');
-    if (existsSync(lib)) {
-      const text = readFileSync(lib, 'utf8');
-      const seg = text.slice(text.indexOf('DEFAULT_MODELS'), text.indexOf('DEFAULT_MODELS') + 4000);
-      const models = [];
-      const itemRe = /\{\s*id:\s*"([^"]+)"[\s\S]*?name:\s*"([^"]+)"/g;
-      let it = null;
-      while ((it = itemRe.exec(seg))) models.push({ id: it[1], name: it[2] });
-      if (models.length) { push('deepseek-official', models); sources['deepseek-official'] = 'dsh-llm-deepseek'; }
+    for (const lib of deepseekCatalogCandidates(isoHome)) {
+      if (!existsSync(lib)) continue;
+      const models = parseDeepseekDefaultModels(readFileSync(lib, 'utf8'));
+      if (models.length) { push('deepseek-official', models); sources['deepseek-official'] = 'dsh-llm-deepseek'; break; }
     }
   } catch { /* 同上 */ }
   // ③ 出厂兜底
-  push('deepseek-official', [
-    { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash' },
-    { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
-    { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', vision: true },
-  ]);
+  push('deepseek-official', FACTORY_DEEPSEEK_MODELS);
+  if (!sources['deepseek-official']) sources['deepseek-official'] = 'factory';
   push('xiaomi-token-plan-cn', [
     { id: 'mimo-v2.5', name: 'MiMo-V2.5' },
     { id: 'mimo-v2.5-pro', name: 'MiMo-V2.5-Pro' },
@@ -3926,7 +3955,11 @@ const REMOTE_STATUS_TTL_MS = 10000;
 /** 单引号包裹（POSIX shell 安全的路径传参；路径里出现单引号也不会被拆开） */
 function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 /** 只允许我们拼出来的安全路径（远端桥目录 + 固定文件名），别的一律拒绝 */
-function safeRemotePath(p) { return /^\/[A-Za-z0-9._\/-]+$/.test(String(p || '')); }
+/* 远端路径白名单：只允许绝对路径 + 常见安全字符。
+ * 【2026-09-19 修】原来漏了 `@` —— 而 npm 作用域包（@deepseek-ai/dsh-llm-deepseek/…）**必带** `@`，
+ * 于是"读服务端 DSH 内置模型目录"这条路径被静默拒绝（safeRemotePath 返回 false → ok:false），
+ * 表现就是"切到 DeepSeek 官方时读不到可用模型列表"，只能退到出厂兜底表。 */
+function safeRemotePath(p) { return /^\/[A-Za-z0-9._@\/-]+$/.test(String(p || '')); }
 
 /** 某条隧道的本地端口（隧道没建就退回默认端口） */
 function tunnelLocalPort(serverId, name, fallback) {
@@ -4226,19 +4259,47 @@ function parseDshEffectiveText(text) {
   } catch { return {}; }
 }
 
-/** 服务端 DSH 的模型目录：读服务器上 DSH_HOME 的 settings.yaml（只解析 providers/models 那一段） */
+/** 服务端 DSH 的模型目录：读服务器上 DSH_HOME 的 settings.yaml（只解析 providers/models 那一段），
+ *  再加上服务端 DSH 包里内置的 deepseek 目录 —— **2026-09-19 修**：原来只读 settings.yaml，
+ *  而 deepseek-official 的模型是内置在包里的、settings.yaml 里一个字都没有，于是"切到 DeepSeek 官方就没模型列表"。 */
 async function readRemoteDshModels(server, conn) {
   const user = String(server?.username || 'root');
   const candidates = [...new Set(['/root/.dsh/settings.yaml', `/home/${user}/.dsh/settings.yaml`])];
+  let settingsPath = '';
+  let settingsText = '';
+  let providers = {};
   for (const path of candidates) {
     const r = await remoteReadText(conn, path);
     if (!r.ok) continue;
-    const providers = parseYamlProviderModels(r.text);
-    const sources = {};
-    for (const k of Object.keys(providers)) sources[k] = 'settings.yaml';
-    return { effective: parseDshEffectiveText(r.text), models: { providers, sources }, path, text: r.text };
+    settingsPath = path;
+    settingsText = r.text;
+    providers = parseYamlProviderModels(r.text);
+    break;
   }
-  return { effective: {}, models: { providers: {} }, path: '', text: '' };
+  const sources = {};
+  for (const k of Object.keys(providers)) sources[k] = 'settings.yaml';
+  // 服务端 DSH 包里的 deepseek 内置目录（root 与普通用户两种安装位都试）
+  const catalogCandidates = [
+    '/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js',
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js',
+    `/root/.dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js`,
+    `/home/${user}/.dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js`,
+  ];
+  let deepseek = [];
+  for (const p of catalogCandidates) {
+    const r = await remoteReadText(conn, p);
+    if (!r.ok) continue;
+    deepseek = parseDeepseekDefaultModels(r.text);
+    if (deepseek.length) break;
+  }
+  if (deepseek.length) {
+    providers['deepseek-official'] = deepseek;
+    sources['deepseek-official'] = 'dsh-llm-deepseek';
+  } else {
+    providers['deepseek-official'] = FACTORY_DEEPSEEK_MODELS.map((m) => ({ ...m }));
+    sources['deepseek-official'] = 'factory';
+  }
+  return { effective: parseDshEffectiveText(settingsText), models: { providers, sources }, path: settingsPath, text: settingsText };
 }
 
 /**

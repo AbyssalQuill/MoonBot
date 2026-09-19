@@ -504,11 +504,12 @@ async function main() {
 
   /* 启动时把"主人配置的插话概率"同步到已有会话（2026-09-19 主人要求"插话概率等所有概率都要改好落地"）：
    * 老会话数据里没有来源标记，以前会一直用历史上存下来的那个值（常见是模型早期拍的 0.12），
-   * 主人后来在界面上改成 0.05/0.2 也永远不会变。这里在启动时对齐一次：
-   * 只有被模型显式指定过概率（probabilitySource==='model'）的会话才保留原值。 */
+   * 主人后来在界面上改成 0.05/0.2 也永远不会变。这里在启动时对齐一次。
+   * 【2026-09-19 改口径】连"模型之前自定的"也一起覆盖 —— 主人说"我调的 0.15，唤醒词里带的
+   * 好像是 0.08"，就是因为老口径保留了模型的值。现在主人这份配置说了算。 */
   try {
     const r = applyOwnerWakeProbabilityToSessions();
-    if (r.updated || r.kept) log(`[config] 启动时同步插话概率：更新 ${r.updated} 个会话，保留模型自定的 ${r.kept} 个`);
+    if (r.updated) log(`[config] 启动时同步插话概率：更新 ${r.updated} 个会话（其中覆盖模型自定的 ${r.overridden} 个）`);
   } catch (e) { log('[config] 启动同步插话概率失败:', e?.message ?? e); }
 
   // QQ 侧（NapCat OneBot WebSocket 客户端）
@@ -717,12 +718,13 @@ async function main() {
         }
         /* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】主人一改唤醒概率/活跃概率，
          * 正在跑的会话必须**立刻**跟着变 —— 否则界面上改了数字，已经聊过的会话照旧用旧值
-         * （那正是"改了概率没反应"的机制原因）。只更新 source=owner 的会话；
-         * 模型自己定过概率的会话保留它的选择（它看着语境定的，不该被静默覆盖）。 */
+         * （那正是"改了概率没反应"的机制原因）。
+         * 【2026-09-19 改口径】主人这份配置说了算：连"模型之前自定过概率"的会话也一起覆盖
+         * （旧行为是保留模型的值，结果唤醒提示里一直是 0.08、看着像没生效）。 */
         if (changed.some((k) => k === 'social.wake.recommendedProbability' || k === 'social.wake.activeProbability' || k.startsWith('social.wake'))) {
           try {
             const r = applyOwnerWakeProbabilityToSessions();
-            if (r.updated || r.kept) log(`[config] 插话概率同步：更新 ${r.updated} 个会话，保留模型自定的 ${r.kept} 个`);
+            if (r.updated) log(`[config] 插话概率同步：更新 ${r.updated} 个会话（其中覆盖模型自定的 ${r.overridden} 个）`);
           } catch (e) { log('[config] 同步插话概率失败:', e?.message ?? e); }
         }
         /* 【2026-09-19】上下文治理 / 永久会话改了要立刻生效：

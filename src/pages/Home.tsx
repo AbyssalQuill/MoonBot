@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { instanceAction, startAllInstances, remoteStackById, sshServiceAction } from '../api';
 import type { ManagerState, LocalInstance } from '../stores/types';
@@ -185,7 +186,7 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
 
   return (
     <div className="launcher">
-      {msg && <div className="toast" onClick={() => setMsg(null)}>{msg}</div>}
+      <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
       {/* 【2026-09-12】主人要求：Home 页标题悬停不要弹说明（去掉原生 title 提示框） */}
       <div className="launcher-title">

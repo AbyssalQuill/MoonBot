@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile, type ActivityTarget } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
@@ -1167,7 +1168,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       </div>
 
       <div className="page-body">
-        {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+        <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
         {/* 【2026-09-19 主人要求】"哪个要单独点保存、哪个点顶部保存就行"以前只散落在各卡片的说明里，
             没有一处总览 —— 于是很自然会出现"改了某一项、以为顶部保存会一起存进去"的误会。
@@ -1197,23 +1198,13 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
         {target === 'remote' && remote && (
           <div className="notice-bar server-config-banner" style={{ borderColor: 'var(--nc-primary-400)', display: 'block' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
-              <Server size={15} /> 服务端模式 · 当前编辑的是服务器上的桥配置
+              <Server size={15} /> 服务端模式 · 正在修改服务器上的桥配置
               <span className="badge badge-info">服务端</span>
             </div>
-            <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.75 }}>
-              服务器：<b>{remote.name}</b>（{remote.host}）
-              {remoteMeta.path ? <> · 文件：<code>{remoteMeta.path}</code></> : null}
-              {remoteMeta.dir ? <>（读取自 <code>{remoteMeta.dir}</code>）</> : null}
+            {/* 【2026-09-19 主人要求】这里只说明"改的是服务器上那份配置"；原子写/备份/热加载这些原理不再堆在页面上。 */}
+            <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.7 }}>
+              {remote.name}（{remote.host}）· 保存后立即生效，不用重启桥。
             </div>
-            <div style={{ fontSize: 12.5, marginTop: 4, lineHeight: 1.75 }}>
-              保存时后端会：写临时文件 → 备份 <code>config.json.bak-&lt;时间戳&gt;</code> → <code>mv</code> 原子替换 → 回读比对关键字段；
-              桥按 mtime 热加载，<b>下一条消息即生效</b>，不用重启桥。
-            </div>
-            {remoteMeta.notes?.length ? (
-              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12.5, lineHeight: 1.75 }}>
-                {remoteMeta.notes.map((n, i) => <li key={i}><RichText text={n} /></li>)}
-              </ul>
-            ) : null}
           </div>
         )}
         {target === 'remote' && remoteMeta.message && (
@@ -1662,7 +1653,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
               </button>
             </div>
             <div style={{ flex: 1, overflow: 'auto', padding: '0 20px 14px' }}>
-              {charMsg && <div className="notice-bar" onClick={() => setCharMsg(null)} style={{ marginBottom: 10 }}>{charMsg}</div>}
+              <NoticeBar msg={charMsg} onClose={() => setCharMsg(null)} style={{ marginBottom: 10 }} />
               {!charList.length && !charBusy && (
                 <div style={{ color: '#9a8fb0', fontSize: 13, padding: '18px 4px' }}>点「扫描」列出角色；每个角色会优先使用 ULTIMATE_ROLEPLAY_PROMPT.md（若无则自动拼维度 md）。</div>
               )}
@@ -1787,9 +1778,12 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
       <GroupCard title="静默群聊" path="social" only={['deepsleep', 'deepsleepGroups']} cfg={cfg} ch={ch} onHelp={onHelp}
         desc="想省钱/想安静：全群静默（总开关），或只让名单里的个别群静默。" />
 
-      <GroupCard title="智能体开关与自动回复" path="social" only={['enabled', 'autoReplyCheckMs', 'provideRecommendations']}
+      {/* 【2026-09-19 主人要求】这张卡只留"模型总开关"：另外两项（回复检查间隔 / 推荐参数）
+          一个在「调参」里也有、一个一直没人动过，留在页面上只会让人以为"这些设置还管用"。
+          键本身仍在桥里生效（config.json 不动），只是不再从这里编辑。 */}
+      <GroupCard title="智能体总开关" path="social" only={['enabled']}
         cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="整套智能体的总开关、检查新消息的频率、是否给模型喂推荐参数。" />
+        desc="整套智能体的总开关：关掉 = 桥不再把消息交给模型（只记录、不回复）。" />
       <GroupCard title="投递与回合（速度 / 不吞消息）" blocks={[{ path: 'social', only: ['steerEnabled'] }, { path: 'social.turnHold' }]}
         cfg={cfg} ch={ch} onHelp={onHelp}
         desc="「在途回合注入」：模型正在思考时，新消息会被直接塞进这一轮（而不是等它回完再另起一轮）。默认开启——关掉会让每条消息都要多等一整轮，而且容易卡在 DSH 的 next-turn 队列里出不来。下面一组是「回合保持」：一次唤醒后把这个回合留住多久、最多来回多少次，留住期间你可以连着补话而不用每条都重新唤醒（保持太久会一直占着会话，建议只对私聊开）。" />

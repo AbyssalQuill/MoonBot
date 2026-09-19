@@ -87,32 +87,37 @@ export function defaultWakeConfig() {
  * 把主人配置里的"普通消息插话概率"应用到**正在跑的会话**上（2026-09-19）。
  *
  * 为什么需要：这个概率有两个来源（主人的 recommendedProbability / 模型自己定的值），
- * 现在靠 `triggers.probabilitySource` 区分。主人一改配置，source=owner 的会话立刻跟着变；
- * source=model 的会话保留模型的选择（它是看着语境定的，静默覆盖会让模型的判断失效）。
- * 由 bridge.js 的 config 热加载回调在 `social.wake` 变化时调用。
- * @returns {{updated:number, kept:number}}
+ * 靠 `triggers.probabilitySource` 区分。
+ *
+ * 【2026-09-19 主人反馈后改口径】主人说"我调的 0.15，唤醒词里带的好像是 0.08" —— 老口径是
+ * "source=model 的会话保留模型的选择"，于是主人在界面上改完，老会话纹丝不动、唤醒提示里还是模型
+ * 早就定下的 0.08，看起来就是"改了不生效"。现在改成：**主人一保存，所有会话都按主人这份执行**
+ * （包括原来源=model 的，计数在 overridden 里并写日志）；模型之后仍可在会话内自己调整，
+ * 但主人下次保存会再覆盖回来。由 bridge.js 的配置热加载回调与启动同步调用。
+ * @returns {{updated:number, overridden:number, kept:number}}
  */
 export function applyOwnerWakeProbabilityToSessions() {
   const w = cfgRef?.social?.wake ?? {};
   const ownerProb = Math.min(1, Math.max(0, Number(w.recommendedProbability) || 0));
   const activeProb = Math.min(1, Math.max(0, Number(w.activeProbability) || 0));
   let updated = 0;
-  let kept = 0;
+  let overridden = 0;
   for (const [key, st] of social.conversations.entries()) {
     const tr = st?.wakeConfig?.triggers;
     if (!tr) continue;
-    if (tr.probabilitySource === 'model') { kept += 1; continue; }
     // 活跃模式用 activeProbability（它本来就是"墙上说的活跃概率"），潜水模式用 recommendedProbability
     const want = st.wakeConfig?.mode === 'active' && activeProb > 0 ? activeProb : ownerProb;
-    if (Number(tr.probability) !== want) {
+    const wasModel = tr.probabilitySource === 'model';
+    if (Number(tr.probability) !== want || wasModel) {
       tr.probability = want;
       tr.probabilitySource = 'owner';
       updated += 1;
-      log(`[config] 插话概率已按主人配置更新 ${key}: ${want}（来源=owner）`);
+      if (wasModel) overridden += 1;
+      log(`[config] 插话概率已按主人配置更新 ${key}: ${want}${wasModel ? '（覆盖了模型之前自定的值）' : ''}`);
     }
   }
   if (updated) saveSocialState();
-  return { updated, kept };
+  return { updated, overridden, kept: 0 };
 }
 
 // 软重置唤醒配置：保留当前"模式"（活跃/潜水）与关键触发条件（指定成员/关键词/概率），// 只把其余参数回归推荐默认——用于"无行动/连续未设置唤醒"等兜底场景，

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import NumInput from '../components/NumInput';
 import {
   getLearningConfig, saveLearningConfig, slangAction, personaAction, personaApply, portraitAction, getTokenReport, getSlangLibrary, getPersonProfile,
@@ -725,7 +726,7 @@ const clampHrs = (v: any): number => {
 
       <div className="page-body">
         <div className="lrn-body">
-          {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+          <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
           <div className="lrn-grid">
             {/* ============ 左：学习配置与操作 ============ */}

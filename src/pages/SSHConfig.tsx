@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack, remoteStackById } from '../api';
 import type { SSHServer, ManagerState } from '../stores/types';
@@ -374,7 +375,7 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
         </div>
       </div>
       <div className="page-body">
-        {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+        <NoticeBar msg={msg} onClose={() => setMsg(null)} />
 
         {/* 服务器列表；空 -> 只显示添加 */}
         {servers.length === 0 && !adding ? (
