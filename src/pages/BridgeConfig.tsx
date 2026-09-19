@@ -252,7 +252,26 @@ const TOOL_MCP: Record<string, string> = {
   sendVoice: 'qq_send_voice', transcribeVoice: 'qq_transcribe_voice',
   crosschat: 'qq_crosschat_inbox / qq_crosschat_send',
   getGroupInfo: 'qq_get_group_owner / qq_get_group_members',
+  // 【2026-09-19】点赞与主动私聊：桥有开关（mcp-napcat-safe.js 的 tools?.like / tools?.proactiveSend）、
+  // 中文名表里也有，但这里漏了工具原名，于是「显示 MCP 工具原名」时这两行看不到映射。
+  like: 'qq_like', proactiveSend: 'qq_proactive_send',
 };
+
+/**
+ * 没有独立开关的工具：桥侧**无条件注册**，在「QQ 工具开关」里既开不了也关不了。
+ * 列出来只为一件事 —— 页面上的工具清单要**完整**（主人才知道这套 bot 到底能做什么），
+ * 以及指明"想彻底不给模型看，只能去下面那张『工具 schema 精简』卡里在注册期排除"。
+ * 门禁：tools/audit-ui-tool-names.mjs 会断言 （TOOL_MCP 覆盖的工具 ∪ 这张表）= 桥定义的全部工具。
+ */
+const TOOLS_NO_SWITCH: string[] = [
+  // 宿主侧（mcp-host-server.js）：进程控制默认不注册，只在管理员私聊的 default 模式里可用
+  'napcat_status', 'start_napcat', 'stop_napcat', 'qq_learning_corpus', 'qq_learning_submit',
+  // 联网（mcp-web-search-safe.js）
+  'web_search', 'web_fetch',
+  // 无条件注册的 QQ 工具：状态/群列表/群历史/桥配置读写/静默/人格学习
+  'qq_status', 'qq_list_groups', 'qq_get_group_history', 'qq_get_system_config', 'qq_set_system_config',
+  'qq_deepsleep', 'qq_persona_learn_start', 'qq_persona_learn_stop', 'qq_persona_learn_status',
+];
 
 /**
  * MCP 工具原名的中文名（键 = `mcp__napcat__` 前缀之后的名字）。
@@ -300,6 +319,10 @@ const MCP_LABEL: Record<string, string> = {
   qq_send_voice: '发语音（说话）', qq_transcribe_voice: '语音转文字',
   qq_character_list: '列角色库', qq_character_read: '读角色卡文件',
   qq_character_pack: '取整套角色卡', qq_character_search: '搜角色库',
+  // 【2026-09-19】没有独立开关的那批（条目名字也要有中文名：见下面 TOOLS_NO_SWITCH 一栏）
+  napcat_status: 'NapCat 运行状态', start_napcat: '启动 NapCat', stop_napcat: '停止 NapCat',
+  qq_learning_corpus: '读学习语料', qq_learning_submit: '提交学习结果',
+  web_search: '联网搜索', web_fetch: '抓取网页',
 };
 
 /** 精简名单里某一行该显示的中文名；未登记时回落到「未登记」占位（绝不显示英文原名） */
@@ -2085,7 +2108,16 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
   // 界面上一律显示中文名；要跟 config.json 里的 social.tools.* 对照时再勾上这个开关。
   const [showRaw, setShowRaw] = useState(true);
   if (!v || !isObj(v)) return <div className="empty-state">当前配置没有可开关的 MCP 工具</div>;
-  const keys = Object.keys(v).sort((a, b) => prettyTool(a).localeCompare(prettyTool(b), 'zh'));
+  /* 【2026-09-19 主人反馈"工具开关里显示的工具不全"】根因：这里原来只列 `cfg.social.tools` 里
+     已有的键 —— 而那份 config 是**历史产物**：线上只有 45 个键、出厂示例只有 30 个，桥实际认 57 个
+     开关。于是没被写进 config 的开关（如 sendVoice / transcribeVoice / crosschat）在这页上根本不出现，
+     主人以为"没有这个工具"。现在行集 = **桥侧全部开关（TOOL_MCP 的键）∪ 本配置已有的键**，
+     没有的键按桥的语义（`!== false` 即开）显示为"开"。 */
+  const cfgKeys = Object.keys(v);
+  const keys = Array.from(new Set([...Object.keys(TOOL_MCP), ...cfgKeys]))
+    .sort((a, b) => prettyTool(a).localeCompare(prettyTool(b), 'zh'));
+  const isOn = (k: string) => (k in v ? v[k] !== false : true);
+  const fromCfg = (k: string) => k in v;
   return (
     <div className="card-stack">
       <div className="card">
@@ -2099,7 +2131,7 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
         <div className="switch-grid">
           {keys.map((k) => (
             <label key={k} className="switch-row" title={LABEL[k] || undefined}>
-              <input type="checkbox" checked={!!v[k]} onChange={() => ch('social.tools.' + k)(!v[k])} />
+              <input type="checkbox" checked={isOn(k)} onChange={() => ch('social.tools.' + k)(!isOn(k))} />
               <span style={{ minWidth: 0 }}>
                 {prettyTool(k)}
                 {showRaw && TOOL_MCP[k] ? (
@@ -2108,6 +2140,9 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
                     fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace",
                     overflowWrap: 'anywhere',
                   }}> · {TOOL_MCP[k]}</span>
+                ) : null}
+                {!fromCfg(k) ? (
+                  <span style={{ color: 'var(--nc-foreground-400)', fontSize: 12 }}>（默认开，保存后写入配置）</span>
                 ) : null}
               </span>
             </label>
@@ -2119,6 +2154,27 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
           <br />
           <b style={{ color: 'var(--nc-foreground-300, inherit)' }}>注意：这一组开关<b>不省 token</b></b> —— 工具描述无论如何都会随每次请求发给模型，
           关掉只是"拒绝调用"。要真正少花钱，请用下面那张「工具 schema 精简」卡。
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-title">没有独立开关的工具（{TOOLS_NO_SWITCH.length} 个）</div>
+        <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 10 }}>
+          这些工具由桥<b>无条件注册</b>，上面那组开关管不到：进程控制三个默认不注册（只在管理员私聊里可用）、
+          联网两个随桥常开。要让模型<b>彻底看不见</b>它们，只能在下面那张「工具 schema 精简」卡里把它们加进名单
+          （注册期就不注册 = 这才真的省 token）。
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 13 }}>
+          {TOOLS_NO_SWITCH.map((t) => (
+            <span key={t}>
+              {mcpLabel(t)}
+              {showRaw ? (
+                <span style={{
+                  color: 'var(--nc-foreground-400)', fontSize: 12,
+                  fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace",
+                }}> · {t}</span>
+              ) : null}
+            </span>
+          ))}
         </div>
       </div>
       <SlimToolsCard cfg={cfg} ch={ch} onSave={onSave} />

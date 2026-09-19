@@ -43,6 +43,14 @@ function recordBlock(name) {
 
 const TOOL_MCP = recordBlock('TOOL_MCP');
 const MCP_LABEL = recordBlock('MCP_LABEL');
+/** `const TOOLS_NO_SWITCH: string[] = [ 'a', 'b', ... ];` -- tools with no per-tool switch */
+const TOOLS_NO_SWITCH = (() => {
+  const s = uiSrc.indexOf('const TOOLS_NO_SWITCH');
+  if (s < 0) return new Set();
+  const b = uiSrc.indexOf('[', s);
+  const e = uiSrc.indexOf('];', b);
+  return new Set([...uiSrc.slice(b, e).matchAll(/'([A-Za-z0-9_]+)'/g)].map((m) => m[1]));
+})();
 const TOOL_LABEL_BLOCK = (() => {
   // the switch-label table sits right above TOOL_MCP; find the nearest record before it
   const idx = uiSrc.indexOf('const TOOL_MCP');
@@ -99,6 +107,16 @@ report('UI label entries the bridge never reads', [...TOOL_LABEL.keys()].filter(
 const bogus = new Set();
 for (const [, v] of TOOL_MCP) for (const n of v.split('/').map((s) => s.trim()).filter(Boolean)) if (!defined.has(n)) bogus.add(n);
 report('TOOL_MCP names that are not defined tools', [...bogus].sort());
+
+// 5b) 工具清单完整性：每个工具要么有开关（TOOL_MCP 覆盖），要么登记在 TOOLS_NO_SWITCH。
+//     「QQ 工具开关」页原来只列 config 里已有的键，主人看到的清单因此缺一大截。
+const switchCovered = new Set();
+for (const [, v] of TOOL_MCP) for (const n of v.split('/').map((s) => s.trim()).filter(Boolean)) if (defined.has(n)) switchCovered.add(n);
+report('tools with neither a switch nor a TOOLS_NO_SWITCH entry (the page would hide them)', [...defined].filter((n) => !switchCovered.has(n) && !TOOLS_NO_SWITCH.has(n)).sort());
+report('TOOLS_NO_SWITCH entries that are not defined tools', [...TOOLS_NO_SWITCH].filter((n) => !defined.has(n)).sort());
+report('TOOLS_NO_SWITCH entries that actually have a switch (move them to TOOL_MCP instead)', [...TOOLS_NO_SWITCH].filter((n) => switchCovered.has(n)).sort());
+report('TOOLS_NO_SWITCH entries without a Chinese label in MCP_LABEL', [...TOOLS_NO_SWITCH].filter((n) => !MCP_LABEL.has(n)).sort());
+console.log(`[audit] tool coverage: ${switchCovered.size} switchable + ${TOOLS_NO_SWITCH.size} always-on = ${switchCovered.size + TOOLS_NO_SWITCH.size} of ${defined.size}`);
 
 // 6) every key a real config file carries must have a label, or the page renders the raw English key
 const configArgIdx = process.argv.indexOf('--config');

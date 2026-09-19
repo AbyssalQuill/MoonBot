@@ -231,6 +231,9 @@ const ALLOW = [
   /^png$/i, /^jpeg$/i, /^gif$/i, /^mp3$/, /^wav$/, /^deepseek-v4-pro$/, /^xhigh$/, /^max$/, /^off$/,
   /^low$/, /^high$/, /^medium$/, /^minimal$/, /^none$/, /^sh$/,
   /^\d+[a-z]*$/,                                     // 127.0.0.1:10721 这类数字/端口
+  // 【2026-09-19】「没有独立开关的工具」那一栏会列出宿主侧与联网工具的**工具原名**
+  // （mcp-host-server.js / mcp-web-search-safe.js 注册的，不是字段名，也不是 config 键）
+  /^web_(search|fetch)$/, /^napcat_status$/, /^(start|stop)_napcat$/, /^qq_learning_(corpus|submit)$/,
 ];
 const hits = [];
 const allowed = new Map();
