@@ -17,7 +17,7 @@ import {
   pixivMasterUrl, pixivImageSources, pixivImageCandidates, isAdultWork, PIXIV_REFERER,
   pixivIllustDetail, pixivIllustOriginals,
   cleanPixivCookie, parsePixivUserSearch, rankArtistCandidates, parseAuthorInput,
-  pixivRequestHeaders, pixivLoggedIn, pixivLoginState, pixivSearchUsersByName,
+  pixivRequestHeaders, pixivLoggedIn, pixivLoginState, pixivSearchUsersByName, pixivUserSearchUrl,
 } from '../src/lib/pixiv.js';
 import { safeFetchBuffer } from '../src/safe-fetch.js';
 
@@ -120,31 +120,42 @@ if (pixivLoggedIn()) {
   ok('没配 cookie 时两个域名都不带 cookie', !hPixiv.cookie && !hMirror.cookie);
 }
 
-console.log('\n=== 8. 用户搜索返回体的宽容解析 + 候选排序 ===');
+console.log('\n=== 8. 用户搜索返回体的宽松解析 + 候选排序 ===');
+/* 这条断言专门钉住参数名：pixiv 的用户搜索要的是 **nick** 不是 word —— 之前一直 400 就是栽在这。
+ * 证据：pixiv 用户搜索页的 chunk 里写着 e.get("/ajax/search/users", {}, { nick: t.nick, ... })。 */
+const searchUrl = pixivUserSearchUrl('米山舞');
+ok('用户搜索地址用 nick= 参数', /[?&]nick=/.test(searchUrl) && !/[?&]word=/.test(searchUrl), searchUrl);
+ok('带上 s_mode=s_usr / p=1 / i=0', /s_mode=s_usr/.test(searchUrl) && /[?&]p=1/.test(searchUrl) && /[?&]i=0/.test(searchUrl), searchUrl);
+ok('onlyCreator=true → i=1', /[?&]i=1/.test(pixivUserSearchUrl('x', 1, true)));
 const fixtureSearch = {
   error: false,
   body: {
     users: [
-      { userId: '1554775', userName: '米山舞', illusts: 46, premium: false },
-      { userId: '49982457', userName: '米山舞', illusts: 3 },
-      { userId: '91868118', userName: '米山舞sama', illusts: 0 },
-      { userName: '没有号的脏数据' },
+      { userId: '1554775', name: '米山舞', comment: 'イラストレーター、アニメーター。', partial: 0, premium: false, image: 'https://i.pximg.net/user-profile/img/a_50.jpg' },
+      { userId: '49982457', name: '米山舞', comment: '', partial: 0 },
+      { userId: '91868118', name: '米山舞sama', partial: 1 },
+      { name: '没有号的脏数据' },
     ],
   },
 };
 const parsed = parsePixivUserSearch(fixtureSearch);
 eq('只留真有号的条目', parsed.length, 3);
-eq('id/name/作品数/主页地址', [parsed[0].id, parsed[0].name, parsed[0].works, parsed[0].pageUrl], ['1554775', '米山舞', 46, 'https://www.pixiv.net/users/1554775']);
+eq('id/name/签名/主页地址', [parsed[0].id, parsed[0].name, parsed[0].comment, parsed[0].pageUrl], ['1554775', '米山舞', 'イラストレーター、アニメーター。', 'https://www.pixiv.net/users/1554775']);
 eq('裸数组形状也认', parsePixivUserSearch([{ id: 5, name: 'x' }]).length, 1);
 eq('认不出来 → 空数组（不抛错）', parsePixivUserSearch({ error: true, body: [] }), []);
-const rankedAmbiguous = rankArtistCandidates(parsed, '米山舞');
-ok('两个"完全同名" → 不敢定号，给候选', rankedAmbiguous.unique === null, JSON.stringify(rankedAmbiguous.candidates.map((u) => u.id)));
-ok('候选里作品多的排前面', rankedAmbiguous.candidates[0].id === '1554775');
-const rankedUnique = rankArtistCandidates([{ id: '1', name: '米山舞', works: 46 }, { id: '2', name: '米山舞です', works: 9 }], '米山舞');
-ok('一个完全同名 + 近似号作品数明显更少 → 敢直接定号', rankedUnique.unique?.id === '1', JSON.stringify(rankedUnique.candidates.map((u) => `${u.id}:${u.works}`)));
-ok('近似号作品数更多时 → 不敢定号（粉丝大号冒充不了，但也不能瞎猜）',
-  rankArtistCandidates([{ id: '1', name: '米山舞', works: 2 }, { id: '2', name: '米山舞です', works: 300 }], '米山舞').unique === null);
-ok('两边作品数都是 0/未知 → 保守给候选', rankArtistCandidates([{ id: '1', name: 'x', works: 0 }, { id: '2', name: 'xです', works: 0 }], 'x').unique === null);
+const rankedAmbiguous = rankArtistCandidates([{ id: '1554775', name: '米山舞', works: 46 }, { id: '49982457', name: '米山舞', works: 37 }], '米山舞');
+ok('两个同名号都有作品 → 不敢定号，给候选', rankedAmbiguous.unique === null, JSON.stringify(rankedAmbiguous.candidates.map((u) => u.id)));
+ok('候选按作品数多→少排', rankArtistCandidates([{ id: 'a', name: 'X', works: 3 }, { id: 'b', name: 'X', works: 9 }], 'X').candidates[0].id === 'b');
+/* 实测形状：搜「米山舞」会带出 1 个真号（46 件）+ 一堆 0 作品的同名小号 + "米山舞sama" 这种近似号 */
+const rankedReal = rankArtistCandidates([
+  { id: '1554775', name: '米山舞', works: 46 },
+  { id: '78071615', name: '米山舞', works: 0 },
+  { id: '69453785', name: '米山舞', works: 0 },
+  { id: '91868118', name: '米山舞sama', works: 0 },
+], '米山舞');
+ok('只有一个同名号有作品、其余同名都是 0 件 → 敢直接定号', rankedReal.unique?.id === '1554775', JSON.stringify(rankedReal.candidates.map((u) => `${u.id}:${u.works}`)));
+ok('近似号作品更多时 → 不敢定号', rankArtistCandidates([{ id: '1', name: '米山舞', works: 2 }, { id: '2', name: '米山舞です', works: 300 }], '米山舞').unique === null);
+ok('同名号全是 0 件（判不出谁是画师）→ 保守给候选', rankArtistCandidates([{ id: '1', name: 'x', works: 0 }, { id: '2', name: 'x', works: 0 }], 'x').unique === null);
 eq('全角空格/大小写不影响同名判定', rankArtistCandidates([{ id: '3', name: 'YONEYAMA  MAI', works: 1 }], 'yoneyama mai').unique?.id, '3');
 
 console.log('\n=== 9. 画师入参收口：号 / 链接 / 名字 / 空 ===');

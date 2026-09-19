@@ -2841,12 +2841,16 @@ if (cfg.social?.tools?.pixiv !== false) {
              * 名字可能撞号，所以 resolvePixivAuthor 只在不歧义时才定号，否则把候选交回来让用户挑。 */
             const resolved = await resolvePixivAuthor(wantAuthor);
             if (resolved.kind === 'candidates') {
-              const lines = resolved.candidates.map((u, i) => `${i + 1}. ${u.name || '(无名字)'}（${u.works ? u.works + ' 件作品' : '作品数未知'}）${u.pageUrl}`);
+              const lines = resolved.candidates.map((u, i) => {
+                // 作品数 0 与"没查到"要分开说：前者是"这个号没公开作品"，后者是"补查失败"
+                const w = u.worksKnown ? (u.works ? `${u.works} 件作品` : '无公开作品') : '作品数未知';
+                return `${i + 1}. ${u.name || '(无名字)'}（${w}）${u.comment ? `｜签名：${u.comment}` : ''}\n   ${u.pageUrl}`;
+              });
               return {
                 content: [{
                   type: 'text',
-                  text: `「${resolved.name}」在 Pixiv 上有 ${resolved.candidates.length} 个同名/近似画师，分不清是哪一个，没敢乱发。候选：\n${lines.join('\n')}\n`
-                    + '把用户看到的主页链接念给 ta 确认，或让 ta 给一个 pixiv.net/users/<数字> 或任意一件作品链接（pixiv.net/artworks/<数字>），再用 authorId / illustId 发。',
+                  text: `「${resolved.name}」在 Pixiv 上有 ${resolved.candidates.length} 个同名/近似画师，分不清是哪一个，没敢乱发。候选（按"名字完全相等 → 作品多"排的）：\n${lines.join('\n')}\n`
+                    + '把候选（尤其主页链接）念给用户确认，或让 ta 给一个 pixiv.net/users/<数字> 或任意一件作品链接（pixiv.net/artworks/<数字>），再用 authorId / illustId 发。',
                 }],
                 isError: true,
               };

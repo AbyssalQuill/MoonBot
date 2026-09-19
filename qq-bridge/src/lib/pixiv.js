@@ -733,9 +733,13 @@ export function normalizeArtistName(s) {
 }
 
 /**
- * 纯函数：解析"用户搜索"的返回体 —— 形状没实测过（要登录态才能试），所以**宽容解析**：
- * 认 `body.users` / `body.list` / 裸数组，字段认 userId|id、userName|name、illusts|works|illustCount。
- * @returns {{id:string,name:string,works:number,premium:boolean,pageUrl:string}[]}
+ * 纯函数：解析"用户搜索"的返回体（形状**已实测**，见下）。
+ * 实测返回（`/ajax/search/users?nick=米山舞&s_mode=s_usr&p=1&i=0`，HTTP 200）：
+ *   body 有 data/page/tagTranslation/thumbnails/users/zoneConfig 等键，其中
+ *   `users[] = { userId, name, comment, image, imageBig, premium, partial, isFollowed, isMypixiv, isBlocking, background, commission }`
+ *   —— **没有作品数**（要另外补，见 enrichArtistWorks），`comment` 是签名（消歧很有用）。
+ * 仍做宽容解析（认 body.users / body.list / body.data / 裸数组；认 userId|id、name|userName、illusts|works）。
+ * @returns {{id:string,name:string,comment:string,works:number,partial:number,premium:boolean,pageUrl:string,avatar:string}[]}
  */
 export function parsePixivUserSearch(json) {
   const b = json?.body ?? json;
@@ -749,23 +753,28 @@ export function parsePixivUserSearch(json) {
     return {
       id,
       name: String(u?.userName ?? u?.name ?? '').trim(),
+      comment: String(u?.comment ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
       works: Number.isFinite(w) ? w : 0,
+      worksKnown: Number.isFinite(w),
+      partial: Number(u?.partial) || 0,
       premium: Boolean(u?.premium),
       pageUrl: /^\d+$/.test(id) ? `https://www.pixiv.net/users/${id}` : '',
-      avatar: String(u?.profileImageUrl ?? u?.image ?? u?.imageBig ?? u?.profile_image_url ?? '').trim(),
+      avatar: String(u?.image ?? u?.profileImageUrl ?? u?.imageBig ?? u?.profile_image_url ?? '').trim(),
     };
   }).filter((u) => u.id);
 }
 
 /**
- * 把"按画师名搜"的返回体排序/挑选（**纯函数，离线可测**）：
- * 名字完全相等的排前面（pixiv 搜索本身也会按相关度排，这里只做一道确定性收口），
- * 同档次内按作品数多→少（作品数是"这个号是不是活跃画师"的唯一可用信号）。
+ * 把"按画师名搜"的返回体排序/挑选（**纯函数，离线可测**）。
  *
- * 什么时候**才敢**直接定号（unique）：名字完全相等的那一个**只有一个**，且
- *   · 没有任何"包含关系"的近似号（如搜"米山舞"时冒出来的"米山舞です"），或者
- *   · 它的作品数**严格多于**所有近似号 —— 粉丝小号通常作品很少，这条能救回"重名号扎堆"的常见情况。
- * 其余一律返回候选列表让用户挑：**发错人比不发出去更糟**。
+ * 排序：名字完全相等 → 作品数多 → 其余。作品数是"这个号是不是活跃画师"的唯一可用信号（要另外补）。
+ *
+ * 什么时候**才敢**直接定号（unique）：**恰好有一个同名号名下真有作品**（works>0），并且
+ *   · 其它同名号都是 0 作品（实测：搜「米山舞」会带出 7 个 0 作品的同名/近似小号），**且**
+ *   · 所有近似号（"米山舞です"这种）的作品数都没有超过它。
+ * 为什么不用"作品数最多"来定号：实测搜「ちーのすけ」会出 3 个**完全同名**的活跃画师（20 / 49 / 82 件），
+ * 而主人真正要的那个是 20 件的那位 —— "作品最多"会把号认错。这种情况下只能列候选让人挑：
+ * **发错人比不发出去更糟**。
  * @returns {{exact:object[], partial:object[], others:object[], candidates:object[], unique:object|null}}
  */
 export function rankArtistCandidates(users, name) {
@@ -779,9 +788,14 @@ export function rankArtistCandidates(users, name) {
   const others = list.filter((u) => !exact.includes(u) && !partial.includes(u));
   const byWorks = (a, b) => (b.works || 0) - (a.works || 0);
   const candidates = [...exact.slice().sort(byWorks), ...partial.slice().sort(byWorks), ...others];
-  const topPartialWorks = partial.reduce((m, u) => Math.max(m, u.works || 0), 0);
-  const unique = (exact.length === 1 && (partial.length === 0 || (exact[0].works || 0) > topPartialWorks))
-    ? exact[0] : null;
+  const withWorks = exact.filter((u) => (u.works || 0) > 0);
+  const maxOf = (arr) => arr.reduce((m, u) => Math.max(m, u.works || 0), 0);
+  let unique = null;
+  if (withWorks.length === 1) {
+    const cand = withWorks[0];
+    const otherExactWorks = maxOf(exact.filter((u) => u !== cand));
+    if (otherExactWorks === 0 && maxOf(partial) < (cand.works || 0)) unique = cand;
+  }
   return { exact, partial, others, candidates, unique };
 }
 
@@ -999,9 +1013,47 @@ export function parseAuthorInput(input) {
   return { kind: 'name', name: s };
 }
 
+/** 纯函数：用户搜索的地址。**参数是 `nick` 不是 `word`**（见 pixivUserSearchUrl 的注释）。 */
+export function pixivUserSearchUrl(nick, page = 1, onlyCreator = false) {
+  const q = new URLSearchParams({
+    nick: String(nick ?? '').trim(),
+    s_mode: 's_usr',
+    p: String(Math.max(1, Number(page) || 1)),
+    i: onlyCreator ? '1' : '0',
+  });
+  return `${PIXIV_AJAX}/search/users?${q.toString()}`;
+}
+
+/**
+ * 给候选补"公开作品数"（搜索返回体里没有，但它是"这个号是不是活跃画师"的唯一可用信号）。
+ * 只补前 limit 个、每个一次 `ajax/user/{id}/profile/all`、全部 best-effort（失败就当 0，不抛）。
+ * 实测成本：8 个号约 750~880ms。
+ */
+async function enrichArtistWorks(users, limit = 8) {
+  const slice = users.slice(0, limit);
+  await Promise.allSettled(slice.map(async (u) => {
+    try {
+      const r = await fetchPixivJson(`${PIXIV_AJAX}/user/${u.id}/profile/all?lang=zh`, 12000);
+      const b = r.json?.body;
+      if (!b) return;
+      u.works = Object.keys(b.illusts ?? {}).length + Object.keys(b.manga ?? {}).length;
+      u.worksKnown = true;
+    } catch { /* 补不上就当未知，不影响主流程 */ }
+  }));
+  return users;
+}
+
 /**
  * 按名字搜画师（**需要登录 cookie**，没配就直接说清楚，不退化成关键词搜）。
- * 逐条试几个可能的用户搜索路由（形状没实测过：匿名时它们全被拒，只有带上 cookie 才知道哪条对）。
+ *
+ * 路由是怎么找到的（留证，免得下次又从头试）：`/ajax/search/users` 这条路由**一直都在**，
+ * 之前一直 400「不正确的请求」是因为参数名给错了 —— 它要的是 **`nick`**，不是 `word`。
+ * 证据：pixiv 用户搜索页自己的 chunk `s.pximg.net/soy/pixiv-web-next/.../chunks/users-*.js` 里写着
+ *   `e.get("/ajax/search/users", {}, { nick: t.nick, s_mode: t.sMode, p: t.page, i: t.onlyCreator ? "1" : "0" })`
+ * 实测（带 cookie）：`nick=米山舞` → 1 条命中 `1554775:米山舞`；`nick=七菜` → 10 条同名候选；
+ * `nick=<纯数字>`、`nick=自己的英文 ID` → 0 条（它只按**昵称**搜，不按号、不按 @ID）。
+ * 匿名（不带 cookie）时同一条请求是 400「不正しいリクエストです。」/「不正确的请求。」
+ *
  * @returns {Promise<{query:string, endpoint:string, users:object[]}>}
  */
 export async function pixivSearchUsersByName(name) {
@@ -1012,17 +1064,17 @@ export async function pixivSearchUsersByName(name) {
       + '没登录态时只能改用 authorId（画师号，如 1554775）或作品链接（pixiv.net/artworks/<数字>）；'
       + '关键词搜索搜的是"标题/标签含该名字"的作品，找不到作者本人。');
   }
-  const ends = [
-    `${PIXIV_AJAX}/search/users/${encodeURIComponent(w)}?s_mode=s_usr&lang=zh`,
-    `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`,
-    `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&lang=zh`,
-  ];
+  // 首选实测可用的那条；后面两条是历史形状，留着当兜底（pixiv 随时可能改）
+  const ends = [pixivUserSearchUrl(w), `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`];
   const tried = [];
   for (const url of ends) {
     try {
       const r = await fetchPixivJson(url);
       const users = parsePixivUserSearch(r.json);
-      if (users.length) return { query: w, endpoint: url.replace(PIXIV_AJAX, ''), users };
+      if (users.length) {
+        await enrichArtistWorks(users);
+        return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users };
+      }
       const why = r.json?.error ? `error=${String(r.json.message ?? '').slice(0, 40)}` : '无 users 字段';
       tried.push(`${url.replace(PIXIV_AJAX, '')} → HTTP ${r.status} ${why}`);
     } catch (e) {
@@ -1030,7 +1082,7 @@ export async function pixivSearchUsersByName(name) {
     }
   }
   throw new Error(`按名字搜「${w}」没拿到结果。逐条试过：${tried.join('；')}。`
-    + '（若全是 400/404，说明这个 cookie 没生效或该接口对免费号也不开放 —— 用 tools/test-pixiv-byid.mjs --login 先自检登录态。）');
+    + '（若全是 400/404，先用 tools/test-pixiv-byid.mjs --login 自检登录态；也可能是 pixiv 改了参数名。）');
 }
 
 /**
