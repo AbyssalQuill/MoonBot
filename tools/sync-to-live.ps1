@@ -181,9 +181,23 @@ if (-not $live) {
   if ($diff -eq 0) { Write-Host ("  source and live qq-bridge/src are identical (" + $n + " files)") } else { Write-Host ("  " + $diff + " differences listed above") }
 
   Write-Host '=== 5) verify: agent preset (persona / WAKE TYPES / RULES) source vs live ==='
+  # 【2026-09-19】live 那份 preset 里的 [PERSONA] / [SPEECH RULES] 段是桥按 persona.md / speech-rules.md
+  # 现场合成的（lib/preset-compose.js），比对前必须先剥掉，否则每次都会误报 "live preset is stale"。
+  function Strip-ComposeBlock([string]$text) {
+    $m = [regex]::Match($text, '(?s)\n?[ \t]*# === qq-bridge persona/rules BEGIN ===.*?# === qq-bridge persona/rules END ===')
+    if ($m.Success) { return $text.Remove($m.Index, $m.Length) }
+    return $text
+  }
   $presetRel = 'dsh\agent-presets\default\agent.cordis.yml'
   $presetSrc = Hash8 (Join-Path $srcBridge $presetRel)
-  $presetLive = Hash8 (Join-Path $live $presetRel)
+  $livePresetFile = Join-Path $live $presetRel
+  if (Test-Path $livePresetFile) {
+    $tmpPreset = Join-Path $env:TEMP ('qbm-preset-' + [guid]::NewGuid().ToString('N') + '.yml')
+    $liveStripped = Strip-ComposeBlock ([System.IO.File]::ReadAllText($livePresetFile))
+    [System.IO.File]::WriteAllText($tmpPreset, $liveStripped, (New-Object System.Text.UTF8Encoding($false)))
+    $presetLive = Hash8 $tmpPreset
+    Remove-Item $tmpPreset -Force -ErrorAction SilentlyContinue
+  } else { $presetLive = Hash8 $livePresetFile }
   Write-Host ("  preset src=" + $presetSrc + " live=" + $presetLive)
   if ($presetSrc -ne $presetLive) { Write-Host '  DIFF: live preset is stale -- restart the bridge so it re-installs presets' }
 }

@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { OneBotWsClient } from './lib/onebot-ws.js';
+import { watchOverrideFiles } from './lib/preset-compose.js';
 import { NodeApiClient, unwrap, createTurnCollector } from './dsh-client.js';
 import { mdToPlain, splitForQQ } from './md-to-plain.js';
 import { SENSITIVE_RE, sensitiveHitKind, sensitiveHitSample } from './sensitive.js';
@@ -277,6 +278,12 @@ async function main() {
       try {
         installPresets(target);
         log(`[dsh-side] preset 已刷新到 ${path.join(target.home, '.agent-presets')}`);
+        /* 【2026-09-19 主人要求"外面改系统提示词里面也要改"】盯住 persona.md / speech-rules.md：
+         * 一改就重新合成进已安装的 preset（新会话直接生效），日志留一行。 */
+        try {
+          watchOverrideFiles({ home: target.home, root: ROOT, log });
+          log('[dsh-side] 人设/发言规则监视已启动（改动即重新合成进系统提示词）');
+        } catch (eWatch) { log(`[dsh-side] 人设监视启动失败：${eWatch?.message ?? eWatch}`); }
       } catch (ePre) {
         log(`[dsh-side] preset 刷新失败（继续用现有 preset）: ${ePre?.message ?? ePre}`);
       }

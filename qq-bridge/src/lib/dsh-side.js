@@ -15,6 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { syncPresetOverrides } from './preset-compose.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, '..', '..'); // qq-bridge/
@@ -150,6 +151,16 @@ export function installPresets(target) {
     ensureDir(path.dirname(dest));
     fs.cpSync(src, dest, { recursive: true, force: true });
     log(`preset installed: ${name}`);
+    /* 【2026-09-19】拷完立刻把主人的人设/发言规则合成进 default preset 的 [PERSONA] / [SPEECH RULES] 段：
+     * 新会话建起来时就直接从系统提示词里拿到人设，不再只依赖唤醒正文里的运行时覆盖段。
+     * 正在跑的会话（尤其永久会话）仍由唤醒正文覆盖 —— 两条路都留着，见 lib/preset-compose.js。 */
+    if (name === 'default') {
+      try {
+        const r = syncPresetOverrides({ home: target.home, root: REPO_ROOT, log });
+        if (r.ok && r.changed) log('[dsh-side] 人设/发言规则已合成进 preset（新会话即生效）');
+        else if (!r.ok) log(`[dsh-side] 合成人设到 preset 失败：${r.error}`);
+      } catch (e) { log(`[dsh-side] 合成人设到 preset 异常：${e?.message ?? e}`); }
+    }
   }
 }
 

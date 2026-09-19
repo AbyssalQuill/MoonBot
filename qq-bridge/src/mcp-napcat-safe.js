@@ -3763,6 +3763,7 @@ function characterListText(limit, character, dirOverride) {
     lines.push(`${f.name} | ${f.title || '(no title)'} | ${f.size} B | ${formatCardMtime(f.mtimeMs)} | (loose file)`);
   }
   lines.push('A character = one pack folder. Play/reference one with qq_character_pack(character="<pack name>"); read a single file with qq_character_read; list one pack\'s files with qq_character_list(character="<pack name>"). Only the card imported into persona.md is injected into your prompt automatically - every other pack is not.');
+  lines.push('START FROM SKILL.md: every pack keeps its playable definition in SKILL.md (persona voice, mannerisms, relationship map, do/don\'t) - read it FIRST with qq_character_read(character="<pack name>", file="SKILL.md"), then pull only the extra files you actually need (personality.md / profile.md / interaction.md / relations.md / memory.md / conflicts.md / ULTIMATE_ROLEPLAY_PROMPT.md). The library default root is ~/Downloads/characters/characters (one folder per character; a parent folder that contains only more character folders is walked one level down automatically), and the owner can point it elsewhere with social.charactersDir.');
   return lines.join('\n');
 }
 
