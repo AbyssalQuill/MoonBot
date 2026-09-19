@@ -538,6 +538,102 @@ export const importCharacter = (dir: string, slug: string, includeDims = true, a
   api<{ success: boolean; slug?: string; chars?: number; bytes?: number; preview?: string; applied?: boolean; message?: string }>(
     '/bridge/characters/import', { method: 'POST', body: JSON.stringify({ dir, slug, includeDims, apply }) });
 
+/* ================= 内置表情包（meme pack） =================
+ * 磁盘约定（已冻结，别改）：一份 pack = 一个目录
+ *   <包目录>/manifest.json + index.db(SQLite) + memes/<分类>/<文件名>.<ext>（webp/png/jpg/jpeg/gif）
+ * 三个存放位置都要认：
+ *   ① <runtimeRoot>/meme/<包名>/                        出厂包（如 whale-fanart-001，只能看不能删）
+ *   ② <runtimeRoot>/meme-packs/<包名>/                  **上传的包落这里**
+ *   ③ <charactersDir>/<角色slug>/meme-packs/<包名>/      角色专属包
+ * 后端：GET 列表 / POST 上传（zip 或文件夹，base64-in-JSON）/ POST 删除 / POST 角色绑定。
+ * 【为什么这三个接口不走 api()】api() 遇到非 2xx 直接抛，而后端失败时会带回**中文原因**
+ * （"一个图片都没有"、"规整脚本退出码 1"、"出厂表情包只能禁用不能删"…）—— 那份原因必须让用户看到，
+ * 所以下面用 apiSoft() 把 body 原样取回来，由界面自己判断 success。 */
+async function apiSoft<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api${path}`, { headers: { 'Content-Type': 'application/json' }, ...init });
+  let body: any = null;
+  try { body = await res.json(); } catch { /* 非 JSON（桥/后端没答上）就按 HTTP 状态报 */ }
+  if (!body || typeof body !== 'object') throw new Error(`API ${path} -> HTTP ${res.status}`);
+  return body as T;
+}
+
+/** 列表里的一个包（坏包也会出现：count=null + broken 写原因） */
+export interface MemePackEntry {
+  id: string;
+  /** 包目录的绝对路径（界面上悬停可见，方便自己去翻文件） */
+  dir: string;
+  source: 'factory' | 'global' | 'character';
+  /** 角色专属包的归属角色；其它包为 null */
+  character: string | null;
+  /** index.db 里**真读**出来的张数；坏包为 null */
+  count: number | null;
+  tags: string[];
+  /** 磁盘上真实存在的图片文件数（与 count 不一致 = 表/盘漂移） */
+  imageCount: number;
+  manifest?: Record<string, any> | null;
+  mtimeMs?: number;
+  /** 坏包原因（index.db 缺失/为空/读不了）；有它时 count 一定是 null */
+  broken?: string;
+}
+export interface MemePackListResp {
+  success: boolean;
+  /** 三处根目录（不存在的不列） */
+  dirs?: { global?: string[]; packs?: string[]; characters?: string[] };
+  packs?: MemePackEntry[];
+  /** 角色 ↔ 包绑定（读的是桥 config.json 的 social.meme.personaPacks） */
+  bindings?: Record<string, string[]>;
+  message?: string;
+}
+export interface MemePackUploadReport {
+  /** 收到的条目数（zip 里被跳过的目录项不算） */
+  received: number;
+  /** 校验通过、真的写进包里的图片张数 */
+  images: number;
+  /** 被跳过的非图片文件数（含 __MACOSX/、.DS_Store、Thumbs.db） */
+  skipped: number;
+  /** 被跳过的文件名（最多前 20 个） */
+  skippedNames: string[];
+  /** 还有多少个跳过项没列出来 */
+  skippedMore?: number;
+  /** 同名同内容、被规整脚本挪进 .dedup/ 的重复张数 */
+  deduped: number;
+  /** 覆盖同名旧包时，旧包改名后的名字（空 = 原来没有同名包） */
+  backup: string;
+  /** 规整脚本（qq-bridge/tools/relayout-meme-pack.mjs）的原始输出 */
+  relayoutOutput: string;
+}
+export interface MemePackUploadResp {
+  success: boolean;
+  packId?: string;
+  dir?: string;
+  /** 落盘后真读 index.db 得到的张数 */
+  count?: number;
+  tags?: string[];
+  report?: MemePackUploadReport;
+  /** 重启本机桥的结果（skipped=true 表示没重启，message 里写了为什么）；重启失败不算上传失败 */
+  restart?: { ok?: boolean; skipped?: boolean; message?: string };
+  /** 规整脚本没跑通时：收到的图片留在临时目录里没动 */
+  keptTemp?: boolean;
+  tempDir?: string;
+  message?: string;
+}
+export const memePacks = () => apiSoft<MemePackListResp>('/bridge/meme-packs');
+/** 上传一个包：files（文件夹，path 用 webkitRelativePath）或 zip 二选一；留空 packId 则由目录名/zip 名推导 */
+export const memePackUpload = (payload: {
+  packId?: string;
+  character?: string;
+  files?: Array<{ path: string; data: string }>;
+  zip?: { name: string; data: string };
+}) => apiSoft<MemePackUploadResp>('/bridge/meme-packs/upload', { method: 'POST', body: JSON.stringify(payload) });
+/** 删包（只删上传包与角色包；出厂包会被拒绝，返回 success:false + 中文原因） */
+export const memePackDelete = (id: string) =>
+  apiSoft<{ success: boolean; id?: string; source?: string; character?: string | null; trash?: string; message?: string; restart?: { ok?: boolean; skipped?: boolean; message?: string } }>(
+    '/bridge/meme-packs/delete', { method: 'POST', body: JSON.stringify({ id }) });
+/** 角色 ↔ 包绑定（写进桥 config.json 的 social.meme.personaPacks；空数组 = 解绑） */
+export const memePackBind = (character: string, packs: string[]) =>
+  apiSoft<{ success: boolean; character?: string; packs?: string[]; path?: string; backup?: string; unknown?: string[]; localOnly?: boolean; message?: string }>(
+    '/bridge/meme-packs/bind', { method: 'POST', body: JSON.stringify({ character, packs }) });
+
 /* 某人最近发过的消息(画像档案历史消息) */
 export interface PersonMsg { conv: string; sender: string; content: string; kind: string; ts: string; tsMs: number; }
 export const getPersonMessages = (uid: string, limit = 20) =>

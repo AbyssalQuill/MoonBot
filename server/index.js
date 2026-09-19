@@ -4,7 +4,8 @@ import { Client } from 'ssh2';
 import { createServer, connect } from 'net';
 import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
-import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync, renameSync, chmodSync } from 'fs';
+import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync, renameSync, chmodSync, rmSync } from 'fs';
+import { inflateRawSync } from 'zlib';
 import { join, dirname, extname, basename, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { fileURLToPath } from 'url';
@@ -3808,6 +3809,491 @@ app.post('/api/bridge/stickers/upload', async (req, res) => {
       await startDispatcher('bridge-local', loadConfig());
     } catch (e) { console.error('[stickers upload] bridge restart:', e.message); }
     res.json({ success: true, count: created.length, stickers: created, dir });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+/* ================= 内置表情包（meme pack）管理 =================
+ * 一份 pack = 一个目录：manifest.json + index.db(SQLite) + memes/<tag>/<文件名>.<ext>
+ * 三个存放位置都要认（磁盘约定已冻结，别改）：
+ *   1) <runtimeRoot>/meme/<packId>/                       出厂包（whale-fanart-001 就在这，只读为主、**不可删**）
+ *   2) <runtimeRoot>/meme-packs/<packId>/                 **上传的包落这里**
+ *   3) <charactersDir>/<角色slug>/meme-packs/<packId>/    角色专属包
+ * 接口：
+ *   GET  /api/bridge/meme-packs         列出三处的包（坏包也列出来：count=null + broken 写清原因）
+ *   POST /api/bridge/meme-packs/upload  base64-in-JSON 上传（zip 或文件夹）→ 规整建索引 → 重启桥
+ *   POST /api/bridge/meme-packs/delete  删上传包/角色包（出厂包只能禁用不能删）
+ *   POST /api/bridge/meme-packs/bind    角色 ↔ 包绑定写进桥 config.json 的 social.meme.personaPacks
+ * 为什么上传要"先落临时目录 → 跑规整脚本 → 再 rename 到位"：
+ *   index.db 里的 path/file_name 与磁盘上的文件必须一一对得上（qq_meme_search 按表搜、qq_send_meme 按表里的
+ *   path 发图 —— 对不上就是"搜得到、发不出"）。规整脚本负责"改文件名 + 重建表 + 对账"，它跑不通就整份留在
+ *   .upload-* 里，正式目录一个字节都不动。
+ * ============================================================== */
+const MEME_IMG_EXTS = new Set(['.webp', '.png', '.jpg', '.jpeg', '.gif']);
+/** 包名/角色 slug 白名单（它会拼进磁盘路径，只允许这三类安全字符） */
+const MEME_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+/** 出厂包根（随包分发） */
+const memeFactoryRoot = () => join(RUNTIME_ROOT, 'meme');
+/** 上传包的目标根 */
+const memeUploadRoot = () => join(RUNTIME_ROOT, 'meme-packs');
+
+/** node:sqlite 是内置模块，但只在真的要读索引时才 import —— 老 node 上没有它，也只是"读不了 count"，
+ *  不该让整个管理端起不来（所以这里做惰性 + 可重试的加载）。 */
+let sqliteModulePromise = null;
+function loadSqlite() {
+  if (!sqliteModulePromise) {
+    sqliteModulePromise = import('node:sqlite').catch((e) => {
+      sqliteModulePromise = null;
+      throw new Error('这个 Node 没有内置 node:sqlite，读不了 index.db（' + (e?.message ?? e) + '）');
+    });
+  }
+  return sqliteModulePromise;
+}
+
+/** 真读 index.db 数图 + 取 tag。读不到就 count=null + broken 写清原因 —— **不要**因此不返回这个包：
+ *  用户需要看到"坏包"（比如手工塞进去、复制到一半断电的目录），好去修或删。 */
+async function readMemePackIndex(packDir) {
+  const dbPath = join(packDir, 'index.db');
+  if (!existsSync(dbPath)) return { count: null, tags: [], broken: 'index.db 缺失或为空' };
+  try { if (!statSync(dbPath).size) return { count: null, tags: [], broken: 'index.db 缺失或为空' }; } catch { /* 下面统一按读失败报 */ }
+  let db = null;
+  try {
+    const { DatabaseSync } = await loadSqlite();
+    db = new DatabaseSync(dbPath, { readOnly: true });          // 只读打开：看包绝不改包
+    const n = Number(db.prepare('SELECT COUNT(*) AS n FROM memes').get()?.n ?? 0);
+    const tags = db.prepare('SELECT tag, COUNT(*) AS c FROM memes GROUP BY tag ORDER BY tag').all().map((r) => String(r.tag ?? ''));
+    return { count: n, tags, ...(n ? {} : { broken: 'index.db 里一条图都没有' }) };
+  } catch (e) {
+    return { count: null, tags: [], broken: `index.db 读不了：${e?.message ?? e}` };
+  } finally {
+    try { db?.close(); } catch { /* 只读句柄，关不掉也不影响列表 */ }
+  }
+}
+
+/** 数磁盘上真实的图片张数（跳过隐藏目录：.dedup / 备份目录不算；不看表，所以能戳穿"表里有、磁盘没有"） */
+function countMemeImages(dir) {
+  let n = 0;
+  const walk = (d) => {
+    let ents = [];
+    try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      if (e.name.startsWith('.')) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (MEME_IMG_EXTS.has(extname(e.name).toLowerCase())) n += 1;
+    }
+  };
+  walk(dir);
+  return n;
+}
+
+/** 某个根目录下的 pack 目录：跳过隐藏目录（.upload-* 临时目录、.dedup）与备份/回收目录 */
+function listMemePackDirs(root) {
+  if (!root || !existsSync(root)) return [];
+  let ents = [];
+  try { ents = readdirSync(root, { withFileTypes: true }); } catch { return []; }
+  return ents
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !/\.(bak|deleted)-/.test(e.name))
+    .map((e) => join(root, e.name));
+}
+
+/** 角色专属包的搜索根：角色库那套根 + 每个角色下的 meme-packs/（与「角色库导入」同一份目录语义） */
+function memeCharacterRoots() { return [...new Set(findCharacterRoots())]; }
+
+/** 上传到角色包时用哪个根：优先**已经存在**的角色库根（桥目录下的 characters），都没有就现场建第一个 */
+function memeCharacterRootForWrite() {
+  const roots = memeCharacterRoots();
+  const hit = roots.find((r) => existsSync(r));
+  const root = hit || roots[0] || join(findBridgeDir(), 'characters');
+  if (!existsSync(root)) mkdirSync(root, { recursive: true });
+  return root;
+}
+
+/** 扫三处把包目录找齐（**不读 db**，GET 列表 / 删除 / 绑定共用同一份口径） */
+function scanMemePackDirs() {
+  const factoryRoot = memeFactoryRoot();
+  const uploadRoot = memeUploadRoot();
+  const packs = [];
+  for (const d of listMemePackDirs(factoryRoot)) packs.push({ id: basename(d), dir: d, source: 'factory', character: null });
+  for (const d of listMemePackDirs(uploadRoot)) packs.push({ id: basename(d), dir: d, source: 'global', character: null });
+  const charPackDirs = [];
+  for (const root of memeCharacterRoots()) {
+    if (!existsSync(root)) continue;                            // 根不存在 = 跳过，不报错
+    let slugs = [];
+    try { slugs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => e.name); } catch { continue; }
+    for (const slug of slugs) {
+      const packsDir = join(root, slug, 'meme-packs');
+      if (!existsSync(packsDir)) continue;
+      charPackDirs.push(packsDir);
+      for (const d of listMemePackDirs(packsDir)) packs.push({ id: basename(d), dir: d, source: 'character', character: slug });
+    }
+  }
+  return { packs, charPackDirs, factoryRoot, uploadRoot };
+}
+
+/** 桥 config.json 里的「角色 ↔ 包」绑定表（social.meme.personaPacks）；读不到就回空表 */
+function readMemeBindings() {
+  try {
+    const table = readBridgeCfg()?.social?.meme?.personaPacks;
+    if (!table || typeof table !== 'object' || Array.isArray(table)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(table)) if (Array.isArray(v)) out[k] = v.map(String);
+    return out;
+  } catch { return {}; }
+}
+
+/** 规整/建索引脚本的位置：优先桥目录里的那份（与线上桥同源），再退回运行目录 */
+function findMemeRelayoutScript() {
+  const cands = [
+    join(findBridgeDir(), 'tools', 'relayout-meme-pack.mjs'),
+    join(RUNTIME_ROOT, 'qq-bridge', 'tools', 'relayout-meme-pack.mjs'),
+    join(RUNTIME_ROOT, 'runtime', 'qq-bridge', 'tools', 'relayout-meme-pack.mjs'),
+    join(RUNTIME_ROOT, 'tools', 'relayout-meme-pack.mjs'),
+  ];
+  return cands.find((p) => existsSync(p)) || '';
+}
+
+/** 用 node 跑规整脚本（**必须 node，别用 PowerShell**）：按 tag 归位 + 重建 index.db + 写 manifest + 对账 */
+function runMemeRelayout(packDir) {
+  const script = findMemeRelayoutScript();
+  if (!script) {
+    return { ok: false, output: '', message: '没找到规整脚本 qq-bridge/tools/relayout-meme-pack.mjs（找过桥目录与运行目录的 tools/）；文件已留在临时目录里没动' };
+  }
+  const spawnIt = (exe) => spawnSync(exe, [script, packDir], { encoding: 'utf8', windowsHide: true, timeout: 180000, maxBuffer: 16 * 1024 * 1024 });
+  // 打包版的 process.execPath 就是随包的 qbm-node.exe（本身就是 node）；万一不是，再退回 PATH 里的 node
+  let r = spawnIt(process.execPath);
+  if (r.error) r = spawnIt('node');
+  const output = [r.stdout, r.stderr].filter(Boolean).join('\n').trim();
+  if (r.error) return { ok: false, output, message: '规整脚本没跑起来：' + r.error.message };
+  if (r.status !== 0) return { ok: false, output, message: `规整脚本退出码 ${r.status}${r.signal ? `（信号 ${r.signal}）` : ''}` };
+  return { ok: true, output, message: '已规整并重建索引' };
+}
+
+/** 上传成功后要不要顺手重启本机桥？
+ *  【为什么不无条件照抄 stickers/upload 的两行】stopInstance('bridge-local') 最后一步是
+ *  killByCmdline('bridge.js') —— 它按**命令行关键字**杀所有 node/qbm-node 进程，而 startDispatcher
+ *  又会用 findBridgeDir() 重新拉起一座桥。要是发起上传的这个管理端进程根本不认得本机桥（典型场景：
+ *  管理端在仓库/另一个目录里跑，而线上桥在 runtime 里跑），这两步就会**杀掉一座不归自己管的桥、
+ *  再拉起一座目录不对的桥**。所以只有本管理器确实在管这座桥（有运行记录，或状态机认为它 running）才重启，
+ *  否则如实告诉用户"没重启，新包会在桥下次启动时生效"。 */
+function localBridgeRestartCheck() {
+  if (runtimes.has('bridge-local')) return { ok: true, why: '' };
+  if (phaseInfo('bridge-local')?.phase === 'running') return { ok: true, why: '' };
+  return { ok: false, why: '本管理端没看到本机桥在运行，跳过了重启（新包会在桥下次启动时生效；想立刻生效就到首页点一次「重启桥」）' };
+}
+
+/** 上传路径归一化：一律 '/'，去掉 './'；**返回空串 = 不接受**（绝对路径 / 含 '..' 的 zip-slip） */
+function normMemeRelPath(p) {
+  const s = String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  if (!s) return '';
+  if (s.startsWith('/') || /^[A-Za-z]:/.test(s)) return '';
+  const parts = s.split('/').filter((x) => x && x !== '.');
+  if (!parts.length || parts.some((x) => x === '..')) return '';
+  return parts.join('/');
+}
+
+/** zip 条目名的编码：有 UTF-8 标记就按 UTF-8；否则先按 UTF-8 试，出现替换字符再按 GBK
+ *  （国内压缩包常见 GBK 文件名，直接按 UTF-8 读会变成乱码 tag） */
+function decodeZipName(bytes, isUtf8) {
+  if (isUtf8) return bytes.toString('utf8');
+  const utf8 = bytes.toString('utf8');
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try { return new TextDecoder('gbk').decode(bytes); } catch { return utf8; }
+}
+
+/** 最小 ZIP 读取器：手工解析中央目录，数据用 node:zlib 的 inflateRawSync 解压。
+ *  只支持 stored(0) / deflate(8)（Windows 资源管理器、7-Zip、macOS 归档默认就是这两种）；
+ *  加密项、zip64、其它压缩方式一律明确报错，不做半吊子解析。
+ *  **zip-slip 防护**：条目名含 '..' 或绝对路径（'/x'、'C:\x'）直接抛错 —— 整包拒绝，一个文件都不落盘。 */
+function readMemeZipEntries(buf) {
+  let eocd = -1;
+  const floor = Math.max(0, buf.length - 66000);                 // 中央目录结尾可能带注释，从尾部往前找
+  for (let i = buf.length - 22; i >= floor; i -= 1) { if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; } }
+  if (eocd < 0) throw new Error('不是有效的 zip（找不到中央目录结尾；zip64 / 分卷压缩包不支持，请重新打包）');
+  const total = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const out = [];
+  for (let i = 0; i < total; i += 1) {
+    if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) throw new Error(`zip 中央目录损坏（第 ${i + 1} 项）`);
+    const flags = buf.readUInt16LE(off + 8);
+    const method = buf.readUInt16LE(off + 10);
+    const compSize = buf.readUInt32LE(off + 20);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localOff = buf.readUInt32LE(off + 42);
+    const name = decodeZipName(buf.subarray(off + 46, off + 46 + nameLen), (flags & 0x800) !== 0);
+    off += 46 + nameLen + extraLen + commentLen;
+    if (name.endsWith('/')) continue;                            // 目录项：跳过（目录按图片路径重建）
+    if (flags & 0x1) throw new Error(`zip 里的 ${name} 是加密的，读不了`);
+    if (method !== 0 && method !== 8) throw new Error(`zip 里的 ${name} 用了不支持的压缩方式（method=${method}）`);
+    const rel = normMemeRelPath(name);
+    if (!rel) throw new Error(`zip 里有不安全的路径（zip-slip），已整包拒绝：${name}`);
+    if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== 0x04034b50) throw new Error('zip 条目损坏：' + name);
+    // 数据起点要用**本地文件头**自己的 name/extra 长度（可能与中央目录里的不一致）
+    const start = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
+    const raw = buf.subarray(start, start + compSize);
+    if (raw.length !== compSize) throw new Error('zip 条目数据不完整：' + name);
+    out.push({ name: rel, data: method === 0 ? Buffer.from(raw) : inflateRawSync(raw) });
+  }
+  return out;
+}
+
+/** GET /api/bridge/meme-packs —— 列出三处能认出来的包（含坏包） */
+app.get('/api/bridge/meme-packs', async (_req, res) => {
+  try {
+    const { packs: dirs, charPackDirs, factoryRoot, uploadRoot } = scanMemePackDirs();
+    const packs = [];
+    for (const it of dirs) {
+      const idx = await readMemePackIndex(it.dir);
+      let manifest = null;
+      try { manifest = readJsonSafe(join(it.dir, 'manifest.json')); } catch { manifest = null; }
+      let mtimeMs = 0;
+      try { mtimeMs = statSync(it.dir).mtimeMs; } catch { /* 拿不到时间就 0，不影响列表 */ }
+      packs.push({
+        id: it.id, dir: it.dir, source: it.source, character: it.character,
+        count: idx.count, tags: idx.tags, imageCount: countMemeImages(it.dir),
+        manifest, mtimeMs,
+        ...(idx.broken ? { broken: idx.broken } : {}),
+      });
+    }
+    // 排序：出厂 → 角色 → 上传，同源按包名（界面上先看见自带的那份）
+    const rank = { factory: 0, character: 1, global: 2 };
+    packs.sort((a, b) => (rank[a.source] - rank[b.source]) || String(a.id).localeCompare(String(b.id)));
+    res.json({
+      success: true,
+      dirs: {
+        global: existsSync(factoryRoot) ? [factoryRoot] : [],      // 出厂包根（不可用就跳过，不报错）
+        packs: existsSync(uploadRoot) ? [uploadRoot] : [],         // 上传包根
+        characters: charPackDirs,
+      },
+      packs,
+      bindings: readMemeBindings(),                                // 额外字段：角色↔包绑定（前端要显示勾选状态）
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+/** POST /api/bridge/meme-packs/upload —— base64-in-JSON（zip 或文件夹）→ 规整 → 落盘 → 重启桥
+ *  body: { packId?, character?, files?: [{ path, data }], zip?: { name, data } } */
+app.post('/api/bridge/meme-packs/upload', async (req, res) => {
+  const body = req.body ?? {};
+  try {
+    const character = String(body.character ?? '').trim();
+    if (character && !MEME_ID_RE.test(character)) {
+      return res.status(400).json({ success: false, message: '角色名只能用 A-Z a-z 0-9 . _ - ，长度 1~64' });
+    }
+    const rawPackId = String(body.packId ?? '').trim();
+    if (rawPackId && !MEME_ID_RE.test(rawPackId)) {
+      return res.status(400).json({ success: false, message: '包名只能用 A-Z a-z 0-9 . _ - ，长度 1~64（例：my-pack）' });
+    }
+    const files = Array.isArray(body.files) ? body.files : [];
+    const zip = body.zip && typeof body.zip === 'object' ? body.zip : null;
+    if (!files.length && !zip) {
+      return res.status(400).json({ success: false, message: '没收到文件：选一个 .zip，或选一个装着图片的文件夹' });
+    }
+
+    /* ---------- 1) 先在内存里还原成一棵树 + 全套校验（到这里一个字节都还没落盘） ---------- */
+    const tree = new Map();                                       // 归一化相对路径 → Buffer
+    const skipped = [];                                          // 非图片文件（含 __MACOSX/.DS_Store/Thumbs.db）
+    let received = 0;
+    try {
+      const accept = (rawPath, buf) => {
+        const rel = normMemeRelPath(rawPath);
+        if (!rel) throw new Error(`路径不安全（zip-slip / 绝对路径），已整包拒绝：${rawPath}`);
+        const base = basename(rel);
+        if (/^__MACOSX\//i.test(rel) || base === '.DS_Store' || base === 'Thumbs.db' || base.startsWith('._')) { skipped.push(rel); return; }
+        if (!MEME_IMG_EXTS.has(extname(rel).toLowerCase())) { skipped.push(rel); return; }
+        if (!buf?.length) { skipped.push(rel + '（空文件）'); return; }
+        tree.set(rel, buf);
+      };
+      if (zip) {
+        const raw = Buffer.from(String(zip.data ?? '').replace(/^data:[^;]+;base64,/, ''), 'base64');
+        if (!raw.length) throw new Error('zip 内容是空的');
+        for (const en of readMemeZipEntries(raw)) { received += 1; accept(en.name, en.data); }
+      }
+      for (const f of files) {
+        received += 1;
+        accept(f?.path ?? f?.name ?? '', Buffer.from(String(f?.data ?? '').replace(/^data:[^;]+;base64,/, ''), 'base64'));
+      }
+    } catch (e) {
+      // 校验不过：直接 400，磁盘上不留任何东西（连临时目录都没建）
+      return res.status(400).json({ success: false, message: String(e?.message ?? e) });
+    }
+    if (!tree.size) {
+      return res.status(400).json({
+        success: false,
+        message: `一个图片都没有：只收 webp/png/jpg/jpeg/gif${skipped.length ? `（跳过了 ${skipped.length} 个非图片文件）` : ''}`,
+        report: { received, images: 0, skipped: skipped.length, skippedNames: skipped.slice(0, 20) },
+      });
+    }
+
+    /* ---------- 2) 自动判定 pack 根：所有图都在同一个顶层目录下 → 把这层剥掉 ----------
+     * 例：zip 里是 my-pack/happy/xx.webp → 真正的包根是 my-pack/，落盘时不能多套一层。 */
+    const imgs = [...tree.keys()];
+    const tops = new Set(imgs.map((p) => p.split('/')[0]));
+    let stripped = '';
+    if (tops.size === 1 && imgs.every((p) => p.split('/').length > 1 && p.split('/').length <= 4)) {
+      stripped = [...tops][0];
+      const next = new Map();
+      for (const [k, v] of tree) next.set(k.slice(stripped.length + 1), v);
+      tree.clear();
+      for (const [k, v] of next) tree.set(k, v);
+    }
+    const autoId = (s) => { const t = String(s ?? '').trim(); return MEME_ID_RE.test(t) ? t : ''; };
+    const packId = rawPackId
+      || autoId(stripped)
+      || autoId(String(zip?.name ?? '').replace(/\.zip$/i, ''))
+      || `meme-pack-${Date.now()}`;
+
+    /* ---------- 3) 落临时目录（正式目录此时还没动） ---------- */
+    const rootDir = character ? join(memeCharacterRootForWrite(), character, 'meme-packs') : memeUploadRoot();
+    const targetDir = join(rootDir, packId);
+    if (!existsSync(rootDir)) mkdirSync(rootDir, { recursive: true });
+    const tempDir = join(rootDir, `.upload-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+    mkdirSync(tempDir, { recursive: true });
+    for (const [rel, buf] of tree) {
+      const dst = join(tempDir, rel);
+      mkdirSync(dirname(dst), { recursive: true });
+      writeFileSync(dst, buf);
+    }
+
+    /* ---------- 4) 规整 + 建索引（跑不通就保留临时目录，绝不污染正式目录） ---------- */
+    const fix = runMemeRelayout(tempDir);
+    const baseReport = {
+      received, images: tree.size, skipped: skipped.length, skippedNames: skipped.slice(0, 20),
+      skippedMore: Math.max(0, skipped.length - 20), deduped: 0, backup: '', relayoutOutput: fix.output,
+    };
+    if (!fix.ok) {
+      return res.status(500).json({
+        success: false, keptTemp: true, tempDir, packId,
+        message: `${fix.message}；收到的图片留在临时目录 ${tempDir} 里没动（正式目录没有被改）`,
+        report: baseReport,
+      });
+    }
+
+    /* ---------- 5) 就位：老包先改名备份，再整体 rename（不直接删用户数据） ---------- */
+    let backup = '';
+    if (existsSync(targetDir)) {
+      backup = `${packId}.bak-${Date.now()}`;
+      try { renameSync(targetDir, join(rootDir, backup)); }
+      catch (e) { return res.status(500).json({ success: false, keptTemp: true, tempDir, packId, message: `旧包备份失败（${e.message}），没有覆盖它`, report: baseReport }); }
+    }
+    try { renameSync(tempDir, targetDir); }
+    catch (e) {
+      if (backup) { try { renameSync(join(rootDir, backup), targetDir); } catch { /* 还原失败只能如实报告 */ } }
+      return res.status(500).json({ success: false, keptTemp: true, tempDir, packId, message: '就位失败（可能是桥正占用文件）：' + e.message, report: baseReport });
+    }
+
+    /* ---------- 6) 回读新包（count/tags 一律以**真读 index.db** 为准，不信中间变量） ---------- */
+    const idx = await readMemePackIndex(targetDir);
+    const count = idx.count ?? 0;
+    const report = {
+      ...baseReport,
+      deduped: Math.max(0, tree.size - count),                     // 规整脚本会把同名同内容的副本挪进 .dedup/
+      backup,
+    };
+
+    /* ---------- 7) 重启本机桥让新包立刻生效（重启失败不算上传失败） ---------- */
+    let restart = { ok: false, skipped: true, message: '未重启' };
+    try {
+      const chk = localBridgeRestartCheck();
+      if (!chk.ok) restart = { ok: false, skipped: true, message: chk.why };
+      else {
+        await stopInstance('bridge-local');
+        await startDispatcher('bridge-local', loadConfig());
+        restart = { ok: true };
+      }
+    } catch (e) { restart = { ok: false, message: String(e?.message ?? e) }; }
+
+    res.json({ success: true, packId, dir: targetDir, count, tags: idx.tags ?? [], report, restart });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+/** POST /api/bridge/meme-packs/delete —— 只删上传包 / 角色包；出厂包只能禁用不能删
+ *  删除前先 rename 成 .deleted-<时间戳>，避免"点错了就没了"（同名目录在回收站里还能捞回来）。 */
+app.post('/api/bridge/meme-packs/delete', async (req, res) => {
+  try {
+    const id = String(req.body?.id ?? '').trim();
+    if (!id) return res.status(400).json({ success: false, message: '缺少 id（要删哪个包）' });
+    if (!MEME_ID_RE.test(id)) return res.status(400).json({ success: false, message: '包名不合法（只允许 A-Z a-z 0-9 . _ -）' });
+    const inFactory = existsSync(join(memeFactoryRoot(), id));
+    const hit = scanMemePackDirs().packs.find((p) => p.id === id && p.source !== 'factory');
+    if (!hit) {
+      if (inFactory) return res.status(400).json({ success: false, message: '出厂表情包只能禁用不能删（它在 <runtime>/meme/ 里，删了下次更新还会回来）' });
+      return res.status(404).json({ success: false, message: `没找到可删除的包：${id}（出厂包不在可删范围内）` });
+    }
+    const trash = `${hit.dir}.deleted-${Date.now()}`;
+    try { renameSync(hit.dir, trash); }
+    catch (e) { return res.status(500).json({ success: false, message: '删不掉（可能被占用）：' + e.message }); }
+    let removed = true;
+    try { rmSync(trash, { recursive: true, force: true }); } catch { removed = false; }
+    // 桥是把包读进内存的，删完也让它重新载入（重启失败不影响"已删掉"这个事实）
+    let restart = { ok: false, skipped: true, message: '未重启' };
+    try {
+      const chk = localBridgeRestartCheck();
+      if (!chk.ok) restart = { ok: false, skipped: true, message: chk.why };
+      else {
+        await stopInstance('bridge-local');
+        await startDispatcher('bridge-local', loadConfig());
+        restart = { ok: true };
+      }
+    } catch (e) { restart = { ok: false, message: String(e?.message ?? e) }; }
+    res.json({
+      success: true, id, source: hit.source, character: hit.character,
+      trash: removed ? '' : trash,                                     // 没删干净时把回收目录告诉用户
+      message: removed ? '已删除' : `已改名到 ${trash}，但没删干净（可以先留着，不影响使用）`,
+      restart,
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+/** POST /api/bridge/meme-packs/bind —— 角色 ↔ 包绑定，写进桥 config.json 的 social.meme.personaPacks
+ *  body: { character, packs: string[] }（空数组 = 解绑）
+ *  【只在本机生效】绑定要落到**桥自己的 config.json**（与桥同源的那份）；这台机器上找不到它，
+ *  就明确说"仅本机可用"，绝不假装成功。 */
+app.post('/api/bridge/meme-packs/bind', (req, res) => {
+  try {
+    const character = String(req.body?.character ?? '').trim();
+    const raw = Array.isArray(req.body?.packs) ? req.body.packs : null;
+    if (!character) return res.status(400).json({ success: false, message: '缺少角色名（character）' });
+    if (!raw) return res.status(400).json({ success: false, message: '缺少 packs（要一个数组；空数组 = 解绑）' });
+    if (!MEME_ID_RE.test(character)) return res.status(400).json({ success: false, message: '角色名只能用 A-Z a-z 0-9 . _ - ，长度 1~64' });
+    const packs = [...new Set(raw.map((x) => String(x ?? '').trim()).filter(Boolean))];
+    const bad = packs.filter((p) => !MEME_ID_RE.test(p));
+    if (bad.length) return res.status(400).json({ success: false, message: `包名不合法：${bad.slice(0, 5).join('、')}（只允许 A-Z a-z 0-9 . _ -）` });
+
+    const cfgPath = bridgeCfgPath();
+    if (!existsSync(cfgPath)) {
+      return res.status(400).json({
+        success: false, localOnly: true,
+        message: `角色绑定仅本机可用：这台机器上没找到桥的 config.json（找过 ${BRIDGE_DIRS.join('、')}）。服务端模式下请到服务器上改 qq-bridge/config.json。`,
+      });
+    }
+    const rawText = readFileSync(cfgPath, 'utf-8');
+    const hasBom = rawText.charCodeAt(0) === 0xFEFF;        // 历史上被误写成带 BOM 的 UTF-8：写回时原样保留
+    let cfg = null;
+    try { cfg = JSON.parse(hasBom ? rawText.slice(1) : rawText); }
+    catch (e) { return res.status(500).json({ success: false, message: 'config.json 解析失败：' + e.message }); }
+    const social = (cfg.social && typeof cfg.social === 'object') ? cfg.social : (cfg.social = {});
+    const meme = (social.meme && typeof social.meme === 'object') ? social.meme : (social.meme = {});
+    const table = (meme.personaPacks && typeof meme.personaPacks === 'object' && !Array.isArray(meme.personaPacks)) ? meme.personaPacks : (meme.personaPacks = {});
+    table[character] = packs;                               // 保留其它字段（深合并只动这一格）
+
+    // 写盘：临时文件 → 备份 → rename 原子替换（与 /api/bridge/config 同一套，桥侧 fs.watch 不会读到半截 JSON）
+    const text = JSON.stringify(cfg, null, 2) + (/\n$/.test(hasBom ? rawText.slice(1) : rawText) ? '\n' : '');
+    const tmp = `${cfgPath}.tmp-memebind`;
+    writeFileSync(tmp, (hasBom ? '\uFEFF' : '') + text, 'utf-8');
+    let backup = '';
+    try { backup = `${cfgPath}.bak-memebind-${Date.now()}`; copyFileSync(cfgPath, backup); } catch { backup = ''; }
+    renameSync(tmp, cfgPath);
+
+    // 绑定里写了根本找不到的包：照样存（用户可能先绑后传），但如实提醒
+    const known = new Set(scanMemePackDirs().packs.map((p) => p.id));
+    const unknown = packs.filter((p) => !known.has(p));
+    res.json({
+      success: true, character, packs, path: cfgPath, backup, unknown,
+      message: `已把「${character}」的绑定存进桥配置${backup ? `（原配置备份在 ${basename(backup)}）` : ''}`
+        + (unknown.length ? `；其中 ${unknown.join('、')} 现在没找到这个包（先绑后传也可以）` : ''),
+    });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 

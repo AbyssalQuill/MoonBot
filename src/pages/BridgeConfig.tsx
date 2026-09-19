@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
-import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, type CharacterEntry, type ConfigProfile, type ActivityTarget } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
-import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic } from 'lucide-react';
+import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen } from 'lucide-react';
 import NapcatTokensCard from '../components/NapcatTokensCard';
 import NumInput from '../components/NumInput';
 
@@ -168,6 +168,10 @@ const LABEL: Record<string, string> = {
   injectMax: '最多注入几条黑话', injectIntoPrompt: '把黑话写进提示词',
   learnerPreset: '学习会话的人设预设', 'slang.workspaceTitle': '学习工作区名称',
   autoResearch: '自动联网考究', charactersDir: '角色库目录',
+  // 内置表情包（social.meme）：多包 + 角色绑定，详见 README 的「内置表情包（meme-packs）」一节
+  'social.meme': '内置表情包（多包）', 'social.meme.enabled': '内置表情包总开关',
+  'social.meme.packs': '只搜这几个表情包', 'social.meme.personaPacks': '角色专属表情包绑定',
+  'social.meme.activePersona': '当前角色（自动写入）',
   // 空闲会话自动归档（social.sessionArchive）
   intervalMs: '巡检间隔（毫秒）', idleMinutes: '闲置多少分钟算空闲',
   batchMax: '单批最多归档几个', pruneDays: '归档保留天数',
@@ -549,7 +553,19 @@ function mcpLabel(fullName: string) {
   'slang.workspaceTitle': '学习工作区名称（桥里的键名 slang.workspaceTitle）：给黑话学习的那个会话工作区起的名字，只是显示用，不影响行为。',
   autoResearch: '自动联网考究（桥里的键名 slang.autoResearch，默认开）：提取到新词后自动联网查它的含义，查不到就留成"未确认"等下次。',
   charactersDir: '角色库目录（桥里的键名 social.charactersDir）：一个角色 = 一个子目录 = 一个角色包（SKILL.md / personality.md / manifest.json 等）。'
-    + '留空 = 用默认目录（用户主目录下的 Downloads/characters/characters）。四个角色卡工具都**只读**这个目录，不会写盘。',
+    + '出厂自带 21 个角色包（另有 1 个散装卡）；留空 = 用默认目录（用户主目录下的 Downloads/characters/characters）。四个角色卡工具都**只读**这个目录，不会写盘。',
+  // —— 内置表情包（social.meme）：三处包目录 + 角色绑定 ——
+  'social.meme': '内置表情包（桥里的键名 social.meme）：一份表情包 = 一个目录（manifest.json + index.db + memes/<分类>/图片）。'
+    + '桥会同时认三个位置：出厂包（运行目录 meme/）、后装与上传的包（运行目录 meme-packs/）、角色专属包（角色库里的 <角色>/meme-packs/）。通常不用手改这一段，'
+    + '在「常用设置」的「内置表情包」卡里上传与勾选即可。',
+  'social.meme.enabled': '内置表情包总开关（桥里的键名 social.meme.enabled，默认开）：关掉时 qq_meme_search / qq_send_meme **干脆不注册**给模型'
+    + '（工具列表里直接消失、描述不再占额度），不是到调用时才拒绝。',
+  'social.meme.packs': '只搜这几个表情包（桥里的键名 social.meme.packs）：填包 id 数组（如 ["whale-fanart-001"]）；'
+    + '留空 = 出厂包 + 上传的包 + 角色专属包全都搜。非空时除了点名的包，当前角色绑定的包也一定在搜索范围里。',
+  'social.meme.personaPacks': '角色专属表情包绑定（桥里的键名 social.meme.personaPacks）：形如 {"atri": ["atri-pack-001"]}。'
+    + '两份包里有同名表情时，优先用这里绑定的那一份。一般不用手写，在「内置表情包」卡里按角色勾选。',
+  'social.meme.activePersona': '当前角色（桥里的键名 social.meme.activePersona）：记最近一次从角色库导入进 persona.md 的角色，用来决定哪份角色专属表情包排最前。'
+    + '由管理端导入角色卡时自动写入，不用手改。',
   // —— 同名键按路径区分说明 ——
   'social.agentPreset': '社交会话用的人设预设（桥里的键名 social.agentPreset，默认 default）：只作用于社交模块建的会话；'
     + '「基础与会话」里那个同名的项是全局预设，两个都在时以社交模块这个为准。',
@@ -1295,6 +1311,12 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
                 <button className="btn btn-soft btn-sm" disabled={uploading} onClick={() => openCharLib()}>
                   <Library size={14} /> 角色库导入
                 </button>
+                {/* 【2026-09-20】表情包卡在「常用设置」页（挨着上面那张「表情包」卡）；这里给个入口，
+                    省得主人记得"它到底在哪一页"——点它切页并滚到那张卡。 */}
+                <button className="btn btn-soft btn-sm" title="内置表情包：传包 / 给角色绑包（在「常用设置」页）"
+                  onClick={() => { setTab('common'); setTimeout(() => document.getElementById('meme-packs-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60); }}>
+                  <Layers size={14} /> 内置表情包
+                </button>
                 <span className="upload-hint">.md/.txt 载入编辑器（点右侧保存生效）；.skill.zip/.zip 上传到角色包目录</span>
                 <button className="btn btn-primary btn-sm" disabled={saving} onClick={() => saveCard('persona')}>
                   {saving ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存人设
@@ -1775,6 +1797,9 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
       <GroupCard title="私聊打字等待（不抢话 / 智能接话）" path="social.typing" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="私聊里先看对方是不是正在打字：正在输入就先等 ta 打完再回（不抢话）；对方不停发消息时打字状态会一直延续；每次唤醒再掷一次骰子，命中就插话接上（智能接话）。等待期间到的消息全部排队、最后合并成一次发给模型，省注入轮数。" />
       <StickerCard cfg={cfg} ch={ch} onHelp={onHelp} uploadStickers={uploadStickers} />
+      {/* 【2026-09-20 主人要求】内置表情包（meme pack）：包列表 / 上传（zip 或文件夹）/ 角色绑定 / 删除。
+          紧挨上面那张「表情包」卡：同一件事的两半 —— 上面管"用不用表情、多久同步"，这张管"库里有哪些包"。 */}
+      <MemePacksCard remote={remote} />
       <GroupCard title="静默群聊" path="social" only={['deepsleep', 'deepsleepGroups']} cfg={cfg} ch={ch} onHelp={onHelp}
         desc="想省钱/想安静：全群静默（总开关），或只让名单里的个别群静默。" />
 
@@ -2103,6 +2128,275 @@ function StickerCard({ cfg, ch, onHelp, uploadStickers }: {
           {busy ? <Loader2 size={14} className="spin" /> : <Upload size={14} />} 上传表情包图库
         </button>
         <span className="upload-hint">选本地图片/动图入库，AI 也能用（存到 stickers-upload/ 并自动重启桥接）</span>
+      </div>
+    </div>
+  );
+}
+
+/** 包来源的中文说法（出厂的那份只能看不能删，上传的与角色专属的可以删） */
+const MEME_SOURCE_LABEL: Record<string, string> = { factory: '出厂', global: '全局', character: '角色专属' };
+
+/* ================= 内置表情包（meme-packs） =================
+ * 一张卡管四件事：① 看包（连"坏包"也要看得见）② 传包（zip 或文件夹两条路）③ 给角色绑包 ④ 删包。
+ *
+ * 磁盘约定（已冻结，别改）：一份 pack = 一个目录，
+ *   <包目录>/manifest.json + index.db(SQLite) + memes/<分类>/<文件名>.<ext>（webp/png/jpg/jpeg/gif）
+ * 三个位置：① <runtime>/meme/<包名>/ 出厂包（自带那份）② <runtime>/meme-packs/<包名>/ 上传的包落这
+ *          ③ <charactersDir>/<角色slug>/meme-packs/<包名>/ 某个角色专属的包
+ *
+ * 上传不在前端拼目录：原样把文件交给管理端（POST /api/bridge/meme-packs/upload，base64-in-JSON），
+ * 由后端校验图片 → 落临时目录 → 用桥里的规整脚本重排目录并重建 index.db → 再整体 rename 就位。
+ * 所以"收了几张、入库几张、跳过哪些、有没有备份旧包"全部以后端回的报告为准 —— 界面只如实显示，
+ * 不自己猜一个数字（猜出来的"成功"最容易骗人）。 */
+function MemePacksCard({ remote }: { remote?: { id: string; name?: string } | null }) {
+  const zipRef = useRef<HTMLInputElement>(null);
+  const dirRef = useRef<HTMLInputElement>(null);
+  const [packs, setPacks] = useState<MemePackEntry[]>([]);
+  const [bindings, setBindings] = useState<Record<string, string[]>>({});
+  const [libRoles, setLibRoles] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState('');
+  const [msg, setMsg] = useState<string | null>(null);
+  const [report, setReport] = useState<MemePackUploadReport | null>(null);
+  const [packIdInput, setPackIdInput] = useState('');
+  const [toCharacter, setToCharacter] = useState('');
+  /** 每个角色"正在改但还没保存"的勾选（没改过的角色直接看 bindings） */
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({});
+
+  const load = async () => {
+    setLoading(true); setLoadErr(null);
+    try {
+      const r = await memePacks();
+      if (!r.success) { setLoadErr(r.message || '管理端没给出原因'); setPacks([]); setBindings({}); return; }
+      setPacks(Array.isArray(r.packs) ? r.packs : []);
+      setBindings(r.bindings ?? {});
+    } catch (e: any) { setLoadErr(e?.message || '请求失败'); setPacks([]); setBindings({}); }
+    finally { setLoading(false); }
+  };
+  // 角色行：角色库里扫到的 ∪ 已经有专属包的 ∪ 已经绑过包的（_template 这类模板不算角色）
+  const roleRows = Array.from(new Set([
+    ...libRoles,
+    ...packs.filter((p) => p.character).map((p) => String(p.character)),
+    ...Object.keys(bindings),
+  ])).filter((s) => s && !s.startsWith('_')).sort();
+
+  useEffect(() => {
+    void load();
+    // 角色清单走「角色库导入」那套扫描（只用来给绑定行起名，扫不到也不影响看包/传包）
+    (async () => {
+      try {
+        const r = await listCharacters();
+        setLibRoles((r.characters ?? []).map((c) => c.slug).filter((s) => s && !s.startsWith('_')));
+      } catch { /* 忽略：没有角色库不代表不能用包 */ }
+    })();
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, []);
+
+  /** 文件 → base64（与「表情包图库上传」同一套写法：分块 fromCharCode，避免大文件爆栈） */
+  const toB64 = async (f: File) => {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let bin = ''; const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode(...bytes.subarray(i, i + CH));
+    return btoa(bin);
+  };
+
+  const upload = async (kind: 'zip' | 'folder', fileList: File[]) => {
+    if (!fileList.length) return;
+    setBusy(true); setMsg(null); setReport(null); setStage('');
+    try {
+      const payload: { packId?: string; character?: string; files?: Array<{ path: string; data: string }>; zip?: { name: string; data: string } } = {};
+      if (packIdInput.trim()) payload.packId = packIdInput.trim();
+      if (toCharacter) payload.character = toCharacter;
+      if (kind === 'zip') {
+        const f = fileList[0];
+        setStage(`正在读取 ${f.name}…`);
+        payload.zip = { name: f.name, data: await toB64(f) };
+      } else {
+        // 只挑图片：其它文件传上去也只会被后端算进"跳过"，白占上传体积
+        const imgs = fileList.filter((f) => /\.(webp|png|jpe?g|gif)$/i.test(f.name));
+        if (!imgs.length) { setMsg('这个文件夹里没有 webp / png / jpg / gif 图片'); return; }
+        const total = imgs.reduce((n, f) => n + f.size, 0);
+        if (total > 40 * 1024 * 1024) {
+          setMsg(`这个文件夹里的图有 ${(total / 1048576).toFixed(1)} MB，一次传不完（上限约 40 MB）：请挑一个只装图片的小文件夹，或先压成 zip 再传`);
+          return;
+        }
+        setStage(`正在读取 ${imgs.length} 张图片…`);
+        const files: Array<{ path: string; data: string }> = [];
+        for (const f of imgs) files.push({ path: f.webkitRelativePath || f.name, data: await toB64(f) });
+        payload.files = files;
+        setStage(`正在上传 ${imgs.length} 张图片（约 ${(total / 1048576).toFixed(1)} MB）…`);
+      }
+      if (kind === 'zip') setStage('正在上传…');
+      const r = await memePackUpload(payload);
+      if (!r.success) { setMsg(r.message || '上传失败'); setReport(r.report ?? null); if (r.keptTemp) await load(); return; }
+      const rep = r.report;
+      const restartNote = r.restart?.ok ? '，桥接已重启' : (r.restart?.message ? `；${r.restart.message}` : '');
+      setReport(rep ?? null);
+      setMsg(`已入库「${r.packId}」：${rep?.images ?? 0} 张图`
+        + (rep?.skipped ? `，跳过 ${rep.skipped} 个不是图片的文件` : '')
+        + (rep?.deduped ? `，去掉 ${rep.deduped} 张重复` : '')
+        + (rep?.backup ? `（原来的同名包已备份成 ${rep.backup}）` : '')
+        + restartNote);
+      setPackIdInput('');
+      await load();
+    } catch (e: any) { setMsg('上传失败：' + (e?.message || '')); }
+    finally { setBusy(false); setStage(''); }
+  };
+
+  const del = async (p: MemePackEntry) => {
+    if (!window.confirm(`删掉表情包「${p.id}」？\n\n它所在的目录会先改名成 ${p.id}.deleted-<时间戳> 再删，删错了还能从那个目录里把图捞回来。`)) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await memePackDelete(p.id);
+      if (!r.success) { setMsg(r.message || `没删掉「${p.id}」`); return; }
+      const restartNote = r.restart?.ok ? '，桥接已重启' : (r.restart?.message ? `；${r.restart.message}` : '');
+      setMsg(`已删除「${p.id}」${r.trash ? `（没删干净，目录留在 ${r.trash}）` : ''}${restartNote}`);
+      await load();
+    } catch (e: any) { setMsg('删除失败：' + (e?.message || '')); }
+    finally { setBusy(false); }
+  };
+
+  const saveBind = async (role: string) => {
+    const picked = drafts[role] ?? bindings[role] ?? [];
+    setBusy(true); setMsg(null);
+    try {
+      const r = await memePackBind(role, picked);
+      if (!r.success) { setMsg(r.message || `「${role}」的绑定没保存成功`); return; }
+      setMsg(r.message || `已保存「${role}」的绑定`);
+      await load();
+    } catch (e: any) { setMsg('保存绑定失败：' + (e?.message || '')); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="cfg-card" id="meme-packs-card">
+      <div className="cfg-card-title">内置表情包（meme-packs）</div>
+      <div className="cfg-card-desc">
+        包里的一组图按<b>分类</b>取材（开心 / 生气 / 无奈…），机器人按聊天语境挑着发，比 QQ 收藏表情更好搜、也更贴语境。
+        磁盘上它就是一个个目录：<code>manifest.json</code> + <code>index.db</code> + <code>memes/&lt;分类&gt;/图</code>。
+        出厂那份在 <code>meme/</code> 里（只看不删），你传的包落在 <code>meme-packs/</code>，也能只给某个角色用。
+        {remote ? '这张卡读的是本机那份目录；服务端的包要到服务器上放。' : ''}
+      </div>
+
+      <NoticeBar msg={msg} onClose={() => setMsg(null)} />
+
+      {/* ---------- ① 包列表 ---------- */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}>
+        <b style={{ fontSize: 13 }}>现在的包（{packs.length}）</b>
+        <button className="btn btn-sm" disabled={loading} onClick={() => void load()}>
+          {loading ? <Loader2 size={13} className="spin" /> : <RotateCcw size={13} />} 重新读取
+        </button>
+      </div>
+      {loading && <div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读表情包目录…</div>}
+      {!loading && loadErr && (
+        <div className="lrn-inline-note" style={{ color: '#b3261e' }}>
+          <AlertTriangle size={13} /> 读不到包列表：{loadErr}
+          <button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={() => void load()}>重试</button>
+        </div>
+      )}
+      {!loading && !loadErr && packs.length === 0 && (
+        <div className="lrn-inline-note">还没有表情包。下面用「选 zip 上传」或「选文件夹上传」传一个上来，机器人就能用了。</div>
+      )}
+      {!loading && !loadErr && packs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '4px 0 8px' }}>
+          {packs.map((p) => (
+            <div key={p.dir} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', border: '1px solid var(--nc-content2, #eee)', borderRadius: 8, padding: '7px 10px' }}>
+              <b style={{ fontSize: 13.5, color: '#3d2b4f' }}>{p.id}</b>
+              <span className={`badge ${p.source === 'factory' ? 'badge-soft' : 'badge-success'}`}>{MEME_SOURCE_LABEL[p.source] ?? p.source}</span>
+              {p.character ? <span className="badge badge-soft">角色 {p.character}</span> : null}
+              {p.broken
+                ? <span style={{ fontSize: 12, color: '#b3261e' }}>
+                    <AlertTriangle size={12} style={{ verticalAlign: -2 }} /> 坏包：{p.broken}（磁盘上还有 {p.imageCount} 张图）
+                  </span>
+                : <span style={{ fontSize: 12, color: '#6b5f80' }}>
+                    {p.count} 张 · {p.tags.length} 个分类{p.imageCount !== p.count ? `（磁盘上 ${p.imageCount} 张，跟索引对不上）` : ''}
+                  </span>}
+              <span style={{ fontSize: 11.5, color: '#a99fc0', marginLeft: 'auto', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.dir}>{p.dir}</span>
+              {p.source === 'factory'
+                ? <span style={{ fontSize: 12, color: '#a99fc0' }}>出厂包不可删除</span>
+                : <button className="btn btn-outline-danger btn-sm" disabled={busy} onClick={() => void del(p)}><Trash2 size={13} /> 删除</button>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ---------- ② 上传 ---------- */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+        <input className="input" style={{ maxWidth: 190 }} placeholder="包名（留空自动取名）" value={packIdInput} onChange={(e) => setPackIdInput(e.target.value)} />
+        <select className="input" style={{ maxWidth: 190 }} value={toCharacter} onChange={(e) => setToCharacter(e.target.value)}>
+          <option value="">谁都能用（公共包）</option>
+          {roleRows.map((r) => <option key={r} value={r}>只给 {r} 用</option>)}
+        </select>
+        <input ref={zipRef} type="file" hidden accept=".zip,application/zip,application/x-zip-compressed"
+          onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void upload('zip', [f]); }} />
+        <input ref={dirRef} type="file" hidden multiple {...({ webkitdirectory: '' } as Record<string, string>)}
+          onChange={(e) => { const fs = Array.from(e.target.files ?? []); e.target.value = ''; if (fs.length) void upload('folder', fs); }} />
+        <button className="btn btn-soft-primary btn-sm" disabled={busy} onClick={() => zipRef.current?.click()}>
+          {busy ? <Loader2 size={14} className="spin" /> : <Upload size={14} />} 选 zip 上传
+        </button>
+        <button className="btn btn-soft btn-sm" disabled={busy} onClick={() => dirRef.current?.click()}>
+          {busy ? <Loader2 size={14} className="spin" /> : <FolderOpen size={14} />} 选文件夹上传
+        </button>
+        <span className="upload-hint">
+          {busy ? (stage || '正在处理…') : '包名只能有字母数字和 . _ -；zip 里多套一层目录也没关系（会自动认成包根）'}
+        </span>
+      </div>
+
+      {/* ---------- 逐文件报告 ---------- */}
+      {report && (
+        <div style={{ fontSize: 12.5, margin: '8px 0', padding: '7px 9px', borderRadius: 8, background: 'var(--nc-content2, #f6f4fb)', color: '#4a3d5c' }}>
+          收到 {report.received} 个文件 · 入库 {report.images} 张 · 跳过 {report.skipped} 个
+          {report.deduped ? ` · 去掉重复 ${report.deduped} 张` : ''}
+          {report.backup ? ` · 旧包备份成 ${report.backup}` : ''}
+          {report.skippedNames?.length ? (
+            <div style={{ marginTop: 4, color: '#8a7f9e' }}>
+              跳过的：{report.skippedNames.join('、')}{report.skippedMore ? `…另外还有 ${report.skippedMore} 个` : ''}
+            </div>
+          ) : null}
+          {report.relayoutOutput ? (
+            <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer', color: '#8a7f9e' }}>规整脚本说了什么（排错时看这个）</summary>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11.5, margin: '4px 0 0', maxHeight: 160, overflow: 'auto' }}>{report.relayoutOutput}</pre>
+            </details>
+          ) : null}
+        </div>
+      )}
+
+      {/* ---------- ③ 角色绑定 ---------- */}
+      <div style={{ marginTop: 10 }}>
+        <b style={{ fontSize: 13 }}>哪个角色用哪些包</b>
+        <div style={{ fontSize: 12.5, color: '#8a7f9e', margin: '2px 0 6px' }}>
+          勾上就写进桥的 <code>config.json</code>（<code>social.meme.personaPacks</code>），保存后立刻生效；
+          一个都不勾 = 这个角色只用出厂那份包。
+        </div>
+        {roleRows.length === 0 && (
+          <div className="lrn-inline-note">还没有角色可用：先到「人设」页用「角色库导入」放一个角色进来，或上传时把「谁都能用」改成某个角色。</div>
+        )}
+        {roleRows.map((r) => {
+          const picked = drafts[r] ?? bindings[r] ?? [];
+          const dirty = JSON.stringify(picked) !== JSON.stringify(bindings[r] ?? []);
+          return (
+            <div key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px solid var(--nc-content2, #eee)', borderRadius: 8, padding: '6px 10px', marginBottom: 6 }}>
+              <b style={{ fontSize: 13, color: '#3d2b4f', minWidth: 90 }}>{r}</b>
+              {packs.length === 0 && <span style={{ fontSize: 12.5, color: '#9a8fb0' }}>还没有包可选</span>}
+              {packs.map((p) => (
+                <label key={p.id} style={{ fontSize: 12.5, display: 'flex', gap: 4, alignItems: 'center', color: '#4a3d5c' }}>
+                  <input type="checkbox" checked={picked.includes(p.id)} disabled={busy}
+                    onChange={(e) => setDrafts((d) => {
+                      const cur = d[r] ?? bindings[r] ?? [];
+                      return { ...d, [r]: e.target.checked ? [...cur, p.id] : cur.filter((x) => x !== p.id) };
+                    })} />
+                  {p.id}
+                </label>
+              ))}
+              <button className="btn btn-sm" style={{ marginLeft: 'auto' }} disabled={busy || !dirty} onClick={() => void saveBind(r)}>
+                {dirty ? '保存这个角色' : '已保存'}
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
