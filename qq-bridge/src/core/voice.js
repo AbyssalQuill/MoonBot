@@ -996,7 +996,8 @@ export function voiceTurnHint(key) {
   const { p, cooling, hit } = dice('voice', key, cfg.send?.probability ?? 0.2, cfg.send?.cooldownMs ?? 0);
   const cap = Math.min(60, Number(cfg.maxChars) || 60);
   if (hit) {
-    return `[Voice] dice HIT (p=${p}, default voice=${voiceName}): you MAY mix ONE short voice bubble into this turn's reply - text is still the carrier, never voice instead of the answer, never the same words twice, under ${cap} chars.\n`;
+    // 【2026-09-19】与表情同理：HIT 从"许可"改成"指令"（原文 you MAY → 实际常常抽了也不发）
+    return `[Voice] dice HIT (p=${p}, default voice=${voiceName}): ADD ONE short voice bubble to this turn's reply (qq_send_voice) - text is still the carrier, never voice instead of the answer, never the same words twice, under ${cap} chars; skip it only if this line has nothing speakable in it.\n`;
   }
   const why = cooling ? 'cooldown' : 'dice MISS';
   return `[Voice] ${why} (p=${p}, default voice=${voiceName})${p <= 0 ? ' voice off' : ''}: text only this turn unless someone explicitly asks you to speak or sing (when they do, OMIT the voice field so the default above is used).\n`;

@@ -59,13 +59,18 @@ export function noteMemeSent(key) {
 /**
  * 唤醒提示词里的表情包抽签行（英文，与 preset 的英文指令框架一致）
  * 表情包总开关关掉、或概率为 0 时给出明确说明；不注入空行以外的东西。
+ *
+ * 【2026-09-19 把 HIT 从"许可"改成"指令"】原文写的是 `you MAY send ONE sticker/meme`，
+ * 结果实际发生率 ≈ 配置概率 × 模型配合率 —— 抽中了也常常不发（实测 1966 次工具调用里
+ * qq_send_sticker 只有 5 次）。主人设概率是想让它**真的发**，所以改成祈使句：
+ * 抽中就发一张，只有"库里没有对得上语境的"这一个理由可以跳过。preset 里的对应段落同步改了。
  */
 export function memeTurnHint(key) {
   const c = memeCfg();
   if (!c.enabled) return '';
   const { p, cooling, hit } = dice('meme', key, c.probability, c.cooldownMs);
   if (hit) {
-    return `[Meme] dice HIT (p=${p}): you MAY send ONE sticker/meme this turn (qq_send_sticker for QQ favorites, qq_send_meme for the built-in pack) - at most one, and never as a substitute for answering.\n`;
+    return `[Meme] dice HIT (p=${p}): SEND ONE sticker or meme this turn (qq_send_sticker for QQ favorites, qq_send_meme for the built-in pack). At most one, never as a substitute for answering, and skip it only if nothing in the library fits what you are saying.\n`;
   }
   const why = cooling ? 'cooldown' : 'dice MISS';
   return `[Meme] ${why} (p=${p})${p <= 0 ? ' stickers off' : ''}: no stickers this turn unless someone explicitly asks for one.\n`;
