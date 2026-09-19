@@ -52,7 +52,7 @@ MoonBot 管理五个部件，负责安装、配置、拉起、探活、记录日
 - 群友画像、人格、黑话三类自动学习，黑话库可在管理端检索
 - 表情包、贴纸、QQ 空间说说、定时消息、跨会话留言
 - 富文本发送：图文卡、合并转发、Word 文档、QQ 原生表情、表情包；音乐点歌卡片可在手机端点开播放
-- 语音：接入小米 MiMo，支持全语音模式；语音与表情包的发送概率由桥侧掷骰决定
+- 语音：接入小米 MiMo（纯远端 API，无本地模型），内置音色 / 文字造音色 / 音频复刻三选一，支持全语音模式与收到语音自动转文字；语音与表情包的发送概率由桥侧掷骰决定（原理见[语音发送](#语音发送tts--asr)）
 - 联网搜索与网页抓取、图片搜索、Pixiv 搜图（镜像站地址可配，本地筛选 + 自动翻页）
 - 潜水与活跃模式、活动时段、回合保持、连发合并
 - Token 用量统计与费用估算，工具 schema 可按需精简
@@ -172,6 +172,17 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 - 封面只做 URL 归一化（`normalizeCoverUrl()`：http 升 https、限定尺寸、补 `type=jpg`），**不做图片代理** —— 代理过一次的那版正是「手机端没封面」的元凶，已回退。
 - 版式分两种：`share` 版照抄真机分享的图文卡，手机端会画封面；旧的 `music.lua` 版手机端本来就不画封面，且会被「将要访问」中转页拦一层。
 - 签名服务是独立进程 `qq-bridge/music-sign-proxy.py`；探针与回归在 `qq-bridge/tools/probe-netease-cover.mjs`、`probe-sign-payloads.mjs`、`probe-sign-types.mjs`、`test-music-card.mjs`、`test-qq-card-sign.mjs`。
+
+### 语音发送（TTS / ASR）
+
+- **没有本地模型，也没有随包音频**：合成与识别都走小米 MiMo 的 OpenAI 兼容端点（`POST {baseUrl}/chat/completions`，默认 `https://token-plan-cn.xiaomimimo.com/v1`），实现集中在 `qq-bridge/src/core/voice.js`。鉴权同时发 `api-key` 与 `Authorization: Bearer`；合成时**要念的文本放 `assistant` 消息**、风格描述放 `user` 消息（可选）、音色放 `audio.voice`，返回 `choices[0].message.audio.data` 的 base64 音频，落盘成 mp3 再交给 NapCat 发 `record`；识别（ASR）用 `input_audio` 传 data URL，返回文字。计费按 token（实测一条短句 163 tokens），与聊天同一本账。
+- **三种音色来源**：`tts`（`mimo-v2.5-tts`，`audio.voice` 传官方音色 id）、`design`（`mimo-v2.5-tts-voicedesign`，用文字描述造音色，**不能**传 voice）、`clone`（`mimo-v2.5-tts-voiceclone`，`audio.voice` 必须是样本的 **DataURL**，裸 base64 会被 400 拒）。
+- **官方音色只是一张 id 名单**：`voice.js` 的 `BUILTIN_VOICES`（`mimo_default`、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean，各带语言与性别），经 `/api/voice/config` 的 `builtinVoices` 下发给管理端「语音」页渲染；音色数据本身在服务端，仓库里 0 个音频文件。design/clone 造出来的音色存 `state/voice-voices.json`，克隆样本存 `state/voice-cache/samples/`。
+- **什么时候发语音由模型决定**：每次唤醒桥侧先掷骰（`send-dice.js` 的 `dice('voice', …)`，概率 `send.probability`、冷却 `send.cooldownMs`），命中才往提示词里插一行「本轮可以额外加一条短语音气泡」，模型接着调 `qq_send_voice` 发出（HTTP 侧是 `POST /api/voice/send`，令牌/白名单/限频与文字发送同一套规矩，工具本身可用工具开关 `sendVoice` 关掉）。概率设 0 = 永不主动发，只能被明确要求。
+- **全语音模式**：`send.allVoice=true` 时回复**一律**以语音发出（`qq-send.js` 走 `allVoicePlan()`）；任何一条不成立 —— 合成失败、超单条上限、当日额度用尽、被限流、带图、念不出来 —— 都**自动退回文字**并在日志留一行原因，绝不吞消息。
+- **省钱与兜底**：同模型 + 同音色 + 同风格 + 同描述 + 同文本 → 命中 `state/voice-cache/*.mp3` 不再请求（上限 `maxCacheFiles`，默认 300）；单条上限 `maxChars`（硬上限 2000 字）、每日额度 `dailyChars`。语音文件必须落在 **NapCat 容器读得到的目录**（复用图片/表情那套 `napcat.tmpDir` + docker 路径映射），读不回来时自动退 base64 重发。
+- **识别别人的语音**：收到的 `record` 段经 `get_record{out_format:'mp3'}` 转 mp3、`docker cp` 取回宿主再送 ASR（`mimo-v2.5-asr`，`asrLanguage` 默认 `zh`，原始音频 ≤7MB，对应 base64 后约 10MB）。
+- **密钥**：存 `state/voice-config.json`（出厂安装包里被脱敏清空），管理端只回掩码与 `apiKeySet` 布尔值；换 key 走「语音」页或 `PUT /api/voice/config`。不配 key 不影响文字发送，语音相关调用一律降级。
 
 ### 部署与克隆
 
