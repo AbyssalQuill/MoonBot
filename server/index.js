@@ -4303,9 +4303,27 @@ async function callBridgeConsole(target, forcedTarget = null) {
     const detail = `${e?.message ?? e}${e?.cause?.code ? ` (${e.cause.code})` : ''}`;
     console.error(`[bridge proxy] ${target.method || 'GET'} ${target.path} 失败:`, detail);
     if (bridgeNotListening(detail)) {
+      /* 【2026-09-19 主人要求】只有"本机和服务器都连不上"时，才该把话说成"桥没在运行"。
+       * 现实里最容易出现的一种是：服务器连上了、但 Bridge 隧道（13100）没建起来 —— 这时
+       * resolveBridgeTarget() 会退回本机，于是报"本机桥没在运行"，看着像"我明明连着服务器"。
+       * 所以在回落本机时补一句"服务器已连接但桥隧道不在"，指明该去哪修。 */
+      let offlineHint = '';
+      if (t.kind === 'local') {
+        try {
+          const c = loadConfig();
+          const active = c.activeServerId ? (c.servers || []).find((s) => s.id === c.activeServerId) : null;
+          if (active) {
+            const connected = sshConnections.has(active.id);
+            const tun = [...tunnels.entries()].some(([k, v]) => k.startsWith(active.id + ':') && v.name === BRIDGE_TUNNEL_NAME);
+            offlineHint = connected
+              ? `（服务器「${active.name || active.host}」已连接${tun ? '' : '，但 Bridge 控制台隧道不在'}：它上面的桥也可能没在跑 —— 到「服务器」卡片启动/重启桥，或回 SSH 配置页重连让隧道重建）`
+              : `（已配置服务器「${active.name || active.host}」但当前未连接：连上它以后这一页读的就是服务器上的配置）`;
+          }
+        } catch { /* 探测失败就不加这句 */ }
+      }
       const message = t.kind === 'remote'
         ? `远端桥没在运行，或 Bridge 控制台隧道（13100）没通：${t.base} 无响应。先在 SSH 配置页点「连接」并确认四个隧道都在，或切到本机桥，然后点重试。`
-        : `本机桥没在运行：${t.base} 无响应，这份数据要从桥上取。启动桥（首页「一键启动整套」）后点重试。`;
+        : `本机桥没在运行：${t.base} 无响应，这份数据要从桥上取。启动桥（首页「一键启动整套」）后点重试。${offlineHint}`;
       return { target: t, fail: { success: false, code: 'bridge-offline', message, detail } };
     }
     // 桥应答过但这次没取到数（超时 / 令牌不对）：既不等于"没在跑"，也不等于"版本旧"，别乱扣帽子。

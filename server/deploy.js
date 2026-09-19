@@ -335,7 +335,9 @@ function buildStagePlan(task, src, opts) {
     name: 'bridge',
     stage: 'qq-bridge.tar.gz',
     pack: `tar czf /root/.qqbridge-clone/qq-bridge.tar.gz -C /root --exclude='qq-bridge/.git' --exclude='qq-bridge/node_modules' --exclude='qq-bridge/state/bridge.lock' --exclude='qq-bridge/state/bridge*.log' qq-bridge`,
-    dst: 'set -e; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf - -C /root',
+    // 【2026-09-19】与"本机复刻"那条一样：解包前先备份目标机原有的 config.json 与语音配置，
+    // 免得"整套复刻"把服务端那侧配好的东西（pixiv 登录 cookie、语音 key、白名单）覆盖没了。
+    dst: `set -e; TS=$(date +%Y%m%d-%H%M%S); if [ -d /root/qq-bridge ]; then mkdir -p /root/qqbridge-prev-$TS; cp -a /root/qq-bridge/config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; cp -a /root/qq-bridge/state/voice-config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; echo "目标机原配置已备份: /root/qqbridge-prev-$TS"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf - -C /root`,
     restart: '', // bridge 单独管理
   });
   // 2. DSH 主目录(DSH_HOME 全部: settings/credentials/agent-presets/profiles/sessions/storages/meme-packs)
@@ -607,7 +609,10 @@ export function buildLocalStagePlan(task, opts = {}) {  const p = opts.localPath
         `${basename(p.bridgeDir)}/state/agents/*/node_modules`,
         `${basename(p.bridgeDir)}/tests`,
       ],
-      dstFile: `set -e; rm -rf /root/${basename(p.bridgeDir)} && mkdir -p /root && tar xzf ${stageDir}/qq-bridge.tar.gz -C /root`,
+      /* 【2026-09-19】解包前先把目标机**原有的** config.json 与 state/voice-config.json 备份出来：
+       * 这条路径是"整套复刻"，会把本机的 config 覆盖上去；如果主人是在服务端那侧配的（pixiv 登录 cookie、
+       * 语音 TTS key、白名单…），覆盖后就再也找不回来了。备份目录名会打进部署日志。 */
+      dstFile: `set -e; TS=$(date +%Y%m%d-%H%M%S); if [ -d /root/qq-bridge ]; then mkdir -p /root/qqbridge-prev-$TS; cp -a /root/qq-bridge/config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; cp -a /root/qq-bridge/state/voice-config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; echo "目标机原配置已备份: /root/qqbridge-prev-$TS"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf ${stageDir}/qq-bridge.tar.gz -C /root`,
     });
   }
   if (p.dshHome) {
@@ -803,6 +808,67 @@ function buildTargetDshHealScript() {
     'HEALEOF',
     'export PROF_DIR="$PROF" BRIDGE_SRC="$BR/src" NODE_BIN="$(command -v node || echo /usr/bin/node)"',
     'node /tmp/qbm-heal-dsh.js; rm -f /tmp/qbm-heal-dsh.js',
+  ].join('\n');
+}
+
+/**
+ * 部署后「能力与配置核对」脚本（在目标机上跑，打印一份清单）。
+ *
+ * 起因（2026-09-19 主人要求）："SSH 配置界面部署要能把所有能力和配置都部署到，包括 pixiv 那些"。
+ * 部署本身是"整套复刻"（bridge 的代码 + config.json + state/ 都在同一个包里），但**没有一处告诉用户
+ * 到底哪些能力真的到了**：pixiv 登录 cookie、语音 TTS key、白名单、记忆库、表情库、黑话库、画像……
+ * 任何一项缺失都不会报错，只会在用的时候表现为"某个功能不好使"。
+ * 所以这里在部署末尾逐项核对并如实打印 ✅/⚠️/❌ + 该去哪儿补。
+ */
+export function buildTargetCapabilityCheckScript() {
+  const js = [
+    "const fs = require('fs');",
+    "const BR = '/root/qq-bridge';",
+    "const j = (p, d) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return d; } };",
+    "const size = (p) => { try { return fs.statSync(p).size; } catch { return 0; } };",
+    "const exists = (p) => { try { return fs.existsSync(p); } catch { return false; } };",
+    "const cfg = j(BR + '/config.json', {});",
+    "const voice = j(BR + '/state/voice-config.json', {});",
+    "const rows = [];",
+    "const add = (label, state, detail) => rows.push({ label, state, detail });",
+    "// —— 模型 / 桥本体 ——",
+    "add('桥的 config.json', exists(BR + '/config.json') ? 'ok' : 'bad', (cfg.dsh && cfg.dsh.provider ? cfg.dsh.provider + ' / ' + cfg.dsh.model : '没读到模型段'));",
+    "// —— Pixiv（主人点名要核对的）——",
+    "add('Pixiv 镜像站地址', cfg.pixiv && cfg.pixiv.base ? 'ok' : 'warn', (cfg.pixiv && cfg.pixiv.base) || '未配置 → 用内置默认 x.pixigraph.xyz');",
+    "add('Pixiv 登录 cookie', cfg.pixiv && cfg.pixiv.cookie ? 'ok' : 'warn', cfg.pixiv && cfg.pixiv.cookie ? ('已带（长度 ' + String(cfg.pixiv.cookie).length + '）→ 可按画师名字搜人') : '未配置 → 按画师名字搜人不可用；按号/按链接发原图不受影响。补：管理端 配置→pixiv.cookie');",
+    "add('Pixiv 已缓存画师', exists(BR + '/state/pixiv-artists.json') ? 'ok' : 'info', exists(BR + '/state/pixiv-artists.json') ? ('已缓存 ' + (Object.keys(j(BR + '/state/pixiv-artists.json', {}).names || {}).length) + ' 个名字（cookie 过期也能用）') : '还没有缓存（查过一次画师名字后自动生成）');",
+    "// —— 语音 ——",
+    "add('语音总开关', voice.enabled === true ? 'ok' : 'warn', voice.enabled === true ? ('enabled=true，概率 ' + ((voice.send && voice.send.probability) ?? '-') + '，冷却 ' + ((voice.send && voice.send.cooldownMs) ?? '-') + 'ms') : '未启用 → 模型调语音工具会被拒。补：管理端 语言页 或用 qq_send_voice 前先打开');",
+    "const ttsKey = String((voice.models && voice.models.tts && voice.models.tts.apiKey) || '');",
+    "add('语音 TTS key', ttsKey ? 'ok' : 'warn', ttsKey ? ('已带（' + ttsKey.slice(0, 6) + '…，长度 ' + ttsKey.length + '）') : '未配置 → 语音合成会失败（打包时也不该把它带进安装包，只能在目标机上填）');",
+    "add('语音默认音色', voice.defaultVoice ? 'ok' : 'info', voice.defaultVoice || '未设置（用内置默认）');",
+    "// —— 访问控制 ——",
+    "const ag = (cfg.allow && cfg.allow.groups) || []; const ap = (cfg.allow && cfg.allow.private) || [];",
+    "add('允许名单', 'info', '群 ' + ag.length + ' 个 / 私聊 ' + ap.length + ' 个；放行开关：全局=' + (cfg.allowAllWhenEmpty === true) + ' 私聊=' + (cfg.allowAllPrivate === true) + ' 群=' + (cfg.allowAllGroups === true) + (ag.length || ap.length || cfg.allowAllWhenEmpty || cfg.allowAllPrivate || cfg.allowAllGroups ? '' : ' ← 全是空的：机器人不会在任何会话被唤醒'));",
+    "add('拉黑名单', 'info', '群 ' + (((cfg.deny || {}).groups) || []).length + ' 个 / 私聊 ' + (((cfg.deny || {}).private) || []).length + ' 个');",
+    "add('主人 QQ', cfg.ownerQQ ? 'ok' : 'warn', cfg.ownerQQ ? String(cfg.ownerQQ) : '未设置 → 没有主人权限识别');",
+    "// —— 数据 / 记忆 ——",
+    "add('记忆库 memory.db', size(BR + '/state/memory.db') > 0 ? 'ok' : 'warn', size(BR + '/state/memory.db') > 0 ? (Math.round(size(BR + '/state/memory.db') / 1024) + ' KB') : '不存在或为空');",
+    "add('黑话库 slang.json', size(BR + '/state/slang.json') > 0 ? 'ok' : 'info', (size(BR + '/state/slang.json') > 0 ? Math.round(size(BR + '/state/slang.json') / 1024) + ' KB' : '还没学到（正常）'));",
+    "add('表情库 stickers.json', size(BR + '/state/stickers.json') > 0 ? 'ok' : 'info', (size(BR + '/state/stickers.json') > 0 ? Math.round(size(BR + '/state/stickers.json') / 1024) + ' KB' : '还没同步'));",
+    "add('内置表情包目录', exists('/root/.dsh/meme-packs') || exists(BR + '/../meme') ? 'ok' : 'warn', exists('/root/.dsh/meme-packs') ? '/root/.dsh/meme-packs' : (exists(BR + '/../meme') ? BR + '/../meme' : '没找到 meme 包 → qq_send_meme 不可用'));",
+    "add('群友/主人画像', exists(BR + '/state/agents') ? 'ok' : 'info', exists(BR + '/state/agents') ? 'state/agents 已存在' : '还没有画像数据（跑一段时间后自动生成）');",
+    "add('活跃时段', exists(BR + '/state/activity-windows.json') ? 'ok' : 'info', exists(BR + '/state/activity-windows.json') ? '已设时段' : '未设时段（= 全天不限）');",
+    "add('角色库', exists(BR + '/roles') ? 'ok' : 'info', exists(BR + '/roles') ? 'roles/ 已带过来' : '没有角色库文件');",
+    "// —— 打印 ——",
+    "const icon = { ok: '✅', warn: '⚠️ ', bad: '❌', info: '· ' };",
+    "console.log('能力与配置核对（服务端 ' + BR + '）：');",
+    "for (const r of rows) console.log('  ' + (icon[r.state] || '· ') + ' ' + r.label.padEnd(20, ' ') + ' ' + r.detail);",
+    "const bad = rows.filter((r) => r.state === 'bad').length;",
+    "const warn = rows.filter((r) => r.state === 'warn').length;",
+    "console.log('  小结：' + rows.length + ' 项，其中 ' + bad + ' 项缺失、' + warn + ' 项需要你补（上面每行都写了去哪儿补）');",
+  ].join('\n');
+  return [
+    'set -u',
+    "cat > /tmp/qbm-caps.js <<'CAPSEOF'",
+    js,
+    'CAPSEOF',
+    'node /tmp/qbm-caps.js || true; rm -f /tmp/qbm-caps.js',
   ].join('\n');
 }
 
@@ -1140,6 +1206,16 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       const r = await runCmd(dstConn, buildTargetDshHealScript(), 180000);
       if (!r.ok) throw new Error(r.err || r.out || 'DSH 自愈脚本执行失败');
       taskLine(task, (r.out || '').trim().split('\n').filter(Boolean).map((l) => `  ${l}`).join('\n'));
+    });
+
+    /* 4g. 能力与配置核对（2026-09-19 主人要求"确保所有能力和配置都部署到，包括 pixiv 那些"）：
+     * 部署是"整套复刻"，但**没有一处告诉用户到底哪些能力真的到了**。这一步逐项核对并如实打印，
+     * 缺什么、去哪儿补都写在行里（缺项不会让部署失败——它是"核对"，不是闸门）。 */
+    await step('核对能力与配置是否到齐（pixiv / 语音 / 白名单 / 记忆 / 表情库 / 画像）', async () => {
+      const r = await runCmd(dstConn, buildTargetCapabilityCheckScript(), 90000);
+      const lines = String(r.out || '').trim().split('\n').filter(Boolean);
+      taskLine(task, lines.length ? lines.map((l) => `  ${l}`).join('\n') : '  （核对脚本没有输出，可到服务器上手动跑：node /root/qq-bridge/tools/test-… 或看 /root/qq-bridge/config.json）');
+      if (!r.ok) taskLine(task, `  ⚠ 核对脚本退出码非 0：${(r.err || '').slice(0, 200)}`);
     });
 
     /* 5. 目标机装配: systemd / napcat 容器与卷 / 启动 */

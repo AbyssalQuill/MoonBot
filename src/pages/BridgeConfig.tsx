@@ -63,6 +63,7 @@ const LABEL: Record<string, string> = {
   sessionCwd: '会话工作目录', ackMessage: '收到回执语', sendDelayMs: '发送间隔', questionTimeoutMs: '问题等待超时',
   consolePort: '本机服务端口', consoleToken: '本机服务令牌', allowAllWhenEmpty: '名单为空时全部放行（两边都放）',
   allowAllPrivate: '私聊：名单为空时全部放行', allowAllGroups: '群聊：名单为空时全部放行',
+  'pixiv.cookie': 'Pixiv 登录 cookie（PHPSESSID，只用于按画师名字搜人）',
   // 名单
   private: '私聊', groups: '群聊',
   // 唤醒
@@ -468,6 +469,164 @@ function mcpLabel(fullName: string) {
     + '不打勾 = 全部正常注册。工具表只在隔离 DSH 启动时取一次，所以改完必须重启隔离 DSH。',
   'social.slimTools.deny': '不注册给模型的工具名单（桥里的键名 social.slimTools.deny）：里面写的是 MCP 工具原名（形如 mcp__napcat__qq_send_message），'
     + '必须与桥侧注册的名字逐字一致，写错了不报错但也不生效。',
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * 【2026-09-19 主人要求："说明文档里给每一个配置输入框加上详细说明"】
+   * 上面那些是历史上逐条加的（只挑了对新手不友好的）。下面这段把**其余全部配置键**补齐，
+   * 做到"每一个输入框点 ⓘ 都有话说"；工具与规则里的每一个工具开关也逐条写了"打开后模型就能做什么"。
+   * 维护约定：以后新增配置键，必须同时在这里补一条 —— 有 tools/audit-config-help.mjs 可以审计覆盖率
+   * （它会拿 config.example.json + 本机 config.json 的键去比对这张表，缺了就退出码 1）。
+   * ══════════════════════════════════════════════════════════════════════════════════════ */
+
+  // ── 顶层分组（卡片标题）──
+  dsh: '隔离 DSH（模型执行器）这一段：跑什么厂商、什么模型、推理档位、超时，以及隔离实例与 DSH CLI 的位置。改完由管理端同步进隔离 DSH 的 settings.yaml 并重启它才生效。',
+  napcat: 'NapCat（QQ 协议端）这一段：OneBot 的 WebSocket / HTTP 地址与令牌、NapCat 安装位置、图片落盘的临时目录与容器路径映射。这里的 accessToken / wsAccessToken 不在这张卡里改，去「NapCat 鉴权令牌」那张卡（它会同时写 NapCat 自己的配置并重启 NapCat）。',
+  pixiv: 'Pixiv 相关的两项：镜像站地址（qq_pixiv_search / qq_send_pixiv 兜底用）与可选的登录 cookie（只为了"按画师名字搜人"）。按画师号、按作品链接发原图都不需要 cookie。',
+  guard: 'NapCat 会话守护：定期探活，连续失败就判定"会话假死"并尝试重启 NapCat 自愈（默认只在配了免扫码回退登录时才自动重启，否则只告警）。',
+  slang: '黑话学习：从聊天里抽取群内黑话/缩写并沉淀成词表，模型写回复时可以自然用上。抽多少条才触发、多久抽一次、注入多少条都在这里。',
+  social: '社交行为总段：唤醒、发送节奏、上下文与轮换、表情包、主动闲聊、等待、打字等待、投递与回合、活跃时段、工具开关都在这一段下面。social.enabled 是总开关。',
+  'social.tools': '工具开关：里面每一个键对应一个 MCP 工具（名字是桥侧注册的工具名去掉 qq_ 前缀的驼峰形式）。关掉 = 该工具不注册、模型看不到它。',
+  'social.wake': '唤醒与潜水：机器人什么时候被叫醒、默认潜水还是活跃、推荐的沉睡时长/概率/关键词、唤醒频率上限。@、叫名字、提问、拍一拍这类"被直接叫到"的永远会唤醒。',
+  'social.send': '发送节奏与限额：一次最多几条、单条多少字、条间间隔、每分钟/每小时最多发几条、长间隔概率。这里直接决定"会不会刷屏"。',
+  'social.wait': '等待工具（qq_wait_for_messages）的默认与上下限：默认等多久、最短多久、收到新消息后至少再静默多久。等太久容易把一回合拖成几分钟。',
+  'social.sticker': '表情包：总开关、收藏表情同步间隔、列表上限、是否把可用表情写进提示词、提示词里最多列几张。',
+  'social.sticker.collect': '自动收藏：模型看到语境内合适的表情时自动存进收藏库的节流（每分钟/每小时最多几张）。',
+  'social.proactive': '主动闲聊：没人说话时机器人自己找话题的间隔与概率。间隔是随机区间，概率 0 = 永远不主动。',
+  'social.feedback': '反馈（qq_report_feedback）：模型把"这次回复效果好不好"上报回桥的通道，以及要不要在出错时通知主人。',
+  'social.context': '上下文窗口：唤醒时给模型贴多少条近期消息、未读最多带几条、轮换后第一轮给多长的窗口。这三个直接决定 token 成本。',
+  'social.autoReset': '会话轮换（换新会话、避免上下文越拖越长）：聊多少轮之后换、换完第一个回合给多少条历史、提前预热几个会话。',
+  'social.sessionArchive': '会话归档：闲置多久把 DSH 会话归档、多久巡检一次、一次最多归档几个、保留多少天。',
+  'social.turnHold': '回合保持：一段连续对话里让 DSH 会话保持"在回合中"，省掉每次重新唤醒的整轮开销。私聊专用，有最大来回数与空闲关闭时间。',
+  'social.typing': '私聊打字等待：对方还在打字时先等一下再回（最多等多久、多久刷新一次、多大概率打断直接回）。',
+  'social.docx': 'Word 文档（qq_send_docx）：每天能生成/发送多少篇、单篇多少字、临时目录。',
+  'social.deepsleep': '静默群聊：打勾 = 这些群的消息完全不处理（连唤醒都不排），用来临时闭嘴。',
+  // social.steerEnabled 的说明历史上已经有了（上面那条长说明），这里不再重复登记，否则 TS 会报重复键。
+
+  // ── 基础与会话 ──
+  ownerQQ: '主人 QQ。填上之后这个人的私聊带 [OWNER] 标记、可以用自然语言改配置、能用主人专属工具；留空 = 没有主人（谁都不是主人）。必须是机器人能看到消息的 QQ 号。',
+  adminQQ: '额外的管理员 QQ 列表（可以多人）。这些人能下管理命令（加白名单、静默等），但不能改配置、也不是主人。',
+  agentPreset: '默认 agent 预设名（preset）：决定系统提示词的骨架。social.agentPreset 是聊天用的那个，两个都在时以社交模块的为准。',
+  workspaceTitle: 'DSH 工作区标题（显示在会话列表里，纯展示用，不影响行为）。',
+  ackMessage: '收到消息先回一条的"垫话"（例如"🤔 收到，正在思考…"）。留空 = 不垫，直接等正式回复。',
+  sendDelayMs: '每条消息之间的基础延迟（毫秒）。0 = 立即发；调大像打字慢一点。',
+  questionTimeoutMs: '需要用户回答的提问（审批/选择）最多等多久，超时就当没答复继续走。',
+  'security.interceptNotify': '安全拦截通知：命中敏感词/危险指令被拦下时，要不要在会话里说一声（不打勾就静默拦）。',
+
+  // ── 名单 ──
+  allow: '允许名单：**只有**名单里的会话会被处理（发消息、唤醒、回复）。名单为空时看下面三个"放行开关"。黑名单永远优先。',
+  'allow.private': '允许的私聊 QQ 号。一行一个/逗号分隔。空 + 没开放行开关 = 任何私聊都不处理。',
+  'allow.groups': '允许的群号。空 + 没开放行开关 = 任何群都不处理（机器人等于闭嘴）。',
+  deny: '黑名单：命中就一律不处理，即使同时在允许名单里也拦（拉黑优先）。',
+  'deny.private': '拉黑的 QQ 号：不处理其私聊，也不会被加好友/拉人。',
+  'deny.groups': '拉黑的群号：这些群的消息完全不理。',
+
+  // ── NapCat 连接 ──
+  'napcat.httpUrl': 'NapCat 的 OneBot HTTP 接口地址（桥用它发消息、查状态）。本机部署通常是 http://127.0.0.1:3000。',
+  'napcat.wsUrl': 'NapCat 的 OneBot 反向/正向 WebSocket 地址（桥用它接收消息事件）。本机部署通常是 ws://127.0.0.1:3001。改错的表现是"连接成功但收不到任何消息"。',
+
+  // ── Pixiv ──
+  'pixiv.base': 'Pixiv 第三方镜像站地址（只在"官网直连失败"时兜底，官方的 ajax 接口其实免登录可用；镜像站慢一些：同一张图 2.7~5.7 秒）。留空 = 用内置默认 https://x.pixigraph.xyz。',
+  'pixiv.cookie': 'Pixiv 登录 cookie（PHPSESSID）：**只为一件事** —— 按画师**名字**搜人（官网的用户搜索接口对匿名请求一律 400）。免费号即可；填一次就行：每解出一个画师号都会落盘缓存（state/pixiv-artists.json），cookie 以后过期了，查过的名字照样能用；真过期时桥会自检并主动在 QQ 里提醒你。不填也能用 authorId（画师号，如 1554775）或作品链接。安全：只发给 pixiv 自己的域名，绝不发给镜像站；写入请用 tools/set-pixiv-cookie.mjs（从文件读、写完删文件、只回显掩码）。',
+
+  // ── 工具开关（逐个写清"打开后模型能做什么"）──  'social.tools.getPrompt': '读提示词（qq_get_prompt）：模型主动重新读一遍当前生效的人设/发言规则/工具说明。一般不用它，但它能让模型自查"我现在的人设是什么"。',
+  'social.tools.getUnread': '读未读（qq_get_unread）：取还没处理的消息。关掉后模型只能靠唤醒正文里带的未读内容。',
+  'social.tools.getRecent': '读最近消息（qq_get_recent_messages）：按会话翻最近若干条历史，包括自己发过的。追旧话题时要用。',
+  'social.tools.socialState': '查社交状态（qq_social_state）：当前潜水/活跃、下次唤醒时间、限额用了多少。排障时最有用。',
+  'social.tools.sendGroup': '发群消息（qq_send_group_message）：向白名单内的群发文本。关掉 = 模型不能在群里说话。',
+  'social.tools.sendPrivate': '发私聊消息（qq_send_private_message）：向白名单内的 QQ 发文本。',
+  'social.tools.reply': '引用回复（qq_reply）：带引用地回某条消息（QQ 里显示"回复 xxx"）。',
+  'social.tools.sendBurst': '连发（qq_send_burst）：一次调用发多条气泡，条间按打字节奏自动延迟——"像人一样分条发"。',
+  'social.tools.sendMessage': '统一发送（qq_send_message）：最常用的发送入口，支持 text + images + 引用 + @，也支持多条。',
+  'social.tools.waitMessages': '等待新消息（qq_wait_for_messages）：沉睡前先观察一段时间；也可以用 triggers 等特定的人/关键词。',
+  'social.tools.feedback': '反馈（qq_report_feedback）：把"这次回得好不好/哪里出了问题"上报回来，供后续学习与排障。',
+  'social.tools.getMyRecent': '读自己最近说的话（qq_get_my_recent_messages）：避免重复、保持一致。',
+  'social.tools.getMessageDetail': '查单条消息详情（qq_get_message_detail）：引用/转发/图片等结构拆解，排障用。',
+  'social.tools.getActiveMembers': '查活跃成员（qq_get_active_members）：群里谁最近在说话，决定 @ 谁。',
+  'social.tools.setWakeConfig': '设置唤醒条件（qq_set_wake_config）：潜多久、什么条件唤醒（@/名字/关键词/提问/拍一拍），每轮收尾都要调一次。',
+  'social.tools.markRead': '标记已读（qq_mark_read）：推进已读水位，避免同一条消息被反复处理。',
+  'social.tools.memory': '记忆（qq_memory_append/search 等）：把长期事实写进记忆库、需要时搜出来。',
+  'social.tools.slangQuery': '查黑话（qq_slang_query）：这个词群里是什么意思。',
+  'social.tools.slangSubmit': '提交黑话（qq_slang_submit）：学到新词时上报给黑话库。',
+  'social.tools.getImages': '读消息里的图（qq_get_message_images）：取回图片内容再交给模型看。关掉后图片消息只剩占位文字。',
+  'social.tools.getForwardMsg': '读合并转发（qq_get_forward_msg）：把转发聊天记录展开成可读文本。',
+  'social.tools.sendPoke': '拍一拍（qq_send_poke）：戳一下对方。',
+  'social.tools.listStickers': '列收藏表情（qq_list_stickers）：看自己收藏了哪些表情（含备注），挑一张来发。',
+  'social.tools.getStickerImage': '看表情图（qq_get_sticker_image）：把某张收藏表情取回来给模型看，避免瞎发。',
+  'social.tools.sendSticker': '发收藏表情（qq_send_sticker）：把收藏里的某张发出去。',
+  'social.tools.setStickerRemark': '给表情写备注（qq_set_sticker_remark）：把"这张适合什么场合"记下来，下次选得更准。默认关（属于整理动作，日常用不上）。',
+  'social.tools.stickerNote': '表情学习笔记（qq_sticker_note）：看到新表情时记下自己的理解。',
+  'social.tools.collectSticker': '收藏表情（qq_collect_sticker）：把别人发的、语境内好用的表情存进自己的收藏库。',
+  'social.tools.getSelfImage': '取自己的形象图（qq_get_self_image）：assets/deepseek娘.png，需要发自拍/头像时用。',
+  'social.tools.characterCards': '角色库（qq_character_list/read/pack/search）：读 characters 目录下的角色卡，做角色扮演时用。',
+  'social.tools.faceList': 'QQ 原生表情表（qq_face_list）：列出可用的 QQ 大表情/小表情及含义，挑一个发。',
+  'social.tools.sendQqFace': '发 QQ 原生表情（qq_send_qq_face）：发内置大表情（比自己写 emoji 自然得多）。',
+  'social.tools.musicSearch': '点歌搜索（qq_music_search）：按关键词搜歌，拿到 musicId 后用 qq_send_rich 发音乐卡片。',
+  'social.tools.sendRich': '发卡片/音乐（qq_send_rich）：音乐卡（网易云/QQ音乐）、名片、骰子等富消息。音乐卡只传 musicId，标题/封面/音频由桥自己拼，手写 JSON 会导致手机端空白卡。',
+  'social.tools.imageSearch': '联网找图（qq_image_search）：按关键词搜图片（Bing/百度），能把结果图直接发出去——不知道用什么图时用它。',
+  'social.tools.videoSearch': '视频解析（qq_video_parse）：把 B 站/抖音等分享链接解析成可发的内容（B 站会发小程序卡片）。',
+  'social.tools.sendForward': '发合并转发（qq_send_forward）：把多条消息打包成"聊天记录"一次发出。',
+  'social.tools.scheduleMessage': '定时消息（qq_schedule_message）：约定"几点提醒你"这类场景。',
+  'social.tools.withdrawMessage': '撤回消息（qq_withdraw_message）：发错了可以撤回（需要 messageId）。',
+  'social.tools.historyDelete': '删单条历史（qq_history_delete）：把某条消息从桥的会话历史里删掉（只删桥的记录，不删 QQ 上的）。',
+  'social.tools.historyClear': '清空历史（qq_history_clear）：清掉整个会话的历史记录，重置上下文。影响面大，默认关。',
+  'social.tools.memorySearch': '搜记忆（qq_memory_search）：在长期记忆库里检索相关条目。',
+  'social.tools.globalOverview': '全局概览（qq_global_overview）：一次看到所有会话的未读/状态，忙的时候很省 token。',
+  'social.tools.qzone': 'QQ 空间（qq_qzone_*）：看/发说说、点赞评论。默认关（对外发布动作，谨慎开）。',
+  'social.tools.sendDocx': '发 Word 文档（qq_send_docx）：长文/报告转成 .docx 发文件，不走聊天正文。',
+  'social.tools.getFileContent': '读群文件（qq_get_file_content）：下载并读取群文件/收到的文件内容，需要模型看文档时用。',
+
+  // ── 唤醒 ──
+  'social.wake.defaultMode': '默认模式：diving = 潜水（按触发条件才醒）/ active = 活跃（群里说什么都接）。单会话可以用 /set mode active 覆盖。',
+  'social.wake.preSleepWaitEnabled': '沉睡之前先观察：开启后 qq_wait_for_messages 会先等一个安静窗口，确认没人说话再睡，避免刚睡下就被叫醒。',
+  'social.wake.recommendedDefaultInfinite': '给模型的推荐值：是否建议"无限期潜水"（自己判断该醒时再醒）。这只是提示词里的建议，不是强制。',
+  'social.wake.sleepMinMs': '允许的最短沉睡时长（毫秒）：模型想睡太短时会被顶到这里的下限。',
+  'social.wake.sleepMaxMs': '允许的最长沉睡时长（毫秒）：0 = 不限制（可以睡到无限期）。',
+  'social.wake.recommendedSleepMinMs': '推荐沉睡时长下限（毫秒）：写进提示词，引导模型别睡太频繁。',
+  'social.wake.recommendedSleepMaxMs': '推荐沉睡时长上限（毫秒）：写进提示词。',
+  'social.wake.recommendedProbability': '推荐"随机被唤醒"概率：模型沉睡时，普通消息有多大概率把它叫醒。0.05 = 二十分之一。',
+  'social.wake.recommendedAtMention': '推荐开关：被 @ 时唤醒。建议常开。',
+  'social.wake.recommendedNameMention': '推荐开关：消息里叫到机器人名字时唤醒。',
+  'social.wake.recommendedQuestion': '推荐开关：有人在提问时唤醒。',
+  'social.wake.recommendedPoke': '推荐开关：被拍一拍时唤醒。',
+  'social.wake.batchWindowMs': '唤醒合批窗口（毫秒）：这段时间内的多条消息合成一批一起交给模型，避免"每来一条就唤醒一次"。',
+  'social.wake.maxWakePerMinute': '每分钟最多唤醒几次：超了排队（防抖/防循环）。',
+  'social.wake.maxWakePerHour': '每小时最多唤醒几次：成本刹车。',
+  'social.wake.noActionLimit': '连续几次唤醒都没做任何动作（既不回也不设置唤醒条件）就强制提醒/收尾，防"空转烧 token"。',
+  'social.wake.maxWakeConfigReminders': '同一回合最多提醒几次"你还没设置唤醒条件"。',
+  'social.wake.maxWakePerMinutePrivate': '**私聊**每分钟最多唤醒几次（默认 12）：私聊是主人自己找上门，允许比群聊密一些。',
+  'social.wake.maxWakePerHourPrivate': '**私聊**每小时最多唤醒几次（默认 0 = 不限）：私聊默认不设小时上限，防止主人半夜说话被挡。',
+
+  // ── 发送节奏 ──
+  'social.send.burstEnabled': '允许一次发多条气泡：关掉 = 只能发一条（模型硬要发多条会被拒）。',
+  'social.send.burstMaxMessages': '一次最多几条气泡：超过直接拒绝。',
+  'social.send.longGapProbability': '出现"长间隔"的概率：模拟"打了一半停一下再发"的真人节奏。',
+  'social.send.longGapMinMs': '长间隔的最小毫秒数。',
+  'social.send.longGapMaxMs': '长间隔的最大毫秒数。',
+  'social.send.maxSendPerMinute': '每分钟最多发几条消息（跨会话合计），0 = 不限。超了直接拒绝并结束回合。',
+  'social.send.maxSendPerHour': '每小时最多发几条，0 = 不限。被垃圾回复刷屏时的兜底刹车。',
+  'social.send.maxMessageChars': '单条消息最多多少字：超了拒绝（防止一句话糊满整屏）。',
+  'social.send.maxGapMs': '条间最大间隔（毫秒）：上限，防止节奏参数配得过大把一回合拖很久。',
+
+  // ── 让"审计"一次过：分组键也给一条（有些卡片会把分组键名显示成标题旁的ⓘ）──
+  'social.sticker.collect.maxRemarkChars': '收藏表情时自动写的备注最多几个字（太长会很啰嗦）。',
+};
+
+/** 与 LABEL 分开维护：这里只补"历史上漏登记中文名"的键 */
+const LABEL_EXTRA: Record<string, string> = {
+  'pixiv.cookie': 'Pixiv 登录 cookie（PHPSESSID，只用于按画师名字搜人）',
+  'pixiv.base': 'Pixiv 镜像站地址',
+  // 工具开关的中文名：官方审计工具（tools/audit-ui-labels.mjs）要求"每个键都要有中文标签"，
+  // 这些是 2026-09-19 补说明文时一并补上的（原来只有 TOOL_LABEL 里的一部分）。
+  'social.tools.faceList': 'QQ 原生表情表', 'social.tools.sendQqFace': '发 QQ 原生表情',
+  'social.tools.musicSearch': '点歌搜索', 'social.tools.sendRich': '发卡片/音乐',
+  'social.tools.imageSearch': '联网找图', 'social.tools.videoSearch': '视频解析',
+  'social.tools.sendForward': '发合并转发', 'social.tools.scheduleMessage': '定时消息',
+  'social.tools.withdrawMessage': '撤回消息', 'social.tools.historyDelete': '删单条历史',
+  'social.tools.historyClear': '清空历史', 'social.tools.memorySearch': '搜记忆',
+  'social.tools.globalOverview': '全局概览', 'social.tools.qzone': 'QQ 空间',
+  'social.tools.sendDocx': '发 Word 文档',
+  'social.tools.getFileContent': '读群文件',
+  'social.wake.maxWakePerMinutePrivate': '私聊每分钟唤醒上限', 'social.wake.maxWakePerHourPrivate': '私聊每小时唤醒上限',
 };
 
 /** 开关下方的一行小字提示（按完整路径/字段名精确命中） */
@@ -2138,7 +2297,7 @@ function Field({ path, val, label, ch, onHelp, cfg }: {
   // 切服务商时给的提示（"模型列表跟着换了"）
   const [autoMsg, setAutoMsg] = useState('');
   const last = path.split('.').pop() || '';
-  const registered = LABEL[path] ?? LABEL[last];
+  const registered = LABEL[path] ?? LABEL[last] ?? LABEL_EXTRA[path] ?? LABEL_EXTRA[last];
   const labelText = registered ?? label;              // label 已由 pretty() 兜底成中文占位
   // 连中文标签都没登记的键：自动配一条「这是哪个键」的最小说明，
   // 保证界面上不会出现一个查不到出处、还顶着英文名的字段。
