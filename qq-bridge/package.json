@@ -18,7 +18,7 @@
     "test-forward": "node scripts/test-forward.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
-    "check": "node scripts/check-scope.mjs && node scripts/check-size.mjs && node --check src/bridge.js && node tests/lib.test.js && node tests/paths.test.js && node tests/voice.test.js && node tests/all-voice-mode.test.js && node tests/typing-hold.test.js && node tests/mid-turn-steer.test.js && node tests/smart-quote.test.js && node tests/reset-reply-idempotency.test.js && node tests/at-userid-guard.test.js && node tests/steer-merge.test.js && node tests/onebot-reconnect.test.js && node tests/dsh-token.test.js && node tests/wake-trigger.test.js && node tests/persona-inject.test.js && node tools/test-slash-commands.mjs",
+    "check": "node scripts/check-scope.mjs && node scripts/check-size.mjs && node --check src/bridge.js && node tests/lib.test.js && node tests/paths.test.js && node tests/voice.test.js && node tests/all-voice-mode.test.js && node tests/typing-hold.test.js && node tests/mid-turn-steer.test.js && node tests/smart-quote.test.js && node tests/reset-reply-idempotency.test.js && node tests/at-userid-guard.test.js && node tests/steer-merge.test.js && node tests/onebot-reconnect.test.js && node tests/dsh-token.test.js && node tests/wake-trigger.test.js && node tests/persona-inject.test.js && node tests/outbound-format.test.js && node tests/outbound-send-integration.test.js && node tools/test-slash-commands.mjs",
     "test-voice": "node tests/voice.test.js",
     "analyze": "node scripts/analyze-bridge.mjs src/bridge.js",
     "test-lib": "node tests/lib.test.js && node tests/paths.test.js",

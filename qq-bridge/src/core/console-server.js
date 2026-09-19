@@ -56,7 +56,7 @@ import { normalizeLoopSignature, isDuplicateSendText } from '../lib/loop-guard.j
 import { faceIdFromArtifactContent, resolveArtifactFaceId } from '../lib/qq-face-parse.js';
 import { compressImageBuffer, finalizeImageBuffer } from '../lib/image-compress.js';
 import { isSafeLocalMediaPath, isProbablySafeImageFileRef } from '../lib/media-guard.js';
-import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, escapeCqText, unquoteJsonString } from '../lib/text-safe.js';
+import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, escapeCqText, unquoteJsonString, splitSerializedBubbles, looksLikeSerializedBubbleArray } from '../lib/text-safe.js';
 import { normalizeOwnerQQ, normalizeIdList, allowed } from '../lib/config.js';
 import { readRoleState, writeRoleState, sanitizeRoleName, listRoles } from '../lib/role-access.js';
 import { sleep, withTimeout } from '../lib/async.js';
@@ -2079,12 +2079,24 @@ export function startConsoleServer() {
         }
         if (typeof rawMessages === 'string') {
           const trimmed = rawMessages.trim();
-          // 兼容模型把数组序列化成 JSON 字符串传入的情况，例如 "[...]"。
-          if (trimmed.startsWith('[')) {
-            try {
-              const parsed = JSON.parse(trimmed);
-              if (Array.isArray(parsed)) rawMessages = parsed.map(String);
-            } catch {}
+          /* 【2026-09-20 主人实测：整串数组被当成一条消息发了出去】
+           * 现场：messages 被模型整体序列化成一个字符串，且内部引号嵌套
+           *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", "我帮你设 ᗜ ‸ ᗜ"]
+           * → JSON.parse 失败 → 旧代码把整串当"一条消息"原样发进 QQ。
+           * 现在：能还原就还原成多条气泡（strict JSON 或容错切分，见 lib/text-safe.js）；
+           * 形状对但内容真的切不出来（≥2 段引号都找不到）→ 直接 400 硬失败，
+           * 让模型用真正的 JSON 数组重传，绝不把数组语法发进 QQ。 */
+          if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+            const splitBubbles = splitSerializedBubbles(trimmed);
+            if (splitBubbles && splitBubbles.length) {
+              rawMessages = splitBubbles;
+              log(`[send] 正文是被序列化的气泡数组 → 已还原成 ${splitBubbles.length} 条气泡（${key}）`);
+              appendActivity(`${key} [send] 正文是序列化数组，已还原 ${splitBubbles.length} 条气泡`);
+            } else if (looksLikeSerializedBubbleArray(trimmed) || (trimmed.startsWith('[') && trimmed.endsWith(']') && trimmed.length > 2 && /["'\u201c\u201d]\s*,\s*["'\u201c\u201d]/.test(trimmed))) {
+              log(`[send] 正文是"被序列化的气泡数组"形状但切不出气泡，已拒发（硬失败）: ${trimmed.slice(0, 80)}`);
+              sendJson({ ok: false, error: '这条正文整体是一个被序列化的气泡数组（形如 ["a","b"]），它是工具参数的容器、不是消息内容，已拒发。多条气泡请把真正的 JSON 数组传给 messages（如 messages=["第一句","第二句"]），不要把数组写进字符串；确实要发 JSON/代码本身就用 ``` 代码块包起来。' }, 400);
+              return;
+            }
           } else if (trimmed.startsWith('"')) {
             // 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。
             try {

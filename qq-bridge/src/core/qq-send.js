@@ -3,7 +3,7 @@
 import { qqTextSeg } from '../lib/onebot-ws.js';
 import { sweepMessageArtifacts, cleanOutboundText, redactKnownTokensOnly } from '../lib/outbound-text.js';
 import { splitForQQ } from '../md-to-plain.js';
-import { escapeCqText, tokenDisclosureIn } from '../lib/text-safe.js';
+import { escapeCqText, tokenDisclosureIn, collapseExplicitNewlines, looksLikeSerializedBubbleArray } from '../lib/text-safe.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { withTimeout, sleep } from '../lib/async.js';
@@ -201,6 +201,16 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     log(`发送内容疑似泄露会话令牌(${tokenLeak.kind})，已阻止发送 (${kind}:${id})`);
     throw new Error('发送内容疑似泄露会话令牌，已阻止发送');
   }
+  /* 【2026-09-20 硬失败 · 主人实测】正文整体是"被序列化的工具参数数组"就不是人话：
+   * 现场 qq_send_message 的 messages 被模型整体序列化成一个字符串传下来（且引号嵌套），
+   * JSON.parse 失败 → 旧代码把它当"一条消息"原样发进 QQ，用户看到的就是
+   *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", ...]
+   * 现在一律拒发并让模型重传：多气泡 = 真正的 JSON 数组（不是字符串），
+   * 真要发 JSON/代码本身 = 用 ``` 代码块包起来（包起来就不算参数形状，见 arrayPayloadInner）。 */
+  if (looksLikeSerializedBubbleArray(rawMessage0)) {
+    log(`[send] ${kind}:${id} 正文是"被序列化的气泡数组"形状，已拒发（硬失败）: ${rawMessage0.slice(0, 80)}`);
+    throw new Error('这条正文整体是一个被序列化的气泡数组（形如 ["a","b"]），它是工具参数的容器、不是消息内容，已拒发。多条气泡请把真正的 JSON 数组传给 messages（如 messages=["第一句","第二句"]），不要把数组写进字符串；确实要发 JSON/代码本身就用 ``` 代码块包起来。');
+  }
   // 出站文本清洗：输入法 emoji 剥离 + 表情/图片占位符清扫。
   // 根治规则：整条=纯占位（[表情:…] 之类）时先尝试翻译成真 QQ face（能识别出 id）；翻译不出就整条丢弃，
   // 绝不以文字形式发出"文字版表情"；只有整条是纯 emoji/颜文字（清扫占位数为 0）清洗为空时才保留原文，避免误删纯表情消息。
@@ -216,6 +226,14 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     rawMessage = redactKnownTokensOnly(rawMessage0);
   }
   if (artifactFaceId != null) segments.push({ type: 'face', data: { id: artifactFaceId } });
+  /* 【2026-09-20 主人要求】正文里不许显式写换行（代码、诗歌/诗词除外）。
+   * 放在这里、而不是 quotePrefix 之后：引用前缀 `> 原话\n` 自带一个**真换行**，
+   * 折叠必须在它拼上去之前做完，否则 prefix 引用模式（见 quoteModeOf）会被压成一行。
+   * 字面量 "\n"（模型偶尔把换行写成两个字符）先还原成真换行再折叠 —— 这与
+   * escapeCqText 后面的处理方向一致，只是提前到这里，好让折叠看得见它。 */
+  const preFold = rawMessage;
+  rawMessage = collapseExplicitNewlines(rawMessage.replace(/\\r\\n|\\n|\\r/g, '\n'));
+  if (rawMessage !== preFold) log(`[send] ${kind}:${id} 正文里的显式换行已折叠为一行（代码/诗歌例外）`);
   // prefix 引用：把"被引用原文"当正文前缀一起发出去（纯文字气泡，不依赖 QQ 的 reply 段）
   if (quotePrefix) rawMessage = quotePrefix + rawMessage;
   if (imagePath) {

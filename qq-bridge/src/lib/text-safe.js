@@ -139,3 +139,136 @@ export function unquoteJsonString(value) {
   }
   return value;
 }
+
+/* ── 出站正文形态治理（2026-09-20 主人实测要求）──────────────────────────────────
+ * 三条规矩，都作用在"模型写的正文"上：
+ *   ① 正文里不许显式写换行 —— 代码、诗歌/诗词除外（那两类本来就要分行）；
+ *   ② 颜文字只在人设要求时发、且短句内联/长句单独一条 —— 这条只写在系统提示词里，
+ *      桥不猜"人设到底要不要颜文字"，猜错就是把脸糊在别人的正式话题后面；
+ *   ③ 正文不许是"被序列化的工具参数数组"—— 那是容器，不是人话。
+ * 入口：onebotSend（所有模型正文的唯一出口）+ POST /api/social/send-message（数组还原）。
+ */
+
+// 中日韩文字与全角标点：折叠换行时判断"两边要不要补空格"用
+const CJK_CHAR_RE = /[\u2e80-\u303f\u3040-\u30ff\u31c0-\u31ef\u3200-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
+/** 这条正文是不是代码？（``` 围栏；或两行以上明显带缩进 / 代码标点） */
+export function looksLikeCodeBlock(text) {
+  const s = String(text ?? '');
+  if (s.includes('```')) return true;
+  const lines = s.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return false;
+  const indented = lines.filter((l) => /^[ \t]{2,}\S/.test(l)).length;
+  const codeish = lines.filter((l) => /[{};]\s*$|^\s*(?:\/\/|#|\$|>)|(?:=>|->|=|\(\))/.test(l)).length;
+  return indented >= 2 || codeish >= 2;
+}
+
+/**
+ * 这条正文是不是诗歌/诗词？（短行、无句末标点；两行要求等长，三行以上认诗/词）
+ * 判据偏"宁可多保一行、也不拆散一首诗"：普通闲聊被误判成诗的代价只是多一个换行，
+ * 真诗被折叠成一行却是内容损坏 —— 所以这里只认两种很窄的形状：
+ *   · 每行等长且 ≤12 字（五言/七言/对联）；
+ *   · 每行都以诗标点（，。？！、；：）收尾且 ≤14 字（律诗/词）。
+ */
+export function looksLikeVerse(text) {
+  const s = String(text ?? '');
+  if (s.length > 160) return false;
+  if (!CJK_CHAR_RE.test(s)) return false;                 // 这套判据只对中文生效（英文两行等长太常见）
+  const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 2) return false;
+  const lens = lines.map((l) => [...l].length);
+  if (lens.some((n) => n > 20)) return false;
+  if (lens.every((n) => n === lens[0]) && [4, 5, 7].includes(lens[0])) return true;
+  return lines.every((l) => [...l].length <= 14 && /[，。？！、；：]$/.test(l));
+}
+
+/**
+ * 正文里显式写的换行 → 折叠成一行：中文相邻直接连起来，英文/数字之间补一个空格。
+ * 代码、诗歌/诗词原样返回；没有换行时原样返回。
+ */
+export function collapseExplicitNewlines(text) {
+  const s = String(text ?? '');
+  if (!/\n/.test(s)) return s;
+  if (looksLikeCodeBlock(s) || looksLikeVerse(s)) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch !== '\n' && ch !== '\r') { out += ch; continue; }
+    let j = i;
+    while (j < s.length && /\s/.test(s[j])) j++;            // 换行两侧的空白一起吃掉
+    const prev = out.replace(/\s+$/, '').slice(-1);
+    const next = s[j] ?? '';
+    out = out.replace(/\s+$/, '');
+    if (prev && next && !CJK_CHAR_RE.test(prev) && !CJK_CHAR_RE.test(next)) out += ' ';
+    i = j - 1;
+  }
+  return out.trim();
+}
+
+// 引号类字符（半角 + 全角 + 弯引号）：容错切分"模型手写数组"时用
+const QUOTE_CLASS = '"\u201c\u201d\u2018\u2019\'';
+const QUOTE_ANY_RE = new RegExp(`[${QUOTE_CLASS}]`, 'g');
+const QUOTE_LEAD_RE = new RegExp(`^[${QUOTE_CLASS}]`);
+const QUOTE_TAIL_RE = new RegExp(`[${QUOTE_CLASS}]$`);
+const QUOTE_ONLY_RE = new RegExp(`^[${QUOTE_CLASS}\\s]+$`);
+
+/** 整条正文是不是被序列化的数组/对象？是则返回方括号内的原文，否则 null */
+function arrayPayloadInner(text) {
+  const t = String(text ?? '').trim();
+  if (!t || t.length > 2000 || /[\r\n]/.test(t)) return null;   // 多行 = 代码/排版，不掺和
+  if (t.includes('```')) return null;                           // 明确包在代码块里 = 内容，不是参数
+  if (t.startsWith('[') && t.endsWith(']')) return t.slice(1, -1);
+  const obj = /^\{[\s\S]*?"(?:messages|message|msg|text)"\s*:\s*(\[[\s\S]*\])\s*[,}]?[\s\S]*\}$/.exec(t);
+  return obj ? obj[1].slice(1, -1) : null;
+}
+
+function stripWrapQuotes(s) {
+  let t = String(s ?? '').trim();
+  /* 只剥"外面那层包裹引号"，判据是引号个数为奇数 —— 因为切的时机在 `", "` 上，
+   * 现场原文（引号嵌套）切出来常常是**已经配平**的：
+   *   `"比如"谬友圈活跃19点到23点""` → `比如"谬友圈活跃19点到23点"`（2 个引号 = 内容自身的）
+   * 而首尾那两条是落单的：
+   *   `"直接跟我说就行`（1 个）、`我帮你设 ᗜ ‸ ᗜ"`（1 个）→ 要剥。
+   * 剥两层会把内容里的引号也削掉，所以这里只剥一次、且只在落单时剥。 */
+  const quotes = (t.match(QUOTE_ANY_RE) || []).length;
+  if (quotes % 2 === 1) {
+    if (QUOTE_LEAD_RE.test(t)) t = t.slice(1).trim();
+    else if (QUOTE_TAIL_RE.test(t)) t = t.slice(0, -1).trim();
+  }
+  return QUOTE_ONLY_RE.test(t) ? '' : t;   // `""` / `"` 这种只剩引号的不算一条气泡
+}
+
+/**
+ * 把"被序列化成一个字符串的气泡数组"还原成多条气泡。
+ * 现场形态（主人 2026-09-20 实测；引号嵌套导致 JSON.parse 必然失败，
+ * 旧代码于是把整串当"一条消息"原样发进 QQ）：
+ *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", "我帮你设 ᗜ ‸ ᗜ"]
+ * @returns {string[]|null} null = 不是这个形状；数组 = 还原出的气泡
+ */
+export function splitSerializedBubbles(text) {
+  const inner = arrayPayloadInner(text);
+  if (inner === null) return null;
+  const t = String(text ?? '').trim();
+  try {
+    let parsed = JSON.parse(t);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const k of ['messages', 'message', 'msg', 'text']) {
+        if (Array.isArray(parsed[k])) { parsed = parsed[k]; break; }
+      }
+    }
+    if (Array.isArray(parsed) && parsed.length) {
+      const items = parsed.map((x) => String(x ?? '').trim()).filter(Boolean);
+      if (items.length) return items;
+    }
+  } catch { /* 嵌套引号 → 走下面的容错切分 */ }
+  const parts = inner
+    .split(new RegExp(`[${QUOTE_CLASS}]\\s*,\\s*[${QUOTE_CLASS}]`))
+    .map(stripWrapQuotes)
+    .filter(Boolean);
+  return parts.length >= 2 ? parts : null;
+}
+
+/** 正文是不是"被序列化的工具参数数组"形状？（真数组走不到这里，它本来就是数组） */
+export function looksLikeSerializedBubbleArray(text) {
+  return splitSerializedBubbles(text) !== null;
+}

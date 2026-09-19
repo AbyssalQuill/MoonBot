@@ -144,6 +144,19 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 | 发送与幂等 | `qq-bridge/src/core/send-chain.js`、`qq-bridge/src/core/send-idempotency.js`、`qq-bridge/src/lib/onebot-delivery.js` | 发送链负责分段与节奏，幂等闸门防止 `/reset` 之后重复回一次 |
 | 会话映射与自愈 | `qq-bridge/src/core/session-state.js`、`qq-bridge/src/core/session-archive.js` | 维护 QQ 会话与 DSH 会话的映射；启动时清掉指向已删会话的映射，避免事件泵空转 |
 
+### 出站正文格式（换行 / 颜文字 / 数组硬失败）
+
+模型写的正文在**出站那一刻**还会过一遍格式治理（提示词里写清楚 + 桥侧真的拦），落地位置是 `qq-bridge/src/lib/text-safe.js` 与 `qq-bridge/src/core/qq-send.js` 的 `onebotSend`（所有模型正文的唯一出口）。
+
+| 规则 | 行为 | 例外 |
+| --- | --- | --- |
+| 不许显式换行 | 正文里的 `\n` 折叠成一行：中文相邻直接连起来，英文/数字之间补一个空格；模型把换行写成字面量 `\n` 也一起还原再折叠 | 代码（``` 围栏 / 多行缩进 / 代码标点）与诗歌诗词（每行等长 ≤12 字，或每行以诗标点收尾）原样保留 |
+| 颜文字要有出处 | 人设（`[PERSONA]` / `[SPEECH RULES]`）没要求就不发颜文字；要求了的话：正文（含标点）≤10 字时跟在同一气泡里，超过 10 字时颜文字**单独一条气泡**，免得 QQ 换行把脸截断 | 这条只写在 preset 的 `[TOOLS] 2c`：桥不猜"人设到底要不要颜文字" |
+| 代码类不分段 | 代码生成与代码解释始终一条气泡，>50 字也不拆成多条短气泡 | 超过单条上限（`social.send.maxMessageChars`）时改用 `qq_send_docx` / `qq_send_forward`，不是拆气泡 |
+| 工具参数数组不能当正文 | `["甲","乙"]` 是工具调用的容器，不是消息内容。发送端点会把它**还原成多条气泡**（含引号嵌套、`{"messages":[…]}` 包装）；实在切不出来就 **400 硬失败**、一条都不发，并回执让模型重传真正的 JSON 数组 | 真要发 JSON/代码本身：用 ``` 代码块包起来（包起来就不算参数形状） |
+
+回归测试：`qq-bridge/tests/outbound-format.test.js`（判据）与 `qq-bridge/tests/outbound-send-integration.test.js`（真起控制台 + 假 OneBot 端点，看实际发出去的正文），preset 内容由 `qq-bridge/tools/test-wake-protocol.mjs` 的 D 组兜住。
+
 ### 人格学习与画像
 
 | 能力 | 文件 | 说明 |

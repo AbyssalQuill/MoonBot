@@ -190,6 +190,12 @@ const mustHave = [
   ['主人私聊回合保持规则（原 rulesShort 第 10 条）', /the bridge keeps this round open by itself/],
   ['活跃时段规则（原 rulesShort 第 11 条）', /qq_set_activity_hours/],
   ['系统配置键规则（原 rulesShort 第 12 条）', /proactiveEnabled/],
+  // 【2026-09-20 主人要求：正文不许显式换行 / 颜文字有条件发 / 数组当正文是硬失败 / 代码不分段】
+  ['[TOOLS] 2b 正文不许显式换行（代码/诗歌例外）', /FORMATTING - NO EXPLICIT NEWLINES/],
+  ['[TOOLS] 2c 颜文字只在人设要求时发', /KAOMOJI - ONLY IF THE CHARACTER ASKS FOR THEM/],
+  ['[TOOLS] 2c 10 字内联 / 超 10 字单独一条', /10 characters or fewer[\s\S]{0,200}its OWN separate bubble/],
+  ['[TOOLS] 2d 工具参数数组当正文 = 硬失败', /NEVER SEND THE TOOL-ARGUMENT ARRAY AS TEXT - HARD FAILURE/],
+  ['[TOOLS] 2e 代码类不分段（>50 字仍一条）', /CODE IS NEVER SPLIT[\s\S]{0,200}over 50 characters is still one message/],
   // 【2026-09-13 主人要求：默认人设改为 "You are a helpful assistant"，不要小鲸鱼】
   ['主人段落不再有撒娇/顺从注册', null],
 ];
