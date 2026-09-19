@@ -190,6 +190,8 @@ import {
   MAX_MEDIA_BYTES, MAX_MEDIA_PIXELS, MAX_MEDIA_STORE_PER_KEY,
   initMediaPipeCore, setMediaPipeBot,
 } from './core/media-pipe.js';
+// 独立识图模型（语言模型与识图模型分开配）：只做 init，真正调用发生在 media-pipe 里
+import { initVisionCore, visionSplitEnabled } from './core/vision.js';
 import {
   tunableListItems, findTunable, applyTunable, rearmProactiveTimersAfterChange,
   tokenBelongsToOwner, TUNABLE_SPECS, setTunableCfg,
@@ -338,6 +340,10 @@ async function main() {
   initPromptDeliverCore(cfg);
   initSocialFlowCore(cfg);
   initMediaPipeCore(cfg);
+  initVisionCore(cfg);
+  log(visionSplitEnabled()
+    ? `[vision] 已启用独立识图模型：${String(cfg.dsh?.visionModel || '')} @ ${String(cfg.dsh?.visionBaseUrl || '')}（图片先转文字再交给语言模型）`
+    : '[vision] 未配置独立识图模型：图片按附件发给主模型（识图模型留空时用主模型）');
   setScheduledRecorder(recordSentMessages);
   setWakeSender(sendWakePrompt);
   // 会话忙时把新消息塞进在途回合（DSH mode:'steer'），省掉"结束后再唤醒一轮"的整轮往返

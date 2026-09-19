@@ -3,7 +3,11 @@
     "baseUrl": "http://127.0.0.1:13210",
     "provider": "deepseek-official",
     "model": "deepseek-v4-flash-vision-exp",
-    "reasoningEffort": "max"
+    "reasoningEffort": "max",
+    "apiKey": "",
+    "visionModel": "",
+    "visionBaseUrl": "",
+    "visionApiKey": ""
   },
   "napcat": {
     "wsUrl": "ws://127.0.0.1:3001",

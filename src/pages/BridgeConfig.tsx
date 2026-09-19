@@ -54,6 +54,7 @@ const LABEL: Record<string, string> = {
   // 模型与推理
   baseUrl: 'DSH 地址', provider: '模型服务商', apiKey: '接口密钥', model: '主模型',
   visionModel: '识图模型', reasoningEffort: '推理档位',
+  visionBaseUrl: '识图模型请求地址', visionApiKey: '识图模型密钥',
   // NapCat
   wsUrl: 'WebSocket 地址', wsAccessToken: 'WS 访问令牌（已移到「NapCat 鉴权令牌」卡）', httpUrl: 'HTTP 地址', accessToken: 'HTTP 访问令牌（已移到「NapCat 鉴权令牌」卡）',
   launcherPath: '启动器路径', homeDir: '运行目录', allowProcessControl: '允许进程控制',
@@ -292,9 +293,11 @@ function mcpLabel(fullName: string) {
 /** 进阶项说明（点 ⓘ 展开），只给对新手不友好的项加 */const HELP: Record<string, string> = {
   baseUrl: 'DSH（DeepSeek Harness）Web 服务地址。本地内置隔离实例默认 http://127.0.0.1:10721；也可用环境变量 QQB_DSH_BASE_URL 覆盖。不要填桌面端 3210。',
   provider: '模型服务商标识，由 DSH 端已配置的 provider 决定；不确定时保持默认，改错会导致会话建不起来（日志会提示）。',
-  apiKey: '如你的服务商需要在 DSH 侧配置密钥，请到隔离 DSH 的密钥/设置页配置；此处填写的 Key 只会随本配置保存，不会注入运行进程。',
+  apiKey: '「接口密钥」：这里填的 Key 会在**保存时**写进隔离 DSH 自己的凭据文件（.credentials.yaml，权限 600），变量名按「模型服务商」在 DSH settings.yaml 里声明的 apiKeyEnv 决定（例如服务商 xiaomi-token-plan-cn → XIAOMI_TOKEN_PLAN_CN_API_KEY），并重启 DSH 让新值生效。它**不会**被写进 qq-bridge/config.json，也不会进日志/安装包。留空 = 不动已保存的那份；要删掉点下面那行的「清除已保存的密钥」。注意 DSH 自己的取值优先级是「启动它的进程环境变量 > 凭据文件」：若你在系统里另设过同名环境变量，那个会盖过这里填的。',
   model: '主对话模型。留空由 DSH 默认决定。',
-  visionModel: '识图（多模态）模型，用于带图片消息的会话。留空时自动使用上面的主模型——请保证主模型是多模态的（默认已是）。',
+  visionModel: '识图（多模态）模型，用于带图片消息的会话。**语言模型和识图模型是分开配的**：上面「主模型」管文字回话，这里管看图。三种情况——① 三个识图字段全留空：图片按老办法当附件发给主模型（要求主模型本身是多模态的，默认已是）；② 只填「识图模型」不填地址：仍走 DSH 那条路，只是这次会话显式指定这个模型来读图；③ 填了「识图模型请求地址」：桥**直接**用 OpenAI 兼容接口（POST /chat/completions，图片走 image_url 的 data: URL）去问识图模型，把返回的文字描述交给语言模型——这样识图可以用完全不同的厂商/额度，也能给主模型省钱（主模型只收文字）。',
+  visionBaseUrl: '识图模型的 **OpenAI 兼容**请求地址，例如 https://api.siliconflow.cn/v1 或 http://127.0.0.1:8000/v1（桥会自己在后面接 /chat/completions，所以填到 /v1 为止，别带 /chat/completions）。**留空 = 不用这条独立通路**，图片按老办法走 DSH 当附件。填了它就必须同时填「识图模型」（否则不知道该调哪个模型）；「识图模型密钥」可留空（本机自建服务通常不要密钥）。',
+  visionApiKey: '识图模型这把独立密钥（只在填了「识图模型请求地址」时用）。它跟着配置保存，用于请求上面那个地址；留空则不带头（本机自建/内网服务用）。注意：它和「接口密钥」是两个不同的东西，互不影响。',
   reasoningEffort: '推理强度档位，只对支持该参数的服务商生效（如 deepseek-reasoner / 深度思考类）。档位越高越慢但更仔细；实测**这是单次调用耗时与思考 token 最大的一块**（出现过单次 37 秒），嫌慢嫌贵先降它。`xhigh`/`max` 只有部分服务商支持（小米 MiMo 不支持）：选了不支持的档位时，桥会自动退回该服务商的默认档位并在日志里写一行，不会卡住会话。改完会自动重启隔离 DSH 生效。'
     + '下拉里每项都是「英文档位 id · 中文说明」——英文 id 就是真正写进 DSH settings.yaml 的值，保留它是为了配置和文件能对上号：'
     + 'off=关闭思考、none=同「关闭思考」、minimal=最低、low=快但粗略、medium=平衡、high=仔细但慢、xhigh=更高、max=最高。',
@@ -693,6 +696,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   const [speechRules, setSpeechRules] = useState('');
   const [personaHasFile, setPersonaHasFile] = useState(false);
   const [speechHasFile, setSpeechHasFile] = useState(false);
+  /** 隔离 DSH 里「接口密钥」到底配没配（后端只回 {env, from, set, len}，**不含密钥本身**） */
+  const [apiKeyStatus, setApiKeyStatus] = useState<any>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
@@ -756,8 +761,12 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (!c.dsh) c.dsh = {};
       if (c.dsh.apiKey === undefined) c.dsh.apiKey = '';
       if (c.dsh.visionModel === undefined) c.dsh.visionModel = '';
+      if (c.dsh.visionBaseUrl === undefined) c.dsh.visionBaseUrl = '';
+      if (c.dsh.visionApiKey === undefined) c.dsh.visionApiKey = '';
       if (!c.dsh.model) c.dsh.model = '';
       if (!c.dsh.provider) c.dsh.provider = '';
+      // 「接口密钥」的真实状态（在隔离 DSH 的凭据文件里，不在 config.json 里）
+      setApiKeyStatus((r as any).apiKeyStatus || null);
       // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
       if (c.ownerQQ === null || c.ownerQQ === undefined) c.ownerQQ = '';
       // DSH 里实际生效的模型段（推理档位下拉用它识别"已经是 off/xhigh/max"这类档位）
@@ -891,18 +900,45 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       // 实际 DSH 还在用旧模型（"管理端改的模型配置无法默认到 DSH 里"的直接成因之一）。
       // 服务端模式：写的是服务器上的 config.json（桥按 mtime 热加载），返回里带回读比对结果。
       const r = await writeBridge(body);
+      // 「接口密钥」的落地结果要单独说清楚：它不在 config.json 里，而是写进隔离 DSH 的凭据文件
+      const keyNote = (() => {
+        const w = r?.apiKeyWrite;
+        if (w && w.ok === false) return ` · 接口密钥未写入：${w.error || '未知原因'}`;
+        if (w && w.ok && w.action === 'set') return ` · 接口密钥已写入隔离 DSH 凭据（${w.env}）`;
+        if (w && w.ok && w.action === 'removed') return ` · 接口密钥已从隔离 DSH 凭据中清除（${w.env}）`;
+        const st = (r?.steps ?? []).find((x: any) => /DSH 凭据/.test(x.step || ''));
+        if (st) return st.ok ? ` · ${st.msg}` : ` · 接口密钥未写入：${st.msg}`;
+        return '';
+      })();
       if (target === 'remote') {
-        setMsg(remoteResultText(r));
+        setMsg(remoteResultText(r) + keyNote);
       } else if (r?.dshChanged) {
-        setMsg(r.modelSynced
+        setMsg((r.modelSynced
           ? '已保存 · 模型配置已同步到隔离 DSH，约 15 秒后生效'
-          : '已保存，但模型配置未写入 DSH：' + (r.modelSyncMessage || '未知原因'));
-      } else setMsg('已保存');
+          : '已保存，但模型配置未写入 DSH：' + (r.modelSyncMessage || '未知原因')) + keyNote);
+      } else setMsg('已保存' + keyNote);
       onRefresh();
       // 【2026-09-19】保存后的这次重载**必须**绕过服务端预热缓存，否则会把"写之前的旧值"读回来 ——
       // 主人看到的就是"点了保存、切出去再回来又变回去了，得再点一次保存才真的生效"。
       await load({ forceRefresh: target === 'remote' });
     } catch (e: any) { setMsg('保存失败：' + (e?.message || '')); }
+    finally { setSaving(false); }
+  };
+
+  /** 清除隔离 DSH 凭据文件里的那条密钥（界面上的输入框是密码框，看不出"到底配没配"，
+   *  所以给一个显式清除入口；后端只删这一行，文件里 DSH 自己写的其它块原样保留）。 */
+  const clearApiKey = async () => {
+    setSaving(true); setMsg(null);
+    try {
+      const r = await writeBridge({ config: { dsh: { clearApiKey: true, provider: cfg?.dsh?.provider || '' } } });
+      const w = r?.apiKeyWrite;
+      const st = (r?.steps ?? []).find((x: any) => /DSH 凭据/.test(x.step || ''));
+      if ((w && w.ok) || (st && st.ok)) {
+        setCfg((c: any) => (c ? { ...c, dsh: { ...(c.dsh || {}), apiKey: '' } } : c));
+        setMsg(`已清除隔离 DSH 凭据里的接口密钥（${w?.env || st?.msg || ''}）`);
+      } else setMsg('清除失败：' + (w?.error || st?.msg || r?.message || '未知原因'));
+      await load({ forceRefresh: target === 'remote' });
+    } catch (e: any) { setMsg('清除失败：' + (e?.message || '')); }
     finally { setSaving(false); }
   };
 
@@ -1141,7 +1177,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           <div className="card"><div className="lrn-inline-note"><Loader2 size={13} className="spin" /> 正在读取配置…</div></div>
         )}
 
-        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} writeConfig={(next) => writeBridge({ config: next })} onCfgChange={setCfg} />}
+        {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} writeConfig={(next) => writeBridge({ config: next })} onCfgChange={setCfg}
+          apiKeyStatus={apiKeyStatus} onClearApiKey={clearApiKey} saving={saving} target={target} />}
         {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} />}
 
         {tab === 'persona' && (
@@ -1554,7 +1591,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 }
 
 /* ================= 常用设置：一功能一卡片，3 列等高对齐 ================= */
-function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfgChange }: {
+function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfgChange,
+  apiKeyStatus, onClearApiKey, saving, target }: {
   cfg: any; ch: (p: string) => (v: any) => void;
   onHelp: (h: any) => void;
   uploadStickers: (files: File[]) => Promise<void>;
@@ -1562,13 +1600,37 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
   /** 活跃时段卡要用：整份配置写回 + 回写页面状态（加群要落进 allow.groups） */
   writeConfig: (next: any) => Promise<any>;
   onCfgChange: (next: any) => void;
+  /** 隔离 DSH 里「接口密钥」的真实状态（只有 env/from/set/len，不含密钥） */
+  apiKeyStatus?: { env?: string; from?: string; set?: boolean; len?: number; path?: string; readable?: boolean } | null;
+  onClearApiKey?: () => Promise<void>;
+  saving?: boolean;
+  target?: string;
 }) {
   // 精简后的基础项：删掉端口/令牌/会话目录等系统自管项，避免无效配置
   const topOnly = ['agentPreset', 'workspaceTitle', 'ownerQQ', 'adminQQ', 'ackMessage', 'sendDelayMs', 'questionTimeoutMs'];
   return (
     <div className="cfg-grid">
       <GroupCard title="模型与推理" path="dsh" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="连到哪个 DSH、用什么模型回话。服务商默认「自动探测」（即用隔离 DSH 里已配置的官方 DeepSeek），也可显式选 DeepSeek 官方；留空模型即用 DSH 默认。改这里会自动重启隔离 DSH 使其生效。「推理档位」是单次调用耗时与思考 token 最大的一块——实测同一次调用出现过 37 秒，嫌慢/嫌贵先从它和「工具与规则」页的精简名单入手。" />
+        desc="连到哪个 DSH、用什么模型回话。服务商默认「自动探测」（即用隔离 DSH 里已配置的官方 DeepSeek），也可显式选 DeepSeek 官方；留空模型即用 DSH 默认。改这里会自动重启隔离 DSH 使其生效。「推理档位」是单次调用耗时与思考 token 最大的一块——实测同一次调用出现过 37 秒，嫌慢/嫌贵先从它和「工具与规则」页的精简名单入手。">
+        {/* 【2026-09-19 主人说"接上它"】接口密钥不再是"保存了但不生效"的空字段：
+            保存时写进隔离 DSH 的凭据文件（600），这里显示它到底配没配。 */}
+        <div className="cfg-card-desc" style={{ marginTop: 6 }}>
+          {apiKeyStatus?.env
+            ? <>
+              接口密钥落在{target === 'remote' ? '服务端' : '本机的隔离'} DSH 凭据文件
+              {apiKeyStatus.path ? `（${apiKeyStatus.path}）` : ''}里的 <code>{apiKeyStatus.env}</code>：
+              {apiKeyStatus.set
+                ? <b> 已配置（{apiKeyStatus.len} 个字符）</b>
+                : <b> 尚未配置</b>}
+              {apiKeyStatus.from ? `（变量名来源：${{ 'settings.yaml': '服务端/隔离 DSH 的 settings.yaml 声明', 'known-provider': '已知服务商对照表', 'derived': '按服务商 id 推导' }[apiKeyStatus.from] || apiKeyStatus.from}）` : ''}
+              。保存时填写即写入 / 覆盖；留空不动它。
+              {apiKeyStatus.set && onClearApiKey
+                ? <> <button type="button" className="btn btn-sm" disabled={saving} onClick={() => { void onClearApiKey(); }}>清除已保存的密钥</button></>
+                : null}
+            </>
+            : '接口密钥会随保存写进隔离 DSH 的凭据文件（systemd 环境变量），不再只存不生效。'}
+        </div>
+      </GroupCard>
       {/* 【2026-09-15 主人反馈"这个界面不就重复了"】令牌字段**只留下面那张卡**：
           这里改成白名单，只列地址/运行路径等连接项，不再重复显示 accessToken / wsAccessToken。 */}
       <GroupCard title="NapCat 连接（地址与路径）"

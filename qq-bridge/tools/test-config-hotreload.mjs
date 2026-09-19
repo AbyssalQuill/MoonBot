@@ -73,7 +73,7 @@ check('坏文件保留旧配置', cfg.dsh.model === 'model-B', `got ${cfg.dsh.mo
 // ④ 删除字段要跟着删除（loadConfig 会补默认值，旧键不能残留）
 fs.writeFileSync(cfgFile, JSON.stringify({ dsh: { provider: 'deepseek-official', model: 'model-C' }, ownerQQ: '333' }, null, 2));
 await sleep(700);
-check('字段删除与新增同步', cfg.dsh.model === 'model-C' && cfg.social.send.linearStepMs === 350, `model=${cfg.dsh.model} step=${cfg.social.send.linearStepMs}`);
+check('字段删除与新增同步', cfg.dsh.model === 'model-C' && cfg.social.send.linearPerCharMs === 150, `model=${cfg.dsh.model} perChar=${cfg.social.send.linearPerCharMs}`);
 
 stop();
 stopped = true;

@@ -4,11 +4,13 @@ import { Client } from 'ssh2';
 import { createServer, connect } from 'net';
 import { spawn, spawnSync } from 'child_process';
 import crypto from 'crypto';
-import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync, renameSync } from 'fs';
+import { createWriteStream, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, copyFileSync, unlinkSync, appendFileSync, linkSync, renameSync, chmodSync } from 'fs';
 import { join, dirname, extname, basename, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { fileURLToPath } from 'url';
 import { deployApi } from './deploy.js';
+// 隔离 DSH 凭据文件（.credentials.yaml）的纯逻辑：本地直写与服务端 SSH 写盘共用，可单测
+import { mergeCredentialText, credentialStatusFromText, validateCredentialDocument } from './iso-credential.js';
 const deploy = deployApi();
 
 /* 【2026-09-12 主人要求："确保这个应用安装在哪个盘都可以找到"】
@@ -3051,8 +3053,16 @@ app.get('/api/bridge/config', (_req, res) => {
     const speechRules = existsSync(bridgeSpeechPath()) ? readTextStripBom(bridgeSpeechPath()) : '';
     let roles = [];
     try { roles = readdirSync(bridgeRolesDir()).filter((f) => /\.(md|txt|zip|skill)$/i.test(f)); } catch {}
+    /* 【2026-09-19】「接口密钥」的状态（配没配、写进哪个环境变量）——**绝不回值**，只回布尔与长度。
+     * 界面上那格永远显示空（密钥不落 config.json），靠这条显示"已配置（XIAOMI_TOKEN_PLAN_CN_API_KEY）"。 */
+    let apiKeyStatus = null;
+    try {
+      const prov = String(cfg?.dsh?.provider || '').trim() || 'xiaomi-token-plan-cn';
+      apiKeyStatus = isoCredentialStatus(prov);
+    } catch { /* 读不到就不显示状态 */ }
     res.json({
       dir: findBridgeDir(), config: cfg,
+      apiKeyStatus,
       persona: persona || DEFAULT_PERSONA, personaHasFile: persona.length > 0,
       speechRules: speechRules || DEFAULT_SPEECH_RULES, speechHasFile: speechRules.length > 0,
       roles,
@@ -3221,12 +3231,129 @@ app.post('/api/bridge/activity-hours', async (req, res) => {
   }
 });
 
+/* ── 隔离 DSH 的凭据写入（2026-09-19 主人要求"把『接口密钥』接上"）────────────────────────
+ * 背景：这张卡里的「接口密钥」以前是**只保存不生效**的字段（桥和 DSH 都不读它）。
+ * 真正生效的密钥有两份东西：
+ *   ① 隔离 home 的 settings.yaml 里，每个服务商声明自己用哪个环境变量取 key（`apiKeyEnv: XIAOMI_TOKEN_PLAN_CN_API_KEY`）；
+ *   ② 隔离 home 的 .credentials.yaml 里存着那些 `KEY: value`（管理端启动 DSH 时读进进程环境，见本文件 ~613 行）。
+ * 现在保存时按这条链路把值写进 ②，并重启隔离 DSH 让它生效。
+ *
+ * 两条纪律：
+ *   · **绝不把密钥写进 qq-bridge/config.json**（明文文件，还会被同步/打包）：保存时把 dsh.apiKey 从 config 里摘掉，
+ *     只留一份在 DSH 自己的凭据文件里（权限 600）；
+ *   · **绝不整份重写 .credentials.yaml**：DSH 自己会往里写 version/records/kind/payload/refs/secret 这些块，
+ *     整份重写会把它们弄丢。这里只做**逐行**增删改，并且先备份。
+ */
+function isoHomeDir() {
+  const isoHome = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '') || join(homedir(), '.qq-bridge-manager', 'dsh-isolated-home-official');
+  return isoHome;
+}
+/** 已知服务商的 apiKeyEnv 兜底表（settings.yaml 里读不到时用；键名必须与 DSH provider 声明的完全一致） */
+const API_KEY_ENV_ALIAS = {
+  'deepseek-official': 'DEEPSEEK_API_KEY',
+  'deepseek': 'DEEPSEEK_API_KEY',
+  'xiaomi-token-plan-cn': 'XIAOMI_TOKEN_PLAN_CN_API_KEY',
+  'mimo': 'MIMO_API_KEY',
+};
+/** 从 settings.yaml 文本里找 `providers: <pid>: apiKeyEnv: X`（逐行缩进扫描，与 parseYamlProviderModels 同思路） */
+function providerApiKeyEnvFromSettings(text, providerId) {
+  const pid = String(providerId || '').trim();
+  if (!pid) return '';
+  const lines = String(text ?? '').split(/\r?\n/);
+  let inProviders = false; let providersIndent = -1; let curPid = null; let curPidIndent = -1;
+  for (const raw of lines) {
+    if (!raw.trim() || /^\s*#/.test(raw)) continue;
+    const indent = raw.match(/^\s*/)[0].length;
+    const line = raw.trim().replace(/\s+#.*$/, '');
+    if (/^providers:\s*$/.test(line)) { inProviders = true; providersIndent = indent; curPid = null; continue; }
+    if (!inProviders) continue;
+    if (indent <= providersIndent) { inProviders = false; continue; }
+    const pidLine = /^([A-Za-z0-9._@\-/]+):\s*$/.exec(line);
+    if (pidLine && indent <= providersIndent + 2) { curPid = pidLine[1]; curPidIndent = indent; continue; }
+    if (curPid === pid && indent > curPidIndent) {
+      const env = /^apiKeyEnv:\s*["']?([A-Za-z0-9_]+)["']?\s*$/.exec(line);
+      if (env) return env[1];
+    }
+  }
+  return '';
+}
+/** 该服务商实际该用的环境变量名（settings.yaml 优先，其次别名表，最后按 id 推导） */
+function providerApiKeyEnv(providerId) {
+  const pid = String(providerId || '').trim();
+  let fromSettings = '';
+  try {
+    const p = join(isoHomeDir(), 'settings.yaml');
+    if (existsSync(p)) fromSettings = providerApiKeyEnvFromSettings(readFileSync(p, 'utf8'), pid);
+  } catch { /* 读不到就靠兜底 */ }
+  if (fromSettings) return { env: fromSettings, from: 'settings.yaml' };
+  if (API_KEY_ENV_ALIAS[pid]) return { env: API_KEY_ENV_ALIAS[pid], from: 'known-provider' };
+  const derived = pid.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_KEY';
+  return { env: derived, from: 'derived' };
+}
+/** 读 .credentials.yaml 的原始文本（失败返回 null，调用方一律 fail-closed 不写） */
+function readIsoCredentialText(isoHome) {
+  const p = join(isoHome, '.credentials.yaml');
+  if (!existsSync(p)) return null;
+  try { return readFileSync(p, 'utf8'); } catch { return null; }
+}
+/* 凭据文件的改写逻辑（refs 块定位 / 增改删 / 状态读取 / 格式自检）全部在 server/iso-credential.js —— 
+ * 本地直写与服务端 SSH 写盘共用同一份，且能单独单测（tools/test-iso-credential.mjs）。
+ * 关键坑（顶格会写坏 DSH）与依据见那个文件顶部注释。 */
+
+/**
+ * 写入/更新/删除一条 `KEY: value`（逐行处理，保留文件里其它所有内容与顺序）。
+ * @returns {{ok:boolean, env:string, action:'set'|'removed'|'unchanged'|'error', backup?:string, error?:string}}
+ */
+function writeIsoCredential(isoHome, key, value) {
+  const env = String(key || '').trim();
+  if (!/^[A-Za-z0-9_]+$/.test(env)) return { ok: false, env, action: 'error', error: '环境变量名不合法' };
+  const file = join(isoHome, '.credentials.yaml');
+  const cur = readIsoCredentialText(isoHome);
+  if (cur === null) return { ok: false, env, action: 'error', error: `找不到 ${file}（让隔离 DSH 正常启动一次，它会自己创建）` };
+  if (value === null && !new RegExp(`^\\s*${env}\\s*:`, 'm').test(cur)) return { ok: true, env, action: 'unchanged' };
+  const merged = mergeCredentialText(cur, env, value);
+  if (!merged.ok) return { ok: false, env, action: 'error', error: merged.error };
+  const next = merged.text;
+  const backup = `${file}.bak-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}`;
+  try {
+    copyFileSync(file, backup);
+    writeFileSync(file, next, { encoding: 'utf8', mode: 0o600 });
+    try { chmodSync(file, 0o600); } catch { /* Windows 上不支持，忽略 */ }
+  } catch (e) { return { ok: false, env, action: 'error', error: String(e?.message || e) }; }
+  return { ok: true, env, action: value === null ? 'removed' : 'set', backup };
+}
+/** 凭据文件里这个环境变量配没配（只回布尔 + 长度，**绝不回值**，供界面显示状态） */
+function isoCredentialStatus(providerId) {
+  const { env, from } = providerApiKeyEnv(providerId);
+  const { set, len } = credentialStatusFromText(readIsoCredentialText(isoHomeDir()), env);
+  return { env, from, set, len };
+}
+
 app.post('/api/bridge/config', (req, res) => {
   try {
     const body = req.body ?? {};
     const cfgPath = bridgeCfgPath();
     const prev = readBridgeCfg();
     const prevDsh = JSON.stringify(prev.dsh ?? {});
+    /* 【2026-09-19 主人要求"把『接口密钥』接上"】这张卡里的密钥以前只保存不生效。
+     * 现在：**先把它从要落盘的 config 里摘出来**（明文密钥不许进 qq-bridge/config.json，那文件还会被同步/打包），
+     * 交给下面 writeIsoCredential 写进隔离 DSH 自己的凭据文件（权限 600）；写成功才重启 DSH。 */
+    const incomingApiKey = body?.config?.dsh && typeof body.config.dsh.apiKey === 'string' ? body.config.dsh.apiKey.trim() : '';
+    const clearApiKey = body?.config?.dsh?.clearApiKey === true;
+    if (body?.config?.dsh && typeof body.config.dsh === 'object') {
+      delete body.config.dsh.apiKey;
+      delete body.config.dsh.clearApiKey;
+    }
+    const apiKeyWrite = (incomingApiKey || clearApiKey)
+      ? (() => {
+        const prov = String(body?.config?.dsh?.provider || prev?.dsh?.provider || 'deepseek-official').trim();
+        const { env, from } = providerApiKeyEnv(prov);
+        const r = writeIsoCredential(isoHomeDir(), env, clearApiKey ? null : incomingApiKey);
+        if (r.ok) mlog(`[iso-cred] ${clearApiKey ? '清除' : '写入'} ${env}（服务商 ${prov}，来源 ${from}，备份 ${r.backup || '无'}）`);
+        else mlog(`[iso-cred] 写入 ${env} 失败：${r.error}`);
+        return { ...r, provider: prov, source: from };
+      })()
+      : null;
     // 深合并保存：GUI 表单只带它编辑的片段，绝不能整体覆盖丢字段（曾整文件替换导致配置丢失）。
     const deepMerge = (base, patch) => {
       const out = (base && typeof base === 'object' && !Array.isArray(base)) ? { ...base } : (Array.isArray(base) ? [...base] : {});
@@ -3269,7 +3396,11 @@ app.post('/api/bridge/config', (req, res) => {
     //      把管理器刚保存的改动抹掉。（桥侧已加 config.json 热加载，见 qq-bridge/src/core/config.js。）
     // 现在把 `dshChanged / modelSynced / modelSyncMessage` 一并回给前端，失败会**明说原因**。
     const nextDsh = JSON.stringify(merged.dsh ?? {});
-    const dshChanged = nextDsh !== prevDsh;
+    /* 【2026-09-19】密钥写进凭据文件后**必须重启隔离 DSH**才生效（它只在启动时把 .credentials.yaml 读进环境）。
+     * 所以把"这次写过/删过密钥"也算进重启条件里 —— 否则用户填完密钥、看到"已保存"，实际 DSH 还在用旧 key；
+     * 清除这条同理：不清空的话进程环境里那把旧 key 会一直用下去。 */
+    const apiKeyTouched = Boolean(apiKeyWrite?.ok && (apiKeyWrite.action === 'set' || apiKeyWrite.action === 'removed'));
+    const dshChanged = nextDsh !== prevDsh || apiKeyTouched;
     let synced = false;
     let syncMessage = dshChanged ? '' : '模型段无变化，未触发同步';
     // 期望值一律取**合并后**的 merged.dsh（前端可能只提交 model 一个字段，此时不能拿片段当全量，
@@ -3336,6 +3467,11 @@ app.post('/api/bridge/config', (req, res) => {
       dshChanged: dshChanged || healDrift,
       modelSynced: synced || alreadyOk,
       modelSyncMessage: syncMessage,
+      // 【2026-09-19】「接口密钥」这次写到哪儿了（只回环境变量名/动作/备份，**绝不回值**）
+      apiKeyWrite: apiKeyWrite ? { ...apiKeyWrite } : null,
+      apiKeyStatus: isoCredentialStatus(merged?.dsh?.provider || wantProv),
+      // 保存响应里回给前端一份"脱敏后的 config"（含被摘掉的 apiKey 字段的空值），免得界面再读一次
+      config: { ...merged, dsh: { ...(merged.dsh ?? {}), apiKey: '' } },
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -3967,12 +4103,16 @@ async function buildRemoteBridgeConfigPayload(server, conn) {
   const brief = { id: server.id, name: server.name, host: server.host, username: server.username };
   if (!bundle.ok) return { ok: false, target: 'remote', connected: true, server: brief, dir: bundle.dir || '', message: bundle.message };
   const dsh = await readRemoteDshModels(server, conn);
+  // 服务端「接口密钥」当前状态（只回布尔/长度，不回值）——界面据此显示"已配置 / 未配置"
+  let apiKeyStatus = null;
+  try { apiKeyStatus = await remoteCredentialStatus(server, conn, dsh, bundle.config?.dsh?.provider); } catch { apiKeyStatus = null; }
   return {
     ok: true, target: 'remote', connected: true, server: brief,
     dir: bundle.dir, path: bundle.path, config: bundle.config,
     persona: bundle.persona, personaHasFile: bundle.personaHasFile,
     speechRules: bundle.speechRules, speechHasFile: bundle.speechHasFile,
     dshEffective: dsh.effective, dshModels: dsh.models, dshSettingsPath: dsh.path,
+    apiKeyStatus,
     roles: [],
     notes: [
       `当前编辑的是**服务端**（${server.name} · ${server.username}@${server.host}）的 \`${bundle.path}\`：桥按 mtime 热加载，保存后下一条消息即生效。`,
@@ -4078,9 +4218,27 @@ async function readRemoteDshModels(server, conn) {
     const providers = parseYamlProviderModels(r.text);
     const sources = {};
     for (const k of Object.keys(providers)) sources[k] = 'settings.yaml';
-    return { effective: parseDshEffectiveText(r.text), models: { providers, sources }, path };
+    return { effective: parseDshEffectiveText(r.text), models: { providers, sources }, path, text: r.text };
   }
-  return { effective: {}, models: { providers: {} }, path: '' };
+  return { effective: {}, models: { providers: {} }, path: '', text: '' };
+}
+
+/**
+ * 服务端「接口密钥」状态：读服务端 DSH 的 settings.yaml 找 apiKeyEnv，
+ * 再看服务端凭据文件里那条有没有值（**只回布尔 + 长度，绝不回值**）。
+ * @param {{path?:string, text?:string}} dshRead readRemoteDshModels 的结果（复用，省一次 SSH）
+ */
+async function remoteCredentialStatus(server, conn, dshRead, providerId) {
+  const pid = String(providerId || '').trim() || 'xiaomi-token-plan-cn';
+  const fromSettings = dshRead?.text ? providerApiKeyEnvFromSettings(dshRead.text, pid) : '';
+  const env = fromSettings || API_KEY_ENV_ALIAS[pid]
+    || (pid.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_KEY');
+  const from = fromSettings ? 'settings.yaml' : (API_KEY_ENV_ALIAS[pid] ? 'known-provider' : 'derived');
+  const dir = dshRead?.path ? String(dshRead.path).replace(/[/\\][^/\\]+$/, '') : `/home/${server?.username || 'root'}/.dsh`;
+  const credPath = `${dir}/.credentials.yaml`;
+  const c = await remoteReadText(conn, credPath);
+  const { set, len } = credentialStatusFromText(c.ok ? c.text : '', env);
+  return { env, from, set, len, path: credPath, readable: c.ok };
 }
 
 /** 浅层深合并（与 /api/bridge/config 本地保存同一套语义：GUI 只带它编辑的片段，不能整体覆盖丢字段） */
@@ -4154,12 +4312,20 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
   if (!dir) return res.json({ ok: false, success: false, target: 'remote', server: brief, message: '服务器上没找到 qq-bridge 目录' });
   const out = { ok: true, success: true, target: 'remote', server: brief, dir, steps: [] };
 
+  /* 「接口密钥」先摘出来 —— 它**不能**进 config.json（明文、会随同步/打包外流），
+   * 只写服务端隔离 DSH 的 /root/.dsh/.credentials.yaml（600）。摘除必须在 ① 深合并之前。 */
+  const incomingKey = typeof body?.config?.dsh?.apiKey === 'string' ? body.config.dsh.apiKey.trim() : '';
+  const clearKey = body?.config?.dsh?.clearApiKey === true;
+  if (body?.config?.dsh && typeof body.config.dsh === 'object') { delete body.config.dsh.apiKey; delete body.config.dsh.clearApiKey; }
+
   // ① config.json：先读回当前全量（GUI 只提交它编辑的片段）→ 深合并 → 写 → 回读比对
   if (body.config && typeof body.config === 'object') {
     const cur = await remoteReadText(conn, `${dir}/config.json`);
     let prev = {};
     if (cur.ok) { try { prev = JSON.parse(cur.text); } catch { prev = {}; } }
     const merged = deepMergeObject(prev, body.config);
+    // 顺手抹掉老版本可能残留在服务端 config.json 里的明文 apiKey（迁移到凭据文件）
+    if (merged?.dsh && typeof merged.dsh === 'object') { delete merged.dsh.apiKey; delete merged.dsh.clearApiKey; }
     const text = JSON.stringify(merged, null, 2);
     const w = await remoteWriteTextVerified(conn, `${dir}/config.json`, text);
     if (!w.ok) return res.json({ ...out, ok: false, success: false, message: '写入服务端 config.json 失败：' + (w.error || ''), steps: out.steps });
@@ -4180,6 +4346,49 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
     out.steps.push({ step: '回读比对关键字段', ok: out.verified, msg: out.verified ? '全部一致' : ('不一致：' + mismatched.join(', ')) });
     if (!out.verified) { out.ok = false; out.success = false; out.message = '已写入服务端 config.json，但**回读比对不一致**：' + mismatched.join(', '); }
     else out.message = `已写入服务端 config.json（${dir}/config.json）· 回读比对一致 · 桥按 mtime 热加载，下一条消息即生效`;
+  }
+
+  /* ①b 「接口密钥」→ 服务端隔离 DSH 的凭据文件（2026-09-19 主人要求"接上它"）
+   *   服务端模式下机器人在服务器上跑，密钥必须写到**服务器**的隔离 home 才生效：
+   *   读服务端 settings.yaml 找该服务商声明的 apiKeyEnv → 逐行改 /root/.dsh/.credentials.yaml → 重启 dsh-web。
+   *   注意：密钥**不写进 config.json**（下面 ① 里那份是明文、还会被同步/打包），只留凭据文件这一份（600）。 */
+  {
+    if (incomingKey || clearKey) {
+      const prov = String(body?.config?.dsh?.provider || out.config?.dsh?.provider || '').trim() || 'xiaomi-token-plan-cn';
+      const s = await remoteReadText(conn, '/root/.dsh/settings.yaml');
+      const envFromSettings = s.ok ? providerApiKeyEnvFromSettings(s.text, prov) : '';
+      const env = envFromSettings
+        || API_KEY_ENV_ALIAS[prov]
+        || (prov.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_KEY');
+      const credPath = '/root/.dsh/.credentials.yaml';
+      const c = await remoteReadText(conn, credPath);
+      if (!c.ok) {
+        out.steps.push({ step: `写服务端 DSH 凭据（${env}）`, ok: false, msg: `读不到 ${credPath}：${c.error || ''}（先让服务端 DSH 正常启动一次）` });
+        out.ok = false; out.success = false; out.message = `写服务端凭据失败：读不到 ${credPath}`;
+      } else {
+        const merged = mergeCredentialText(c.text, env, clearKey ? null : incomingKey);
+        const valid = merged.ok ? validateCredentialDocument(merged.text) : { ok: false, error: '' };
+        if (!merged.ok || !valid.ok) {
+          const why = merged.error || `改写结果不合 DSH 的凭据格式（${valid.error}）`;
+          out.steps.push({ step: `写服务端 DSH 凭据（${env}）`, ok: false, msg: why });
+          out.ok = false; out.success = false; out.message = `写服务端凭据失败：${why}`;
+        } else {
+          const w = await remoteWriteTextVerified(conn, credPath, merged.text);
+          out.steps.push({
+            step: `写服务端 DSH 凭据（${env}${clearKey ? ' · 清除' : ''}）`,
+            ok: w.ok,
+            msg: w.ok ? `${credPath}（备份 ${w.backup || '无原文件'}；来源 ${envFromSettings ? 'settings.yaml' : '别名/推导'}）` : (w.error || '写入失败'),
+          });
+          if (!w.ok) { out.ok = false; out.success = false; out.message = out.message || '写服务端 DSH 凭据失败'; }
+          else {
+            out.apiKeyEnv = env;
+            const r = await sshExecCapture(conn, 'systemctl restart dsh-web >/dev/null 2>&1; sleep 3; systemctl is-active dsh-web', 90000);
+            const active = /active/.test(String(r.out || ''));
+            out.steps.push({ step: '重启服务端 dsh-web（让新密钥生效）', ok: active, msg: active ? 'dsh-web 已重启并处于 active' : ((r.out || r.error || '').trim().slice(0, 160) || '状态未知') });
+          }
+        }
+      }
+    }
   }
 
   // ② 人设 / 发言规则（写服务端同名文件；空内容 = 删除，与本地保存一致）
@@ -4216,6 +4425,11 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
    * 少了这一步，保存后的那次重载会读到旧配置 —— 就是"切出去回来值又变回去、第二次才生效"。 */
   remoteBridgeCfgEpoch.set(server.id, cfgEpochOf(server.id) + 1);
   remoteBridgeCfgCache.delete(server.id);
+  // 回一份「接口密钥」最新状态（只回布尔/长度），界面保存后立刻能显示"已配置"
+  try {
+    const dsh = await readRemoteDshModels(server, conn);
+    out.apiKeyStatus = await remoteCredentialStatus(server, conn, dsh, out.config?.dsh?.provider || body?.config?.dsh?.provider);
+  } catch { /* 状态取不到不影响保存结果 */ }
   res.json(out);
 });
 

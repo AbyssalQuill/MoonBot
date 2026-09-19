@@ -41,7 +41,9 @@ export const TUNABLE_SPECS = [
   // —— 模型相关（改完会同步给隔离 DSH 的 agent-default-model，见 applyTunable）——
   { key: 'modelProvider', path: ['dsh', 'provider'], type: 'str', modelGroup: true, label: '模型服务商', desc: 'deepseek-official=DeepSeek 官方（默认）；xiaomi-token-plan-cn=小米 MiMo；空=自动探测用 DSH 端默认' },
   { key: 'model', path: ['dsh', 'model'], type: 'str', modelGroup: true, label: '主模型', desc: '如 deepseek-v4-flash / deepseek-v4-flash-vision-exp / deepseek-v4-pro / mimo-v2.5；留空=DSH 默认' },
-  { key: 'visionModel', path: ['dsh', 'visionModel'], type: 'str', modelGroup: true, label: '识图模型', desc: '留空=跟随主模型（默认多模态）' },
+  { key: 'visionModel', path: ['dsh', 'visionModel'], type: 'str', modelGroup: true, label: '识图模型', desc: '留空=跟随主模型（默认多模态）；配了 visionBaseUrl 时用它指定的模型读图' },
+  { key: 'visionBaseUrl', path: ['dsh', 'visionBaseUrl'], type: 'str', label: '识图模型请求地址', desc: 'OpenAI 兼容地址（填到 /v1 为止）。留空=图片当附件发给主模型（老路）' },
+  { key: 'visionApiKey', path: ['dsh', 'visionApiKey'], type: 'str', label: '识图模型密钥', desc: '只在配了「识图模型请求地址」时用；本机自建服务可留空' },
   { key: 'reasoningEffort', path: ['dsh', 'reasoningEffort'], type: 'str', modelGroup: true, label: '推理档位', desc: 'auto/low/medium/high；留空或 auto=自动探测' }
 ];
 

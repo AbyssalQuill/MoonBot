@@ -1,4 +1,4 @@
-﻿// 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
+// 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
 //
 // 安全设计：
 // - 只暴露聊天所需的**安全动作子集**（查状态/查群/查消息/发消息），
@@ -847,7 +847,7 @@ registerTool(
 
 registerTool(
   'qq_set_system_config',
-  'Modify system run config (owner private chat only). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. Tell the owner the applied value; non-owner sessions are rejected.',
+  'Modify system run config (owner private chat only). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model), visionBaseUrl (OpenAI-compatible endpoint for a SEPARATE vision model; empty = images are sent to the main model as attachments), visionApiKey (key for that endpoint) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. Tell the owner the applied value; non-owner sessions are rejected.',
   {
     key: z.string().describe('Config key: privateProbability / privateProactiveMin / proactiveEnabled etc. (see qq_get_system_config)'),
     value: z.union([z.string(), z.number(), z.boolean()]).describe('New value: probability/interval etc.; intervals accept ms numbers or 30min, 2h, 30分钟'),

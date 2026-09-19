@@ -7,6 +7,7 @@ import { safeFetchBuffer, looksLikeImageBuffer } from '../safe-fetch.js';
 import { isProbablySafeImageFileRef, isSafeLocalMediaPath } from '../lib/media-guard.js';
 import { mimeFromBuffer, mimeFromUrl, base64FromMaybe } from '../lib/media-meta.js';
 import { finalizeImageBuffer, ensureDeliverableImage, IMAGE_HARD_MAX_SIDE } from '../lib/image-compress.js';
+import { visionSplitEnabled as useVisionSplit, describeImageWithVisionModel } from './vision.js';
 
 export const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // 单条消息图片总字节上限（调大以支持收藏大图/大 gif；safeFetchBuffer 调用处显式传参）
 export const MAX_MEDIA_PIXELS = 64_000_000; // 单张图片像素上限，防止“图片炸弹”解码拖垮 DSH
@@ -244,10 +245,21 @@ export async function resolveMediaList(mediaList) {
     if (r.face) {
       if (r.faceText) parts.push({ type: 'text', text: r.faceText });
       parts.push({ type: 'image', mediaType: r.mimeType, data: r.buffer.toString('base64'), name: `face-${idx}.${(r.mimeType || 'png').split('/')[1]}` });
-    } else {
-      parts.push({ type: 'text', text: `[图片${idx}]` });
-      parts.push({ type: 'image', mediaType: r.mimeType, data: r.buffer.toString('base64'), name: `qq-image-${idx}.${(r.mimeType || 'jpeg').split('/')[1]}` });
+      continue;
     }
+    /* 【2026-09-19】配了「识图模型请求地址」→ 走独立识图通路：图片不进上下文，只把**文字描述**交给语言模型。
+     * 失败（超时/非 2xx/没文字）就退回附件，绝不让识图故障变成"图丢了"。 */
+    if (useVisionSplit()) {
+      const d = await describeImageWithVisionModel(r.buffer, r.mimeType);
+      if (d.ok) {
+        log(`[vision] 图片${idx} 由独立识图模型 ${d.model} 转成文字（${d.text.length} 字，${d.ms}ms）`);
+        parts.push({ type: 'text', text: `[图片${idx}] ${d.text}` });
+        continue;
+      }
+      log(`[vision] 图片${idx} 独立识图失败（${d.error}），退回附件方式发给主模型`);
+    }
+    parts.push({ type: 'text', text: `[图片${idx}]` });
+    parts.push({ type: 'image', mediaType: r.mimeType, data: r.buffer.toString('base64'), name: `qq-image-${idx}.${(r.mimeType || 'jpeg').split('/')[1]}` });
   }
   return parts;
 }
