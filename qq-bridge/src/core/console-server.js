@@ -4091,7 +4091,9 @@ export function startConsoleServer() {
           preSleepWaitRemainingMs: preSleepRemainingMs,
           rotateNow,
           rotateTurns: rotateTurnsNow,
-          rotateThreshold,
+          // 永久会话（social.autoReset.permanent）时阈值是 Infinity，而 JSON.stringify(Infinity) = null，
+          // 直接塞进去会让工具结果看起来"阈值是 null"。这里显式回 null（= 不轮换），语义清楚。
+          rotateThreshold: Number.isFinite(rotateThreshold) ? rotateThreshold : null,
           rotateHint: rotateNow
             ? `[Rotate] This conversation has run for ${rotateTurnsNow} exchanges (limit ${rotateThreshold}). Wrap up NOW: send your closing reply, then close with qq_set_wake_config / qq_mark_read, and do NOT call qq_wait_for_messages again this round. A fresh session will start on the next incoming message, carrying the recent history over - so do not announce or explain any of this, just close naturally.`
             : undefined,

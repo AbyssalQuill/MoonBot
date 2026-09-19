@@ -106,6 +106,11 @@ const LABEL: Record<string, string> = {
   recentLimit: '每会话内存保留条数', unreadLimit: '未读队列上限',
   contextWindow: '首轮带入历史条数', resetWindow: '轮换后首轮带入条数',
   wakeThreshold: '聊多少轮换新会话', prewarmAhead: '提前几轮预建新会话',
+  permanent: '永久会话（不轮换）',
+  // 上下文治理（整路径写死：这些字段名只在这一段里出现，但按路径写更醒目、也不会被别处的同名标签顶掉）
+  'dshCompaction.thresholdRatio': '触发比例', 'dshCompaction.retainRatio': '逐字保留比例',
+  'dshCompaction.toolResultMaxChars': '工具结果保留字数',
+  'dshCompaction.summarizationProvider': '摘要模型服务商', 'dshCompaction.summarizationModel': '摘要模型',
   // 表情包 / 等待
   stickerEnabled: '表情包', syncTtlMs: '同步缓存', maxListCount: '列表上限', includeInPrompt: '提示里附带',
   promptMaxStickers: '提示最多表情', collectEnabled: '自动收藏', maxPerMinute: '每分钟上限', maxPerHour: '每小时上限',
@@ -143,6 +148,7 @@ const LABEL: Record<string, string> = {
   guard: 'NapCat 会话守护', slang: '黑话学习', tools: 'QQ 工具开关', collect: '自动收藏',
   sessionArchive: '空闲会话自动归档', feedback: '反馈上报',
   context: '上下文', autoReset: '会话轮换', send: '发送节奏', wake: '唤醒与潜水',
+  dshCompaction: '上下文治理',
   wait: '回复前停顿', sticker: '表情包', proactive: '主动闲聊', typing: '私聊打字等待',
   // 路径专属（同名键在不同分组里含义不同，必须按完整路径写死）
   'social.agentPreset': '社交模块的人设预设',
@@ -331,6 +337,38 @@ function mcpLabel(fullName: string) {
     + '到点直接切过去，第一轮不卡、还能命中提示缓存。填 1 = 只在最后一轮才建（最省，但轮换那一下稍慢）；'
     + '填得和轮换阈值一样大 = 第一轮就建（没必要）。默认 3。'
     + '⚠️ 这条以前在**没写进 config.json** 时是失效的（读取处 `Number(x) ?? 3` 在缺键时算出 NaN，预热分支永远不触发），已修。',
+  permanent: '「永久会话（不轮换）」：勾上就**不再按轮数换会话** —— 一个会话一直用下去，省掉每次换新会话那一轮的首轮 token'
+    + '（新会话的系统提示词、工具清单、历史窗口都是冷的，没有任何前缀缓存可用）。'
+    + '配套的是「上下文治理（dshCompaction）」：由隔离 DSH 自己剪掉超大的工具结果、必要时把最老一段摘要，'
+    + '所以不换会话也不会把上下文越拖越长。两条要注意：'
+    + '① `agentPreset`（人设预设）**只在建会话那一刻绑定** —— 开着永久会话时改预设，老会话不会跟着变'
+    + '（改 persona.md 人设文件不受影响，那份是每轮注入的正文）；确实要换预设就先把这里取消勾选、等它轮换一次再打开。'
+    + '② 万一压缩配置被写坏，会话会一直长下去，所以「聊多少轮换新会话」那个值仍保留：关掉本项立刻恢复按轮数轮换。'
+    + '改这一项**立刻生效**，不用重启桥，正在聊的会话也不会被打断。',
+  dshCompaction: '上下文治理：让一个会话能长期用下去又不堆积上下文。'
+    + '桥**不直接改** DSH 的历史（DSH 的会话是内存里的事件溯源日志，外部改文件只会撞 `seq gap` 校验），'
+    + '而是把策略写进隔离 DSH home 的 `cordis.patch.yml`（home 级 patch 层），交给 DSH 自己的压缩组件执行：'
+    + '① 先剪掉超大的工具结果（`tool-result-pruner`）——不发模型请求，聊天记录一个字都不动；'
+    + '② 剪完仍超阈值、或提供方报上下文溢出，才把最老一段摘要成 `<compacted-summary>`（`compaction-basic`）。'
+    + '阈值一律按「模型窗口的比例」给，换模型自动等比缩放。改这里**立刻生效**（DSH 会热加载那份 patch），不用重启 DSH 或桥。',
+  thresholdRatio: '「触发比例」：上下文用到**模型窗口的百分之多少**就开始治理（默认 0.06）。'
+    + '窗口 1M 的模型 ≈ 63k token 触发；窗口 128k 的模型 ≈ 7.7k token 触发 —— 同一个比例换模型自动缩放，不用手改。'
+    + '调小 = 更早清理、账单更省，但模型记得的原文更少；调大 = 保留更多原文，代价是每轮重读更多 token。'
+    + 'DSH 的硬要求：这个值必须**大于**「逐字保留比例」，否则插件会拒绝加载（桥会自动夹到合法范围并写日志）。',
+  retainRatio: '「逐字保留比例」：最近这一部分上下文**原样保留**，压缩只动比它更老的部分（默认 0.012）。'
+    + '必须小于「触发比例」。调大 = 最近这段记得更牢、更贵；调小 = 更省，但模型更容易忘掉前几轮的细节。',
+  toolResultMaxChars: '「工具结果保留字数」：单个工具结果超过这么多字符（Unicode 码点）就被剪成'
+    + '「开头 60% + 一行 `[... tool result middle pruned ...]` + 结尾 20%」（默认 1500）。'
+    + '这是**最省 token 的一刀**：QQ 机器人的上下文大头几乎都是工具结果（群成员列表、聊天记录、网页正文、图片信息）。'
+    + '剪枝不发模型请求、不动聊天记录，被剪掉的原文本仍留在会话日志里（可回放、可 grep）。'
+    + 'DSH 的硬要求：保留的头 + 标记 + 尾不能超过这个字数，桥会自动按 60/20 拆并校验。',
+  summarizationProvider: '「摘要模型服务商」+「摘要模型」：指定压缩时用哪个模型写摘要。**两个都留空最省钱** —— '
+    + '空的含义是"沿用本次会话路由到的模型"，DSH 会把会话的系统提示词、工具、被压缩的那段历史原样回放给摘要请求，'
+    + '等于复用了同一份热前缀缓存，只有尾部的压缩指令和摘要是新算的。'
+    + '换成别的厂商/模型会丢掉这份缓存复用（换来的是"用便宜模型写摘要"），非必要别填。',
+  summarizationModel: '「摘要模型」：见上一条「摘要模型服务商」。两个都留空 = 跟主模型（复用热前缀缓存，最省）。'
+    + '要单独指定就得两个都填，只填一个不生效。',
+  'dshCompaction.enabled': '总开关：关掉 = 不覆盖 DSH 默认（默认要等上下文用到窗口 80% 才压缩，等于不压缩，上下文会一直涨到轮换为止）。',
   contextWindow: '「首轮带入历史条数」：一个新会话的**第一次**唤醒时，往提示里贴最近多少条聊天记录'
     + '（每个会话只贴这一次，之后各轮只发一行哨兵，不再重贴）。下限 6、普通首轮**上限 24**——'
     + '填 30 也只按 24 走；想让轮换后的第一轮看得更长，要同时调「轮换后首轮带入条数」。'
@@ -765,6 +803,19 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (c.dsh.visionApiKey === undefined) c.dsh.visionApiKey = '';
       if (!c.dsh.model) c.dsh.model = '';
       if (!c.dsh.provider) c.dsh.provider = '';
+      /* 上下文治理：老配置里没有这一段，也要把输入框画出来（缺键时按默认值显示，保存即落盘）。
+       * 服务端模式同理 —— 远程 config.json 里没有这些键时不补，卡片就是空的。 */
+      if (!c.dshCompaction || typeof c.dshCompaction !== 'object') c.dshCompaction = {};
+      const dc = c.dshCompaction;
+      if (dc.enabled === undefined) dc.enabled = true;
+      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.06;
+      if (dc.retainRatio === undefined) dc.retainRatio = 0.012;
+      if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 1500;
+      if (dc.summarizationProvider === undefined) dc.summarizationProvider = '';
+      if (dc.summarizationModel === undefined) dc.summarizationModel = '';
+      if (!c.social) c.social = {};
+      if (!c.social.autoReset || typeof c.social.autoReset !== 'object') c.social.autoReset = {};
+      if (c.social.autoReset.permanent === undefined) c.social.autoReset.permanent = false;
       // 「接口密钥」的真实状态（在隔离 DSH 的凭据文件里，不在 config.json 里）
       setApiKeyStatus((r as any).apiKeyStatus || null);
       // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
@@ -1670,7 +1721,12 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
           { title: '③ 聊多少轮自动换新会话（上下文轮换）', path: 'social.autoReset' },
         ]}
         cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="三组管三件不同的事，不是重复项：① 决定新会话的第一轮往提示里贴多少条聊天记录（'轮换后首轮带入条数'只对轮换后的第一轮生效，所以它必须填得比'首轮带入历史条数'大才有意义）；② 决定桥在内存里留多少条，省内存用；③ 决定聊多少轮把上下文换成新会话——它是换会话的时机，不是历史条数。" />
+        desc="三组管三件不同的事，不是重复项：① 决定新会话的第一轮往提示里贴多少条聊天记录（'轮换后首轮带入条数'只对轮换后的第一轮生效，所以它必须填得比'首轮带入历史条数'大才有意义）；② 决定桥在内存里留多少条，省内存用；③ 决定聊多少轮把上下文换成新会话——它是换会话的时机，不是历史条数。勾上「永久会话（不轮换）」就不再换会话，上下文改由下面那张「上下文治理」卡负责。" />
+      {/* 【2026-09-19 主人要求】"一个会话永久使用，但别让上下文堆积" —— 策略写进隔离 DSH 的 home 级
+          cordis.patch.yml（lib/dsh-compaction.js），由 DSH 自己的 compaction-basic + tool-result-pruner 执行。
+          为什么不在桥侧删历史：DSH 的会话是内存事件溯源日志，外部改文件只会撞 seq gap / zstd 校验和。 */}
+      <GroupCard title="上下文治理（工具历史剪枝）" path="dshCompaction" cfg={cfg} ch={ch} onHelp={onHelp}
+        desc="让一个会话能长期用下去又不堆积上下文：上下文用到「触发比例」时，隔离 DSH 先剪掉超大的工具结果（不发模型请求、聊天记录一字不动），剪完仍超阈值才把最老一段摘要成 <compacted-summary>。阈值按模型窗口的比例给，换模型自动缩放。改这里立刻生效（DSH 热加载那份 patch），不用重启 DSH 或桥。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
       <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />

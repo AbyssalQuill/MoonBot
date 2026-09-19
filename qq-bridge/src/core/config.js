@@ -23,6 +23,23 @@ export function loadConfig() {
       reasoningEffort: 'max',
       ...(file.dsh ?? {})
     },
+    /* 【2026-09-19 主人要求】「一个会话永久使用，但别让上下文堆积」——
+     * 桥侧不自己动 DSH 的历史（DSH 的会话是内存事件溯源，外部改文件只会撞 seq gap），
+     * 而是把**压缩策略**写进 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的
+     * compaction-basic + tool-result-pruner 执行：
+     *   · 先剪掉超大工具结果（剪枝不发模型请求、聊天记录一字不动）；
+     *   · 剪枝后仍超阈值 / 提供方报上下文溢出，才把最老一段摘要成 <compacted-summary>。
+     * 阈值用**比例**（相对已路由模型的 contextWindow），换模型自动等比缩放 —— 也是 DSH 的硬要求：
+     * retainRatio 必须小于 thresholdRatio，否则插件直接拒绝加载。字段含义与取值见 lib/dsh-compaction.js。 */
+    dshCompaction: {
+      enabled: true,             // 关掉 = 不写这段（回到 DSH 默认：窗口 80% 才压缩 ≈ 等于不压缩）
+      thresholdRatio: 0.06,      // 上下文用到窗口的多少比例就开始治理（0.06 × 1M ≈ 63k token）
+      retainRatio: 0.012,        // 最近多少比例的上下文**逐字保留**（必须小于 thresholdRatio）
+      toolResultMaxChars: 1500,  // 单个工具结果超过多少字符就被剪成「开头 + 剪枝标记 + 结尾」
+      summarizationProvider: '', // 摘要用哪个服务商（留空 = 跟主模型，能复用热前缀最便宜）
+      summarizationModel: '',    // 摘要用哪个模型（留空 = 跟主模型）
+      ...(file.dshCompaction ?? {})
+    },
     napcat: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.napcat ?? file.napcat ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
@@ -211,7 +228,15 @@ export function loadConfig() {
       // 所以改配置文件对跑着的老会话立即生效（详见 wake-send.js 的 rotateThresholdOf 注释）。
       autoReset: {
         wakeThreshold: 10,         // 累计多少真实来回后换新会话（最小 5）
-        prewarmAhead: 3            // 到阈值前提前几轮预建并预热下一代会话（最小 1）
+        prewarmAhead: 3,           // 到阈值前提前几轮预建并预热下一代会话（最小 1）
+        /* 【2026-09-19 主人要求："一个会话永久使用、但不让上下文堆积，省掉每次切新会话的首轮 token"】
+         * true = **不按轮数换会话**（wakeThreshold 失效，但保留作为参考值）；
+         * 上下文改由隔离 DSH 自己的压缩治理（见 dshCompaction 段 + lib/dsh-compaction.js）：
+         * 先剪掉超大工具结果（不发模型请求、聊天记录不动），聊天本身超阈值时才把最老一段摘要成
+         * <compacted-summary>。谨慎开启的两点理由：
+         *   ① agentPreset 只在建会话时绑定 —— 换 preset 后老会话仍用旧提示词（改 persona.md 不受影响，
+         *      它是每轮注入的正文）；② 万一压缩配置被写坏，单会话会一直长下去，所以留了 wakeThreshold 兜底。 */
+        permanent: false
       },
       ...(file.social ?? {})
     }

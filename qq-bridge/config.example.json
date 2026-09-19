@@ -9,6 +9,15 @@
     "visionBaseUrl": "",
     "visionApiKey": ""
   },
+  "dshCompaction": {
+    "_note": "上下文治理（2026-09-19）：桥不直接改 DSH 的历史（DSH 的会话是内存里的事件溯源日志，外部改文件只会撞 seq gap 校验 / zstd 校验和），而是把这一段策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的 compaction-basic + tool-result-pruner 执行。改这里立刻生效（DSH 会热加载那份 patch），不用重启 DSH 或桥。",
+    "enabled": true,
+    "thresholdRatio": 0.06,
+    "retainRatio": 0.012,
+    "toolResultMaxChars": 1500,
+    "summarizationProvider": "",
+    "summarizationModel": ""
+  },
   "napcat": {
     "wsUrl": "ws://127.0.0.1:3001",
     "httpUrl": "http://127.0.0.1:3000",
@@ -212,7 +221,10 @@
     "autoReset": {
       "wakeThreshold": 10,
       "_wakeThresholdNote": "「聊多少轮换新会话」：同一个会话累计到这么多轮，下一次**用户触发**的唤醒就切到下一代 DSH 会话（旧会话归档，记忆文件保留、不丢记忆）。计数有三处自增：用户触发的唤醒（私聊/被@/被提问/被喊名字/拍一拍/关键词）各 +1、qq_wait_for_messages 每取回一批新消息 +1、回合保持期间的每次来回 +1；回复检查/主动冒泡这类内部唤醒不计入，**也不触发轮换**（轮换只在用户触发的唤醒上执行）。桥里下限 5、缺省 10。它和 context.contextWindow / resetWindow 不是一回事：那两个是「换完之后第一轮贴多少条历史」，这里才是「什么时候换」。两个易踩的点：① 阈值是**每一轮现读** config.json 的（热加载是原地合并，见 core/config.js 的 watchConfigFile），所以改这个值对**正在跑的老会话立刻生效**，不需要等它自然轮换、也不需要重启桥；② 计数 rotateTurns 落在 state/social-state.json，重启桥**不会**重置它。",
-      "prewarmAhead": 3
+      "prewarmAhead": 3,
+      "permanent": false,
+      "_permanentNote": "「永久会话（不轮换）」：true = 不再按轮数换会话，一个 DSH 会话一直用下去，省掉每次换新会话那一轮的首轮 token（新会话的系统提示词 / 工具清单 / 历史窗口全是冷的）。配套 dshCompaction 段的上下文治理：DSH 会先剪掉超大的工具结果（不发模型请求、聊天记录不动），聊天本身超阈值时才把最老一段摘要成 <compacted-summary>。注意 agentPreset 只在建会话那一刻绑定 —— 开着它改人设预设，老会话不会跟着变（改 persona.md 不受影响）；想换预设先关掉本项、等它轮换一次再打开。wakeThreshold 保留作为兜底：关掉本项立刻恢复按轮数轮换。",
+      "_autoResetNote": "会话轮换 = 上下文换新（避免越拖越长）。它和 context.contextWindow / resetWindow 不是一回事：那两个是「换完之后第一轮贴多少条历史」，这里才是「什么时候换」。"
     },
     "sessionArchive": {
       "enabled": true,

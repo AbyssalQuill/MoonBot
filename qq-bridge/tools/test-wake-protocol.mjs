@@ -278,6 +278,41 @@ for (const rel of srcFiles) {
   check('H4 再改一次也生效（双向）', sOwner.wakeConfig.triggers.probability === 0.07, String(sOwner.wakeConfig.triggers.probability));
 }
 
+/* ── I. 永久会话（social.autoReset.permanent）───────────────────────────────
+ * 【2026-09-19 主人要求"一个会话永久使用，但别让上下文堆积，省掉切新会话的首轮 token"】
+ * 这里断言的是**一处开关管住全部轮换路径**：
+ *   · rotateThresholdOf 返回 Infinity（阈值不再是数字）；
+ *   · rotationDue 即便轮次远超 wakeThreshold 也判 false（wake-send 的轮换块 / busy 分支、
+ *     turn-hold 的"到点放行关回合"、控制台那条 [Rotate] 收尾指令全都看它）；
+ *   · 关掉开关立刻恢复按轮数轮换（双向，不是一次性的）。 */
+{
+  cfg.social.autoReset = cfg.social.autoReset || {};
+  cfg.social.autoReset.wakeThreshold = 5;
+  cfg.social.autoReset.permanent = undefined;
+  const st9 = socialMod.getSocialState('group:900009');
+  st9.rotateTurns = 99;
+  st9._promptInjected = true;
+  cfgMod.state.sessions['group:900009'] = 'session-permanent-test';
+  const normalThreshold = wakeMod.rotateThresholdOf(cfg);
+  const normalDue = wakeMod.rotationDue('group:900009', st9, cfg);
+  check('I1 默认（非永久）：阈值是配置里的数字', normalThreshold === 5, String(normalThreshold));
+  check('I2 默认（非永久）：轮次超阈值 → 该轮换', normalDue.due === true, JSON.stringify(normalDue));
+
+  cfg.social.autoReset.permanent = true;
+  const permThreshold = wakeMod.rotateThresholdOf(cfg);
+  const permDue = wakeMod.rotationDue('group:900009', st9, cfg);
+  check('I3 永久会话：阈值变成 Infinity（不再是数字）', permThreshold === Infinity, String(permThreshold));
+  check('I4 永久会话：轮次 99/5 也判「不该轮换」', permDue.due === false && permDue.why === 'permanent-session', JSON.stringify(permDue));
+  check('I5 isPermanentSession 与阈值同源', wakeMod.isPermanentSession(cfg) === true);
+
+  cfg.social.autoReset.permanent = false;
+  check('I6 关掉立刻恢复按轮数轮换（双向）', wakeMod.rotationDue('group:900009', st9, cfg).due === true);
+  // 非布尔真值不算开启（避免 "false" 字符串之类把永久会话误开）
+  cfg.social.autoReset.permanent = 'false';
+  check('I7 只认布尔 true（"false" 字符串不开启）', wakeMod.isPermanentSession(cfg) === false);
+  delete cfg.social.autoReset.permanent;
+}
+
 try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* Windows 占用忽略 */ }
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

@@ -194,8 +194,10 @@ import {
 import { initVisionCore, visionSplitEnabled } from './core/vision.js';
 import {
   tunableListItems, findTunable, applyTunable, rearmProactiveTimersAfterChange,
-  tokenBelongsToOwner, TUNABLE_SPECS, setTunableCfg,
+  tokenBelongsToOwner, TUNABLE_SPECS, setTunableCfg, resolveIsolatedDshHome,
 } from './core/tunables.js';
+// 上下文治理：把压缩策略写进 DSH home 的 cordis.patch.yml（见该文件顶部为什么不能在桥侧改历史）
+import { syncDshCompactionPatch } from './lib/dsh-compaction.js';
 import {
   social, defaultWakeConfig, softResetWakeConfig, initSocialCore,
   preSleepWaitBlocked, computeWakeSafety,
@@ -344,8 +346,25 @@ async function main() {
   log(visionSplitEnabled()
     ? `[vision] 已启用独立识图模型：${String(cfg.dsh?.visionModel || '')} @ ${String(cfg.dsh?.visionBaseUrl || '')}（图片先转文字再交给语言模型）`
     : '[vision] 未配置独立识图模型：图片按附件发给主模型（识图模型留空时用主模型）');
-  setScheduledRecorder(recordSentMessages);
-  setWakeSender(sendWakePrompt);
+  /* 【2026-09-19 上下文治理】把压缩策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层）。
+   * 为什么在桥侧做：桥知道 DSH home 在哪（QQB_DSH_HOME 由启动脚本给出，本机由管理器配置给出），
+   * 而且 DSH 的 profile 是 `patchReload: live` —— 改这份文件**不用重启 DSH** 就生效，改动不打断会话。
+   * 写不进去只是没有治理，绝不影响桥启动（失败只记一行日志）。 */
+  try {
+    const cRes = syncDshCompactionPatch({ home: resolveIsolatedDshHome(), cfg: cfg.dshCompaction, log });
+    if (!cRes.ok) log(`[compaction] 上下文治理配置未写入（忽略）：${cRes.error}`);
+    else if (!cRes.changed) log(`[compaction] 上下文治理配置已是最新（${cRes.path}）`);
+    else {
+      const v = cRes.values;
+      log(v.enabled
+        ? `[compaction] 已写入上下文治理配置 ${cRes.path}：窗口 ${(v.thresholdRatio * 100).toFixed(1)}% 触发，`
+          + `最近 ${(v.retainRatio * 100).toFixed(1)}% 逐字保留，工具结果超 ${v.toolResultMaxChars} 字剪枝（保留头 ${v.headChars}/尾 ${v.tailChars}）`
+        : `[compaction] 已关闭上下文治理（${cRes.path}）——回到 DSH 默认（窗口 80% 才压缩）`);
+    }
+  } catch (error) {
+    log('[compaction] 写上下文治理配置异常（忽略）:', error?.message ?? error);
+  }
+  setScheduledRecorder(recordSentMessages);  setWakeSender(sendWakePrompt);
   // 会话忙时把新消息塞进在途回合（DSH mode:'steer'），省掉"结束后再唤醒一轮"的整轮往返
   setSteerSender(steerIntoRunningTurn);
   if (typeof steerIntoRunningTurn === 'function') log('[steer] 已注册「在途回合注入」(session/prompt mode:steer)');
@@ -676,6 +695,22 @@ async function main() {
             const r = applyOwnerWakeProbabilityToSessions();
             if (r.updated || r.kept) log(`[config] 插话概率同步：更新 ${r.updated} 个会话，保留模型自定的 ${r.kept} 个`);
           } catch (e) { log('[config] 同步插话概率失败:', e?.message ?? e); }
+        }
+        /* 【2026-09-19】上下文治理 / 永久会话改了要立刻生效：
+         *   · dshCompaction.* → 重写 DSH home 的 cordis.patch.yml（那里的 patchReload: live 会即时应用，
+         *     不必重启 DSH、不必重启桥，正在聊的会话也不会被打断）；
+         *   · social.autoReset.permanent → 轮换判定每轮现读 cfg，改完下一轮就按新值走（这里只打一行日志）。 */
+        if (changed.some((k) => k.startsWith('dshCompaction'))) {
+          try {
+            const r = syncDshCompactionPatch({ home: resolveIsolatedDshHome(), cfg, log });
+            if (r.ok) log(`[compaction] 配置热加载：${r.changed ? '已更新' : '无变化'} ${r.path}`);
+            else log(`[compaction] 配置热加载失败（忽略）：${r.error}`);
+          } catch (e) { log('[compaction] 配置热加载异常:', e?.message ?? e); }
+        }
+        if (changed.some((k) => k === 'social.autoReset.permanent')) {
+          log(cfg.social?.autoReset?.permanent
+            ? '[rotate] 已切换为「永久会话」：不再按轮数换会话，上下文交给 DSH 压缩治理'
+            : `[rotate] 已关闭「永久会话」：回到按轮数轮换（阈值 ${cfg.social?.autoReset?.wakeThreshold ?? 10} 轮）`);
         }
       },
     });

@@ -76,9 +76,23 @@ export const ROTATE_DEFER_MAX_MS = 120000;
  *    · 重启桥也**不会**重置计数 —— `rotateTurns` 落在 state/social-state.json，由 social-state.js
  *      的加载路径读回（存：`rotateTurns: Number(st.rotateTurns) || 0`；读：`rotateTurns: Number(val.rotateTurns) || 0`）。
  *  另一半"改了不生效"的坑在`preset`（系统提示词）——那个**只在 DSH 会话创建时绑定**（dsh-session.js 建会话
- *  时才带 agentPreset），所以老会话要等轮换或空闲归档重建才会拿到新提示词。两者别混为一谈。 */
+ *  时才带 agentPreset），所以老会话要等轮换或空闲归档重建才会拿到新提示词。两者别混为一谈。
+ *
+ *  【2026-09-19 永久会话 · 主人要求"一个会话永久使用，但别让上下文堆积"】
+ *  `social.autoReset.permanent === true` 时这里返回 `Infinity` = **永不轮换**。所有用到阈值的判定都写成
+ *  `count >= threshold` / `count >= threshold - prewarmAhead`，用 Infinity 天然恒为 false，于是：
+ *  轮换块、busy 分支的"先别注入等收尾"、turn-hold 的"到点放行关回合"、控制台那条 [Rotate] 收尾指令
+ *  统统一处不改就自动停用（这正是把它们统一到这一个函数里的意义）。
+ *  上下文治理改由 DSH 侧负责：先剪掉超大工具结果，聊天超阈值时才摘要 —— 见 lib/dsh-compaction.js。
+ *  留 `wakeThreshold` 不动：关掉永久会话后它立刻恢复作用，兼当"压缩配置被写坏"时的兜底。 */
 export function rotateThresholdOf(cfg) {
+  if (cfg?.social?.autoReset?.permanent === true) return Infinity;
   return Math.max(5, Number(cfg?.social?.autoReset?.wakeThreshold) || 10);
+}
+
+/** 是否处于「永久会话」模式（不按轮数换会话）；界面/日志/测试共用这一处判定 */
+export function isPermanentSession(cfg) {
+  return cfg?.social?.autoReset?.permanent === true;
 }
 
 /**
@@ -90,6 +104,7 @@ export function rotateThresholdOf(cfg) {
 export function rotationDue(key, st, cfg) {
   const threshold = rotateThresholdOf(cfg);
   const count = Number(st?.rotateTurns) || 0;
+  if (!Number.isFinite(threshold)) return { due: false, count, threshold, why: 'permanent-session' };
   if (count < threshold) return { due: false, count, threshold, why: 'below-threshold' };
   const sidNow = state.sessions?.[key];
   if (!sidNow) return { due: false, count, threshold, why: 'no-session' };

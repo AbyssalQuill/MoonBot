@@ -44,7 +44,12 @@ export const TUNABLE_SPECS = [
   { key: 'visionModel', path: ['dsh', 'visionModel'], type: 'str', modelGroup: true, label: '识图模型', desc: '留空=跟随主模型（默认多模态）；配了 visionBaseUrl 时用它指定的模型读图' },
   { key: 'visionBaseUrl', path: ['dsh', 'visionBaseUrl'], type: 'str', label: '识图模型请求地址', desc: 'OpenAI 兼容地址（填到 /v1 为止）。留空=图片当附件发给主模型（老路）' },
   { key: 'visionApiKey', path: ['dsh', 'visionApiKey'], type: 'str', label: '识图模型密钥', desc: '只在配了「识图模型请求地址」时用；本机自建服务可留空' },
-  { key: 'reasoningEffort', path: ['dsh', 'reasoningEffort'], type: 'str', modelGroup: true, label: '推理档位', desc: 'auto/low/medium/high；留空或 auto=自动探测' }
+  { key: 'reasoningEffort', path: ['dsh', 'reasoningEffort'], type: 'str', modelGroup: true, label: '推理档位', desc: 'auto/low/medium/high；留空或 auto=自动探测' },
+  // —— 上下文治理（2026-09-19 主人要求"一个会话永久用、别让上下文堆积"）——
+  { key: 'permanentSession', path: ['social', 'autoReset', 'permanent'], type: 'bool', label: '永久会话（不轮换）', desc: 'true=不再按轮数换会话（上下文交给 DSH 压缩治理，省掉每次换会话的首轮 token）；false=按 wakeThreshold 轮换。开启后改 agentPreset 对老会话不生效（preset 只在建会话时绑定）' },
+  { key: 'compactionEnabled', path: ['dshCompaction', 'enabled'], type: 'bool', label: '上下文治理（工具历史剪枝）', desc: 'true=上下文用到窗口阈值时先剪掉超大工具结果（聊天记录不动），仍超阈值才摘要最老一段；false=回到 DSH 默认（窗口 80% 才压缩）' },
+  { key: 'compactionThresholdRatio', path: ['dshCompaction', 'thresholdRatio'], type: 'float', min: 0.005, max: 0.5, label: '压缩触发比例', desc: '上下文用到模型窗口的多少比例开始治理（默认 0.06，1M 窗口 ≈ 63k token）。调小=更早清理、更省 token；调大=保留更多原文' },
+  { key: 'compactionToolResultChars', path: ['dshCompaction', 'toolResultMaxChars'], type: 'float', min: 300, max: 100000, label: '工具结果保留字数', desc: '单个工具结果超过这么多字符就被剪成「开头 + 剪枝标记 + 结尾」（默认 1500）；原始全文仍留在会话日志里可回放' }
 ];
 
 export function readCfgPath(arr) { let o = cfgObj; for (const k of arr) { if (o == null || typeof o !== 'object') return undefined; o = o[k]; } return o; }
