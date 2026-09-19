@@ -199,10 +199,14 @@ const TOOL_LABEL: Record<string, string> = {
   getFileContent: '读文件内容', sendQqFace: '发 QQ 表情', faceList: 'QQ 表情列表', memorySearch: '搜聊天记录',
   historyDelete: '删聊天记录', historyClear: '清空记录', sendDocx: '发 Word 文档', sendRich: '发卡片消息',
   musicSearch: '搜歌', videoSearch: '看/搜视频', imageSearch: '联网找图发图', pixiv: '搜/发 Pixiv 插画', globalOverview: '全局总览', scheduleMessage: '定时发消息', withdrawMessage: '撤回消息',
-  sendForward: '合并转发', like: '点赞', proactiveSend: '主动私聊', getGroupOwner: '查群主',
-  getGroupMembers: '查成员', adminSet: '管理设置', whitelist: '白名单', blacklist: '拉黑',
-  profileSet: '改档案', profileQuery: '查档案', qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间', sendQzone: '发说说', memeSearch: '搜表情包',
-  sendMeme: '发表情包（内置表情库）', scheduleList: '定时列表', scheduleCancel: '取消定时', activityHours: '活跃时段',
+  sendForward: '合并转发', like: '点赞', proactiveSend: '主动私聊',
+  adminSet: '管理设置', whitelist: '白名单',
+  qzone: '空间互动（看/评/赞/发）', qzoneView: '看空间',
+  activityHours: '活跃时段',
+  /* 【2026-09-19 删废开关】这里原来还有 blacklist / profileSet / profileQuery / memeSearch /
+     sendMeme / sendQzone 六个开关名，以及 getGroupOwner / getGroupMembers / scheduleList /
+     scheduleCancel 四个对不上任何开关的标签 —— 桥侧全树 grep 0 命中，勾了不生效，一并删掉
+     （群信息由 getGroupInfo 管、定时只有 scheduleMessage、qzone 由 qzone/qzoneView 统管）。 */
   // 【2026-09-18】config.example.json 里已有、但标签表漏登的开关：漏了就会在「工具与规则」页裸奔英文 key
   characterCards: '角色卡（角色库）',
   // 【2026-09-19】同样漏登的四个：桥确实会读这四个开关（console-server 的 ToolEnabled('sendVoice'/
@@ -241,10 +245,15 @@ const TOOL_MCP: Record<string, string> = {
   qzone: 'qq_qzone_view / qq_qzone_comment / qq_qzone_like / qq_qzone_reply_comment / qq_send_qzone',
   // 以下 key 当前线上 config 没有（保留映射，切到含它们的配置时也能显示）
   activityHours: 'qq_get_activity_hours / qq_set_activity_hours', adminSet: 'qq_admin_set',
-  whitelist: 'qq_whitelist', blacklist: 'qq_blacklist / qq_remove_friend',
-  profileSet: 'qq_profile_set', profileQuery: 'qq_profile_get',
-  memeSearch: 'qq_meme_search', sendMeme: 'qq_send_meme',
-  qzoneView: 'qq_qzone_view', sendQzone: 'qq_send_qzone',
+  whitelist: 'qq_whitelist',
+  qzoneView: 'qq_qzone_view',
+  /* 【2026-09-19 删废开关】这里原来还有 blacklist / profileSet / profileQuery / memeSearch /
+     sendMeme / sendQzone 六个键 —— 桥侧**从来不读**它们（`git grep` 全树 0 命中，桥只读
+     `cfg.social?.tools?.[key] !== false`）：拉黑走 /api/blacklist 的令牌鉴权、qzone 那组由
+     `qzone` / `qzoneView` 统管、群信息由 `getGroupInfo` 管。它们对应的工具（qq_blacklist /
+     qq_remove_friend / qq_profile_get / qq_profile_set / qq_meme_search / qq_send_meme）
+     都是无条件注册 —— 见下面 TOOLS_NO_SWITCH。
+     留着这些行 = 页面上摆着一个"勾了不生效"的开关，比缺行更糟。 */
   // 【2026-09-19】角色库四个工具由 social.tools.characterCards 一个开关统管（false = 四个都不注册）。
   characterCards: 'qq_character_list / qq_character_read / qq_character_pack / qq_character_search',
   // 【2026-09-19】语音两个与跨会话/群信息三个：同样要显示英文原名，否则开关行只有中文名、
@@ -271,6 +280,9 @@ const TOOLS_NO_SWITCH: string[] = [
   // 无条件注册的 QQ 工具：状态/群列表/群历史/桥配置读写/静默/人格学习
   'qq_status', 'qq_list_groups', 'qq_get_group_history', 'qq_get_system_config', 'qq_set_system_config',
   'qq_deepsleep', 'qq_persona_learn_start', 'qq_persona_learn_stop', 'qq_persona_learn_status',
+  // 【2026-09-19】原来挂在六个废开关下面的工具（开关已删，工具照旧无条件注册）：
+  // 表情包两个、档案读写两个、拉黑与删好友两个。
+  'qq_meme_search', 'qq_send_meme', 'qq_profile_get', 'qq_profile_set', 'qq_blacklist', 'qq_remove_friend',
 ];
 
 /**
@@ -2114,7 +2126,13 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
      主人以为"没有这个工具"。现在行集 = **桥侧全部开关（TOOL_MCP 的键）∪ 本配置已有的键**，
      没有的键按桥的语义（`!== false` 即开）显示为"开"。 */
   const cfgKeys = Object.keys(v);
-  const keys = Array.from(new Set([...Object.keys(TOOL_MCP), ...cfgKeys]))
+  /* 行集 = 桥会读的全部开关（TOOL_MCP 的键）∪ 本配置里"有中文名"的键。
+     配置里那些既没有映射、又没有中文名的键 = 历史遗留的废开关（桥根本不读），
+     渲染出来只会让人以为勾了有用，所以不显示，只在下面一句话里点出来，
+     方便主人去 config.json 里删掉。 */
+  const knownKeys = new Set(Object.keys(TOOL_MCP));
+  const deadKeys = cfgKeys.filter((k) => !knownKeys.has(k) && !TOOL_LABEL[k]).sort();
+  const keys = Array.from(new Set([...knownKeys, ...cfgKeys.filter((k) => TOOL_LABEL[k])]))
     .sort((a, b) => prettyTool(a).localeCompare(prettyTool(b), 'zh'));
   const isOn = (k: string) => (k in v ? v[k] !== false : true);
   const fromCfg = (k: string) => k in v;
@@ -2148,6 +2166,12 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
             </label>
           ))}
         </div>
+        {deadKeys.length ? (
+          <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginTop: 10 }}>
+            配置里还有 {deadKeys.length} 个<b>桥侧不读</b>的旧开关，已不再显示（想清理就打开 config.json，
+            在工具开关那一节里把它们删掉）：{deadKeys.join('、')}
+          </div>
+        ) : null}
         <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginTop: 14 }}>
           关闭某项即停用对应的 QQ 工具（AI 调用时会被拒绝）；开关不影响人设文本里已有的自然语言规则。
           想按 config.json 里的英文键名逐个核对时，勾上右上角「显示 MCP 工具原名」。
