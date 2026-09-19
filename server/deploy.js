@@ -1041,7 +1041,11 @@ export async function runDeploy(taskId, source, target, opts = {}) {
         taskLine(task, `  napcat: ${r.out || r.err}`);
       });
       await safely('重启桥', async () => {
-        const r = await runCmd(srcConn, `cd /root/qq-bridge && rm -f state/bridge.lock && nohup bash start-bridge.sh >/dev/null 2>&1 & sleep 3; pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down`, 60000);
+        /* 优先用随代码包同步过去的 restart-bridge.sh（它会先停旧桥再起，并回报 new/old pid）；
+         * 老写法 `nohup bash start-bridge.sh` 不杀旧桥 → 旧桥继续占着 3100，新实例 EADDRINUSE 自退，
+         * 而判据只看 pgrep 命中 → 永远"bridge-up"其实没重启（2026-09-19 实测）。全新机器上脚本还可能
+         * 不存在（这次是首次部署），那种情况退回老写法。 */
+        const r = await runCmd(srcConn, `if [ -f /root/qq-bridge/tools/restart-bridge.sh ]; then bash /root/qq-bridge/tools/restart-bridge.sh; else cd /root/qq-bridge && rm -f state/bridge.lock && nohup bash start-bridge.sh >/dev/null 2>&1 & sleep 3; pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down; fi`, 120000);
         taskLine(task, `  bridge: ${r.out || r.err}`);
       });
     }

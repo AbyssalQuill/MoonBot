@@ -167,7 +167,14 @@ function collectMemePacks(candidate, character, out) {
   let ents = [];
   try { ents = fs.readdirSync(candidate, { withFileTypes: true }); } catch { return out; }
   for (const e of ents) {
-    if (!e.isDirectory() || e.name.startsWith('.')) continue;   // .dedup / .upload-* / 隐藏目录都不算包
+    if (e.name.startsWith('.')) continue;                       // .dedup / .upload-* / 隐藏目录都不算包
+    /* 【2026-09-20 修「服务器上一份包都找不到」】这里以前用 `e.isDirectory()` 过滤 ——
+     * 而 readdir 的 Dirent **不跟随符号链接**：服务器上的 `/root/.dsh/meme-packs/whale-fanart-001`
+     * 正是指向 `/root/whale-fanart-001` 的软链，isDirectory() 为 false → 整份包被跳过 → 工具回
+     * "本机没装内置表情包"。改用 statSync 判目录（跟随链接），与 hasMemePack 的口径一致。 */
+    let st = null;
+    try { st = fs.statSync(path.join(candidate, e.name)); } catch { continue; }
+    if (!st.isDirectory()) continue;
     push(path.join(candidate, e.name), e.name);
   }
   return out;
@@ -200,7 +207,13 @@ function scanCharacterPacks() {
   const out = [];
   for (const root of characterMemeRoots()) {
     let slugs = [];
-    try { slugs = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== '_template').map((e) => e.name); } catch { continue; }
+    try {
+      // 同样用 statSync 判目录（跟随软链）：角色库根与角色目录都可能是链接（服务器上常见）
+      slugs = fs.readdirSync(root, { withFileTypes: true })
+        .filter((e) => !e.name.startsWith('.') && e.name !== '_template')
+        .filter((e) => { try { return fs.statSync(path.join(root, e.name)).isDirectory(); } catch { return false; } })
+        .map((e) => e.name);
+    } catch { continue; }
     for (const slug of slugs) collectMemePacks(path.join(root, slug, 'meme-packs'), slug, out);
   }
   return out;

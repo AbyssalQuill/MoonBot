@@ -2443,8 +2443,8 @@ app.post('/api/ssh/sync', async (req, res) => {
             try { unlinkSync(sTar); } catch {}
           }
         }
-        const rst = await sshExecCapture(conn, "cd /root/qq-bridge && nohup bash start-bridge.sh </dev/null >/dev/null 2>&1 & sleep 3; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-up || echo bridge-down", 30000);
-        steps.push({ step: '重启桥', ok: rst.ok && String(rst.out || '').includes('bridge-up'), msg: String(rst.out || rst.error || '') });
+        const rst = await remoteRestartBridge(conn);
+        steps.push({ step: '重启桥', ok: rst.ok, msg: rst.msg });
       } finally {
         const rm = await sshExecCapture(conn, 'rm -f /root/qq-bridge-sync.tar.gz /root/qq-bridge-state-sync.tar.gz /root/qq-bridge-stickers.tar.gz', 20000);
         steps.push({ step: '清理远端临时文件', ok: rm.ok, msg: rm.ok ? '已清理' : (rm.error || '清理失败') });
@@ -2668,14 +2668,9 @@ app.post('/api/ssh/sync', async (req, res) => {
             }
           } catch (e) { steps.push({ step: '表情包合并', ok: false, msg: e.message }); }
         }
-        /* 【2026-09-19 修「重启远端桥其实没重启」】原来是直接 `nohup bash start-bridge.sh`：
-         * `start-bridge.sh` 不会替你杀旧进程，于是旧桥继续占着 3100，新起的那个实例只能报
-         * `控制台服务错误: listen EADDRINUSE` 然后自己退出 —— 而这里的检查只看
-         * `pgrep 'node src/bridge.js'` 有没有命中，**旧桥正好命中**，所以界面永远显示"重启成功"，
-         * 实际上新代码一行都没生效（实测服务器两次同步都是这样）。现在先按命令行关键字停掉旧桥、
-         * 等它退干净再起新的，并把"新进程 pid + 到 NapCat 3001 的连接数"一起回报，让成功可验证。 */
-        const restartB = await sshExecCapture(conn, "pkill -f 'node src/bridge[.]js'; sleep 3; cd /root/qq-bridge && nohup bash start-bridge.sh </dev/null >/dev/null 2>&1 & sleep 8; P=$(pgrep -f 'node src/bridge[.]js' | head -1); C=$(ss -tn 2>/dev/null | grep -c ':3001'); if [ -n \"$P\" ]; then echo \"bridge-up pid=$P napcat-conn=$C\"; else echo bridge-down; fi", 60000);
-        steps.push({ step: '重启远端桥', ok: restartB.ok && String(restartB.out || '').includes('bridge-up'), msg: String(restartB.out || restartB.error || '') });
+        /* 重启远端桥：逻辑见上面的 remoteRestartBridge（脚本随代码包走，停旧桥 → 起新桥 → 回报 pid） */
+        const restartB = await remoteRestartBridge(conn);
+        steps.push({ step: '重启远端桥', ok: restartB.ok, msg: restartB.msg });
         await resumeLocal('重启本地桥');
       } finally {
         try { unlinkSync(remoteTar); } catch {}
@@ -3950,7 +3945,11 @@ function listMemePackDirs(root) {
   let ents = [];
   try { ents = readdirSync(root, { withFileTypes: true }); } catch { return []; }
   return ents
-    .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !/\.(bak|deleted)-/.test(e.name))
+    /* 用 statSync 判目录（跟随软链）而不是 `e.isDirectory()`：readdir 的 Dirent 不跟随链接，
+     * 而服务器上 `<meme-packs>/<包里>` 往往就是指向别处的软链 —— 用 isDirectory 会把整份包漏掉
+     * （桥侧 2026-09-20 就是因此报"没装内置表情包"，管理端这份口径跟着对齐）。 */
+    .filter((e) => !e.name.startsWith('.') && !/\.(bak|deleted)-/.test(e.name))
+    .filter((e) => { try { return statSync(join(root, e.name)).isDirectory(); } catch { return false; } })
     .map((e) => join(root, e.name));
 }
 
@@ -4434,7 +4433,30 @@ function sshExecCapture(conn, command, timeoutMs = 8000) {
   });
 }
 
-/** 远端 qq-bridge 根目录探测：在常见位置找带 config.json 的目录（服务器无桥接目录配置项，只能探测） */
+/**
+ * 重启远端桥（代码同步 / 数据合并 / 克隆 三条路都用这一个）。
+ *
+ * 【2026-09-19 真机事故：这一步报成功、其实什么都没重启】
+ * 原来各处都是内联一条 `cd /root/qq-bridge && nohup bash start-bridge.sh …& sleep 3; pgrep -f 'node src/bridge[.]js' && echo bridge-up || echo bridge-down`：
+ *   ① `start-bridge.sh` 不会替你杀旧进程 → 旧桥继续占着 3100，新实例报 `listen EADDRINUSE` 自己退出；
+ *   ② 而判据只看"有没有桥进程"—— **旧桥正好命中**，于是永远回 "bridge-up"、界面显示"重启成功"，
+ *      新同步上去的代码一行都没生效（实测 2026-09-19 的两次同步都是这样，服务器 pid 一直没变）。
+ * 现在真正的逻辑放在随代码包同步过去的 `qq-bridge/tools/restart-bridge.sh` 里（停旧桥 → 等它优雅退出、
+ * 超时才 -9 → 起新桥 → 回报 `pid / old / napcat-conn / console-listen`）：命令短、不会被 ssh 那几层
+ * 引号解析打坏，而且可以单独重跑。报出来的 `old=` 与 `pid=` 不同才算真的换了进程。
+ */
+async function remoteRestartBridge(conn) {
+  const cmd = 'if [ -f /root/qq-bridge/tools/restart-bridge.sh ]; then bash /root/qq-bridge/tools/restart-bridge.sh; else echo restart-script-missing; fi';
+  const r = await sshExecCapture(conn, cmd, 120000);
+  const out = String(r.out || '').trim();
+  if (!r.ok) return { ok: false, msg: r.error || '重启命令没跑起来', out };
+  if (out.includes('restart-script-missing')) {
+    return { ok: false, msg: '服务器上没有 qq-bridge/tools/restart-bridge.sh（这份代码包是旧版？先同步一次代码再来）', out };
+  }
+  return { ok: out.includes('bridge-up'), msg: out || '(没有输出)', out };
+}
+
+
 async function findRemoteBridgeDir(conn) {
   const script = [
     'for d in "$HOME/qq-bridge" "$HOME/Desktop/qq-bridge" "$HOME/QQ-Bridge" "$HOME/Desktop/QQ-Bridge"',

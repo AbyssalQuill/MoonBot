@@ -162,6 +162,15 @@ if (MULTIPACK) {
     'memes/happy/只有全局包有.webp': WB,
   });
   check('用真实 relayout 造出 pack-b / pack-c', b.ok && c.ok, b.ok ? c.out.slice(-120) : b.out.slice(-400));
+  /* 【2026-09-20 回归】再放一份**软链/junction**指向的包：服务器上 `<meme-packs>/<包里>` 就是
+   * 指向别处的软链，而 readdir 的 Dirent 不跟随链接（e.isDirectory() === false）—— 旧代码会在这一步
+   * 把整份包漏掉，表现就是工具回"本机没装内置表情包"（实测服务器上真的踩到了）。 */
+  const linkedSrc = path.join(sandbox, 'outside', 'pack-linked');
+  const linked = buildPack(linkedSrc, { 'memes/happy/软链包.webp': WB });
+  const linkPath = path.join(packsRoot, 'pack-linked');
+  let linkOk = false;
+  try { fs.symlinkSync(linkedSrc, linkPath, 'junction'); linkOk = fs.existsSync(path.join(linkPath, 'index.db')); } catch { linkOk = false; }
+  check('造出一份 union/软链指向的包', linked.ok && linkOk, linkOk ? linkPath : `linked.ok=${linked.ok} linkOk=${linkOk}`);
   // relayout 之后再让 pack-b 的这一张"消失"：表里仍有、盘上没有 —— 这样"同名歧义时优先选了哪一份"
   // 就变成**可观测**的（错误信息会点名包 id）。
   // 注意：本机 Node 的 fs.rmSync 对**含中文的路径**会静默不生效（实测 existsSync 仍为 true），
@@ -179,8 +188,8 @@ if (MULTIPACK) {
 
   const boot = stderrLines.find((l) => l.includes('内置表情包已加载')) ?? '';
   console.log(`stderr：${boot || '(没有!)'}`);
-  check('启动日志认出 2 份包', /已加载 2 份/.test(boot), boot);
-  check('两份都被点名（带来源标注）', /pack-b\(global\)/.test(boot) && /pack-c\(global\)/.test(boot), boot);
+  check('启动日志认出 3 份包（含软链那份）', /已加载 3 份/.test(boot), boot);
+  check('三份都被点名（带来源标注）', /pack-b\(global\)/.test(boot) && /pack-c\(global\)/.test(boot) && /pack-linked\(global\)/.test(boot), boot);
 
   let nextId = 20;
   const search = async (args) => {
@@ -201,6 +210,10 @@ if (MULTIPACK) {
     console.log(`\n--- 跨包搜索 query="开心" ---\n${t1}\n---`);
     const rows1 = parseRows(t1);
     check('跨包搜索同时命中两份包', new Set(rows1.map((r) => r.pack)).size === 2, [...new Set(rows1.map((r) => r.pack))].join(','));
+
+    const tLink = await search({ query: '软链包' });
+    console.log(`\n--- 软链那份包 search query="软链包" ---\n${tLink}\n---`);
+    check('软链指向的包能被搜到（也就是能被发现）', parseRows(tLink).some((r) => r.pack === 'pack-linked'), tLink.split('\n').slice(0, 3).join(' / '));
     check('结果头部列出命中的包名', /来自 .*(pack-b|pack-c).*(pack-b|pack-c)/.test(t1), t1.split('\n')[0]);
 
     const t2 = await search({ query: '', tag: 'happy', pack: 'pack-c' });
