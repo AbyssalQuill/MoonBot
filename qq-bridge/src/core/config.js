@@ -324,12 +324,29 @@ export function applyConfigInPlace(target, next, pathPrefix = '') {
 /**
  * 监听 config.json 并热加载到 target（管理器保存 / 手工编辑都会触发）。
  * 自己写盘时也会收到事件，但此时文件与内存一致 → changed 为空 → 不触发 onChange，不会自激循环。
+ *
+ * 【2026-09-19 修：热加载"看起来装了、其实早就死了"】
+ *   原来写的是 `fs.watch(config.json)` —— Linux 上它盯的是**那个 inode**。而管理端保存服务端配置走的是
+ *   「临时文件 → 备份 → mv 原子替换」，**rename 一覆盖，inode 就换了**，监视器从此盯在一个已被 unlink 的
+ *   旧 inode 上：**之后任何改动都不再触发事件**，直到桥重启为止。
+ *   线上实测（VPS，ZFS 根）：桥 07:34 启动时装好监视，07:39:54 管理端做了一次 mv 覆盖；此后
+ *   「原地写」与「原子替换」两种写法都被实验证伪 —— 桥日志里一条 `已热加载` 都没有（同一台机器上
+ *   单独测 fs.watch 是好的：原地写给 change、mv 覆盖给 change+rename，坏的只是"文件级 watch 被 rename 弄失聪"）。
+ *   后果正是主人反复遇到的"管理端改了配置没生效 / 白名单移除了还在唤醒"。
+ *
+ *   现在的双保险：
+ *     ① **监听目录**（`fs.watch(dir)`，按文件名过滤）—— 目录 inode 不会因为文件被替换而失效，
+ *        mv 覆盖会给出 rename 事件，实测可靠；
+ *     ② **2 秒轮询兜底**（`fs.watchFile`，stat 比较）—— 跨 inode、跨文件系统都能发现变化。
+ *   事件驱动依旧毫秒级，轮询只是保险，成本可忽略。
  * @returns {() => void} 停止监听
  */
 export function watchConfigFile(target, { onChange, debounceMs = 400 } = {}) {
   const file = configFilePath();
+  const dir = path.dirname(file);
+  const base = path.basename(file);
   let timer = null;
-  let watcher = null;
+  let dirWatcher = null;
   const reload = () => {
     timer = null;
     let next;
@@ -339,10 +356,20 @@ export function watchConfigFile(target, { onChange, debounceMs = 400 } = {}) {
     log(`[config] config.json 已热加载，变更字段: ${changed.slice(0, 12).join(', ')}${changed.length > 12 ? ` …共 ${changed.length} 项` : ''}`);
     try { onChange?.(changed); } catch (e) { log('[config] 热加载回调失败:', e?.message ?? e); }
   };
+  const schedule = () => { if (timer) clearTimeout(timer); timer = setTimeout(reload, debounceMs); };
+
   try {
-    watcher = fs.watch(file, () => { if (timer) clearTimeout(timer); timer = setTimeout(reload, debounceMs); });
-    watcher.on('error', (e) => log('[config] config.json 监听出错:', e?.message ?? e));
-    log('[config] 已监听 config.json：管理端保存后无需重启桥接即生效');
-  } catch (e) { log('[config] 无法监听 config.json:', e?.message ?? e); }
-  return () => { try { if (timer) clearTimeout(timer); watcher?.close(); } catch { /* 忽略 */ } };
+    dirWatcher = fs.watch(dir, (_ev, name) => {
+      const n = String(name ?? '');
+      // 只认 config.json 本身和它的临时/备份邻居，别让目录里其它文件的写入白唤醒一次 reload
+      if (!n || n === base || n.startsWith(base + '.')) schedule();
+    });
+    dirWatcher.on('error', (e) => log('[config] config.json 目录监听出错:', e?.message ?? e));
+    log('[config] 已监听 config.json（目录监听 + 2s 轮询兜底）：管理端保存后无需重启桥接即生效');
+  } catch (e) { log('[config] 无法监听 config.json 所在目录:', e?.message ?? e); }
+  try { fs.watchFile(file, { interval: 2000 }, () => schedule()); } catch (e) { log('[config] 轮询兜底启动失败:', e?.message ?? e); }
+
+  return () => {
+    try { if (timer) clearTimeout(timer); dirWatcher?.close(); fs.unwatchFile(file); } catch { /* 忽略 */ }
+  };
 }
