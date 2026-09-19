@@ -37,6 +37,18 @@ const denied = cfg({ private: [1], groups: [2] }, { private: [1], groups: [2] },
 ok('同时在允许与拉黑里 → 拒绝', allowed('group', 2, denied) === false);
 ok('私聊同理', allowed('private', 1, denied) === false);
 
+console.log('\n=== 4b. 分侧放行（2026-09-19 主人要求"私聊全部放行"）===');
+const onlyPrivate = { allow: { private: [], groups: [] }, deny: { private: [], groups: [] }, allowAllWhenEmpty: false, allowAllPrivate: true, allowAllGroups: false };
+ok('只勾"私聊全部放行" → 私聊放行', allowed('private', 1736784911, onlyPrivate) === true);
+ok('只勾"私聊全部放行" → 群聊仍然拒绝', allowed('group', 868756515, onlyPrivate) === false);
+const onlyGroup = { ...onlyPrivate, allowAllPrivate: false, allowAllGroups: true };
+ok('只勾"群聊全部放行" → 群聊放行、私聊拒绝', allowed('group', 1, onlyGroup) === true && allowed('private', 1, onlyGroup) === false);
+ok('分侧开关不影响黑名单（拉黑优先）', allowed('private', 999, { ...onlyPrivate, deny: { private: [999], groups: [] } }) === false);
+ok('名单非空时，分侧开关不开后门', allowed('private', 5, { ...onlyPrivate, allow: { private: [1], groups: [] } }) === false);
+ok('全局开关仍然两边都放', allowed('group', 1, { ...onlyPrivate, allowAllWhenEmpty: true }) === true);
+ok('分侧与全局是"或"关系：全局关、私聊开 → 私聊放行', allowed('private', 7, { ...onlyPrivate, allowAllWhenEmpty: false }) === true);
+ok('三个都不勾 → 私聊也拒绝', allowed('private', 7, { ...onlyPrivate, allowAllPrivate: false }) === false);
+
 console.log('\n=== 5. 兼容单数键名（历史配置写过 group / private）===');
 const singular = { allow: { private: [], group: [777] }, deny: { private: [], group: [] }, allowAllWhenEmpty: false };
 ok('cfg.allow.group 也能命中', allowed('group', 777, singular) === true);

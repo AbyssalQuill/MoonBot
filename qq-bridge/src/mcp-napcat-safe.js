@@ -1,4 +1,4 @@
-// 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
+﻿// 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
 //
 // 安全设计：
 // - 只暴露聊天所需的**安全动作子集**（查状态/查群/查消息/发消息），
@@ -150,7 +150,10 @@ function getAccess() {
     allowPrivate: (c.allow?.private ?? []).map(String),
     denyGroups: (c.deny?.groups ?? []).map(String),
     denyPrivate: (c.deny?.private ?? []).map(String),
-    allowAllWhenEmpty: c.allowAllWhenEmpty === true
+    allowAllWhenEmpty: c.allowAllWhenEmpty === true,
+    // 分侧放行（名单为空时生效）：群 / 私聊各自一个开关（见 lib/config.js 的 allowed()）
+    allowAllGroups: c.allowAllGroups === true,
+    allowAllPrivate: c.allowAllPrivate === true
   };
 }
 
@@ -162,12 +165,14 @@ function getOneBotConfig() {
   };
 }
 
-// 与 bridge.allowed 保持一致：allow 列表为空时按 allowAllWhenEmpty 放行
-function isAllowed(allowList, denyList, id, allowAllWhenEmpty) {
+// 与 bridge.allowed 保持一致：allow 列表为空时看"放行开关"。
+// 【2026-09-19】第 5 个参数改名为 allowAll：调用方按类传 `allowAllXxx || allowAllWhenEmpty`
+// （分侧开关与全局开关是"或"关系，名单非空时两者都不生效——口径与 lib/config.js 的 allowed() 完全一致）。
+function isAllowed(allowList, denyList, id, allowAll) {
   const s = String(id);
   if (denyList.includes(s)) return false;
   if (allowList.length > 0) return allowList.includes(s);
-  return allowAllWhenEmpty;
+  return allowAll === true;
 }
 
 // 防止底层网关把文本中的 [CQ: 当作 CQ 码解析：替换为全角冒号。
@@ -502,7 +507,7 @@ registerTool(
       const a = getAccess();
       const data = await onebot('get_group_list');
       const list = (Array.isArray(data) ? data : (data?.data ?? []))
-          .filter((g) => isAllowed(a.allowGroups, a.denyGroups, g.group_id, a.allowAllWhenEmpty))
+          .filter((g) => isAllowed(a.allowGroups, a.denyGroups, g.group_id, a.allowAllGroups || a.allowAllWhenEmpty))
           .map((g) => ({ group_id: g.group_id, group_name: g.group_name }));
       return { content: [{ type: 'text', text: JSON.stringify(list, null, 2) }] };
     } catch (error) {
@@ -558,7 +563,7 @@ registerTool(
   async ({ groupId, messageSeq }) => {
     const g = String(groupId);
     const a = getAccess();
-    if (!isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllWhenEmpty)) {
+    if (!isAllowed(a.allowGroups, a.denyGroups, g, a.allowAllGroups || a.allowAllWhenEmpty)) {
       return { content: [{ type: 'text', text: `拒绝：群 ${g} 不在只读白名单中。白名单：${a.allowGroups.join(', ') || '（空）'}` }], isError: true };
     }
     try { await authorizeRead(`group:${g}`); } catch (error) {

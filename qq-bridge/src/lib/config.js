@@ -18,14 +18,22 @@ export function normalizeIdList(value) {
   return value.map((v) => String(v).trim()).filter((v) => /^\d+$/.test(v));
 }
 
-// 访问控制判断（cfg 由调用方注入）：白名单命中放行；命中黑名单拒绝；名单空时看 allowAllWhenEmpty。
+// 访问控制判断（cfg 由调用方注入）：白名单命中放行；命中黑名单拒绝；名单为空时看"放行开关"。
 // OneBot 事件里的 id 可能是数字也可能是字符串（int64 序列化差异），统一转字符串比较。
 // 配置字段兼容单数（group/private）与复数（groups/privates）两种写法。
+//
+// 【2026-09-19 加"分侧放行"】主人要求"允许名单里加一个私聊全部放行"：机器人在群里要严（只认名单），
+// 私聊却想让谁都进得来。原有的 `allowAllWhenEmpty` 是**全局**开关，做不到"只放开私聊"。
+// 现在三个开关的关系是：
+//   · 名单**非空** → 一律以名单为准（开关不会开后门，避免"以为只放行名单、其实全放行"）；
+//   · 名单**为空** → 本类开关（allowAllPrivate / allowAllGroups）**或**全局开关，
+//     任一为 true 就放行该类；都不为 true（默认）就是"空名单 = 谁都不放行"。
 export function allowed(kind, id, cfg) {
   const s = String(id);
   const denyList = cfg.deny[kind] ?? cfg.deny[kind + 's'] ?? [];
   if (denyList.map(String).includes(s)) return false;
   const allowList = cfg.allow[kind] ?? cfg.allow[kind + 's'] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
-  return cfg.allowAllWhenEmpty;
+  const perKind = kind === 'private' ? cfg.allowAllPrivate : cfg.allowAllGroups;
+  return perKind === true || cfg.allowAllWhenEmpty === true;
 }

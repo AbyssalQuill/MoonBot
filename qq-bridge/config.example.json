@@ -47,6 +47,9 @@
     "groups": []
   },
   "allowAllWhenEmpty": false,
+  "allowAllPrivate": false,
+  "allowAllGroups": false,
+  "_allowAllNote": "三个放行开关的关系（2026-09-19 加后两个）：① 某一类名单**非空**时一律以名单为准，开关不会开后门；② 某一类名单**为空**时，该类专属开关（allowAllPrivate / allowAllGroups）与全局开关 allowAllWhenEmpty 是**或**关系，任一为 true 就放行该类；③ 三个都为 false（默认）= 空名单时谁都不放行（默认拒绝）。常见用法：群聊严格只认名单、私聊放开 —— 只勾 allowAllPrivate。黑名单（deny）永远优先。",
   "ackMessage": "",
   "sendDelayMs": 300,
   "questionTimeoutMs": 300000,

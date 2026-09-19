@@ -61,7 +61,8 @@ const LABEL: Record<string, string> = {
   // 基础与会话
   agentPreset: '人设预设', workspaceTitle: '工作区名称', ownerQQ: '主人 QQ', adminQQ: '管理员',
   sessionCwd: '会话工作目录', ackMessage: '收到回执语', sendDelayMs: '发送间隔', questionTimeoutMs: '问题等待超时',
-  consolePort: '本机服务端口', consoleToken: '本机服务令牌', allowAllWhenEmpty: '名单为空时全部放行',
+  consolePort: '本机服务端口', consoleToken: '本机服务令牌', allowAllWhenEmpty: '名单为空时全部放行（两边都放）',
+  allowAllPrivate: '私聊：名单为空时全部放行', allowAllGroups: '群聊：名单为空时全部放行',
   // 名单
   private: '私聊', groups: '群聊',
   // 唤醒
@@ -307,7 +308,9 @@ function mcpLabel(fullName: string) {
   consolePort: '桥接内部服务端口（本地管理端会探测它判断是否在运行）。',
   consoleToken: '本机桥接内部接口令牌，一般不用改；改动后管理端会需要同步。',
   sessionCwd: 'DSH 会话工作目录；留空 = 每个会话在 state/agents 下独立建目录。',
-  allowAllWhenEmpty: '白名单为空时是否放行所有会话。强烈建议先把私聊/群白名单填上再开它。',
+  allowAllWhenEmpty: '白名单为空时是否放行所有会话（私聊+群聊两边一起放）。强烈建议先把私聊/群白名单填上再开它。',
+  allowAllPrivate: '私聊专属开关（2026-09-19 主人要求）：**私聊名单为空**时放行所有私聊 —— 群里严格只认名单、私聊谁来都能说上话，就用它。注意：① 只在该类名单为空时生效，私聊名单里填了人就以名单为准；② 黑名单永远优先，拉黑的人照样进不来。',
+  allowAllGroups: '群聊专属开关，语义与上面那条一样，只是作用于群聊。默认两个都不勾 = 空名单时谁都不放行。',
   security: '安全选项分组。',
   trustedCrossSessionUids: '允许 agent 跨会话读取/带话的 QQ 号（数组），一般只放你自己最信任的好友。',
   deepsleep: '总开关：开启后**所有群聊**的消息入库但不唤醒、不回复、不主动冒泡（省 token）；**私聊照常**。拍一拍等群内事件同样被静默。主人发 /start 可随时恢复（这条命令不经过模型，永远有效）。',
@@ -1420,7 +1423,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
 
       <div className="card-stack">
         <GroupCard title="允许名单" cfg={cfg} ch={ch} onHelp={onHelp}
-          blocks={[{ path: 'allow' }, { path: '', only: ['allowAllWhenEmpty'] }]}
+          blocks={[{ path: 'allow' }, { path: '', only: ['allowAllPrivate', 'allowAllGroups', 'allowAllWhenEmpty'] }]}
           desc="允许陪聊的私聊/群；留空 + 全部放行 = 谁都能聊。" />
         <GroupCard title="拒绝名单" path="deny" cfg={cfg} ch={ch} onHelp={onHelp}
           desc="永远不搭理的私聊/群，优先于允许名单。" />

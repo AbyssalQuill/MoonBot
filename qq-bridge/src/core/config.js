@@ -40,6 +40,10 @@ export function loadConfig() {
     },
     // 私聊/群聊均未配置白名单时是否放行所有（true 时启动会打警告）
     allowAllWhenEmpty: file.allowAllWhenEmpty === true,
+    // 【2026-09-19】分侧放行开关：某个类的名单为空时，单独放开这一类（群严、私聊松的常见配置）。
+    // 恒为布尔（缺省 false）—— 界面按"配置里存在的键"渲染，不给默认值的话这两个勾选框不会出现。
+    allowAllPrivate: file.allowAllPrivate === true,
+    allowAllGroups: file.allowAllGroups === true,
     ackMessage: file.ackMessage ?? '🤔 收到，正在思考…',
     sendDelayMs: file.sendDelayMs ?? 300,
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
