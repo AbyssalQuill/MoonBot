@@ -30,21 +30,33 @@ import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } fro
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-// 内置表情包资源根：优先项目 meme/ 目录（随项目分发，已从服务器打包集成，分类在 meme/<pack>/memes/），
-// 再退到项目 .runtime / 项目 meme-packs / 用户主目录 .dsh（服务器旧形态），全部运行时探测，禁止写死。
+// 内置表情包（meme packs）：**多包**发现 + 角色专属包绑定，全部运行时探测，禁止写死。
+//
+// 【2026-09-20 从"单包"改成"多包"】此前这里只认一个写死的 pack id（whale-fanart-001），
+// 于是：主人再传一份表情包进来，模型根本看不见它；角色卡里配的"这个角色用这套表情"也无处落地。
+// 现在一份 pack 的形态固定为：
+//     <包目录>/{manifest.json, index.db, memes/<tag>/<文件名>.<ext>}
+//   · index.db 表 memes(path 主键, file_name, tag, caption, keywords[, file_hash, mtime, captioned_at])
+//   · path 是相对包根的路径（'/' 分隔），**发图靠它**；file_name 只是文件名（包内唯一），搜索靠它。
+// 包出现在三类位置（都认，顺序即优先级）：
+//   1) 出厂包      <runtimeRoot>/meme/<packId>/          —— 随安装包分发（鲸鱼包就在这里）
+//   2) 后装/上传包 <runtimeRoot>/meme-packs/<packId>/    —— 管理端上传的新包落点
+//   3) 角色专属包  <角色库根>/<角色slug>/meme-packs/<packId>/ —— 跟着角色走
 //
 // 【2026-09-15 改名】工具从 qq_whale_meme_search / qq_send_whale_meme 改成 qq_meme_search / qq_send_meme：
 // 旧名字带开发初版「鲸鱼娘人设」的味道，工具本身跟人设无关（就是"从内置表情包里挑一张发"）。
-// **pack 目录名 whale-fanart-001 保持不变**：那是已分发到本机 runtime 与 4 份安装包 payload 里的真实
-// 磁盘路径，改名会让所有已装好的机器找不到表情包（工具退化成"没装表情库"）；等哪天重打包再一起改。
+// **pack 目录名 whale-fanart-001 保持不变**：那是已分发到本机 runtime 与安装包 payload 里的真实
+// 磁盘路径，改名会让所有已装好的机器找不到表情包；id 由 manifest.id 决定，目录名不再等于 id。
 //
 // 【2026-09-13 修「表情包图库搜索失败」】现网 <安装目录>\resources\runtime 与所有安装包 payload
-// 都漏装了 meme/ 表情包 → MEME_ROOT 解析为 null → 工具直接回"本机没装鲸鱼娘同人表情库"，
+// 都漏装了 meme/ 表情包 → 解析为 null → 工具直接回"本机没装表情包"，
 // 而且是**静默降级**（只在被调用时才暴露）。现在：
 //   1) 候选表补上隔离 DSH home / 桌面端 DSH home 下的 meme-packs 与 plugins 形态；
 //   2) 启动时一个都找不到就必打**一行 stderr**，把尝试过的每条路径都列出来；
-//   3) 运行期补装（sync-to-live.ps1 拷进 runtime）后无需重启桥即自愈。
-const MEME_PACK_ID = 'whale-fanart-001';
+//   3) 运行期补装（sync-to-live.ps1 拷进 runtime）或管理端上传新包后，**无需重启桥即自愈**（5 秒缓存）。
+const MEME_LEGACY_PACK_ID = 'whale-fanart-001';
+/** 发现结果缓存：管理端刚传完包就能搜到，不用等重启；但也不至于每次搜索都全盘 readdir */
+const MEME_RESCAN_MS = 5000;
 
 /** DSH home 候选（与 core/tunables.js::resolveIsolatedDshHome / lib/dsh-side.js 同源，只读不改） */
 function dshHomeCandidates() {
@@ -71,61 +83,206 @@ function dshHomeCandidates() {
   return out;
 }
 
-/** 全部候选路径（顺序即优先级）；解析与启动日志共用同一张表，日志里列的就是真正试过的那些 */
-function memeCandidates() {
+/** 全部候选根（顺序即优先级）；解析与启动日志共用同一张表，日志里列的就是真正试过的那些。
+ *  每条候选**既可能是包本身**（目录里有 index.db），也可能是**包根**（下面一层的子目录才是各个包）——
+ *  两种形态都认，这样"出厂单包目录"与"上传的多包目录"共用同一套代码。 */
+function memeRootCandidates() {
   const list = [];
   const add = (p) => { if (p && !list.includes(p)) list.push(p); };
   const explicit = String(process.env.QQB_MEME_ROOT || '').trim();
   // 显式覆盖：可指 pack 本身，也可指 pack 的父目录
-  if (explicit) { add(explicit); add(path.join(explicit, MEME_PACK_ID)); }
-  // ROOT = qq-bridge；项目根 meme = ROOT/../meme（setup 分发后与 qq-bridge 平级的 meme/）
-  add(path.join(ROOT, '..', 'meme', MEME_PACK_ID));                        // 项目根 meme/（随 setup 分发，默认）
-  add(path.join(ROOT, '..', '.runtime', 'meme-packs', MEME_PACK_ID));
+  if (explicit) { add(explicit); add(path.join(explicit, MEME_LEGACY_PACK_ID)); }
+  // ROOT = qq-bridge；项目根 meme/ 与 meme-packs/ 都在 ROOT/..（setup 分发后与 qq-bridge 平级）
+  add(path.join(ROOT, '..', 'meme'));                                       // 出厂包所在（随安装包分发，默认）
+  add(path.join(ROOT, '..', 'meme-packs'));                                 // 后装/上传的包落点
+  add(path.join(ROOT, '..', '.runtime', 'meme-packs'));
+  add(path.join(ROOT, 'meme'));
+  add(path.join(ROOT, 'meme-packs'));
+  add(path.join(ROOT, '.runtime', 'meme-packs'));
   // 【2026-09-13 补】"从本机复刻到服务器"那条路把表情包放在 <源机 qq-bridge 的父目录>/dsh-meme ——
   // 目标机上就是 /root/dsh-meme/<pack>。原来候选表里没有这一条，克隆过去的服务器会重演
   // "表情包图库搜索失败"。这里补上两种形态（与部署脚本 buildLocalStagePlan 的 dsh-meme 目录一致）。
-  add(path.join(ROOT, '..', 'dsh-meme', MEME_PACK_ID));
-  add(path.join(ROOT, 'dsh-meme', MEME_PACK_ID));
-  add(path.join(ROOT, 'meme', MEME_PACK_ID));
-  add(path.join(ROOT, '.runtime', 'meme-packs', MEME_PACK_ID));
+  add(path.join(ROOT, '..', 'dsh-meme'));
+  add(path.join(ROOT, 'dsh-meme'));
   const home = process.env.USERPROFILE || process.env.HOME || '';
-  if (home) add(path.join(home, '.dsh', 'meme-packs', MEME_PACK_ID));
-  add('/root/.dsh/meme-packs/' + MEME_PACK_ID);                            // 服务器（Linux）旧形态
+  if (home) add(path.join(home, '.dsh', 'meme-packs'));
+  add('/root/.dsh/meme-packs');                                             // 服务器（Linux）旧形态
   for (const h of dshHomeCandidates()) {
-    add(path.join(h, 'meme-packs', MEME_PACK_ID));                          // DSH home 形态：<home>/meme-packs/<pack>
+    add(path.join(h, 'meme-packs'));                                        // DSH home 形态：<home>/meme-packs/<pack>
     // home 内再嵌一层 .dsh（桌面端旧形态）；home 本身就叫 .dsh 时不必再加一遍
-    if (!/\.dsh$/i.test(h)) add(path.join(h, '.dsh', 'meme-packs', MEME_PACK_ID));
-    add(path.join(h, 'plugins', MEME_PACK_ID));                             // 作为 DSH 插件/pack 安装的形态
-    add(path.join(h, 'plugins', 'meme-packs', MEME_PACK_ID));
+    if (!/\.dsh$/i.test(h)) add(path.join(h, '.dsh', 'meme-packs'));
+    add(path.join(h, 'plugins', 'meme-packs'));                             // 作为 DSH 插件/pack 安装的形态
+    add(path.join(h, 'plugins', MEME_LEGACY_PACK_ID));
   }
   return list;
 }
 
-const MEME_CANDIDATES = memeCandidates();
+const MEME_ROOT_CANDIDATES = memeRootCandidates();
 
 /** index.db 必须是**非空文件**才算一份可用的 pack（半截拷贝不算） */
 function hasMemePack(dir) {
   try { const st = fs.statSync(path.join(dir, 'index.db')); return st.isFile() && st.size > 0; } catch { return false; }
 }
 
-function resolveMemeRoot() {
-  for (const c of MEME_CANDIDATES) { if (hasMemePack(c)) return c; }
-  return null;
+/** 读 pack 的 manifest.json（读不到/坏掉都当没有，绝不抛） */
+function readMemeManifest(dir) {
+  try {
+    const t = fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8').replace(/^\uFEFF/, '');
+    const j = JSON.parse(t);
+    return j && typeof j === 'object' ? j : null;
+  } catch { return null; }
 }
 
-let memeRootCache = resolveMemeRoot();
-if (memeRootCache) {
-  console.error(`[mcp-napcat-safe] 内置表情包已加载：${memeRootCache}`);
-} else {
-  console.error(`[mcp-napcat-safe] 未找到内置表情包（${MEME_PACK_ID}）：qq_meme_search / qq_send_meme 将不可用。已尝试 ${MEME_CANDIDATES.length} 条路径：${MEME_CANDIDATES.join(' | ')}`);
+/** 出厂包判定：<qq-bridge 的父目录>/meme/ 下面（含 <父目录>/qq-bridge/meme/ 这种旧形态） */
+function isFactoryMemeDir(dir) {
+  for (const base of [path.join(ROOT, '..', 'meme'), path.join(ROOT, 'meme')]) {
+    const rel = path.relative(base, dir);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+  }
+  return false;
 }
 
-/** 取 pack 根：启动时没找到会重新探测，运行期补装后无需重启桥 */
-function getMemeRoot() {
-  if (!memeRootCache) memeRootCache = resolveMemeRoot();
-  return memeRootCache;
+/**
+ * 把一个候选根展开成若干份 pack，追加进 out（按 realpath 去重：同一条路径被多条候选指到时只算一次）。
+ * @param {string} candidate 候选根（包本身或包根）
+ * @param {string|null} character 角色 slug（角色专属包才有）
+ */
+function collectMemePacks(candidate, character, out) {
+  const push = (dir, fallbackId) => {
+    if (!hasMemePack(dir)) return;
+    let real = dir;
+    try { real = fs.realpathSync(dir); } catch { /* 路径读不到就用原样，后面查库时会自然失败 */ }
+    if (out.some((p) => p.dir === real)) return;
+    const manifest = readMemeManifest(dir);
+    out.push({
+      id: String(manifest?.id || fallbackId || path.basename(dir)),
+      dir: real,
+      source: character ? 'character' : (isFactoryMemeDir(dir) ? 'factory' : 'global'),
+      character: character || null,
+      name: String(manifest?.name || fallbackId || path.basename(dir)),
+      manifest
+    });
+  };
+  if (hasMemePack(candidate)) { push(candidate, path.basename(candidate)); return out; }
+  let ents = [];
+  try { ents = fs.readdirSync(candidate, { withFileTypes: true }); } catch { return out; }
+  for (const e of ents) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;   // .dedup / .upload-* / 隐藏目录都不算包
+    push(path.join(candidate, e.name), e.name);
+  }
+  return out;
 }
+
+/** 全局包（出厂 meme/ + 后装 meme-packs/ + DSH home 等旧形态）。只读文件系统、不读配置，故模块初始化期也能调。 */
+function scanGlobalPacks() {
+  const out = [];
+  for (const c of MEME_ROOT_CANDIDATES) collectMemePacks(c, null, out);
+  return out;
+}
+
+/** 角色专属包落在哪些角色库根下（与角色只读工具组同一套解析：config.social.charactersDir 优先） */
+function characterMemeRoots() {
+  const out = [];
+  const add = (p) => { if (p && !out.includes(p)) out.push(p); };
+  try { add(resolveCharactersDir(null)); } catch { /* 角色库解析器异常不该让表情包一起废掉 */ }
+  add(path.join(ROOT, 'characters'));                       // 随安装包分发的角色库
+  add(path.join(ROOT, '..', 'characters'));
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  if (home) {
+    add(path.join(home, 'Desktop', 'characters'));
+    add(path.join(home, 'Desktop', 'characters', 'characters'));
+  }
+  return out;
+}
+
+/** 角色专属包：<角色库根>/<角色slug>/meme-packs/<packId>/（要读配置，只能在工具调用期调） */
+function scanCharacterPacks() {
+  const out = [];
+  for (const root of characterMemeRoots()) {
+    let slugs = [];
+    try { slugs = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== '_template').map((e) => e.name); } catch { continue; }
+    for (const slug of slugs) collectMemePacks(path.join(root, slug, 'meme-packs'), slug, out);
+  }
+  return out;
+}
+
+/** 全局包缓存（5 秒）：管理端刚传完的包不用重启桥就能搜到，但也不至于每次搜索都全盘 readdir */
+let globalMemePacksCache = { at: 0, packs: [] };
+function findGlobalMemePacks() {
+  const now = Date.now();
+  if (globalMemePacksCache.packs.length && now - globalMemePacksCache.at < MEME_RESCAN_MS) return globalMemePacksCache.packs;
+  const packs = scanGlobalPacks();
+  globalMemePacksCache = { at: now, packs };
+  return packs;
+}
+
+/** 启动自检：一份全局包都没有就必打**一行 stderr**，把尝试过的每条路径都列出来。
+ *  （静默降级是 2026-09-13「表情包图库搜索失败」那场事故的根因：装漏了不报，只在被调用时才暴露。）
+ *  这里只扫全局包、不读配置 —— 模块初始化期 DEFAULT_CHARACTERS_DIR 还在 TDZ 里。 */
+{
+  const initial = findGlobalMemePacks();
+  if (initial.length) {
+    console.error(`[mcp-napcat-safe] 内置表情包已加载 ${initial.length} 份：${initial.map((p) => `${p.id}(${p.source})`).join(', ')}`);
+  } else {
+    console.error(`[mcp-napcat-safe] 未找到内置表情包（meme-packs）：qq_meme_search / qq_send_meme 将不可用。已尝试 ${MEME_ROOT_CANDIDATES.length} 条路径：${MEME_ROOT_CANDIDATES.join(' | ')}`);
+  }
+}
+
+/** 全部可用包（全局 + 角色专属），同样 5 秒缓存。工具调用期用这个。 */
+let allMemePacksCache = { at: 0, packs: [] };
+function findMemePacks() {
+  const now = Date.now();
+  if (allMemePacksCache.packs.length && now - allMemePacksCache.at < MEME_RESCAN_MS) return allMemePacksCache.packs;
+  const packs = scanGlobalPacks();
+  try {
+    for (const p of scanCharacterPacks()) if (!packs.some((x) => x.dir === p.dir)) packs.push(p);
+  } catch { /* 角色库读不到不该让全局表情包一起废掉 */ }
+  allMemePacksCache = { at: now, packs };
+  return packs;
+}
+
 const memeMissingHint = '本机没装内置表情包（meme-packs），这个工具不可用。想发图可以试试 qq_send_message 带本地图片路径，或直接发文字。';
+
+/** 当前生效的角色 slug：管理端导入角色卡时写 social.meme.activePersona；没写但**只有一个**角色绑了包时用它兜底 */
+function activeMemePersona(cfg) {
+  const m = cfg?.social?.meme ?? {};
+  const explicit = String(m.activePersona || '').trim();
+  if (explicit) return explicit;
+  const keys = Object.keys(m.personaPacks ?? {}).filter((k) => Array.isArray(m.personaPacks[k]) && m.personaPacks[k].length);
+  return keys.length === 1 ? keys[0] : '';
+}
+
+/**
+ * 一次搜索要考虑的包，按优先级排序：
+ *   ① 当前角色的专属包（social.meme.personaPacks[角色]）→ ② 该角色自己的目录包 → ③ 主人点名的包（social.meme.packs）
+ *   → ④ 出厂包 → ⑤ 其余。social.meme.packs 非空时只在这些包 + 角色包里搜（空 = 全都搜）。
+ */
+function orderedMemePacks(cfg) {
+  const all = findMemePacks();
+  const m = cfg?.social?.meme ?? {};
+  const persona = activeMemePersona(cfg);
+  const bound = new Set((persona ? (m.personaPacks?.[persona] ?? []) : []).map(String));
+  const wanted = new Set((Array.isArray(m.packs) ? m.packs : []).map(String));
+  const pool = wanted.size ? all.filter((p) => wanted.has(p.id) || bound.has(p.id)) : all;
+  const rank = (p) => (bound.has(p.id) ? 0 : (persona && p.character === persona) ? 1 : wanted.has(p.id) ? 2 : p.source === 'factory' ? 3 : 4);
+  return pool.slice().sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
+}
+
+/**
+ * 从一份 pack 的表里取某个文件的相对路径。
+ * 老 pack（<= v1.1.1 的 relayout 产物）没有 path 列，这里按 memes/<tag>/<文件名> 兜底推出来 ——
+ * 否则表现就是"搜得到、发不出"。
+ */
+function queryMemePath(db, fileName) {
+  try {
+    const r = db.prepare('SELECT path FROM memes WHERE file_name = ?').get(String(fileName));
+    if (r?.path) return String(r.path);
+  } catch { /* 没有 path 列，走下面的兜底 */ }
+  try {
+    const r = db.prepare('SELECT tag, file_name FROM memes WHERE file_name = ?').get(String(fileName));
+    return r ? `memes/${r.tag}/${r.file_name}` : null;
+  } catch { return null; }
+}
 
 function loadConfig() {
   try {
@@ -1738,131 +1895,169 @@ if (cfg.social?.tools?.proactiveSend !== false) {
 }
 
 
-registerTool(
-  'qq_meme_search',
-  'Search the bundled meme pack (a local fan-art/GIF sticker archive shipped with the bot). query = an emotion/content description (e.g., angry, crying, sleeping); returns matching memes whose filename equals the description. Send the chosen one with qq_send_meme.',
-  {
-    query: z.string().describe('Query: emotion/content description, e.g., 生气、哭、睡觉、开心、疑惑'),
-    tag: z.string().optional().describe('Filter by category: happy/angry/sad/shy/confused/surprised/sigh/sleep/daily/love/work'),
-    limit: z.number().optional().describe('Max results returned; default 8')
-  },
-  async ({ query, tag, limit }) => {
-    try {
-      const root = getMemeRoot();
-      if (!root) return { content: [{ type: 'text', text: memeMissingHint }] };
-      const q = String(query ?? '').trim();
-      const tg = String(tag ?? '').trim().toLowerCase();
-      const n = Math.min(20, Math.max(1, Number(limit) || 8));
-      const { DatabaseSync } = await import('node:sqlite');
-      const db = new DatabaseSync(root + '/index.db', { readOnly: true });
-      let sql = 'SELECT file_name, tag, caption, keywords FROM memes WHERE 1=1';
-      const params = [];
-      if (tg) { sql += ' AND tag = ?'; params.push(tg); }
-      if (q) { sql += ' AND (caption LIKE ? OR keywords LIKE ?)'; params.push('%' + q + '%', '%' + q + '%'); }
-      sql += ' LIMIT ?'; params.push(n);
-      const rows = db.prepare(sql).all(...params);
-      db.close();
-      if (!rows.length) return { content: [{ type: 'text', text: `没找到匹配的表情，试试：生气/哭/睡觉/开心/疑惑/害羞/干活/日常` }] };
-      const lines = rows.map((r, i) => `${i + 1}. ${r.file_name} [${r.tag}] ${r.caption}`).join('\n');
-      return { content: [{ type: 'text', text: `找到 ${rows.length} 张表情：\n${lines}` }] };
-    } catch (error) {
-      return { content: [{ type: 'text', text: `搜索失败：${error.message}` }], isError: true };
-    }
-  }
-);
-
-registerTool(
-  'qq_send_meme',
-  'Send one meme from the bundled meme pack to a QQ session. file = the filename returned by qq_meme_search (the filename is the description note). Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
-  {
-    key: z.string().describe('Session key: group:ID or private:QQ'),
-    token: z.string().describe('Session token'),
-    file: z.string().describe('Sticker filename (from qq_meme_search), e.g., 蓝发女仆生气.webp'),
-    replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to')
-  },
-  async ({ key, token, file, replyToMessageId }) => {
-    try {
-      const root = getMemeRoot();
-      if (!root) return { content: [{ type: 'text', text: memeMissingHint }] };
-      const { DatabaseSync } = await import('node:sqlite');
-      const db = new DatabaseSync(root + '/index.db', { readOnly: true });
-      const row = db.prepare('SELECT path FROM memes WHERE file_name = ?').get(String(file));
-      db.close();
-      if (!row) return { content: [{ type: 'text', text: `找不到表情 ${file}，请先用 qq_meme_search 搜索` }], isError: true };
-      const filePath = root + '/' + row.path;
-      if (!fs.existsSync(filePath)) return { content: [{ type: 'text', text: '图片文件不存在' }], isError: true };
-      // NapCat 需读它**自己能读到**的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
-      // 宿主挂载目录），再用 napcatImageFileArg 按 dockerPathMap 换成容器内路径 / base64。
-      // 【2026-09-15】此前直接把宿主绝对路径交给 NapCat，服务器（Docker）报
-      // 「文件处理失败: 识别URL失败」→ 主人看到的是"表情包一张都发不出去"。
-      const tmpDir = path.join(ROOT, 'state', 'sticker-tmp');
-      const cfgMeme = getConfig();
-      const wantTmpDir = String(cfgMeme?.napcat?.tmpDir ?? '').trim() || tmpDir;
-      fs.mkdirSync(wantTmpDir, { recursive: true });
-      const tmpName = `${Date.now()}-meme-${path.basename(row.path || 'meme.webp')}`;
-      const tmpPath = path.join(wantTmpDir, tmpName);
-      fs.copyFileSync(filePath, tmpPath);
-      const napcatPath = napcatImageFileArg(tmpPath, cfgMeme);
-      const [kind, id] = key.split(':');
-      const hasQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
-      // 带引用时统一走桥的发送端点：它用 resolveReplyTarget 把「本地 seq」和「真实 QQ message id」
-      // 都解析成真正可引用的 id，并顺带做限频/防重复/会话记录。此前这里直接把模型给的原始值当
-      // QQ message id 塞进 reply 段 —— 模型传了本地 seq 或过期 id 时 NapCat 照常受理，但 QQ 端
-      // 不显示引用框，工具却回报成功，正是用户看到的"引用失败"。
-      if (hasQuote) {
-        const data = await agentApi('/api/social/send-message', {
-          method: 'POST',
-          body: JSON.stringify({ key, messages: [], images: [tmpPath], replyToMessageId }),
-          headers: { 'x-agent-token': token },
-          timeoutMs: 120000
-        });
-        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file, quoted: data?.quoted ?? null, sent: data?.sent ?? null, via: 'bridge' }, null, 2) }] };
-      }
-      const msg = [];
-      msg.push({ type: 'image', data: { file: napcatPath } });
-      const params = kind === 'private' ? { user_id: Number(id), message: msg } : { group_id: Number(id), message: msg };
-      const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
-      // 这条直连 OneBot 的路径不经过桥的发送端点，必须先用 /api/social/check-send 校验
-      // 会话令牌 + 白名单（config.json allow.groups/allow.private）——否则模型可以给任意群/私聊发图，
-      // 绕过本文件开头声明的"发送类工具强制白名单"。校验不通过时 agentApi 抛错，由外层 catch 报失败。
-      await agentApi('/api/social/check-send', {
-        method: 'POST',
-        body: JSON.stringify({ key, token, tool: kind === 'private' ? 'sendPrivate' : 'sendGroup' }),
-        timeoutMs: 15000
-      });
-      let data;
+if (cfg.social?.meme?.enabled !== false) {
+  registerTool(
+    'qq_meme_search',
+    'Search the bundled meme packs (local fan-art/GIF sticker archives shipped with the bot, one folder per pack). query = an emotion/content description (e.g., angry, crying, sleeping); every hit is returned as "file_name [tag] [packId] caption". Send the chosen one with qq_send_meme. When the owner has uploaded their own packs, their packs are searched together with the built-in one.',
+    {
+      query: z.string().describe('Query: emotion/content description, e.g., 生气、哭、睡觉、开心、疑惑'),
+      tag: z.string().optional().describe('Filter by category: happy/angry/sad/shy/confused/surprised/sigh/sleep/daily/love/work'),
+      pack: z.string().optional().describe('Search one pack only, by the packId shown in results; omit to search every pack the owner allows'),
+      limit: z.number().optional().describe('Max results returned; default 8')
+    },
+    async ({ query, tag, pack, limit }) => {
       try {
-        data = await onebot(action, params);
-      } catch (eSend) {
-        // 【2026-09-15 自愈】NapCat 读不到图片路径（Docker 容器读不到宿主路径）→ 换 base64 重发一次。
-        // 该错误 = 整条消息没发出去，重发不会重复（服务器实测报「文件处理失败: 识别URL失败」）。
-        const em = String(eSend?.message ?? eSend);
-        if (!/文件处理失败|识别URL失败|ENOENT|no such file/i.test(em)) throw eSend;
-        const imgSeg = msg.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
-        if (!imgSeg) throw eSend;
-        imgSeg.data.file = `base64://${fs.readFileSync(tmpPath).toString('base64')}`;
-        data = await onebot(action, params);
-      }
-      const messageId = data?.data?.message_id ?? data?.message_id ?? null;
-      // 登记到桥接会话：让 AI 记住自己发过这张表情、可被 qq_withdraw_message 撤回（含 (id:xxx) 展示）
-      try {
-        if (messageId != null && token) {
-          await agentApi('/api/social/record-own-sent', {
-            method: 'POST',
-            body: JSON.stringify({ key, messageId: String(messageId), text: `[表情:${file}]`, token }),
-            headers: { 'x-agent-token': token },
-            timeoutMs: 10000
-          });
+        const packs = orderedMemePacks(getConfig());
+        if (!packs.length) return { content: [{ type: 'text', text: memeMissingHint }] };
+        const only = String(pack ?? '').trim();
+        if (only && !packs.some((p) => p.id === only)) {
+          return { content: [{ type: 'text', text: `没有叫 ${only} 的表情包。现在能用的是：${packs.map((p) => p.id).join(', ')}` }], isError: true };
         }
-      } catch (regError) {
-        // 登记失败不影响发送本身
+        const q = String(query ?? '').trim();
+        const tg = String(tag ?? '').trim().toLowerCase();
+        const n = Math.min(20, Math.max(1, Number(limit) || 8));
+        const { DatabaseSync } = await import('node:sqlite');
+        const rows = [];
+        let broken = 0;
+        for (const p of packs) {
+          if (rows.length >= n) break;
+          if (only && p.id !== only) continue;
+          let db;
+          try { db = new DatabaseSync(path.join(p.dir, 'index.db'), { readOnly: true }); } catch { broken += 1; continue; }
+          try {
+            let sql = 'SELECT file_name, tag, caption, keywords FROM memes WHERE 1=1';
+            const params = [];
+            if (tg) { sql += ' AND tag = ?'; params.push(tg); }
+            if (q) { sql += ' AND (caption LIKE ? OR keywords LIKE ?)'; params.push('%' + q + '%', '%' + q + '%'); }
+            sql += ' LIMIT ?'; params.push(n - rows.length);
+            for (const r of db.prepare(sql).all(...params)) rows.push({ ...r, packId: p.id });
+          } catch { broken += 1; } finally { try { db.close(); } catch { /* 只读句柄，关不掉不影响结果 */ } }
+        }
+        if (!rows.length) return { content: [{ type: 'text', text: `没找到匹配的表情，试试：生气/哭/睡觉/开心/疑惑/害羞/干活/日常` }] };
+        const lines = rows.map((r, i) => `${i + 1}. ${r.file_name} [${r.tag}] [${r.packId}] ${r.caption}`).join('\n');
+        const used = [...new Set(rows.map((r) => r.packId))];
+        const tailNote = broken ? `\n（另有 ${broken} 份表情包读不出来，已跳过）` : '';
+        return { content: [{ type: 'text', text: `找到 ${rows.length} 张表情（来自 ${used.join(', ')}）：\n${lines}${tailNote}` }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `搜索失败：${error.message}` }], isError: true };
       }
-      return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file, messageId }) }] };
-    } catch (error) {
-      return { content: [{ type: 'text', text: `发送失败：${error.message}` }], isError: true };
     }
-  }
-);
+  );
+}
+
+if (cfg.social?.meme?.enabled !== false) {
+  registerTool(
+    'qq_send_meme',
+    'Send one meme from the bundled meme packs to a QQ session. file = the file_name returned by qq_meme_search (a meme file name is its description note); pass pack as well when two packs contain the same file_name. Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
+    {
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token'),
+      file: z.string().describe('Meme file name from qq_meme_search, e.g., 蓝发女仆生气.webp; "<packId>/<file_name>" also works'),
+      pack: z.string().optional().describe('Pack id shown in qq_meme_search results; only needed when several packs contain the same file_name'),
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to')
+    },
+    async ({ key, token, file, pack, replyToMessageId }) => {
+      try {
+        const packs = orderedMemePacks(getConfig());
+        if (!packs.length) return { content: [{ type: 'text', text: memeMissingHint }] };
+        // file 允许写成 "<packId>/<文件名>"（搜索结果里的 [packId] 就是它）
+        let wantPack = String(pack ?? '').trim();
+        let wantFile = String(file ?? '').trim();
+        const slashAt = wantFile.indexOf('/');
+        if (!wantPack && slashAt > 0) {
+          const maybePack = wantFile.slice(0, slashAt);
+          if (packs.some((p) => p.id === maybePack)) { wantPack = maybePack; wantFile = wantFile.slice(slashAt + 1); }
+        }
+        const { DatabaseSync } = await import('node:sqlite');
+        const hits = [];
+        for (const p of packs) {
+          if (wantPack && p.id !== wantPack) continue;
+          let db;
+          try { db = new DatabaseSync(path.join(p.dir, 'index.db'), { readOnly: true }); } catch { continue; }
+          try {
+            const rel = queryMemePath(db, wantFile);
+            if (rel) hits.push({ pack: p, rel });
+          } catch { /* 坏包跳过：一个包读不出来不该让发图整个失败 */ } finally { try { db.close(); } catch { /* 只读句柄，关不掉不影响发图 */ } }
+        }
+        if (!hits.length) return { content: [{ type: 'text', text: `找不到表情 ${file}${wantPack ? `（包 ${wantPack}）` : ''}，请先用 qq_meme_search 搜索` }], isError: true };
+        // 多份包都有同名文件时按优先级取第一份（角色专属包排在最前），并把这件事如实告诉模型
+        const hit = hits[0];
+        const otherPacks = hits.slice(1).map((h) => h.pack.id);
+        const filePath = path.join(hit.pack.dir, hit.rel.replace(/\\/g, '/'));
+        if (!fs.existsSync(filePath)) return { content: [{ type: 'text', text: `图片文件不存在：${filePath}（包 ${hit.pack.id} 的表里有它，磁盘上没有）` }], isError: true };
+        // NapCat 需读它**自己能读到**的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
+        // 宿主挂载目录），再用 napcatImageFileArg 按 dockerPathMap 换成容器内路径 / base64。
+        // 【2026-09-15】此前直接把宿主绝对路径交给 NapCat，服务器（Docker）报
+        // 「文件处理失败: 识别URL失败」→ 主人看到的是"表情包一张都发不出去"。
+        const tmpDir = path.join(ROOT, 'state', 'sticker-tmp');
+        const cfgMeme = getConfig();
+        const wantTmpDir = String(cfgMeme?.napcat?.tmpDir ?? '').trim() || tmpDir;
+        fs.mkdirSync(wantTmpDir, { recursive: true });
+        const tmpName = `${Date.now()}-meme-${path.basename(hit.rel || 'meme.webp')}`;
+        const tmpPath = path.join(wantTmpDir, tmpName);
+        fs.copyFileSync(filePath, tmpPath);
+        const napcatPath = napcatImageFileArg(tmpPath, cfgMeme);
+        const [kind, id] = key.split(':');
+        const hasQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
+        // 带引用时统一走桥的发送端点：它用 resolveReplyTarget 把「本地 seq」和「真实 QQ message id」
+        // 都解析成真正可引用的 id，并顺带做限频/防重复/会话记录。此前这里直接把模型给的原始值当
+        // QQ message id 塞进 reply 段 —— 模型传了本地 seq 或过期 id 时 NapCat 照常受理，但 QQ 端
+        // 不显示引用框，工具却回报成功，正是用户看到的"引用失败"。
+        if (hasQuote) {
+          const data = await agentApi('/api/social/send-message', {
+            method: 'POST',
+            body: JSON.stringify({ key, messages: [], images: [tmpPath], replyToMessageId }),
+            headers: { 'x-agent-token': token },
+            timeoutMs: 120000
+          });
+          return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), quoted: data?.quoted ?? null, sent: data?.sent ?? null, via: 'bridge' }, null, 2) }] };
+        }
+        const msg = [];
+        msg.push({ type: 'image', data: { file: napcatPath } });
+        const params = kind === 'private' ? { user_id: Number(id), message: msg } : { group_id: Number(id), message: msg };
+        const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+        // 这条直连 OneBot 的路径不经过桥的发送端点，必须先用 /api/social/check-send 校验
+        // 会话令牌 + 白名单（config.json allow.groups/allow.private）——否则模型可以给任意群/私聊发图，
+        // 绕过本文件开头声明的"发送类工具强制白名单"。校验不通过时 agentApi 抛错，由外层 catch 报失败。
+        await agentApi('/api/social/check-send', {
+          method: 'POST',
+          body: JSON.stringify({ key, token, tool: kind === 'private' ? 'sendPrivate' : 'sendGroup' }),
+          timeoutMs: 15000
+        });
+        let data;
+        try {
+          data = await onebot(action, params);
+        } catch (eSend) {
+          // 【2026-09-15 自愈】NapCat 读不到图片路径（Docker 容器读不到宿主路径）→ 换 base64 重发一次。
+          // 该错误 = 整条消息没发出去，重发不会重复（服务器实测报「文件处理失败: 识别URL失败」）。
+          const em = String(eSend?.message ?? eSend);
+          if (!/文件处理失败|识别URL失败|ENOENT|no such file/i.test(em)) throw eSend;
+          const imgSeg = msg.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
+          if (!imgSeg) throw eSend;
+          imgSeg.data.file = `base64://${fs.readFileSync(tmpPath).toString('base64')}`;
+          data = await onebot(action, params);
+        }
+        const messageId = data?.data?.message_id ?? data?.message_id ?? null;
+        // 登记到桥接会话：让 AI 记住自己发过这张表情、可被 qq_withdraw_message 撤回（含 (id:xxx) 展示）
+        try {
+          if (messageId != null && token) {
+            await agentApi('/api/social/record-own-sent', {
+              method: 'POST',
+              body: JSON.stringify({ key, messageId: String(messageId), text: `[表情:${wantFile}]`, token }),
+              headers: { 'x-agent-token': token },
+              timeoutMs: 10000
+            });
+          }
+        } catch (regError) {
+          // 登记失败不影响发送本身
+        }
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), messageId }) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发送失败：${error.message}` }], isError: true };
+      }
+    }
+  );
+}
 
 registerTool(
   'qq_send_voice',

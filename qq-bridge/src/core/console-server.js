@@ -224,6 +224,10 @@ export function setConsoleMedia(rich, music, card) { sendRich = rich; musicSearc
 export function setConsoleLastModeSink(fn) { writeLastMode = fn; }
 let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔保护（原 main 局部）
 
+/* 内置表情包（meme packs）总开关：与 sticker 一样，关掉就不把这两个工具算进"当前可用工具"，
+ * 桥侧 mcp-napcat-safe.js 更是直接不注册它们（social.meme.enabled=false → 工具从列表里消失）。 */
+const memeEnabled = () => cfgRef?.social?.meme?.enabled !== false;
+
 // ══════════════════════════════════════════════════════════════════════════════
 // 学习管理 / 用量统计（学习系统重构：console 侧 REST + 配置落盘，纯追加模块级代码，
 // 不改动任何既有路由语义。按共享规格 v1「管理端 GUI」一节：3100 为纯 JSON API，
@@ -1179,7 +1183,7 @@ export function startConsoleServer() {
         const current = file.social ?? {};
         const merged = { ...current, ...body };
         // 子对象必须是非 null 对象；null/数组/基本类型会覆盖默认值导致工具开关被绕过，这里直接保留当前值。
-        for (const sub of ['tools', 'wake', 'send', 'wait', 'proactive', 'sticker', 'feedback', 'context']) {
+        for (const sub of ['tools', 'wake', 'send', 'wait', 'proactive', 'sticker', 'meme', 'feedback', 'context']) {
           if (body[sub] !== undefined && (body[sub] === null || typeof body[sub] !== 'object' || Array.isArray(body[sub]))) {
             merged[sub] = current[sub] ?? {};
           }
@@ -1195,6 +1199,18 @@ export function startConsoleServer() {
           for (const k of toolFlags) {
             if (typeof merged.tools[k] !== 'boolean') merged.tools[k] = current.tools?.[k] !== false;
           }
+        }
+        // meme（内置表情包多包）：enabled 宽松解析；packs = 包 id 数组；personaPacks = "角色 slug -> 包 id 数组"
+        if (body.meme && typeof body.meme === 'object' && !Array.isArray(body.meme)) {
+          merged.meme = { ...(current.meme ?? {}), ...body.meme };
+          const asTrue = (v) => (v === true || v === 1 || /^(true|on|1|yes|开|打开)$/i.test(String(v ?? '').trim()));
+          if (merged.meme.enabled !== undefined) merged.meme.enabled = asTrue(merged.meme.enabled);
+          merged.meme.packs = Array.isArray(merged.meme.packs) ? merged.meme.packs.map(String).filter(Boolean) : (current.meme?.packs ?? []);
+          const pp = merged.meme.personaPacks;
+          merged.meme.personaPacks = (pp && typeof pp === 'object' && !Array.isArray(pp))
+            ? Object.fromEntries(Object.entries(pp).map(([k, v]) => [String(k), (Array.isArray(v) ? v : [v]).map(String).filter(Boolean)]))
+            : (current.meme?.personaPacks ?? {});
+          merged.meme.activePersona = String(merged.meme.activePersona ?? '');
         }
         // wake：数值与字符串数组归一化
         if (body.wake && typeof body.wake === 'object') {
@@ -1509,13 +1525,19 @@ export function startConsoleServer() {
           setStickerRemark: 'qq_set_sticker_remark',
           stickerNote: 'qq_sticker_note',
           collectSticker: 'qq_collect_sticker',
-          getSelfImage: 'qq_get_self_image'
+          getSelfImage: 'qq_get_self_image',
+          memeSearch: 'qq_meme_search',
+          sendMeme: 'qq_send_meme'
         };
         const tools = cfgRef.social?.tools ?? {};
         const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
+        const memeToolFlags = new Set(['memeSearch', 'sendMeme']);
         const enabledTools = [];
         for (const [flag, name] of Object.entries(toolMap)) {
-          if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
+          if (tools[flag] === false) continue;
+          if (stickerToolFlags.has(flag) && !stickerEnabled()) continue;
+          if (memeToolFlags.has(flag) && !memeEnabled()) continue;
+          enabledTools.push(name);
         }
         sendJson({
           ok: true,

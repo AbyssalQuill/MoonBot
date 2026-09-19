@@ -199,6 +199,12 @@
         "maxRemarkChars": 20
       }
     },
+    "meme": {
+      "enabled": true,
+      "packs": [],
+      "personaPacks": {},
+      "activePersona": ""
+    },
     "proactive": {
       "enabled": true,
       "checkIntervalMinMs": 1800000,

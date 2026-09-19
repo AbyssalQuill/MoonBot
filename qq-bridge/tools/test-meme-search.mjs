@@ -9,6 +9,7 @@
 //   node tools/test-meme-search.mjs <server.js 路径>       # 测指定副本（现网 runtime / 打包 payload）
 //   node tools/test-meme-search.mjs <server.js> --pack <pack 根>
 //   node tools/test-meme-search.mjs --negative             # 反向自测：无 pack 时必须"响亮报错"
+//   node tools/test-meme-search.mjs --multipack            # 多包自测：造两份包 → 跨包搜索/pack 过滤/同名歧义/角色包优先
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -18,6 +19,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..'); // qq-bridge/
 const argv = process.argv.slice(2);
 const NEGATIVE = argv.includes('--negative');
+const MULTIPACK = argv.includes('--multipack');
 const packArgIdx = argv.indexOf('--pack');
 const PACK_ARG = packArgIdx >= 0 ? argv[packArgIdx + 1] : '';
 const execIdx = argv.indexOf('--exec');
@@ -79,9 +81,9 @@ function listPackFiles(packRoot) {
 }
 
 /** 起 MCP server（stdio）并完成 initialize 握手 */
-function connect(serverFile) {
+function connect(serverFile, extraEnv = {}) {
   const cwd = path.dirname(path.dirname(serverFile));
-  const child = spawn(EXEC_PATH, [serverFile], { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(EXEC_PATH, [serverFile], { cwd, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...extraEnv } });
   const responses = new Map();
   const stderrLines = [];
   let buf = '';
@@ -115,6 +117,142 @@ function connect(serverFile) {
 }
 
 const textOf = (msg) => msg?.result?.content?.map((c) => c.text ?? '').join('\n') ?? '';
+
+/** 解析搜索结果行：`N. <文件名> [tag] [packId] <caption>` */
+function parseRows(text) {
+  return text.split('\n').slice(1)
+    .map((l) => l.match(/^\d+\.\s+(.+?)\s+\[(.+?)\]\s+\[(.+?)\]\s+(.*)$/))
+    .filter(Boolean)
+    .map((m) => ({ name: m[1], tag: m[2], pack: m[3], caption: m[4] }));
+}
+
+/** 用**真实的** relayout 脚本造一份 pack（这样被测的 index.db schema 与出厂/上传产物完全一致） */
+function buildPack(dir, files) {
+  for (const [rel, bytes] of Object.entries(files)) {
+    const p = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, Buffer.from(bytes));
+  }
+  const r = spawnSync(process.execPath, [path.join(REPO, 'tools', 'relayout-meme-pack.mjs'), dir], { encoding: 'utf8' });
+  return { ok: r.status === 0, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+// ---------------------------------------------------------------- 多包自测
+if (MULTIPACK) {
+  section('多包：跨包搜索 / pack 过滤 / 同名歧义 / 角色包优先');
+  const sandbox = path.join(REPO, `.meme-multipack-${Date.now()}`);
+  const packsRoot = path.join(sandbox, 'packs');
+  const copyRoot = path.join(sandbox, 'qq-bridge');
+  const WB = 'RIFF____WEBPVP8 '; // 内容无所谓：工具只按扩展名收图
+
+  fs.mkdirSync(copyRoot, { recursive: true });
+  fs.cpSync(path.join(REPO, 'src'), path.join(copyRoot, 'src'), { recursive: true });
+  const cfgFile = path.join(copyRoot, 'config.json');
+  const writeCfg = (meme) => fs.writeFileSync(cfgFile, JSON.stringify({ social: { meme } }, null, 2), 'utf8');
+
+  // pack-b = 角色 demo 绑定的包；pack-c = 普通全局包。两者故意共用两个文件名用来观测"选了哪一份"。
+  const b = buildPack(path.join(packsRoot, 'pack-b'), {
+    'memes/happy/角色包开心.webp': WB,
+    'memes/demo/角色包测试.webp': WB,
+    'memes/happy/两边都有但这边缺.webp': WB,
+  });
+  const c = buildPack(path.join(packsRoot, 'pack-c'), {
+    'memes/happy/全局包开心.webp': WB,
+    'memes/happy/两边都有但这边缺.webp': WB,
+    'memes/happy/只有全局包有.webp': WB,
+  });
+  check('用真实 relayout 造出 pack-b / pack-c', b.ok && c.ok, b.ok ? c.out.slice(-120) : b.out.slice(-400));
+  // relayout 之后再让 pack-b 的这一张"消失"：表里仍有、盘上没有 —— 这样"同名歧义时优先选了哪一份"
+  // 就变成**可观测**的（错误信息会点名包 id）。
+  // 注意：本机 Node 的 fs.rmSync 对**含中文的路径**会静默不生效（实测 existsSync 仍为 true），
+  // 而 renameSync 是好的（relayout 自己就靠它搬中文名文件）——所以这里用改名而不是删除。
+  const ghost = path.join(packsRoot, 'pack-b', 'memes', 'happy', '两边都有但这边缺.webp');
+  fs.renameSync(ghost, path.join(path.dirname(ghost), 'gone.webp'));
+  check('把 pack-b 的那张挪名（表里仍有、盘上已无）', !fs.existsSync(ghost), ghost);
+
+  writeCfg({ enabled: true, packs: [], personaPacks: { demo: ['pack-b'] }, activePersona: 'demo' });
+  const { child, send, wait, stderrLines } = connect(path.join(copyRoot, 'src', 'mcp-napcat-safe.js'), { QQB_MEME_ROOT: packsRoot });
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'meme-multipack', version: '1' } } });
+  check('initialize 成功', !!(await wait(1)));
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  await new Promise((r) => setTimeout(r, 500));
+
+  const boot = stderrLines.find((l) => l.includes('内置表情包已加载')) ?? '';
+  console.log(`stderr：${boot || '(没有!)'}`);
+  check('启动日志认出 2 份包', /已加载 2 份/.test(boot), boot);
+  check('两份都被点名（带来源标注）', /pack-b\(global\)/.test(boot) && /pack-c\(global\)/.test(boot), boot);
+
+  let nextId = 20;
+  const search = async (args) => {
+    const id = nextId++;
+    send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'qq_meme_search', arguments: args } });
+    return textOf(await wait(id, 20000));
+  };
+  const sendMeme = async (args) => {
+    const id = nextId++;
+    // token 故意填 x：本机可能正跑着真桥控制台，这个 token 一定被拒，
+    // 所以这些调用**不可能真的往 QQ 发出任何东西**；本测试只验"解到了哪一份包/哪一个文件"。
+    send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'qq_send_meme', arguments: { key: 'private:10000', token: 'x', ...args } } });
+    return textOf(await wait(id, 30000));
+  };
+
+  try {
+    const t1 = await search({ query: '开心' });
+    console.log(`\n--- 跨包搜索 query="开心" ---\n${t1}\n---`);
+    const rows1 = parseRows(t1);
+    check('跨包搜索同时命中两份包', new Set(rows1.map((r) => r.pack)).size === 2, [...new Set(rows1.map((r) => r.pack))].join(','));
+    check('结果头部列出命中的包名', /来自 .*(pack-b|pack-c).*(pack-b|pack-c)/.test(t1), t1.split('\n')[0]);
+
+    const t2 = await search({ query: '', tag: 'happy', pack: 'pack-c' });
+    const rows2 = parseRows(t2);
+    check('pack 过滤：只返回该包的行', rows2.length > 0 && rows2.every((r) => r.pack === 'pack-c'), rows2.map((r) => r.pack).join(','));
+
+    const t3 = await search({ query: '角色包测试', pack: 'pack-c' });
+    check('pack 过滤：别的包独有的图搜不到', t3.includes('没找到匹配'), t3.split('\n')[0]);
+
+    const t4 = await search({ query: '角色包测试' });
+    check('同一关键词不限制包时能搜到', parseRows(t4).some((r) => r.pack === 'pack-b'), t4.split('\n').slice(0, 2).join(' / '));
+
+    // 把 social.meme.packs 收紧到 pack-b（pack-c 既没被点名也没被角色绑定 → 应当彻底退出搜索池）
+    writeCfg({ enabled: true, packs: ['pack-b'], personaPacks: { demo: ['pack-b'] }, activePersona: 'demo' });
+    const t5 = await search({ query: '全局包开心' });
+    check('social.meme.packs 收紧后未点名的包不参与搜索', t5.includes('没找到匹配'), t5.split('\n')[0]);
+    writeCfg({ enabled: true, packs: [], personaPacks: { demo: ['pack-b'] }, activePersona: 'demo' });
+
+    // ---- 发图侧：包解析（这里只验"解到了哪一份包/哪一个文件"，真发 QQ 需要活桥，不在本测试范围） ----
+    const s1 = await sendMeme({ file: '两边都有但这边缺.webp' });
+    console.log(`\n--- 同名歧义 file="两边都有但这边缺.webp" ---\n${s1}\n---`);
+    check('同名歧义优先角色绑定的包（错误里点名 pack-b）', s1.includes('图片文件不存在') && s1.includes('pack-b'), s1.slice(0, 200));
+
+    const s2 = await sendMeme({ file: '两边都有但这边缺.webp', pack: 'pack-c' });
+    check('带上 pack=pack-c 后改选 pack-c（不再报缺文件）', !s2.includes('图片文件不存在') && !s2.includes('找不到表情'), s2.slice(0, 200));
+
+    const s3 = await sendMeme({ file: 'pack-c/只有全局包有.webp' });
+    check('file 支持 "<packId>/<文件名>" 简写', !s3.includes('图片文件不存在') && !s3.includes('找不到表情'), s3.slice(0, 200));
+
+    const s4 = await sendMeme({ file: '没有这个表情.webp' });
+    check('不存在的文件名 → 明确回"找不到表情"', s4.includes('找不到表情'), s4.slice(0, 200));
+
+    const s5 = await sendMeme({ file: '只有全局包有.webp', pack: 'pack-b' });
+    check('pack 填错时不回落到别的包', s5.includes('找不到表情'), s5.slice(0, 200));
+
+    const s6 = await sendMeme({ file: '不存在.webp', pack: '没有这个包' });
+    check('pack 不存在时说明现有包', s6.includes('找不到表情'), s6.slice(0, 200));
+  } finally {
+    child.kill();
+    // 安全闸：只允许删 `.meme-multipack-` 开头的临时目录（绝不能是 node_modules / 真实 pack 目录）
+    const base = path.basename(sandbox);
+    if (!base.startsWith('.meme-multipack-') || /node_modules/i.test(sandbox)) {
+      console.log(`清理已跳过（路径不像自测临时目录）：${sandbox}`);
+    } else {
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `Remove-Item -LiteralPath ${JSON.stringify(sandbox)} -Recurse -Force`], { stdio: 'inherit' });
+      console.log(`清理多包临时目录 exit=${r.status}；仍存在=${fs.existsSync(sandbox)}`);
+      check('清理没有伤到 node_modules', fs.existsSync(path.join(REPO, 'node_modules')), path.join(REPO, 'node_modules'));
+    }
+  }
+  console.log(`\n${fails ? `${fails} FAILED` : 'ALL PASS'}（${steps} 项检查）`);
+  process.exit(fails ? 1 : 0);
+}
 
 // ---------------------------------------------------------------- 反向自测
 if (NEGATIVE) {

@@ -196,6 +196,16 @@ export function loadConfig() {
           maxRemarkChars: 20       // 收藏时备注最大长度
         }
       },
+      // 内置表情包（meme packs，多包）：详见 mcp-napcat-safe.js 顶部那段注释。
+      // 一份包 = 一个目录（manifest.json + index.db + memes/<tag>/<文件名>），可能出现在：
+      //   ① <runtime>/meme/<packId>（出厂）② <runtime>/meme-packs/<packId>（后装/上传）
+      //   ③ <角色库根>/<角色slug>/meme-packs/<packId>（角色专属）
+      meme: {
+        enabled: true,             // 总开关：false = qq_meme_search / qq_send_meme 都不注册（模型看不到）
+        packs: [],                 // 只搜这些包（包 id 数组）；空 = 出厂包 + 后装包 + 角色包全都搜
+        personaPacks: {},          // 角色 slug -> [包 id]；当前角色绑定的包排最前（角色包优先、全局包回落）
+        activePersona: ''          // 当前导入进 persona.md 的角色 slug（管理端「角色库导入」时写）
+      },
       proactive: {
         enabled: true,
         checkIntervalMinMs: 30 * 60 * 1000,
@@ -297,6 +307,17 @@ export function loadConfig() {
       maxRemarkChars: 20,
       ...((cfg.social?.sticker?.collect) ?? {})
     }
+  };
+
+  // social.meme 也要深合并：旧 config.json 完全没有这一段时，不能因为外层 spread 丢掉默认值；
+  // personaPacks 是"角色 -> 包 id 数组"的映射，单独再合一层，避免用户只写一个角色就把别的角色顶掉。
+  cfg.social.meme = {
+    enabled: true,
+    packs: [],
+    activePersona: '',
+    ...(cfg.social?.meme ?? {}),
+    packs: Array.isArray(cfg.social?.meme?.packs) ? cfg.social.meme.packs.map(String) : [],
+    personaPacks: { ...((cfg.social?.meme?.personaPacks) ?? {}) }
   };
 
   return cfg;
