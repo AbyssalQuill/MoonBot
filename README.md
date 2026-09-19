@@ -53,7 +53,7 @@ MoonBot 管理五个部件，负责安装、配置、拉起、探活、记录日
 - 表情包、贴纸、QQ 空间说说、定时消息、跨会话留言
 - 富文本发送：图文卡、合并转发、Word 文档、QQ 原生表情、表情包；音乐点歌卡片可在手机端点开播放
 - 语音：接入小米 MiMo（纯远端 API，无本地模型），内置音色 / 文字造音色 / 音频复刻三选一，支持全语音模式与收到语音自动转文字；语音与表情包的发送概率由桥侧掷骰决定（原理见[语音发送](#语音发送tts--asr)）
-- 联网搜索与网页抓取、图片搜索、Pixiv 搜图（镜像站地址可配，本地筛选 + 自动翻页）
+- 联网搜索与网页抓取、图片搜索、Pixiv 搜图发图（镜像站地址可配、本地筛选 + 自动翻页、按作品号直发无损原图；按画师名字找号要配一次登录 cookie，见 [Pixiv 搜图与发图](#pixiv-搜图与发图)）
 - 潜水与活跃模式、活动时段、回合保持、连发合并
 - Token 用量统计与费用估算，工具 schema 可按需精简
 - SSH 远程部署，支持代码、数据、表情包与 config.json 分别同步，可一键克隆整套环境
@@ -631,6 +631,17 @@ npm run dev
 - 角色卡四个工具都是只读的，不会改动人设文件
 - `napcat_status`、`start_napcat`、`stop_napcat` 属于进程控制，默认不注册，只在管理员私聊的 `default` 模式里可用
 - 修改 `mcp-*.js` 后需要重启隔离 DSH
+
+### Pixiv 搜图与发图
+
+两个工具刻意分工：`qq_pixiv_search` **只查不发**、返回候选与筛选明细，`qq_send_pixiv` 负责真发（与"联网找图"同构，`qq-bridge/src/lib/pixiv.js`）。
+
+- **镜像站只认 `keyword` 和 `page`**，其余全是本地筛：`tags`（须全部命中、按子串、大小写不敏感）、`author`、`orientation`、`minWidth` / `minHeight`、`multiPage`、`excludeAi`、`illustType`、`sort`、`r18`、`scanPages`。一页 60 条，`scanPages` 默认 3、上限 10；返回里的 `scan` / `scanNotice` 会如实说明扫了几页（**结果少 ≠ 全站少**）。排序只支持投稿时间（`date_desc` / `date_asc` / `random`），**不支持人气/收藏数**（镜像站返回体里没有收藏数，传 `popular`/`hot`/`rank` 会回落 `date_desc` 并在 `scan.warnings` 说明）。
+- **R-18 的两个工具策略不同**：`qq_pixiv_search` 默认 `r18=exclude`，只有显式传 `only` / `include` 才放行；`qq_send_pixiv` **永远排除 R-18/R-18G**（刻意不给 r18 参数，避免把不宜内容发进 QQ）。要看 R-18 只能用搜索工具。
+- **按号取原图**：`qq_send_pixiv` 给 `illustId`（作品号，或 `pixiv.net/artworks/<数字>` 链接）或 `authorId`（画师号）时，`size` 默认 `original` —— 发出去的就是 Pixiv 原图文件本身（直联 pximg、原字节落盘直发，不缩放不转码不二压，返回的 `sha256` / `bytes` 就是这次真发的字节）；只给 `query` 时默认 `size=master`（1200px jpg）。原图 >15MB 会被挡下并在返回里说明，改 `master`。
+- **找"某位画师本人的作品"要用画师号**：关键词搜的是标题/标签含该词的图（搜「米山舞」多半是别人打了她名字标签的作品）。`qq_pixiv_search` 的 `author` 填名字 = 按 `userName` 子串匹配，填纯数字 = 按 `userId` 精确匹配（走镜像站数据，不需要登录态）。
+- **按画师"名字"找号需要 pixiv 登录态**：`config.json` 的 `pixiv.cookie`（或环境变量 `QQBRIDGE_PIXIV_COOKIE`；`QQBRIDGE_PIXIV_COOKIE_OFF=1` 可临时停用而不删配置）。实测 `nick=米山舞` → 命中 `1554775:米山舞`，`nick=七菜` → 10 条同名候选；匿名请求会被 pixiv 判 400。实现要点：cookie **只发给 pixiv 自己的域名**，绝不带给第三方镜像站；**每次现读** config，贴上新 cookie 即时生效、不用重启 MCP 子进程；命中的名字→号会落盘缓存（`state/pixiv-artists.json`），所以 cookie 过期后已查过的名字照样能用；**没配就明确说"不支持"，不会悄悄退化成关键词搜**（那会给出错误答案）。填法容忍整条 cookie 串、`PHPSESSID=xxx` 或光秃秃的会话值。
+- 镜像站地址在 `config.json` 的 `pixiv.base`（或环境变量 `QQBRIDGE_PIXIV_BASE`，同样每次现读）；登录态自检用 `pixivLoginState()` —— 拉"试纸作品"的 `urls.original`，比"看有没有配 cookie"可靠（cookie 会过期）。回归测试 `qq-bridge/tools/test-pixiv-filters.mjs`。
 
 ## 唤醒机制
 
