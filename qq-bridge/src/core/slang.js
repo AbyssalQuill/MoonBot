@@ -788,7 +788,7 @@ async function runLearnExtractionBlock(sessionId, promptText, stats, researchCan
 function slangHelpText() {
   // 【2026-09-12】主人要求中文子命令带空格显示（/slang 学习、/slang 停止）；
   // 解析侧一直是"先去掉所有空白再比对"，所以带不带空格都认，这里只是让人看着一致。
-  return '黑话指令：/slang 学习（立即增量学习，也认 /slang learn）｜/slang 停止（停止在跑的学习/研究任务，也认 /slang stop）';
+  return '黑话指令：/slang learn（立即增量学习）｜/slang stop（停止在跑的学习/研究任务）';
 }
 
 /** E. /slang 指令分发：只处理 owner 且 kind 为 group/private；reply 数组元素由集成方分条发送。
@@ -796,17 +796,18 @@ function slangHelpText() {
 export async function handleSlangSlashCommand(text, ctx = {}) {
   const raw = String(text ?? '').trim();
   if (!raw) return { handled: false };
-  // 归一化：转小写并把连续空白压成一个空格。只认规范写法：
-  //   `/slang 学习`、`/slang learn`、`/slang 停止`、`/slang stop`
-  // 【2026-09-13 主人要求】不再兜底 `/slanglearn`、`/slangstop`、`/slang学习` 这些历史简写 ——
-  // 所以这里**不能**把空格删掉，否则 `/slang learn` 会被当成 `/slanglearn` 而失去区分。
+  /* 归一化：转小写并把连续空白压成一个空格。只认**全英文**写法：`/slang learn`、`/slang stop`。
+   * 【2026-09-13 主人要求】不再兜底 `/slanglearn`、`/slangstop`、`/slang学习` 这些历史简写 ——
+   * 所以这里**不能**把空格删掉，否则 `/slang learn` 会被当成 `/slanglearn` 而失去区分。
+   * 【2026-09-19 主人要求】再去掉中英混写的 `/slang 学习` / `/slang 停止`：斜杠指令统一英文，
+   * 中文说法（"学一下黑话"）交给模型自然处理。 */
   const low = raw.toLowerCase().replace(/\s+/g, ' ').trim();
   if (!low.startsWith('/slang')) return { handled: false };
   if (!ctx.isOwner) return { handled: true, reply: ['仅主人可操作'] };
   const kind = ctx.kind;
   if (kind !== 'group' && kind !== 'private') return { handled: true, reply: [slangHelpText()] };
-  if (low === '/slang 学习' || low === '/slang learn') {
-    if (learnInFlight) return { handled: true, reply: ['已有黑话学习任务在跑，请稍候或先 /slang 停止'] };
+  if (low === '/slang learn') {
+    if (learnInFlight) return { handled: true, reply: ['已有黑话学习任务在跑，请稍候或先 /slang stop'] };
     const summary = await slangLearnNow(false);
     if (!summary || summary.ok !== true) {
       const reason = summary?.reason === 'disabled' ? '黑话学习未开启（learning-config slang.enabled=false）'
@@ -819,7 +820,7 @@ export async function handleSlangSlashCommand(text, ctx = {}) {
     const r = summary;
     return { handled: true, reply: [`已立即学习黑话：新增${r.added ?? 0} 更新${r.updated ?? 0} 候选${r.candidates ?? 0}${r.stopped ? '（已停止）' : ''}`] };
   }
-  if (low === '/slang 停止' || low === '/slang stop') {
+  if (low === '/slang stop') {
     const r = slangStopNow();
     return { handled: true, reply: ['已停止当前黑话学习/研究任务' + (r.cancelled ? '' : '（当前没有在跑的任务）')] };
   }

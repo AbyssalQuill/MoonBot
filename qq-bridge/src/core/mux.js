@@ -175,6 +175,50 @@ import {
   warmGroupName, getGroupDisplayName, formatGroupListLine, warmGroupInfo,
   getCachedGroupInfo, formatGroupInfoLine, initGroupCacheCore, setGroupCacheBot,
 } from './group-cache.js';
+
+/* ── /set active|diving [HH:MM-HH:MM] 的解析（2026-09-19 主人要求：英文指令 + 可选时段）──
+ * 时段表（activity-windows.json）存的本来就是"什么时候活跃"，所以：
+ *   /set active 09:00-01:00 → 活跃 09:00-01:00，其余时间只回 @ / 点名
+ *   /set diving 00:00-21:00 → 潜水 00:00-21:00（只回 @ / 点名），其余时间活跃（写的是区间**补集**）
+ * 不带时段 = 全天（改的是会话自己的模式）。跨午夜（end <= start）按 +1440 归一。 */
+const fmtClockMin = (m) => {
+  const v = ((Number(m) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+};
+function parseClockRange(rest) {
+  const m = String(rest ?? '').trim().match(/^(\d{1,2})[:：](\d{2})\s*[~-]\s*(\d{1,2})[:：](\d{2})$/);
+  if (!m) return null;
+  const sH = Number(m[1]), sM = Number(m[2]), eH = Number(m[3]), eM = Number(m[4]);
+  if (sH > 23 || eH > 23 || sM > 59 || eM > 59) return null;
+  const start = sH * 60 + sM;
+  let end = eH * 60 + eM;
+  if (end <= start) end += 1440;               // 跨午夜；起止相同 = 整天 → 0..1440
+  return { start, end };
+}
+function complementWindows(range) {
+  const { start: s, end: e } = range;
+  const out = [];
+  if (e > 1440) { const cs = e - 1440; if (cs < s) out.push({ start: cs, end: s }); }
+  else { if (s > 0) out.push({ start: 0, end: s }); if (e < 1440) out.push({ start: e, end: 1440 }); }
+  return out;
+}
+/** 解析 /set active|diving|mode；不匹配返回 null，时段格式非法返回 { invalid:true } */
+function parseSetModeCommand(text) {
+  const s = String(text ?? '').trim();
+  const legacy = s.match(/^\/set\s+mode\s+(active|diving)$/i);
+  if (legacy) return { mode: legacy[1].toLowerCase(), range: null };
+  const m = s.match(/^\/set\s+(active|diving)(?:\s+(.+))?$/i);
+  if (!m) return null;
+  const mode = m[1].toLowerCase();
+  const rest = String(m[2] ?? '').trim();
+  if (!rest) return { mode, range: null };
+  const range = parseClockRange(rest);
+  if (!range) return { mode, range: null, invalid: true };
+  return { mode, range };
+}
+// 供 tests/wake-trigger.test.js 直接 import（纯函数，不依赖任何运行期状态）
+export { parseSetModeCommand, parseClockRange, complementWindows, fmtClockMin };
+
 // 【2026-09-15 合并注入】步边界 = 模型每一步的末尾（`step/end`）：
 //   · markSteerCycleStart / clearSteerPending：复位"本周期已注入"闸门、收掉跨回合的攒批记账；
 //   · flushStepBatch：把这一步里攒下的消息**合成一个** [Mid-turn] 块注入（理由见 turn-hold.js 的注释）。
@@ -410,9 +454,9 @@ export async function handleIncoming(kind, id, event, cfgRef) {
         await sendToQQ(key, `当前管理员：${curL}。用法：/op <QQ号或昵称> 设为管理员；/op del <QQ号或昵称> 取消管理员`);
         return;
       }
-      const m = rest.match(/^(del|remove|删除|取消|撤销|解)\s+([^\s]+)$/) || rest.match(/^([^\s]+)$/);
+      const m = rest.match(/^(del|remove)\s+([^\s]+)$/i) || rest.match(/^([^\s]+)$/);
       if (!m) { await sendToQQ(key, '用法：/op <QQ号或昵称>；/op del <QQ号或昵称>'); return; }
-      const isDel = /^(del|remove|删除|取消|撤销|解)$/.test(m[1]);
+      const isDel = /^(del|remove)$/i.test(m[1]);
       const targetTok = isDel ? m[2] : m[1];
       const target = /^\d{5,11}$/.test(targetTok) ? targetTok : resolveNameToUid(targetTok);
       if (!target) { await sendToQQ(key, `通讯录里没找到「${targetTok}」，直接给我 QQ 号吧~`); return; }
@@ -499,48 +543,55 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       log('[command] ' + key + ' 执行 /start（解除群静默）');
       return;
     }
-    // ── /set mode active / /set mode diving：切换活跃/潜水模式（当前会话）
-    if (plainContent === '/set mode active' || plainContent === '/set mode 活跃') {
+    /* ── /set active [HH:MM-HH:MM] / /set diving [HH:MM-HH:MM] ─────────────
+     * 【2026-09-19 主人要求】用英文指令设"特定时段活跃 / 潜水"，不带时段 = 全天；
+     * `/set mode active|diving` 保留为等价老写法（不带时段）。中英混写的旧写法
+     * （/set mode 活跃、/set mode 潜水）按"去除中英混杂指令"的要求一并删掉。 */
+    const setMode = parseSetModeCommand(plainContent);
+    if (setMode) {
+      if (setMode.invalid) {
+        await sendToQQ(key, `时间格式：HH:MM-HH:MM，如 /set ${setMode.mode} 00:00-21:00；不带时段就是全天。`);
+        return;
+      }
       const stm = getSocialState(key);
+      const win = setMode.range;
+      /* 带时段时模式一律设成 active：时段**内**活跃，时段**外**由睡眠窗口收紧成"只回 @"；
+       * 不带时段才改模式本身（active = 全天活跃；diving = 全天潜水）。 */
+      const wantMode = win ? 'active' : setMode.mode;
       if (stm.wakeConfig) {
-        stm.wakeConfig.mode = 'active';
-        if (stm.wakeConfig.triggers) stm.wakeConfig.triggers.anyMessage = true;
+        stm.wakeConfig.mode = wantMode;
+        if (stm.wakeConfig.triggers) stm.wakeConfig.triggers.anyMessage = wantMode === 'active';
         stm.wakeConfig.infinite = true;
-        stm.wakeConfig.sleepUntil = null;      // 取消“睡到下一时段”的定时
+        stm.wakeConfig.sleepUntil = null;      // 取消"睡到下一时段"的定时
         stm.wakeConfig.confirmedAt = Date.now();
-        stm.wakeConfig.confirmedBy = 'user'; // 管理员显式设定：防遗忘/默认刷新等兜底不得覆盖
+        stm.wakeConfig.confirmedBy = 'user';   // 管理员显式设定：防遗忘/默认刷新等兜底不得覆盖
       }
       if (stm._sleepTimer) { clearTimeout(stm._sleepTimer); stm._sleepTimer = null; }
-      saveSocialState();
-      // 转活跃 = 全天活跃：同时清掉该会话的活跃时段约束，避免时段提示继续让 AI 窗外潜水
-      const hadWindows = !!activityWindows[key];
-      if (hadWindows) {
-        delete activityWindows[key];
+      if (win) {
+        activityWindows[key] = setMode.mode === 'active' ? [win] : complementWindows(win);
         saveActivityWindows();
-        log(`[command] ${key} 转活跃：已清除其活跃时段约束`);
-      }
-      await sendToQQ(key, '好呀，我转成全天在线啦' + (hadWindows ? '，这个群的时段限制也一并去掉了，随时都在。' : '：群里说啥我都接，随时都在。'));
-      log('[command] ' + key + ' 切换活跃模式');
-      return;
-    }
-    if (plainContent === '/set mode diving' || plainContent === '/set mode 潜水') {
-      const stm = getSocialState(key);
-      if (stm.wakeConfig) {
-        stm.wakeConfig.mode = 'diving';
-        if (stm.wakeConfig.triggers) stm.wakeConfig.triggers.anyMessage = false;
-        stm.wakeConfig.infinite = true;
-        stm.wakeConfig.confirmedAt = Date.now();
-        stm.wakeConfig.confirmedBy = 'user'; // 管理员显式设定：防遗忘/默认刷新等兜底不得覆盖
+      } else if (activityWindows[key]) {
+        delete activityWindows[key];           // 全天模式：时段约束一并去掉，免得时段提示让它窗外潜水
+        saveActivityWindows();
       }
       saveSocialState();
-      await sendToQQ(key, '好，我先潜水啦：平时群里不打扰大家，被 @、被点名或有人问我时会出来；私聊随叫随到。要我全程在线，发 /set mode active 就行。');
-      log('[command] ' + key + ' 切换潜水模式');
+      const rng = win ? `${fmtClockMin(win.start)}-${fmtClockMin(win.end)}` : '';
+      if (setMode.mode === 'active') {
+        await sendToQQ(key, win
+          ? `好呀，${rng} 我全程在线：这段时间群里说啥我都接；其它时间潜水，只回 @ 和点名。`
+          : '好呀，我转成全天在线啦：群里说啥我都接，随时都在。');
+      } else {
+        await sendToQQ(key, win
+          ? `好，${rng} 我先潜水：这段时间只回 @、被点名和私聊，其余时间照常活跃。`
+          : '好，我先潜水啦：平时群里不打扰大家，被 @、被点名或有人问我时会出来；私聊随叫随到。要我全程在线，发 /set active 就行。');
+      }
+      log(`[command] ${key} /set ${setMode.mode}${win ? ' ' + rng : ''}（会话模式=${wantMode}，活跃时段=${(activityWindows[key] ?? []).map((w) => `${fmtClockMin(w.start)}-${fmtClockMin(w.end)}`).join(',') || '无'}）`);
       return;
     }
 
     if (plainContent.startsWith('/set sleep')) {
       // 时间段作息：/set sleep 01:00-06:00（北京时间，每天在这个窗口内群聊只响应 @，其余不读、省 token；私聊不限制）
-      const windowMatch = plainContent.match(/^\/set sleep (\d{1,2})[:：](\d{2})\s*[~-年到]\s*(\d{1,2})[:：](\d{2})$/);
+      const windowMatch = plainContent.match(/^\/set sleep (\d{1,2})[:：](\d{2})\s*[~-]\s*(\d{1,2})[:：](\d{2})$/);
       if (windowMatch) {
         const sH = parseInt(windowMatch[1], 10), sM = parseInt(windowMatch[2], 10);
         const eH = parseInt(windowMatch[3], 10), eM = parseInt(windowMatch[4], 10);

@@ -1,7 +1,8 @@
-// 回归测试：黑话指令的写法（主人 2026-09-12 要求中文子命令带空格显示：`/slang 学习`、`/slang 停止`）
-//   ① 带空格 / 不带空格 / 英文 / 大写 都被识别成同一条 /slang 指令（不会被丢给模型当普通消息）
-//   ② 帮助文案里给的是带空格的规范写法
-//   ③ 非 /slang 的文本照旧 handled:false（不影响原有链路）
+// 回归测试：黑话指令的写法（【2026-09-19 主人要求"去除中英混杂指令"】→ 斜杠指令统一全英文）
+//   ① 全英文写法（含大写/多空格）被识别成同一条 /slang 指令（不会被丢给模型当普通消息）
+//   ② 中英混写的 /slang 学习、/slang 停止 **不再**被当成学习指令（只回用法）
+//   ③ 帮助文案里给的是全英文规范写法
+//   ④ 非 /slang 的文本照旧 handled:false（不影响原有链路）
 // 用法：node tools/test-slash-commands.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,33 +36,34 @@ const handle = (text, ctx = { isOwner: false, kind: 'private' }) => slangMod.han
 // ① 各种写法的归一化结果（这就是代码里实际的比对方式：小写 + 连续空白压成一个空格）
 const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
 for (const [label, text, want] of [
-  ['带空格「/slang 学习」', '/slang 学习', '/slang 学习'],
   ['英文「/slang learn」', '/slang learn', '/slang learn'],
   ['全大写「/SLANG LEARN」', '/SLANG LEARN', '/slang learn'],
   ['多空格「/slang   learn」', '/slang   learn', '/slang learn'],
-  ['带空格「/slang 停止」', '/slang 停止', '/slang 停止'],
   ['英文「/slang stop」', '/slang stop', '/slang stop'],
+  ['全大写「/SLANG STOP」', '/SLANG STOP', '/slang stop'],
   ['历史简写「/slanglearn」不再等同规范写法', '/slanglearn', '/slanglearn'],
 ]) check(`① ${label} 归一化正确`, norm(text) === want, `${norm(text)} vs ${want}`);
 
-// ② 全都会被 /slang 处理器接住（非主人 → 回「仅主人可操作」，说明它没被当成普通消息）
-for (const text of ['/slang 学习', '/slang learn', '/slang 停止', '/slang stop', '/slang']) {
+// ② 全英文写法都会被 /slang 处理器接住（非主人 → 回「仅主人可操作」，说明它没被当成普通消息）
+for (const text of ['/slang learn', '/slang stop', '/slang']) {
   const r = await handle(text);
   check(`② ${text} 被识别为 /slang 指令（不交给模型）`, r.handled === true, JSON.stringify(r).slice(0, 80));
 }
 
-// ⑥ 历史简写不再被识别（2026-09-13 主人要求：代码里也不要认 /slanglearn、/slangstop、无空格中文写法）
-for (const text of ['/slang学习', '/slang停止', '/slanglearn', '/slangstop']) {
+// ⑥ 历史简写不再被识别（2026-09-13：/slanglearn、/slangstop、无空格中文写法）
+//    + 2026-09-19 主人要求："去除 /slang 学习 这种中英混杂的指令" → 带中文子命令的也一并只回用法
+for (const text of ['/slang学习', '/slang停止', '/slanglearn', '/slangstop', '/slang 学习', '/slang 停止']) {
   const r = await handle(text, { isOwner: true, kind: 'private' });
   const txt = (r.reply ?? []).join(' ');
   check(`⑥ ${text} 不再被当成学习指令（只回用法）`, r.handled === true && /黑话指令/.test(txt), txt.slice(0, 70));
 }
 
-// ③ 帮助文案给的是带空格的规范写法
+// ③ 帮助文案是全英文的规范写法
 const help = await handle('/slang', { isOwner: true, kind: 'other' });
 const helpText = (help.reply ?? []).join(' ');
-check('③ 帮助文案里是「/slang 学习」', /\/slang 学习/.test(helpText), helpText);
-check('③ 帮助文案里是「/slang 停止」', /\/slang 停止/.test(helpText), helpText);
+check('③ 帮助文案里是「/slang learn」', /\/slang learn/.test(helpText), helpText);
+check('③ 帮助文案里是「/slang stop」', /\/slang stop/.test(helpText), helpText);
+check('③ 帮助文案里不再出现中文子命令', !/\/slang 学习|\/slang 停止/.test(helpText), helpText);
 
 // ④ 别的文本不受影响
 for (const text of ['你好呀', '/status', '/portrait learn', '']) {

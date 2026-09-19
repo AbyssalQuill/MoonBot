@@ -176,11 +176,16 @@ export function evaluateWakeTrigger(key, st, event, kind, textContent, plainCont
     return null;
   }
   const tr = st.wakeConfig?.triggers ?? {};
+  /* 【2026-09-19 修「被 @ 却按 anyMessage 处理 → 免打扰时段把它跳过」】
+   * 群里处于"全活跃"（triggers.anyMessage=true）时，下面的 anyMessage 分支原来**排在 @ 前面**，
+   * 于是"@ 机器人"也被标成 anyMessage —— 而 scheduleWake 的免打扰时段只放行"真实触发"
+   * （@/提问/点名/拍一拍/私聊），anyMessage 在拦截名单里 → 主人看到的就是"群里 @ 我，我没回"。
+   * @ 是"被直接叫到"，语义上永远比"随便说句话"更具体，必须先判定；标对 reason 之后，
+   * 提示词里也会按"被 @ 了"来答（[Wake @] 而不是 [Wake anyMessage]），未读草稿补发提示也只对真实触发注入。 */
+  const atSelf = Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
+  if ((atSelf || quoteTargetIsSelf) && (tr.atMention || tr.anyMessage)) return 'atMention';
   if (tr.anyMessage) return 'anyMessage';
-  if (tr.atMention) {
-    const atSelf = Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
-    if (atSelf || quoteTargetIsSelf) return 'atMention';
-  }
+  if (tr.atMention && (atSelf || quoteTargetIsSelf)) return 'atMention';
   if (tr.nameMention && selfNickname) {
     const lower = String(textContent ?? '').toLowerCase();
     if (lower.includes('@' + selfNickname.toLowerCase()) || lower.includes(selfNickname.toLowerCase())) return 'nameMention';

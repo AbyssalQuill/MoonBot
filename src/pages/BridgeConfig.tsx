@@ -543,7 +543,7 @@ function mcpLabel(fullName: string) {
   maxLength: '反馈字数上限（桥里的键名 social.feedback.maxLength，默认 500）：机器人通过「反馈给主人」工具发来的内容最长多少字，超了会被截断。',
   notifyOwnerOnError: '出错时通知主人（桥里的键名 social.feedback.notifyOwnerOnError，默认关）：开着的时候机器人自己遇到错误会主动私聊告诉你。',
   // —— 黑话学习（slang）：目前的管理端没有单独开这张卡，键照样登记，需要时可在「JSON 进阶」里改 ——
-  'slang.enabled': '黑话学习开关（桥里的键名 slang.enabled，默认开）：关掉后桥会跳过所有黑话学习任务，聊天里发 /slang 学习 也不会跑。',
+  'slang.enabled': '黑话学习开关（桥里的键名 slang.enabled，默认开）：关掉后桥会跳过所有黑话学习任务，聊天里发 /slang learn 也不会跑。',
   extractMinMessages: '凑够几条消息才提取（桥里的键名 slang.extractMinMessages，默认 10）：一小段语料里消息太少就不值得跑一次模型，直接跳过。',
   extractCooldownMs: '两次提取的最小间隔（毫秒，桥里的键名 slang.extractCooldownMs，默认 300000 = 5 分钟）：防止短时间内反复提取把额度烧掉。',
   inferenceThresholds: '推断阈值（桥里的键名 slang.inferenceThresholds，默认 [2,4,8]）：一个词出现到这些次数时，触发不同深度的考究；数字越小的门槛越容易触发。',
@@ -680,7 +680,7 @@ function mcpLabel(fullName: string) {
   'social.tools.getFileContent': '读群文件（qq_get_file_content）：下载并读取群文件/收到的文件内容，需要模型看文档时用。',
 
   // ── 唤醒 ──
-  'social.wake.defaultMode': '默认模式：diving = 潜水（按触发条件才醒）/ active = 活跃（群里说什么都接）。单会话可以用 /set mode active 覆盖。',
+  'social.wake.defaultMode': '默认模式：diving = 潜水（按触发条件才醒）/ active = 活跃（群里说什么都接）。单会话可以用 /set active 或 /set diving 覆盖（也能带时段，如 /set diving 00:00-21:00）。',
   'social.wake.preSleepWaitEnabled': '沉睡之前先观察：开启后 qq_wait_for_messages 会先等一个安静窗口，确认没人说话再睡，避免刚睡下就被叫醒。',
   'social.wake.recommendedDefaultInfinite': '给模型的推荐值：是否建议"无限期潜水"（自己判断该醒时再醒）。这只是提示词里的建议，不是强制。',
   'social.wake.sleepMinMs': '允许的最短沉睡时长（毫秒）：模型想睡太短时会被顶到这里的下限。',
@@ -873,7 +873,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (dc.enabled === undefined) dc.enabled = true;
       if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.06;
       if (dc.retainRatio === undefined) dc.retainRatio = 0.012;
-      if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 1500;
+      if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 8192;
       if (dc.summarizationProvider === undefined) dc.summarizationProvider = '';
       if (dc.summarizationModel === undefined) dc.summarizationModel = '';
       if (!c.social) c.social = {};
@@ -1489,11 +1489,15 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
               <DocSection title="模式与作息">
                 <ul>
-                  <li><code>/set mode active</code>（或 <code>/set mode 活跃</code>）：本会话转全天活跃——群里说啥都接；同时清掉该群的活跃时段限制。</li>
-                  <li><code>/set mode diving</code>（或 <code>/set mode 潜水</code>）：转潜水——平时不打扰群，被 @、被点名或有人问时才出来。</li>
+                  <li><code>/set active</code>：本会话转全天活跃——群里说啥都接；同时清掉该会话的活跃时段限制。</li>
+                  <li><code>/set active 09:00-01:00</code>：只在<b>这段时间</b>活跃，其余时间潜水（只回 @ 与点名）。跨午夜写成 <code>09:00-01:00</code> 就行。</li>
+                  <li><code>/set diving</code>：本会话全天潜水——平时不打扰群，被 @、被点名或有人问时才出来。</li>
+                  <li><code>/set diving 00:00-21:00</code>：<b>这段时间</b>潜水（只回 @ 与点名），其余时间照常活跃。</li>
+                  <li><code>/set mode active</code> / <code>/set mode diving</code>：上面两条不带时段的等价老写法。</li>
                   <li><code>/set sleep 01:00-06:00</code>：设每日作息窗口（北京时间）。窗口内群聊只回 @，其余不读以省 token；私聊不受限。</li>
                   <li><code>/set sleep 30m</code> / <code>/set sleep 2h</code>：定时休息 30 分钟 / 2 小时，到点自动醒。</li>
                   <li><code>/set wake</code> 或 <code>/set cancel</code>：一键取消所有睡眠状态（含作息窗口与定时休息）。</li>
+                  <li>斜杠命令<b>一律英文</b>；中文说法（「转活跃」「这个点别理群」）直接说人话就行，模型会自己调工具。</li>
                 </ul>
               </DocSection>
 
@@ -1508,8 +1512,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
               <DocSection title="黑话学习">
                 <ul>
-                  <li><code>/slang 学习</code> 或 <code>/slang learn</code>：立刻跑一次黑话学习。</li>
-                  <li><code>/slang 停止</code> 或 <code>/slang stop</code>：停止正在跑的黑话学习 / 研究任务。</li>
+                  <li><code>/slang learn</code>：立刻跑一次黑话学习（中英混写的 <code>/slang 学习</code> 已不再识别）。</li>
+                  <li><code>/slang stop</code>：停止正在跑的黑话学习 / 研究任务。</li>
                   <li><code>/slang</code>：看黑话模块的用法说明。</li>
                 </ul>
               </DocSection>
