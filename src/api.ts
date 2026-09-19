@@ -263,8 +263,20 @@ export interface RemoteBridgeConfigResp {
   mismatched?: string[];
   backup?: string | null;
 }
-export const getRemoteBridgeConfig = (serverId?: string) =>
-  api<RemoteBridgeConfigResp>(`/ssh/bridge-config${serverId ? '?serverId=' + encodeURIComponent(serverId) : ''}`);
+/**
+ * 读服务端 /root/qq-bridge/config.json。
+ *
+ * 【2026-09-19 加 refresh】后端对这份配置有一个 45 秒的预热缓存（每次状态轮询都会预热，
+ * 一次预热要 4~5 个 SSH 往返），但 POST 写入后只 delete 缓存、没有代次校验 —— 于是
+ * "写之前发出的那次预热"可能**在写入之后**把**写之前**的旧内容又塞回缓存，GET 再读到旧值。
+ * 表现就是主人报的"点保存、切出去再回来，值又变回去了，第二次点保存才真的生效"。
+ * 所以：保存后的那次重载（以及其它"必须是刚写进去的值"的读取）一律带 refresh=1 绕过缓存。
+ */
+export const getRemoteBridgeConfig = (serverId?: string, opts?: { refresh?: boolean }) =>
+  api<RemoteBridgeConfigResp>(`/ssh/bridge-config?${[
+    serverId ? 'serverId=' + encodeURIComponent(serverId) : '',
+    opts?.refresh ? 'refresh=1' : '',
+  ].filter(Boolean).join('&')}`);
 /** 写服务端配置：后端会「临时文件 → 备份 config.json.bak-<时间戳> → mv 原子替换 → 回读比对关键字段」 */
 export const saveRemoteBridgeConfig = (body: Record<string, any>) =>
   api<RemoteBridgeConfigResp>('/ssh/bridge-config', { method: 'POST', body: JSON.stringify(body) });

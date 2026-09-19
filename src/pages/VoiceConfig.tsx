@@ -4,6 +4,7 @@ import {
   Zap, Upload, Wand2, FlaskConical, Clock3, Sparkles,
 } from 'lucide-react';
 import { api } from '../api';
+import NumInput from '../components/NumInput';
 
 /**
  * MoonBot · 语音（MiMo-V2.5 TTS / 音色设计 / 音色复刻 / 语音识别）
@@ -341,14 +342,15 @@ export default function VoiceConfig({ onBack }: Props) {
                 </label>
                 <label className="field-row">
                   <span className="f-label">单条语音最长字数</span>
-                  <input className="input" type="number" min={10} max={500} value={maxChars}
-                    onChange={(e) => setMaxChars(Number(e.target.value) || 120)} />
+                  {/* 【2026-09-19】原来这里是原生 number 输入 + `Number(v) || 120`：
+                      删光数字时 `Number('') === 0` → 立刻被 ||120 顶回 120，框里永远删不干净。
+                      统一换成 NumInput（全站数字框的既有标准件）：输入期间允许全空，失焦不写 0。 */}
+                  <NumInput value={maxChars} onCommit={(n) => setMaxChars(n)} ariaLabel="单条语音最长字数" />
                   <em>超过会被拒绝，避免发一条几十秒的长语音</em>
                 </label>
                 <label className="field-row">
                   <span className="f-label">每日合成字数上限</span>
-                  <input className="input" type="number" min={0} value={dailyChars}
-                    onChange={(e) => setDailyChars(Number(e.target.value) || 0)} />
+                  <NumInput value={dailyChars} onCommit={(n) => setDailyChars(n)} ariaLabel="每日合成字数上限" />
                   <em>0 = 不限；命中缓存的重复文本不计数</em>
                 </label>
                 <label className="field-row">
@@ -373,14 +375,12 @@ export default function VoiceConfig({ onBack }: Props) {
                 </label>
                 <label className="field-row">
                   <span className="f-label">主动发语音概率</span>
-                  <input className="input" type="number" min={0} max={100} step={1} value={probPct}
-                    onChange={(e) => setProbPct(Math.max(0, Math.min(100, Number(e.target.value) || 0)))} />
+                  <NumInput value={probPct} onCommit={(n) => setProbPct(Math.max(0, Math.min(100, Math.round(n))))} ariaLabel="主动发语音概率" />
                   <em>0~100（%）。每次唤醒桥会掷一次骰子，写进提示词告诉模型本轮能不能掺一条语音；0 = 不主动发，只能被明确要求</em>
                 </label>
                 <label className="field-row">
                   <span className="f-label">语音冷却（分钟）</span>
-                  <input className="input" type="number" min={0} step={1} value={coolMin}
-                    onChange={(e) => setCoolMin(Math.max(0, Number(e.target.value) || 0))} />
+                  <NumInput value={coolMin} onCommit={(n) => setCoolMin(Math.max(0, Math.round(n)))} ariaLabel="语音冷却分钟" />
                   <em>同一个会话刚发过语音后，这段时间内不再抽中（防连发刷屏）</em>
                 </label>
                 {/* 全语音发送模式（send.allVoice）：只做配置读写与提示，真正的"一律发语音"由桥侧实现 */}

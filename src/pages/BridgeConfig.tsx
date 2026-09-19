@@ -558,14 +558,29 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
   useEffect(() => { load(); }, []);
 
-  const load = async () => {
+  /** load() 的序号：晚到的旧响应不许覆盖新响应（详见下面 refresh 的注释） */
+  const loadSeq = useRef(0);
+
+  /**
+   * 读配置。
+   * @param opts.forceRefresh 服务端模式下绕过后端 45 秒预热缓存（保存之后必须用）
+   *
+   * 【2026-09-19 修"点保存、切出去回来又变回去，第二次点保存才真的生效"】
+   * 后端对服务端配置有一份预热缓存；POST 写入后只 delete 缓存、不做代次校验，于是
+   * "写入之前发出的那次预热"可能**在写入之后**把旧内容塞回缓存 —— 紧接着的这次重载就读到旧值。
+   * 现在两头都堵：保存后的重载带 refresh=1（后端也改成 refresh=1 时不复用正在飞的预热），
+   * 且这里给 load 加了序号保护，避免旧请求后到把新值覆盖回去。
+   */
+  const load = async (opts: { forceRefresh?: boolean } = {}) => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setLoadErr('');
     try {
       // 连上服务器 → 读**服务端** /root/qq-bridge/config.json（经已有 SSH 连接，不新建连接）
       const r: any = remote
-        ? await getRemoteBridgeConfig(remote.id)
+        ? await getRemoteBridgeConfig(remote.id, { refresh: opts.forceRefresh === true })
         : await getBridgeConfig();
+      if (seq !== loadSeq.current) return;   // 已经有更新的读取在路上了，丢弃这份旧结果
       const c = r.config || {};
       if (remote) {
         setTarget('remote');
@@ -721,7 +736,10 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
           ? '已保存 · 模型配置已同步到隔离 DSH，约 15 秒后生效'
           : '已保存，但模型配置未写入 DSH：' + (r.modelSyncMessage || '未知原因'));
       } else setMsg('已保存');
-      onRefresh(); load();
+      onRefresh();
+      // 【2026-09-19】保存后的这次重载**必须**绕过服务端预热缓存，否则会把"写之前的旧值"读回来 ——
+      // 主人看到的就是"点了保存、切出去再回来又变回去了，得再点一次保存才真的生效"。
+      await load({ forceRefresh: target === 'remote' });
     } catch (e: any) { setMsg('保存失败：' + (e?.message || '')); }
     finally { setSaving(false); }
   };
@@ -855,6 +873,27 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
       <div className="page-body">
         {msg && <div className="notice-bar" onClick={() => setMsg(null)}>{msg}</div>}
+
+        {/* 【2026-09-19 主人要求】"哪个要单独点保存、哪个点顶部保存就行"以前只散落在各卡片的说明里，
+            没有一处总览 —— 于是很自然会出现"改了某一项、以为顶部保存会一起存进去"的误会。
+            这里给一张总览；卡片自身会用「保存这个 / 保存人设 / 保存发言规则」等按钮明确标出来。 */}
+        <details className="notice-bar" style={{ display: 'block' }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+            保存规则总览：哪些点顶部「保存」就行，哪些卡片要自己点一次保存
+          </summary>
+          <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.85 }}>
+            <div><b>点顶部「保存」</b>（写整份 <code>config.json</code>）：常用设置里的全部字段 —— 模型/厂商、NapCat 地址与路径、基础与会话、允许/拒绝名单、
+              唤醒与潜水、发送节奏、上下文与轮换、主动闲聊、等待、打字等待、表情包参数、静默群聊、投递与回合、好友申请、Word 额度，
+              以及「工具与规则」里的工具开关和工具 schema 精简。</div>
+            <div style={{ marginTop: 4 }}><b>卡片自己写盘、不用点顶部保存</b>：人设（<code>persona.md</code> · 点「保存人设」）、
+              发言规则（<code>speech-rules.md</code> · 点「保存发言规则」）、群聊活跃时段（点「保存这个」，写的是桥的 <code>state/activity-windows.json</code>，不是 config.json）、
+              NapCat 鉴权令牌（自己写 NapCat 的配置并重启 NapCat）、表情包上传（写表情库并重启桥）、
+              「保存并重启」（它会先替你点一次顶部保存、再重启 DSH/桥）。</div>
+            <div style={{ marginTop: 4 }}><b>会顺手写一份 config.json 的两个按钮</b>：「活跃时段 → 添加群」（把群加进允许名单）、
+              「活跃时段 → 关闭静默，恢复群聊响应」（关 <code>deepsleep</code>）—— 它们立刻写盘，不必再点顶部保存。</div>
+            <div style={{ marginTop: 4 }}>配置方案页签：点「存为新方案」只写方案文件；点「套用」写整份 <code>config.json</code>（等同一次全局保存）。</div>
+          </div>
+        </details>
 
         {/* 【2026-09-14 主人要求】明显的横幅标明"当前编辑的是服务端配置"：
             没有这条横幅，用户很容易以为在改本机（两套实例并存时这正是最容易踩的坑）。 */}

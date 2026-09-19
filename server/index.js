@@ -3242,7 +3242,15 @@ app.post('/api/bridge/config', (req, res) => {
       return out;
     };
     const merged = body.config && typeof body.config === 'object' ? deepMerge(prev, body.config) : prev;
-    writeFileSync(cfgPath, JSON.stringify(merged, null, 2), 'utf-8');
+    /* 【2026-09-19】原来是 `writeFileSync(cfgPath, ...)` 直接覆盖，两个毛病：
+     *   ① 不是原子写 —— 桥侧 `fs.watch` 有可能读到写到一半的文件（JSON 半截 → 热加载报错）；
+     *   ② 没有备份 —— 一旦被"桥手里那份内存 config 回写"覆盖掉，改动就永久没了。
+     * 现在对齐服务端那条写入路径：**临时文件 → 备份 → rename 原子替换**。 */
+    const cfgText = JSON.stringify(merged, null, 2);
+    const cfgTmp = `${cfgPath}.tmp`;
+    writeFileSync(cfgTmp, cfgText, 'utf-8');
+    try { copyFileSync(cfgPath, `${cfgPath}.bak-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}`); } catch { /* 首次创建时没有原文件 */ }
+    renameSync(cfgTmp, cfgPath);
     // 人设/发言规则：空内容 = 删除文件（回到「出厂为空」），不落空文件
     if (typeof body.persona === 'string') {
       if (body.persona.trim()) writeFileSync(bridgePersonaPath(), body.persona, 'utf-8');
@@ -3922,6 +3930,12 @@ async function getRemoteServerStatus(server, connArg, opts = {}) {
 const remoteBridgeCfgCache = new Map();
 const remoteBridgeCfgInflight = new Map();   // serverId -> Promise（避免并发重复取；GET 可等它）
 const REMOTE_BRIDGE_CFG_TTL_MS = 45000;
+/* 【2026-09-19 修"点保存、切出去回来又变回去，第二次才生效"】
+ * 缓存原来只有 delete、没有**代次**校验：一次"写之前就发出"的预热会在写入**之后**才完成，
+ * 把**写之前**的旧内容塞回缓存，紧接着保存后的那次重载就读到旧值（最多 45 秒内都这样）。
+ * 现在给每台服务器一个写代次：预热开始时记下代次，落地时对不上就直接丢掉，不再回填。 */
+const remoteBridgeCfgEpoch = new Map();     // serverId -> number（每次写入 +1）
+const cfgEpochOf = (id) => Number(remoteBridgeCfgEpoch.get(id)) || 0;
 async function warmRemoteBridgeConfig(serverId, { force = false } = {}) {
   const ch = remoteBridgeChannel(serverId);
   if (ch.error) return null;
@@ -3930,9 +3944,15 @@ async function warmRemoteBridgeConfig(serverId, { force = false } = {}) {
   // 已在预热中就不要并发重复取，直接复用同一个 Promise
   const running = remoteBridgeCfgInflight.get(ch.server.id);
   if (running) return running;
+  const epochAtStart = cfgEpochOf(ch.server.id);
   const task = (async () => {
     try {
       const data = await buildRemoteBridgeConfigPayload(ch.server, ch.conn);
+      // 取的过程中发生过写入 → 这份内容已经过期，丢掉（不回填缓存；下一次读会重新取）
+      if (epochAtStart !== cfgEpochOf(ch.server.id)) {
+        mlog(`[bridge-cfg] ${ch.server.id} 预热期间发生过写入，丢弃这份过期结果`);
+        return data;
+      }
       remoteBridgeCfgCache.set(ch.server.id, { at: Date.now(), data });
       return data;
     } finally { remoteBridgeCfgInflight.delete(ch.server.id); }
@@ -4110,7 +4130,10 @@ app.get('/api/ssh/bridge-config', async (req, res) => {
   // 【2026-09-14】优先命中预加载缓存（连上服务器后状态轮询会把它预热）→ 点开配置页不再"先转一会儿"。
   const hit = remoteBridgeCfgCache.get(ch.server.id);
   if (hit && req.query.refresh !== '1' && Date.now() - hit.at < REMOTE_BRIDGE_CFG_TTL_MS) return res.json({ ...hit.data, cached: true, cachedAt: hit.at });
-  const inflight = remoteBridgeCfgInflight.get(ch.server.id);   // 预热正在飞 → 等它，别重复取
+  /* refresh=1 = "我就是要刚写进去的那份"，**不能**去复用正在飞的预热 ——
+   * 那次预热可能是写入之前发出的，等的就是旧内容（这正是"第二次保存才生效"的另一半）。
+   * 其它情况仍可复用在途预热，省一次 SSH 往返。 */
+  const inflight = req.query.refresh === '1' ? null : remoteBridgeCfgInflight.get(ch.server.id);
   if (inflight) {
     const data = await inflight;
     if (data) return res.json({ ...data, cached: true, cachedAt: Date.now() });
@@ -4188,7 +4211,11 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
   }
 
   if (!out.message) out.message = '没有需要写入的内容（请求里既没有 config 也没有人设/发言规则）';
-  remoteBridgeCfgCache.delete(server.id);   // 写过了 → 预加载缓存作废（下次点开会重新取最新的）
+  /* 写过了 → 预加载缓存作废，并且**推进代次**：任何"写入之前就发出、写入之后才返回"的预热
+   * 都不能再把旧内容回填进缓存（见 warmRemoteBridgeConfig 里的代次校验）。
+   * 少了这一步，保存后的那次重载会读到旧配置 —— 就是"切出去回来值又变回去、第二次才生效"。 */
+  remoteBridgeCfgEpoch.set(server.id, cfgEpochOf(server.id) + 1);
+  remoteBridgeCfgCache.delete(server.id);
   res.json(out);
 });
 

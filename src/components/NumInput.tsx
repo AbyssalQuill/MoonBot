@@ -12,8 +12,14 @@ import type { CSSProperties } from 'react';
  *   · 渲染成 `type="text" + inputMode="decimal"`（手机上仍然是数字键盘，桌面上没有箭头）；
  *   · 输入期间**允许全空**（本地文本框 state，不被外部值覆盖）；
  *   · 非空且是合法数字 → 立刻上抛（界面实时跟着变）；
- *   · 失焦时若为空 → 按 0 上抛（"保存时为空就默认为 0"）；
+ *   · **失焦时若为空 → 不上抛任何值**，把框恢复成"上一次真正生效的值"（见下面 2026-09-19 的修改）；
  *   · 外部值变化（比如点「恢复默认参数」）会同步回文本框 —— 但正在输入时不打断。
+ *
+ * 【2026-09-19 修改：原来"失焦时若为空 → 按 0 上抛"】
+ *   主人报的原话是"所有输入框都保底一个 0，删不掉"。根因就在这一行：清空后失焦 → 上抛 0 →
+ *   父组件状态变 0 → useEffect 把框里重写成 '0' → 用户下次想输新数字还得先把 0 删掉，
+ *   每次离开都重来一遍。现在空框就是空框：**不写 0**，失焦时把上一次的值显示回去，
+ *   用户想改成别的数字直接接着敲（想真的要 0 就敲个 0，路径不变）。
  */
 export default function NumInput({
   value, onCommit, className = 'input', disabled, placeholder, ariaLabel, title, style,
@@ -35,9 +41,10 @@ export default function NumInput({
     if (!editing) setTxt(ext(value));
   }, [value, editing]);
 
+  /** 只上抛"真的有内容且是数字"的输入；空串一律不上抛（不再写 0）。 */
   const commit = (raw: string) => {
     const s = String(raw).trim();
-    if (s === '') { onCommit(0); return; }
+    if (s === '') return;
     const n = Number(s);
     onCommit(Number.isFinite(n) ? n : 0);
   };
@@ -62,7 +69,12 @@ export default function NumInput({
         const s = raw.trim();
         if (s !== '' && Number.isFinite(Number(s))) onCommit(Number(s));
       }}
-      onBlur={() => { setEditing(false); commit(txt); }}
+      onBlur={() => {
+        setEditing(false);
+        const s = String(txt).trim();
+        if (s === '') { setTxt(ext(value)); return; }   // 空框：恢复上一次的值，**不**上抛 0
+        commit(s);
+      }}
     />
   );
 }
