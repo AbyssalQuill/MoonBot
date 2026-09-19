@@ -2077,6 +2077,17 @@ function packLocalBridge(includeState) {
     // 图库(stickers-upload)只随“表情包”勾选独立推送, 绝不搭代码包顺带覆盖远端图库
     `${name}/stickers-upload`, `${name}/stickers-upload.bak-*`, `${name}/stickers-upload.old-*`, `${name}/stickers-upload.merge-*`,
     `${name}/config.json.bak-*`,
+    /* 【2026-09-19 事故修复：代码包把远端 config.json 一起覆盖了】
+     * `/api/ssh/sync` 的 wantConfig 注释写的是「代码同步本来就不带它」—— 但这份排除表里只有
+     * `config.json.bak-*`，**config.json 本体没被排除**，于是每次"同步代码"都会把**本机那份**塞进 tar
+     * 覆盖到服务器上。实测后果（服务器 2026-09-19 15:43）：远端 config.json 的
+     * napcat.accessToken 061228 → truefriend（NapCat 立刻回 retcode 1403 token验证失败，
+     * 桥每次连上就被踢，日志刷 282 条 code=1005，QQ 侧彻底哑火）、dsh.baseUrl 3080 → 10721
+     * （事件流 remote.mux 连不上）、napcat.dockerPathMap/tmpDir/homeDir 等服务器专属路径全丢、
+     * 白名单与 social.* 参数一起被换成本机调试值。
+     * 所以这里必须排除 config.json 本体：本机 → 远端的配置推送走 wantConfig 那条**显式**通道，
+     * 而整套复刻（server/deploy.js）另有一条会顺带把 config.json 带过去并改写 dsh.baseUrl 的路。 */
+    `${name}/config.json`,
   ];
   if (!includeState) ex.push(`${name}/state`);
   const args = ['-czf', tmp, ...ex.map((p) => `--exclude=${p}`), '-C', parent, name];
@@ -2353,6 +2364,20 @@ app.post('/api/ssh/sync', async (req, res) => {
           steps.push({ step: '备份远端 config.json', ok: bak.ok, msg: bak.ok ? (bak.out.includes('backed-up') ? '已备份为 config.json.bak-sync' : '远端无 config.json, 跳过') : bak.error });
           const unp = await sshExecCapture(conn, 'cd /root && tar xzf /root/qq-bridge-sync.tar.gz -C /root && echo unpacked', 300000);
           steps.push({ step: '解包覆盖 /root/qq-bridge', ok: unp.ok, msg: unp.ok ? '已解包' : unp.error });
+          /* 【2026-09-19 兜底】上面 packLocalBridge 的排除表已经不收 config.json 了，这里再保一道：
+           * 万一将来有人把 config.json 加回 tar（或本地这个 tar 是旧版打的），解包后立刻把**同步前那份**换回来。
+           * 远端 config.json 装的是这台机器专属的东西（NapCat 令牌、DSH 端口、docker 路径映射、白名单），
+           * 被本机调试值覆盖的后果是"桥每次连上 NapCat 就被踢"（实测整台 QQ 哑火 10 分钟、日志 282 条 code=1005）。
+           * 显式推配置仍走下面的 wantConfig，它排在这步之后，所以不会被这次还原打回来。 */
+          if (bak.ok && String(bak.out || '').includes('backed-up')) {
+            const restore = await sshExecCapture(conn, 'cd /root/qq-bridge && if cmp -s config.json config.json.bak-sync; then echo same; else cp config.json config.json.pushed-by-sync && cp config.json.bak-sync config.json && echo restored; fi', 20000);
+            const restored = restore.ok && String(restore.out || '').includes('restored');
+            steps.push({
+              step: '还原远端 config.json',
+              ok: restore.ok,
+              msg: restored ? '代码包把本机 config.json 带过来了，已换回同步前那份（顶掉的那份留成 config.json.pushed-by-sync）' : (restore.ok ? '未被动过，无需还原' : restore.error)
+            });
+          }
           const syn = await sshExecCapture(conn, "cd /root/qq-bridge && bad=$(for f in src/bridge.js src/core/*.js; do [ -f \"$f\" ] || continue; node --check \"$f\" >/dev/null 2>&1 || echo \"$f\"; done); if [ -n \"$bad\" ]; then echo \"$bad\"; exit 1; else echo SYNTAX-OK; fi", 120000);
           steps.push({ step: '远端语法体检', ok: syn.ok, msg: syn.ok ? (syn.out.includes('SYNTAX-OK') ? 'src 语法全部通过' : syn.out) : (syn.out || syn.error) });
           try { unlinkSync(pkg.path); } catch {}
@@ -7230,4 +7255,6 @@ function scheduleAutoStart() {
   }
 }
 
-export { app };
+// packLocalBridge 也导出：tools/test-bridge-pack-excludes-config.mjs 会真的打一次包、列一遍 tar 内容，
+// 用它守住"代码包不再把远端 config.json 覆盖掉"这条线（2026-09-19 的事故见上面排除表里的注释）。
+export { app, packLocalBridge };
