@@ -624,10 +624,171 @@ export const PIXIV_REFERER = 'https://www.pixiv.net/';
 const PIXIV_AJAX = 'https://www.pixiv.net/ajax';
 const PIXIV_DIRECT_TIMEOUT_MS = 15000;
 
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-19 新增：pixiv 登录态（cookie）—— 只为"按名字搜画师"这一件事】
+ *
+ * 为什么需要：pixiv 的**用户搜索**接口对匿名请求一律拒绝。实测（线上 VPS，未登录）：
+ *   · GET /ajax/search/users?word=米山舞[&s_mode=s_usr][&p=1][&type=user] → 400「不正确的请求。」
+ *     （注意**不是 404**：路由存在，只是不接受匿名请求）
+ *   · GET /ajax/search/users/米山舞 → 404；/ajax/search/users/米山舞?s_mode=s_usr → 404
+ *   · 作品关键词搜索替不了它：搜「米山舞」全站 173 条里，作者名含"米山舞"的**0 条**
+ *     （那些是打了她名字标签的粉丝图）。所以"找某人本人的作品"没法靠关键词搜。
+ *   · 镜像站 x.pixigraph.xyz 也没有用户搜索（猜的 5 条路由全 404，search.php 忽略 type/mode/s_mode，
+ *     native.php 代拉 pixiv 的用户搜索返回空）。
+ *   ⇒ 想按名字找人，只能自己带登录态。**免费号就够**（会员只管人气排序/多标签检索这类玩法）。
+ *
+ * 三条纪律：
+ *   ① **只在 pixiv 域名上带 cookie**（见 pixivRequestHeaders）—— 绝不能把登录凭证发给第三方镜像站；
+ *   ② cookie 只从本地配置读（config.json 的 pixiv.cookie / 环境变量），**永不写进任何返回值、日志或 QQ 消息**；
+ *   ③ 没配 cookie 时"按名字搜"要**明确说不支持**，不许悄悄退化成"关键词搜"（那会给出错误的答案）。
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 纯函数：把用户给的东西规整成一条能用的 Cookie 头。
+ * 容忍三种写法（主人不一定会照抄格式）：整条 cookie 串、`PHPSESSID=xxx`、光秃秃的会话值。
+ * 空/含换行（有人会连回车一起复制）都要处理干净 —— 换行进请求头会直接把请求弄坏。
+ * @returns {string} 可用则返回 cookie 串，否则空串
+ */
+export function cleanPixivCookie(v) {
+  let s = String(v ?? '').replace(/[\r\n\t]+/g, ' ').trim();
+  if (!s) return '';
+  // 有人只复制会话值本身（32 位左右的十六进制/字母数字），补上键名
+  if (!s.includes('=') && /^[A-Za-z0-9_%\-+/=.]{8,200}$/.test(s)) s = `PHPSESSID=${s}`;
+  // 只保留 pixiv 需要的几个键（其余键带过去没意义，还会把凭证面铺大）
+  const keep = s.split(';')
+    .map((x) => x.trim())
+    .filter((x) => /^(PHPSESSID|device_token|p_ab_id|p_ab_id_2|p_ab_d_id|p_ab_id_3|yuid_b|cookies_banner)=/i.test(x));
+  const out = (keep.length ? keep : [s]).join('; ').slice(0, 2000);
+  return /^[\x20-\x7E]+$/.test(out) ? out : '';
+}
+
+/** 读 config.json 的 pixiv.cookie（读不到/格式坏都当"没配"，绝不让它把搜索搞挂）。 */
+export function configPixivCookie() {
+  try {
+    let text = fs.readFileSync(CONFIG_PATH, 'utf8');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    return cleanPixivCookie(JSON.parse(text)?.pixiv?.cookie);
+  } catch {
+    return '';
+  }
+}
+
+/** 当前生效的 pixiv 登录 cookie。**每次现读** config.json：贴完新 cookie 不用重启 MCP 子进程。 */
+export function pixivCookie() {
+  return configPixivCookie() || cleanPixivCookie(process.env.QQBRIDGE_PIXIV_COOKIE);
+}
+
+/** 是否配了登录 cookie（只回布尔，**绝不回值**）。 */
+export function pixivLoggedIn() {
+  return pixivCookie().length > 0;
+}
+
+/**
+ * pixiv 请求头。**cookie 只发给 pixiv 自己的域名** —— 镜像站是第三方，把登录凭证发过去等于泄露账号。
+ * @param {string} url 目标地址
+ */
+export function pixivRequestHeaders(url, extra = {}) {
+  const u = String(url ?? '');
+  const isPixiv = /^https?:\/\/(?:[a-z0-9-]+\.)*pixiv\.net(?:[/:]|$)/i.test(u);
+  const ck = isPixiv ? pixivCookie() : '';
+  return {
+    'user-agent': UA,
+    accept: 'application/json,text/plain,*/*',
+    referer: PIXIV_REFERER,
+    ...(ck ? { cookie: ck } : {}),
+    ...extra,
+  };
+}
+
+/**
+ * 登录态自检：拿一个"匿名时被抹掉原图地址"的作品当试纸。
+ *
+ * 依据（实测）：作品 80643572 匿名请求 `ajax/illust/{id}` 时 `urls` 整组为 null（sl=4），
+ * 而 149807268（sl=2）匿名也带 urls。所以"试纸作品 80643572 的 urls.original 非空"
+ * 就能证明 cookie 真的生效了 —— 比"看有没有配 cookie"可靠得多（cookie 会过期）。
+ * @returns {Promise<{configured:boolean, loggedIn:boolean, probeId:string, evidence:string}>}
+ */
+export async function pixivLoginState(probeId = '80643572') {
+  const configured = pixivLoggedIn();
+  if (!configured) {
+    return { configured: false, loggedIn: false, probeId: String(probeId), evidence: '没配 pixiv.cookie（config.json 的 pixiv.cookie 或环境变量 QQBRIDGE_PIXIV_COOKIE）' };
+  }
+  try {
+    const r = await fetchPixivJson(`${PIXIV_AJAX}/illust/${probeId}?lang=zh`);
+    const url = String(r.json?.body?.urls?.original ?? '').trim();
+    return {
+      configured: true,
+      loggedIn: Boolean(url),
+      probeId: String(probeId),
+      evidence: url ? `试纸作品 ${probeId} 拿到了原图地址（登录态生效）` : `试纸作品 ${probeId} 的 urls.original 仍是 null（cookie 无效/已过期）`,
+    };
+  } catch (e) {
+    return { configured: true, loggedIn: false, probeId: String(probeId), evidence: `自检请求失败：${e?.message ?? e}` };
+  }
+}
+
+/** 归一化名字用于比对：去掉空白与全角空格、转小写（'米山舞 ！！' 与 '米山舞！！' 视为同名）。 */
+export function normalizeArtistName(s) {
+  return String(s ?? '').replace(/[\s\u3000]+/g, '').toLowerCase();
+}
+
+/**
+ * 纯函数：解析"用户搜索"的返回体 —— 形状没实测过（要登录态才能试），所以**宽容解析**：
+ * 认 `body.users` / `body.list` / 裸数组，字段认 userId|id、userName|name、illusts|works|illustCount。
+ * @returns {{id:string,name:string,works:number,premium:boolean,pageUrl:string}[]}
+ */
+export function parsePixivUserSearch(json) {
+  const b = json?.body ?? json;
+  const arr = Array.isArray(b?.users) ? b.users
+    : Array.isArray(b?.list) ? b.list
+      : Array.isArray(b?.data) ? b.data
+        : Array.isArray(b) ? b : [];
+  return arr.map((u) => {
+    const id = String(u?.userId ?? u?.id ?? '').trim();
+    const w = Number(u?.illusts ?? u?.works ?? u?.illustCount ?? u?.illust_count);
+    return {
+      id,
+      name: String(u?.userName ?? u?.name ?? '').trim(),
+      works: Number.isFinite(w) ? w : 0,
+      premium: Boolean(u?.premium),
+      pageUrl: /^\d+$/.test(id) ? `https://www.pixiv.net/users/${id}` : '',
+      avatar: String(u?.profileImageUrl ?? u?.image ?? u?.imageBig ?? u?.profile_image_url ?? '').trim(),
+    };
+  }).filter((u) => u.id);
+}
+
+/**
+ * 把"按画师名搜"的返回体排序/挑选（**纯函数，离线可测**）：
+ * 名字完全相等的排前面（pixiv 搜索本身也会按相关度排，这里只做一道确定性收口），
+ * 同档次内按作品数多→少（作品数是"这个号是不是活跃画师"的唯一可用信号）。
+ *
+ * 什么时候**才敢**直接定号（unique）：名字完全相等的那一个**只有一个**，且
+ *   · 没有任何"包含关系"的近似号（如搜"米山舞"时冒出来的"米山舞です"），或者
+ *   · 它的作品数**严格多于**所有近似号 —— 粉丝小号通常作品很少，这条能救回"重名号扎堆"的常见情况。
+ * 其余一律返回候选列表让用户挑：**发错人比不发出去更糟**。
+ * @returns {{exact:object[], partial:object[], others:object[], candidates:object[], unique:object|null}}
+ */
+export function rankArtistCandidates(users, name) {
+  const want = normalizeArtistName(name);
+  const list = Array.isArray(users) ? users.slice() : [];
+  const exact = list.filter((u) => normalizeArtistName(u.name) === want);
+  const partial = list.filter((u) => {
+    const n = normalizeArtistName(u.name);
+    return n !== want && (n.includes(want) || want.includes(n));
+  });
+  const others = list.filter((u) => !exact.includes(u) && !partial.includes(u));
+  const byWorks = (a, b) => (b.works || 0) - (a.works || 0);
+  const candidates = [...exact.slice().sort(byWorks), ...partial.slice().sort(byWorks), ...others];
+  const topPartialWorks = partial.reduce((m, u) => Math.max(m, u.works || 0), 0);
+  const unique = (exact.length === 1 && (partial.length === 0 || (exact[0].works || 0) > topPartialWorks))
+    ? exact[0] : null;
+  return { exact, partial, others, candidates, unique };
+}
+
 /** GET 一个 pixiv/mirror 的 JSON 端点。**不抛 HTTP 状态错**（404 的 JSON 体也要能读到，才能给准话）。 */
 async function fetchPixivJson(url, timeoutMs = PIXIV_DIRECT_TIMEOUT_MS) {
   const res = await fetch(url, {
-    headers: { 'user-agent': UA, accept: 'application/json,text/plain,*/*', referer: PIXIV_REFERER },
+    headers: pixivRequestHeaders(url),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
@@ -812,4 +973,81 @@ export function pixivImageSources(work, opts = {}) {
   // ③ 老候选：从缩略图推日期路径（搜索路径一直用这套，保持行为不变）
   for (const u of pixivImageCandidates(work, { page, size })) push(u);
   return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-19 新增：按画师名字找号（要登录 cookie；见本文件上方 cookie 段）】
+ *
+ * 调用方给的"画师"入参可能是三种东西，这里统一收口：
+ *   · 画师号 / pixiv.net/users/<数字> 链接 → 直接用；
+ *   · 画师名（不含数字）→ 走登录态的用户搜索；
+ *   · 什么都没给 → none。
+ * 名字搜出来**不保证唯一**（同名号在 pixiv 上很常见），所以：
+ *   · 只有一个名字完全相等、且没有包含关系的候选 → 敢直接定（unique）；
+ *   · 否则**返回候选列表让用户挑**，绝不瞎猜一个发出去 —— 发错人比不发更糟。
+ *   （web 搜索引擎那条路实测不可靠：这台 VPS 上 bing 候选恒 0、duckduckgo 时好时坏 202，
+ *    且"七菜"这种常见名会捞出 3 个同名号而真号不在前列；所以只做候选，不做自动定号。）
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** 纯函数：认调用方给的"画师"入参。 */
+export function parseAuthorInput(input) {
+  const s = String(input ?? '').trim();
+  if (!s) return { kind: 'none' };
+  const link = /pixiv\.net\/(?:en\/)?users\/(\d{1,12})/i.exec(s);
+  if (link) return { kind: 'id', id: link[1], from: 'link' };
+  if (/^\d{1,12}$/.test(s)) return { kind: 'id', id: s, from: 'number' };
+  return { kind: 'name', name: s };
+}
+
+/**
+ * 按名字搜画师（**需要登录 cookie**，没配就直接说清楚，不退化成关键词搜）。
+ * 逐条试几个可能的用户搜索路由（形状没实测过：匿名时它们全被拒，只有带上 cookie 才知道哪条对）。
+ * @returns {Promise<{query:string, endpoint:string, users:object[]}>}
+ */
+export async function pixivSearchUsersByName(name) {
+  const w = String(name ?? '').trim();
+  if (!w) throw new Error('要搜的画师名不能为空');
+  if (!pixivLoggedIn()) {
+    throw new Error('按名字找画师需要 pixiv 登录态：在 config.json 的 pixiv.cookie 里填一个会话 cookie（免费号即可）。'
+      + '没登录态时只能改用 authorId（画师号，如 1554775）或作品链接（pixiv.net/artworks/<数字>）；'
+      + '关键词搜索搜的是"标题/标签含该名字"的作品，找不到作者本人。');
+  }
+  const ends = [
+    `${PIXIV_AJAX}/search/users/${encodeURIComponent(w)}?s_mode=s_usr&lang=zh`,
+    `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`,
+    `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&lang=zh`,
+  ];
+  const tried = [];
+  for (const url of ends) {
+    try {
+      const r = await fetchPixivJson(url);
+      const users = parsePixivUserSearch(r.json);
+      if (users.length) return { query: w, endpoint: url.replace(PIXIV_AJAX, ''), users };
+      const why = r.json?.error ? `error=${String(r.json.message ?? '').slice(0, 40)}` : '无 users 字段';
+      tried.push(`${url.replace(PIXIV_AJAX, '')} → HTTP ${r.status} ${why}`);
+    } catch (e) {
+      tried.push(`${url.replace(PIXIV_AJAX, '')} → ${e?.message ?? e}`);
+    }
+  }
+  throw new Error(`按名字搜「${w}」没拿到结果。逐条试过：${tried.join('；')}。`
+    + '（若全是 400/404，说明这个 cookie 没生效或该接口对免费号也不开放 —— 用 tools/test-pixiv-byid.mjs --login 先自检登录态。）');
+}
+
+/**
+ * 收口"画师入参" → 画师号 或 候选列表。
+ * @returns {Promise<{kind:'id',id:string,from:string,name?:string,alternatives?:object[]}|{kind:'candidates',name:string,candidates:object[],endpoint:string}|{kind:'none'}>}
+ */
+export async function resolvePixivAuthor(input) {
+  const p = parseAuthorInput(input);
+  if (p.kind === 'none') return { kind: 'none' };
+  if (p.kind === 'id') return { kind: 'id', id: p.id, from: p.from };
+  const r = await pixivSearchUsersByName(p.name);
+  const ranked = rankArtistCandidates(r.users, p.name);
+  if (ranked.unique) {
+    return {
+      kind: 'id', id: ranked.unique.id, from: 'name', name: p.name, endpoint: r.endpoint,
+      alternatives: ranked.candidates.filter((u) => u.id !== ranked.unique.id).slice(0, 5),
+    };
+  }
+  return { kind: 'candidates', name: p.name, candidates: ranked.candidates.slice(0, 8), endpoint: r.endpoint };
 }

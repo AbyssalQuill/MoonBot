@@ -16,6 +16,8 @@ import {
   parsePixivId, pixivPageUrl, normalizePixivIllustDetail, deriveOriginalPageUrls,
   pixivMasterUrl, pixivImageSources, pixivImageCandidates, isAdultWork, PIXIV_REFERER,
   pixivIllustDetail, pixivIllustOriginals,
+  cleanPixivCookie, parsePixivUserSearch, rankArtistCandidates, parseAuthorInput,
+  pixivRequestHeaders, pixivLoggedIn, pixivLoginState, pixivSearchUsersByName,
 } from '../src/lib/pixiv.js';
 import { safeFetchBuffer } from '../src/safe-fetch.js';
 
@@ -96,14 +98,97 @@ eq('搜索路径（只有缩略图）与老候选完全一致 —— 老行为�
   pixivImageCandidates({ id: '149787938', thumbUrl: 'https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/09/18/01/37/08/149787938_p0_square1200.jpg' }, { page: 0, size: 'master' }));
 ok('搜索路径不塞 Referer（仍走代理）', srcSearch.every((s) => !s.referer));
 
-/* ───────────────────────── 联网：真作品号 ───────────────────────── */
-if (!process.argv.includes('--live')) {
-  console.log(`\n（跳过联网部分；加 --live 才会真去 pixiv 取图）\n结果：通过 ${pass} / 失败 ${fail}`);
+/* ───────────────────────── 离线：登录 cookie 层（按名字搜画师） ───────────────────────── */
+console.log('\n=== 6. cookie 规整（三种写法都要认，换行要清掉）===');
+eq('整条 cookie 串原样保留（只留认识的键）', cleanPixivCookie('PHPSESSID=abc123; p_ab_id=7; other=1'), 'PHPSESSID=abc123; p_ab_id=7');
+eq('只给会话值 → 自动补 PHPSESSID=', cleanPixivCookie('12345678_abcdefghijklmnop'), 'PHPSESSID=12345678_abcdefghijklmnop');
+eq('带 PHPSESSID= 前缀照收', cleanPixivCookie('PHPSESSID=xyz_987654321'), 'PHPSESSID=xyz_987654321');
+eq('复制时带上的换行/tab 被清掉（换行进请求头会弄坏请求）', cleanPixivCookie('PHPSESSID=abc\r\ndef\t'), 'PHPSESSID=abc def');
+eq('空值 → 空串', cleanPixivCookie('   '), '');
+ok('超长被截断（不让凭证面无限大）', cleanPixivCookie(`PHPSESSID=${'a'.repeat(5000)}`).length <= 2000);
+
+console.log('\n=== 7. 登录态只发给 pixiv，绝不发给第三方镜像站 ===');
+const hPixiv = pixivRequestHeaders('https://www.pixiv.net/ajax/illust/80643572');
+const hMirror = pixivRequestHeaders('https://x.pixigraph.xyz/api/detail.php?id=80643572');
+ok('请求头里本来就没有 cookie 时也不报错', typeof hPixiv === 'object' && typeof hMirror === 'object');
+ok('两个域名都会带 Referer（图床防盗链要用）', hPixiv.referer === PIXIV_REFERER && hMirror.referer === PIXIV_REFERER);
+if (pixivLoggedIn()) {
+  ok('pixiv 域名拿到 cookie', Boolean(hPixiv.cookie));
+  ok('★ 镜像站**拿不到** cookie（第三方，不能泄露登录凭证）', !hMirror.cookie);
+} else {
+  console.log('  （本机没配 pixiv.cookie，跳过"带 cookie"的两条断言；线上有配就会跑）');
+  ok('没配 cookie 时两个域名都不带 cookie', !hPixiv.cookie && !hMirror.cookie);
+}
+
+console.log('\n=== 8. 用户搜索返回体的宽容解析 + 候选排序 ===');
+const fixtureSearch = {
+  error: false,
+  body: {
+    users: [
+      { userId: '1554775', userName: '米山舞', illusts: 46, premium: false },
+      { userId: '49982457', userName: '米山舞', illusts: 3 },
+      { userId: '91868118', userName: '米山舞sama', illusts: 0 },
+      { userName: '没有号的脏数据' },
+    ],
+  },
+};
+const parsed = parsePixivUserSearch(fixtureSearch);
+eq('只留真有号的条目', parsed.length, 3);
+eq('id/name/作品数/主页地址', [parsed[0].id, parsed[0].name, parsed[0].works, parsed[0].pageUrl], ['1554775', '米山舞', 46, 'https://www.pixiv.net/users/1554775']);
+eq('裸数组形状也认', parsePixivUserSearch([{ id: 5, name: 'x' }]).length, 1);
+eq('认不出来 → 空数组（不抛错）', parsePixivUserSearch({ error: true, body: [] }), []);
+const rankedAmbiguous = rankArtistCandidates(parsed, '米山舞');
+ok('两个"完全同名" → 不敢定号，给候选', rankedAmbiguous.unique === null, JSON.stringify(rankedAmbiguous.candidates.map((u) => u.id)));
+ok('候选里作品多的排前面', rankedAmbiguous.candidates[0].id === '1554775');
+const rankedUnique = rankArtistCandidates([{ id: '1', name: '米山舞', works: 46 }, { id: '2', name: '米山舞です', works: 9 }], '米山舞');
+ok('一个完全同名 + 近似号作品数明显更少 → 敢直接定号', rankedUnique.unique?.id === '1', JSON.stringify(rankedUnique.candidates.map((u) => `${u.id}:${u.works}`)));
+ok('近似号作品数更多时 → 不敢定号（粉丝大号冒充不了，但也不能瞎猜）',
+  rankArtistCandidates([{ id: '1', name: '米山舞', works: 2 }, { id: '2', name: '米山舞です', works: 300 }], '米山舞').unique === null);
+ok('两边作品数都是 0/未知 → 保守给候选', rankArtistCandidates([{ id: '1', name: 'x', works: 0 }, { id: '2', name: 'xです', works: 0 }], 'x').unique === null);
+eq('全角空格/大小写不影响同名判定', rankArtistCandidates([{ id: '3', name: 'YONEYAMA  MAI', works: 1 }], 'yoneyama mai').unique?.id, '3');
+
+console.log('\n=== 9. 画师入参收口：号 / 链接 / 名字 / 空 ===');
+eq('裸数字 → 就是画师号', parseAuthorInput('1554775'), { kind: 'id', id: '1554775', from: 'number' });
+eq('主页链接 → 提取画师号', parseAuthorInput('https://www.pixiv.net/users/1554775'), { kind: 'id', id: '1554775', from: 'link' });
+eq('带语言前缀的链接', parseAuthorInput('https://www.pixiv.net/en/users/1554775'), { kind: 'id', id: '1554775', from: 'link' });
+eq('名字 → 走名字搜', parseAuthorInput('米山舞'), { kind: 'name', name: '米山舞' });
+eq('空 → none', parseAuthorInput('   '), { kind: 'none' });
+
+/* ───────────────────────── 联网 ───────────────────────── */
+const wantLive = process.argv.includes('--live');
+const wantLogin = process.argv.includes('--login');
+if (!wantLive && !wantLogin) {
+  console.log(`\n（跳过联网部分；--live 真去 pixiv 取图，--login 只做登录态自检 + 按名字搜画师）\n结果：通过 ${pass} / 失败 ${fail}`);
   process.exit(fail ? 1 : 0);
 }
 
 const sha = (b) => createHash('sha256').update(b).digest('hex');
-console.log('\n=== 6. 联网：按作品号取详情 + 原图直链 ===');
+
+console.log('\n=== 10. 联网：登录态自检 + 按名字搜画师 ===');
+const login = await pixivLoginState();
+console.log(`  配了 cookie=${login.configured} 登录生效=${login.loggedIn} —— ${login.evidence}`);
+ok('登录态自检给得出明确结论（不猜）', typeof login.loggedIn === 'boolean');
+const nameToTry = process.argv.includes('--name') ? process.argv[process.argv.indexOf('--name') + 1] : '米山舞';
+try {
+  const found = await pixivSearchUsersByName(nameToTry);
+  console.log(`  按名字「${nameToTry}」搜到 ${found.users.length} 个号（${found.endpoint}）：`);
+  for (const u of rankArtistCandidates(found.users, nameToTry).candidates.slice(0, 6)) {
+    console.log(`    ${u.id.padEnd(10)} ${u.name}${u.works ? `（${u.works} 件）` : ''} ${u.pageUrl}`);
+  }
+  ok('★ 按名字搜画师拿到结果（cookie 生效、该接口对免费号开放）', found.users.length > 0);
+  ok('结果里含真值 1554775（米山舞）', found.users.some((u) => u.id === '1554775') || nameToTry !== '米山舞');
+} catch (e) {
+  const msg = String(e?.message ?? e);
+  console.log('  ' + msg);
+  ok('没配 cookie 时明确说不支持（而不是偷偷退化成关键词搜）', login.configured || /需要 pixiv 登录态/.test(msg), msg);
+  ok('配了 cookie 但搜不到 → 如实报每条路由的失败原因', !login.configured || /逐条试过/.test(msg), msg);
+}
+if (!wantLive) {
+  console.log(`\n结果：通过 ${pass} / 失败 ${fail}`);
+  process.exit(fail ? 1 : 0);
+}
+
+console.log('\n=== 11. 联网：按作品号取详情 + 原图直链 ===');
 const liveId = process.argv.includes('--id') ? process.argv[process.argv.indexOf('--id') + 1] : '80643572';
 const live = await pixivIllustDetail(liveId);
 console.log(`  作品 ${live.id}「${live.title}」by ${live.author}（${live.pageCount} 页，xRestrict=${live.xRestrict}，来源=${live.source}）`);
@@ -114,7 +199,7 @@ console.log(`  原图地址来源=${op.source}${op.note ? ' 备注=' + op.note :
 ok('拿到了逐页原图直链', op.urls.length >= 1 && /img-original\/img\//.test(op.urls[0] || ''));
 ok('页数与 pageCount 对齐', op.urls.length === live.pageCount || op.source === 'derived', `urls=${op.urls.length} pageCount=${live.pageCount}`);
 
-console.log('\n=== 7. 联网：字节级无损校验（直联 vs 镜像代理）===');
+console.log('\n=== 12. 联网：字节级无损校验（直联 vs 镜像代理）===');
 const sources = pixivImageSources(live, { page: 0, size: 'original', originals: op.urls });
 const direct = await safeFetchBuffer(sources[0].url, 15 * 1024 * 1024, { referer: sources[0].referer });
 console.log(`  直联 ${sources[0].url}\n       ${direct.buffer.length}B sha256=${sha(direct.buffer).slice(0, 16)}…`);
@@ -131,7 +216,7 @@ if (proxySrc) {
   console.log('  （没有代理兜底候选，跳过对比）');
 }
 
-console.log('\n=== 8. 联网：错误路径要说人话 ===');
+console.log('\n=== 13. 联网：错误路径要说人话 ===');
 let badMsg = '';
 try { await pixivIllustDetail('99999999999'); } catch (e) { badMsg = String(e?.message ?? e); }
 ok('不存在的作品号报错且带来源说明', /取 Pixiv 作品 99999999999 失败/.test(badMsg), badMsg);

@@ -14,12 +14,12 @@
  * 现在改成现问 server，zod schema 是注册代码现场生成的，量到的就是此刻真实体积，不会再漏新增工具。
  *
  * 口径：字符数不是 token 数；本文件统一按 **3.2 字符/token** 估算（英文 JSON 的经验值）。
- * 合计 96 个工具 88279 字符，其中 mcp__napcat__ 系列 89 个 83045 字符
+ * 合计 96 个工具 88399 字符，其中 mcp__napcat__ 系列 89 个 83165 字符
  *（**只有这一批能被 social.slimTools.deny 精简掉** —— 名单是在 mcp-napcat-safe.js 里生效的）。
  */
 export const TOOL_SCHEMA_CHARS: Record<string, number> = {
   "mcp__napcat__qq_send_rich": 4879,
-  "mcp__napcat__qq_send_pixiv": 3632,
+  "mcp__napcat__qq_send_pixiv": 3752,
   "mcp__napcat__qq_pixiv_search": 3023,
   "mcp__napcat__qq_send_voice": 2430,
   "mcp__napcat__qq_set_wake_config": 2389,

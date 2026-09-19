@@ -22,6 +22,7 @@ import { searchImages } from './lib/image-search.js';
 import {
   pixivSearch, parsePixivId,
   pixivIllustDetail, pixivIllustOriginals, pixivImageSources, pixivUserWorkIds,
+  resolvePixivAuthor, pixivLoggedIn,
 } from './lib/pixiv.js';
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
@@ -2789,7 +2790,7 @@ if (cfg.social?.tools?.pixiv !== false) {
   registerTool(
     'qq_send_pixiv',
     'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id - sends a work by that artist), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size=master (1200px, safe for QQ) or original (the untouched original file); when you give illustId/authorId the default is original, when you only give query the default is master. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
-      + '\n\n【找"某人本人的作品"只能用 authorId】关键词搜的是标题/标签含该词的图（搜「米山舞」多半是别人打了她名字标签的作品）。① 有作品号 → illustId；② 有画师号（pixiv.net/users/<数字>）→ authorId，按投稿时间新→旧取第 index 件；③ 两个都没有 → 先发 ta 任意一件作品，返回里的 authorId 就是画师号。别把画师号当 illustId。'
+      + '\n\n【找"某人本人的作品"只能用 authorId】关键词搜的是标题/标签含该词的图（搜「米山舞」多半是别人打了她名字标签的作品）。① 有作品号 → illustId；② 有画师号（pixiv.net/users/<数字>）→ authorId，按投稿时间新→旧取第 index 件；③ 有画师号更好，**画师名字**只有在桥配了 pixiv 登录 cookie 时才能用（撞号会返回候选让你挑）；④ 都没有 → 先发 ta 任意一件作品，返回里的 authorId 就是画师号。别把画师号当 illustId。'
       + '\n\n【原图无损】size=original = Pixiv 原图文件本身（直联 pximg 下载、原字节落盘直发，不缩放不转码不二压；返回的 sha256/bytes 就是这次真发出去的字节）。master 才是 1200px jpg。原图 >15MB 会被挡下（返回会说明），改 size=master。'
       + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages 都是在镜像站返回的数据里**本地筛**的（镜像站只认 keyword 和 page），一页 60 条、最多扫 scanPages 页（默认 3、上限 10）；index 选的是**筛完之后**的第几条。想先看清筛选细节（筛掉多少、扫了几页、有哪些候选）就用 qq_pixiv_search。排序只支持投稿时间（date_desc/date_asc/random），**不支持按人气/收藏数**（镜像站没有收藏数）。本工具**永远排除 R-18/R-18G**（刻意不给 r18 参数，避免把不宜内容发进 QQ），需要看 R-18 只用 qq_pixiv_search。',
     {
@@ -2797,7 +2798,7 @@ if (cfg.social?.tools?.pixiv !== false) {
       token: z.string().describe('Session token'),
       query: z.string().optional().describe('搜索关键词（没给 illustId/authorId 时用），例如 初音ミク 壁纸。注意：关键词搜的是标签/标题，搜不到"某人本人的作品"——那种情况用 authorId'),
       illustId: z.string().optional().describe('Pixiv **作品号**或 pixiv.net/artworks/<数字> 链接（不是画师号）；按号取图，其它搜索/筛选参数不生效，size 默认 original（真原图）'),
-      authorId: z.string().optional().describe('Pixiv **画师号**（pixiv.net/users/<数字>，也可只给数字）：按投稿时间新→旧取 ta 名下第 index 件作品再发。与 illustId 二选一，其它筛选参数不生效'),
+      authorId: z.string().optional().describe('画师：**画师号**（pixiv.net/users/<数字>，或只给数字）最稳；也可以直接填**画师名字**（需要桥配了 pixiv 登录 cookie，否则会明确报不支持）。按投稿时间新→旧取 ta 名下第 index 件作品再发；名字撞号时会返回候选让你挑，不会乱发。与 illustId 二选一，其它筛选参数不生效'),
       index: z.number().optional().describe('序号（0 开始，默认 0）：给 authorId 时 = 该画师第几新的作品；给 query 时 = 筛选之后第几条搜索结果'),
       size: z.enum(['master', 'original']).optional().describe('original = Pixiv 原图文件本身（无损、逐字节直发；给 illustId/authorId 时的默认）；master = 1200px jpg（只给 query 时的默认）。原图 >15MB 会被挡下，改用 master'),
       page: z.number().optional().describe('多图作品发第几页（0 开始，默认 0）。注意这是**作品内的页号**，不是搜索页码'),
@@ -2836,7 +2837,24 @@ if (cfg.social?.tools?.pixiv !== false) {
           if (wantId) {
             work = await pixivIllustDetail(wantId);
           } else {
-            const { userId, ids } = await pixivUserWorkIds(wantAuthor);
+            /* 画师入参三种形态统一收口：画师号 / users/<数字> 链接 / **画师名字**（走登录态用户搜索）。
+             * 名字可能撞号，所以 resolvePixivAuthor 只在不歧义时才定号，否则把候选交回来让用户挑。 */
+            const resolved = await resolvePixivAuthor(wantAuthor);
+            if (resolved.kind === 'candidates') {
+              const lines = resolved.candidates.map((u, i) => `${i + 1}. ${u.name || '(无名字)'}（${u.works ? u.works + ' 件作品' : '作品数未知'}）${u.pageUrl}`);
+              return {
+                content: [{
+                  type: 'text',
+                  text: `「${resolved.name}」在 Pixiv 上有 ${resolved.candidates.length} 个同名/近似画师，分不清是哪一个，没敢乱发。候选：\n${lines.join('\n')}\n`
+                    + '把用户看到的主页链接念给 ta 确认，或让 ta 给一个 pixiv.net/users/<数字> 或任意一件作品链接（pixiv.net/artworks/<数字>），再用 authorId / illustId 发。',
+                }],
+                isError: true,
+              };
+            }
+            if (resolved.kind !== 'id') {
+              return { content: [{ type: 'text', text: `画师入参不认识：「${wantAuthor}」。给画师号（如 1554775）、pixiv.net/users/<数字> 链接，或者直接用名字（需要桥配了 pixiv 登录 cookie）。` }], isError: true };
+            }
+            const { userId, ids } = await pixivUserWorkIds(resolved.id);
             if (!ids.length) {
               return {
                 content: [{
@@ -2851,7 +2869,11 @@ if (cfg.social?.tools?.pixiv !== false) {
             const pick = Math.max(0, Number(index) || 0);
             const target = ids[pick] || ids[0];
             work = await pixivIllustDetail(target);
-            pickNote = `画师 ${userId} 名下共 ${ids.length} 件公开作品，按投稿时间新→旧取第 ${pick + 1} 件（${target}）`;
+            const how = resolved.from === 'name'
+              ? `按名字「${resolved.name}」搜到画师 ${userId}（${resolved.endpoint}）`
+              : `画师 ${userId}`;
+            const alt = resolved.alternatives?.length ? `（另有 ${resolved.alternatives.length} 个同名/近似账号未采用）` : '';
+            pickNote = `${how}${alt}，名下共 ${ids.length} 件公开作品，按投稿时间新→旧取第 ${pick + 1} 件（${target}）`;
           }
           // R-18 闸门：这条路人肉不过搜索的本地筛选，必须自己判（xRestrict 缺失/非 0 都当 R-18）
           if (work.adult) {
