@@ -239,7 +239,7 @@ MoonBot Public/
 │   ├─ tools/                开发与回归工具（含设备身份固定脚本）
 │   ├─ tests/                单元测试
 │   ├─ docs/                 桥接层文档
-│   ├─ characters/           角色库：一个子目录 = 一个角色包（出厂 22 个）
+│   ├─ characters/           角色库：一个子目录 = 一个角色包（出厂 21 个 + 1 张散装卡）
 │   ├─ config.example.json   出厂配置模板
 │   ├─ music-sign-proxy.py   音乐卡片签名代理
 │   ├─ state/                ⛔ 运行数据：记忆库、社交状态、用量日志
