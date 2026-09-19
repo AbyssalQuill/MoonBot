@@ -11,6 +11,8 @@ import { fileURLToPath } from 'url';
 import { deployApi } from './deploy.js';
 // 隔离 DSH 凭据文件（.credentials.yaml）的纯逻辑：本地直写与服务端 SSH 写盘共用，可单测
 import { mergeCredentialText, credentialStatusFromText, validateCredentialDocument } from './iso-credential.js';
+// NapCat 运行时完整性自检/自修（payload 分片不同源、杀软误删、更新复制不完整都会启动即崩）
+import { ensureNapcatApps } from './napcat-repair.js';
 const deploy = deployApi();
 
 /* 【2026-09-12 主人要求："确保这个应用安装在哪个盘都可以找到"】
@@ -1016,6 +1018,22 @@ function startNapcatLocal(cfgNap) {
       // 2) Windows：自动定位 OneKey
       const onekey = findNapcatOneKey();
       if (onekey) {
+        /* 【2026-09-19 真机事故修复】拉起 NapCat 之前先做一次完整性自检 / 自修。
+         * 事故：别人装完启动即崩 `Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+         * '...\conout-D9oph_Le.js' imported from '...\napcat.mjs'` —— 根因是我们打出去的 payload 里
+         * napcat.mjs 与被引用分片不同源（打包仓库实测：引用 D9oph_Le，目录里只剩旧的 wiJ7YKRd）；
+         * 杀软误删单个 js、以及"更新时文件被占用导致复制不完整"也会造成同一种症状。
+         * 自修方式：缺哪个成员就从随包 NapCat.Shell.zip 里解回哪个（成员名就是内容哈希，必然对得上）。 */
+        let napcatRepairNote = '';
+        try {
+          const rep = ensureNapcatApps({ root: RUNTIME_ROOT, fix: true, log: (m) => mlog(m) });
+          if (rep.broken > 0) {
+            napcatRepairNote = rep.ok
+              ? `\n⚠️ 检测到 NapCat 文件缺失，已自动从随包 zip 补回 ${rep.repaired} 个文件（修复前会启动即崩）`
+              : `\n⚠️ NapCat 文件缺失且自修失败：${rep.error}`;
+            mlog(`[napcat] 完整性自检：检查 ${rep.checked} 个 / 坏 ${rep.broken} 个 / 补回 ${rep.repaired} 个 → ${rep.ok ? '已修复' : '仍有问题'}`);
+          }
+        } catch (e) { mlog(`[napcat] 完整性自检异常（继续启动）：${e?.message ?? e}`); }
         // 清理上次残留的 NapCat/QQ 进程——只杀本 OneKey 目录内启动的进程（绝不误杀用户自己的正版 QQ）
         try {
           const owndir = onekey.dir.replace(/'/g, "''");
@@ -1088,7 +1106,7 @@ function startNapcatLocal(cfgNap) {
           if (ok === 'written') logStream.write(`\n===== onebot 出厂配置已自动写入 (HTTP 3000 / WS 3001, token=truefriend) =====\n`);
           else if (ok === 'found') logStream.write(`\n===== onebot 已有网络配置, 跳过注入 =====\n`);
         });
-        resolve({ success: true, message: `NapCat (OneKey · VBS 隐藏启动) 已拉起${quickLogin ? ' · 快速登录 ' + quickLogin : ' · 二维码登录'}\n启动器：${target}` }); return;
+        resolve({ success: true, message: `NapCat (OneKey · VBS 隐藏启动) 已拉起${quickLogin ? ' · 快速登录 ' + quickLogin : ' · 二维码登录'}\n启动器：${target}${napcatRepairNote}` }); return;
       }
       // 3) 非 Windows：官方安装脚本
       if (process.platform !== 'win32') {
