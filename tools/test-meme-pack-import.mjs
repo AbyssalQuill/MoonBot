@@ -267,7 +267,46 @@ const readTable = (packDir) => {
   const list2 = await get('/api/bridge/meme-packs');
   check('GET 里 bindings 反映出绑定', JSON.stringify(list2.body?.bindings?.['demo-role']) === JSON.stringify([folderPackId, 'unknown-pack-id']), JSON.stringify(list2.body?.bindings));
 
-  // ─────────────────────── 7) 安全：不上线桥、不动出厂包 ───────────────────────
+  // ─────────────────────── 7) 角色库根目录：默认扫桥目录 + 配了就以配置为准 + 导入记当前角色 ───────────────────────
+  section('角色库目录：默认扫桥目录 characters；配了 social.charactersDir 就以它为准；导入会记下当前角色');
+  const factoryRole = path.join(BRIDGE, 'characters', 'factory-role');
+  fs.mkdirSync(factoryRole, { recursive: true });
+  fs.writeFileSync(path.join(factoryRole, 'SKILL.md'), '# factory-role\n出厂库里的演示角色。\n', 'utf8');
+  fs.writeFileSync(path.join(factoryRole, 'manifest.json'), JSON.stringify({ name: '出厂演示角色' }), 'utf8');
+  const userLib = path.join(SANDBOX, 'user-lib');
+  const userRole = path.join(userLib, 'user-role');
+  fs.mkdirSync(userRole, { recursive: true });
+  fs.writeFileSync(path.join(userRole, 'SKILL.md'), '# user-role\n你自己库里的角色。\n', 'utf8');
+  // 注意：这份**也要**带 manifest.json —— scanCharacters 有个"目录不是角色库（没有子目录带 manifest）
+  // 且只有一个子目录 → 往下钻一层"的旧启发式，只放一个不带 manifest 的包会被它当成"外面那层壳"。
+  fs.writeFileSync(path.join(userRole, 'manifest.json'), JSON.stringify({ name: '你自己库里的角色' }), 'utf8');
+
+  const ch1 = await get('/api/bridge/characters');
+  const slugs1 = (ch1.body?.characters ?? []).map((c) => c.slug);
+  check('没配 charactersDir 时扫桥目录里的角色库', ch1.body?.ok === true && slugs1.includes('factory-role'), `dir=${ch1.body?.dir} slugs=${slugs1.join(',')}`);
+
+  // 把 social.charactersDir 指到"用户自己那份" → 扫描根改用它与桥侧四个角色工具同一口径
+  const cfgNow = JSON.parse(fs.readFileSync(CFG, 'utf8').replace(/^\uFEFF/, ''));
+  cfgNow.social = { ...(cfgNow.social ?? {}), charactersDir: userLib };
+  fs.writeFileSync(CFG, JSON.stringify(cfgNow, null, 2) + '\n', 'utf8');
+  const ch2 = await get('/api/bridge/characters');
+  const slugs2 = (ch2.body?.characters ?? []).map((c) => c.slug);
+  check('配了 social.charactersDir 之后完全以它为准', slugs2.includes('user-role') && !slugs2.includes('factory-role'), `dir=${ch2.body?.dir} slugs=${slugs2.join(',')}`);
+
+  const imp = await post('/api/bridge/characters/import', { dir: userLib, slug: 'user-role', includeDims: true, apply: true });
+  check('导入角色成功', imp.status === 200 && imp.body?.success === true, `status=${imp.status} msg=${imp.body?.message ?? ''}`);
+  check('persona.md 真的写进去了', (() => {
+    const p = path.join(BRIDGE, 'persona.md');
+    try { return fs.existsSync(p) && fs.readFileSync(p, 'utf8').includes('user-role'); } catch { return false; }
+  })());
+  const cfgAfterImport = JSON.parse(fs.readFileSync(CFG, 'utf8').replace(/^\uFEFF/, ''));
+  check('导入顺手记下 social.meme.activePersona', cfgAfterImport?.social?.meme?.activePersona === 'user-role', JSON.stringify(cfgAfterImport?.social?.meme ?? null));
+  check('导入只动这一格（charactersDir 与其它字段都在）',
+    cfgAfterImport?.social?.charactersDir === userLib && cfgAfterImport.ownerQQ === 1736784911,
+    JSON.stringify({ ownerQQ: cfgAfterImport.ownerQQ, charactersDir: cfgAfterImport?.social?.charactersDir }));
+  check('返回里如实报了 activePersona 写入结果', imp.body?.activePersona?.written === true, JSON.stringify(imp.body?.activePersona ?? null));
+
+  // ─────────────────────── 8) 安全：不上线桥、不动出厂包 ───────────────────────
   section('安全边界');
   const up3 = await post('/api/bridge/meme-packs/upload', {
     packId: 'restart-check-' + Date.now(),

@@ -3664,7 +3664,20 @@ function findCharacterRoots() {
    * 于是得到"它不注入其他角色的提示词"这个结论 —— 搜不到 ≠ 不支持。
    * 用户在 GUI 输入框仍可任意指定目录。 */
   const bridgeDir = (() => { try { return findBridgeDir(); } catch { return RUNTIME_ROOT; } })();
-  return [
+  /* 【2026-09-20 修「导入列表和模型读的库不是同一个目录」】出厂角色库随安装包进了
+   * <runtime>\qq-bridge\characters 之后，"第一个非空根胜出"就永远被出厂库抢走：主人往自己那份
+   * ~/Downloads/characters/characters 里新加的角色**不会出现在导入列表里**，而桥侧四个角色工具读的
+   * 恰恰是 social.charactersDir（缺省 = 用户那份）—— 两边各看一套库，越用越乱。
+   * 现在把桥配置里配了的 social.charactersDir 提到最前（配了就完全以它为准，和模型看到的一致）；
+   * 没配就维持原来的顺序不变。 */
+  const configured = (() => {
+    try {
+      const cfg = readJsonSafe(join(bridgeDir, 'config.json'));
+      const raw = typeof cfg?.social?.charactersDir === 'string' ? cfg.social.charactersDir.trim() : '';
+      return raw ? resolve(raw) : '';
+    } catch { return ''; }
+  })();
+  const roots = [
     join(bridgeDir, 'characters'),
     join(RUNTIME_ROOT, 'characters'),
     join(homedir(), 'Desktop', 'characters'),
@@ -3672,6 +3685,8 @@ function findCharacterRoots() {
     join(homedir(), 'Downloads', 'characters'),
     join(homedir(), 'Downloads', 'characters', 'characters'),
   ];
+  if (configured) roots.unshift(configured);
+  return [...new Set(roots)];
 }
 function scanCharacters(dir) {
   if (!dir || !existsSync(dir)) return { ok: false, message: '目录不存在' };
@@ -3755,6 +3770,7 @@ app.post('/api/bridge/characters/import', (req, res) => {
     if (!existsSync(join(dir, slug))) return res.json({ success: false, message: `角色目录不存在: ${slug}` });
     const text = buildCharacterPersona(dir, slug, includeDims);
     if (!text) return res.json({ success: false, message: '该角色没有可导入的 md 内容' });
+    let activePersona = { slug, written: false, skipped: 'apply=false' };
     const personaPath = bridgePersonaPath();
     const prev = existsSync(personaPath) ? readFileSync(personaPath, 'utf8') : '';
     if (apply) {
@@ -3764,8 +3780,19 @@ app.post('/api/bridge/characters/import', (req, res) => {
         const bk = join(dirname(personaPath), 'persona.backup-' + slug + '.md');
         writeFileSync(bk, prev, 'utf-8');
       } catch {}
+      /* 【2026-09-20】顺手记下"现在演的是谁"：social.meme.activePersona = slug。
+       * 桥用它决定哪份**角色专属表情包**排在最前（角色包优先、全局包回落）。以前这个键没人写，
+       * 主人绑了多个角色的包以后就分不清该用哪一份 —— 只能手写配置。写失败不影响导入本身。 */
+      try {
+        const p = patchBridgeConfigFile((cfg) => {
+          const social = (cfg.social && typeof cfg.social === 'object') ? cfg.social : (cfg.social = {});
+          const meme = (social.meme && typeof social.meme === 'object') ? social.meme : (social.meme = {});
+          meme.activePersona = String(slug);
+        }, 'charimport');
+        activePersona = p.ok ? { slug, written: true, backup: p.backup } : { slug, written: false, error: p.error };
+      } catch (e) { activePersona = { slug, written: false, error: e.message }; }
     }
-    res.json({ success: true, slug, name: slug, chars: text.length, bytes: Buffer.byteLength(text, 'utf8'), preview: text.slice(0, 400), applied: apply });
+    res.json({ success: true, slug, name: slug, chars: text.length, bytes: Buffer.byteLength(text, 'utf8'), preview: text.slice(0, 400), applied: apply, activePersona });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
@@ -3970,6 +3997,31 @@ function readMemeBindings() {
     for (const [k, v] of Object.entries(table)) if (Array.isArray(v)) out[k] = v.map(String);
     return out;
   } catch { return {}; }
+}
+
+/**
+ * 就地改桥的 config.json（只动 `mutate(cfg)` 改到的那一格）：
+ * 保留 UTF-8 BOM、保留结尾换行、写临时文件再 rename（桥侧 fs.watch 不会读到半截 JSON），
+ * 改前先 copy 一份 `config.json.bak-<tag>-<时间戳>`。
+ * 本机没有桥目录时回 { ok:false, error, localOnly:true }，调用方自己决定怎么报。
+ */
+function patchBridgeConfigFile(mutate, tag) {
+  const cfgPath = bridgeCfgPath();
+  if (!existsSync(cfgPath)) return { ok: false, localOnly: true, error: `这台机器上没找到桥的 config.json（找过 ${BRIDGE_DIRS.join('、')}）` };
+  const rawText = readFileSync(cfgPath, 'utf-8');
+  const hasBom = rawText.charCodeAt(0) === 0xFEFF;        // 历史上被误写成带 BOM 的 UTF-8：写回时原样保留
+  let cfg = null;
+  try { cfg = JSON.parse(hasBom ? rawText.slice(1) : rawText); }
+  catch (e) { return { ok: false, error: 'config.json 解析失败：' + e.message }; }
+  try { mutate(cfg); } catch (e) { return { ok: false, error: '修改配置失败：' + e.message }; }
+  const body = hasBom ? rawText.slice(1) : rawText;
+  const text = JSON.stringify(cfg, null, 2) + (/\n$/.test(body) ? '\n' : '');
+  const tmp = `${cfgPath}.tmp-${tag}`;
+  writeFileSync(tmp, (hasBom ? '\uFEFF' : '') + text, 'utf-8');
+  let backup = '';
+  try { backup = `${cfgPath}.bak-${tag}-${Date.now()}`; copyFileSync(cfgPath, backup); } catch { backup = ''; }
+  renameSync(tmp, cfgPath);
+  return { ok: true, path: cfgPath, backup };
 }
 
 /** 规整/建索引脚本的位置：优先桥目录里的那份（与线上桥同源），再退回运行目录 */
@@ -4292,31 +4344,23 @@ app.post('/api/bridge/meme-packs/bind', (req, res) => {
     const bad = packs.filter((p) => !MEME_ID_RE.test(p));
     if (bad.length) return res.status(400).json({ success: false, message: `包名不合法：${bad.slice(0, 5).join('、')}（只允许 A-Z a-z 0-9 . _ -）` });
 
-    const cfgPath = bridgeCfgPath();
-    if (!existsSync(cfgPath)) {
-      return res.status(400).json({
-        success: false, localOnly: true,
-        message: `角色绑定仅本机可用：这台机器上没找到桥的 config.json（找过 ${BRIDGE_DIRS.join('、')}）。服务端模式下请到服务器上改 qq-bridge/config.json。`,
-      });
+    const patch = patchBridgeConfigFile((cfg) => {
+      const social = (cfg.social && typeof cfg.social === 'object') ? cfg.social : (cfg.social = {});
+      const meme = (social.meme && typeof social.meme === 'object') ? social.meme : (social.meme = {});
+      const table = (meme.personaPacks && typeof meme.personaPacks === 'object' && !Array.isArray(meme.personaPacks)) ? meme.personaPacks : (meme.personaPacks = {});
+      table[character] = packs;                             // 保留其它字段（只动这一格）
+    }, 'memebind');
+    if (!patch.ok) {
+      if (patch.localOnly) {
+        return res.status(400).json({
+          success: false, localOnly: true,
+          message: `角色绑定仅本机可用：${patch.error}。服务端模式下请到服务器上改 qq-bridge/config.json。`,
+        });
+      }
+      return res.status(500).json({ success: false, message: patch.error });
     }
-    const rawText = readFileSync(cfgPath, 'utf-8');
-    const hasBom = rawText.charCodeAt(0) === 0xFEFF;        // 历史上被误写成带 BOM 的 UTF-8：写回时原样保留
-    let cfg = null;
-    try { cfg = JSON.parse(hasBom ? rawText.slice(1) : rawText); }
-    catch (e) { return res.status(500).json({ success: false, message: 'config.json 解析失败：' + e.message }); }
-    const social = (cfg.social && typeof cfg.social === 'object') ? cfg.social : (cfg.social = {});
-    const meme = (social.meme && typeof social.meme === 'object') ? social.meme : (social.meme = {});
-    const table = (meme.personaPacks && typeof meme.personaPacks === 'object' && !Array.isArray(meme.personaPacks)) ? meme.personaPacks : (meme.personaPacks = {});
-    table[character] = packs;                               // 保留其它字段（深合并只动这一格）
-
-    // 写盘：临时文件 → 备份 → rename 原子替换（与 /api/bridge/config 同一套，桥侧 fs.watch 不会读到半截 JSON）
-    const text = JSON.stringify(cfg, null, 2) + (/\n$/.test(hasBom ? rawText.slice(1) : rawText) ? '\n' : '');
-    const tmp = `${cfgPath}.tmp-memebind`;
-    writeFileSync(tmp, (hasBom ? '\uFEFF' : '') + text, 'utf-8');
-    let backup = '';
-    try { backup = `${cfgPath}.bak-memebind-${Date.now()}`; copyFileSync(cfgPath, backup); } catch { backup = ''; }
-    renameSync(tmp, cfgPath);
-
+    const cfgPath = patch.path;
+    const backup = patch.backup;
     // 绑定里写了根本找不到的包：照样存（用户可能先绑后传），但如实提醒
     const known = new Set(scanMemePackDirs().packs.map((p) => p.id));
     const unknown = packs.filter((p) => !known.has(p));

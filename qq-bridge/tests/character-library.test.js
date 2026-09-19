@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 process.env.QQB_MCP_NO_LISTEN = '1';
 const lib = await import('../src/mcp-napcat-safe.js');
@@ -368,12 +369,24 @@ check('搜索：空格分词 = AND；无命中 / 空关键词 / 目录不存在�
 });
 
 // ── 6. 配置字段 ──
-check('配置：social.charactersDir 优先，空/缺失回落默认值', () => {
-  assert.equal(lib.resolveCharactersDir({}), lib.DEFAULT_CHARACTERS_DIR);
-  assert.equal(lib.resolveCharactersDir({ social: {} }), lib.DEFAULT_CHARACTERS_DIR);
-  assert.equal(lib.resolveCharactersDir({ social: { charactersDir: '   ' } }), lib.DEFAULT_CHARACTERS_DIR);
+check('配置：social.charactersDir 优先；空/缺失按"存在即用"回落（用户库 → 出厂库 → 老默认）', () => {
+  // 配了就用配的（原样 resolve），哪怕那个目录此刻不存在
   assert.equal(lib.resolveCharactersDir({ social: { charactersDir: 'D:\\tmp\\chars' } }), path.resolve('D:\\tmp\\chars'));
+  // 空白串 = 没配 → 走存在性回落
+  const fallback = lib.resolveCharactersDir({});
+  assert.equal(lib.resolveCharactersDir({ social: {} }), fallback);
+  assert.equal(lib.resolveCharactersDir({ social: { charactersDir: '   ' } }), fallback);
+  /* 【2026-09-20 修】出厂角色库随安装包进了 <qq-bridge>/characters 以后，"没配就固定回
+   * ~/Downloads/characters/characters"会让全新机器上的四个角色工具指向一个不存在的目录
+   * （装了 21 个包却一个都读不到）。现在按存在性回落，这条断言跟着契约改。 */
+  const userLib = fs.existsSync(lib.DEFAULT_CHARACTERS_DIR);
+  const bundled = fs.existsSync(lib.BUNDLED_CHARACTERS_DIR);
+  if (userLib) assert.equal(fallback, lib.DEFAULT_CHARACTERS_DIR, '用户自己的库在 → 用用户那份');
+  else if (bundled) assert.equal(fallback, lib.BUNDLED_CHARACTERS_DIR, '用户库不在、出厂库在 → 用出厂库');
+  else assert.equal(fallback, lib.DEFAULT_CHARACTERS_DIR, '两个都不在 → 回老默认（报错里保持那个熟悉的路径）');
   assert.equal(lib.DEFAULT_CHARACTERS_DIR, path.join(os.homedir(), 'Downloads', 'characters', 'characters'));
+  const bridgeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  assert.equal(lib.BUNDLED_CHARACTERS_DIR, path.join(bridgeRoot, 'characters'), '出厂库就是桥目录下的 characters');
 });
 
 // ── 7. 真实角色库（存在就跑；只打印包名/计数，绝不打印正文） ──

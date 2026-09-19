@@ -189,7 +189,8 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 - **一份"表情包"就是一个目录**：`manifest.json`（id / 名字 / tag 列表 / 张数）+ `index.db`（SQLite，表 `memes(path, file_name, tag, caption, keywords, file_hash, mtime, captioned_at)`）+ `memes/<tag>/<文件名>.<ext>`（webp、png、jpg、jpeg、gif）。`qq_meme_search` 是拿 `index.db` 的 caption/keywords 搜、`qq_send_meme` 是拿表里的 `path` 发图，所以**改文件名必须同时重建表**，否则表现就是"搜得到、发不出"。
 - **三处位置都认**（顺序即优先级）：出厂包 `<runtime>/meme/<包目录>/`、后装与上传的包 `<runtime>/meme-packs/<包目录>/`、角色专属包 `<角色库根>/<角色 slug>/meme-packs/<包目录>/`。包 id 取 `manifest.json` 的 `id`（目录名可以与 id 不同）；启动时一份都找不到会往 stderr 打**一行**日志，把尝试过的每条路径都列出来。
 - **多包一起搜**：`qq_meme_search` 返回的每行是 `文件名 [tag] [包 id] 描述`，可以带 `pack` 只搜某一份；`qq_send_meme` 收 `文件名`，也收 `包id/文件名`。两份包里有同名文件时按**角色专属包 → 主人点名的包 → 出厂包**取第一份，并在返回里说明这个名字还存在于哪些包。
-- **角色绑定**：`social.meme.personaPacks` 是「角色 slug → 包 id 数组」，`social.meme.activePersona` 记当前导进 `persona.md` 的角色（管理端导入角色卡时写）。`social.meme.packs` 非空时只搜这些包**加上**当前角色的包，留空 = 全都搜；总开关 `social.meme.enabled=false` 时 `qq_meme_search` / `qq_send_meme` 干脆不注册（模型列表里看不到，不是运行时拒绝）。
+- **角色绑定**：`social.meme.personaPacks` 是「角色 slug → 包 id 数组」，`social.meme.activePersona` 记当前导进 `persona.md` 的角色（**管理端导入角色卡时自动写入**）。`social.meme.packs` 非空时只搜这些包**加上**当前角色的包，留空 = 全都搜；总开关 `social.meme.enabled=false` 时 `qq_meme_search` / `qq_send_meme` 干脆不注册（模型列表里看不到，不是运行时拒绝）。
+- **角色库根目录**：`social.charactersDir` 配了就以它为准（管理端「角色库导入」的扫描根与模型四个角色工具用的是**同一个**目录）；没配就按"存在即用"回落 —— 先看主人自己的 `~/Downloads/characters/characters`，不存在就用出厂库 `<runtime>/qq-bridge/characters`。这样全新机器上装了 21 个角色包也能直接读，不会出现"装了却一个都读不到"。
 - **规整与重建表**：`qq-bridge/tools/relayout-meme-pack.mjs <包目录>` 按 tag 落位、重建 `index.db`、写 manifest v2，并做三件对账：表↔磁盘一致、桥侧真会跑的那两条 SQL 都能查到、包内文件名唯一。**已有的 caption/keywords 原样保留**（只给表里没有的新图生成兜底描述）；同名且内容完全相同的副本挪进 `.dedup/`（不删，可回滚），同名但内容不同则报错退出、一个文件都不动。
 - **怎么加自己的包**：管理端「工具与规则」页的「内置表情包（meme-packs）」卡可以选 `.zip` 或整个文件夹上传，也可以直接把目录丢进 `<runtime>/meme-packs/`。上传先落到临时目录并跑一遍 `relayout`，失败会保留现场；成功才替换（旧包改名成 `<包目录>.bak-<时间戳>`），然后自动重启桥，新包立刻可用。
 

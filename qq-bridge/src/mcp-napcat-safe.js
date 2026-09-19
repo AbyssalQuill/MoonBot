@@ -3328,6 +3328,8 @@ registerTool(
 //   4) 单文件 > CHARACTER_MAX_FILE_BYTES 直接不读；read 默认截断到 32KB、pack 封顶 24KB，超了如实说明；
 //   5) 正文只出现在工具返回值里 —— 这段代码不新增任何含正文的日志（console.* 只打路径/计数）。
 const DEFAULT_CHARACTERS_DIR = path.join(os.homedir(), 'Downloads', 'characters', 'characters');
+/** 出厂角色库：随安装包分发的 21 个角色包就放在 <qq-bridge>/characters 下（与 mcp-napcat-safe.js 同级目录的上一层） */
+const BUNDLED_CHARACTERS_DIR = path.join(ROOT, 'characters');
 const CHARACTER_EXTS = new Set(['.md', '.txt', '.json']);
 const CHARACTER_SCAN_MAX_DEPTH = 3;                  // 库根(0) → 角色包(1) → 包内一层(2) → 包内两层(3)，覆盖 <包>/sources/wiki.md
 const CHARACTER_PACK_MAX_FILE_DEPTH = 2;             // 包内允许的最大层数：sources/wiki.md = 1 层
@@ -3355,15 +3357,33 @@ const CHARACTER_FILE_ORDER = [
 // qq_character_read(character) 不传 file 时的默认阅读顺序：SKILL.md → manifest.json → 终极扮演提示词 → personality
 const CHARACTER_DEFAULT_FILE_ORDER = [/^skill\.md$/i, /^manifest\.json$/i, /^ultimate_roleplay_prompt/i, /^personality\./i];
 
-/** 角色库根目录：config.json → social.charactersDir，空/缺失时回落默认值 */
+/** 目录（不是文件）存在吗 —— 用于角色库回落探测，读不到一律当不存在 */
+function isCharacterDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+/**
+ * 角色库根目录：config.json → social.charactersDir 优先；没配就按"存在即用"回落：
+ *   ① 用户自己的 `~/Downloads/characters/characters`（老默认，主人自己的库）
+ *   ② 出厂库 `<qq-bridge>/characters`（随安装包分发的那 21 个角色包）
+ *
+ * 【2026-09-20 修「装了一堆角色包却一个都读不到」】以前没配就直接返回 ① —— 出厂库装上以后，
+ * 全新机器上 ① 往往根本不存在（那是"主人自己放角色库的地方"），于是四个角色工具一起报
+ * "角色库目录不存在"，而真正装着 21 个包的出厂库就在旁边没人看。现在按存在性回落；
+ * 两个都不在时仍然返回 ①，让报错里出现的是那个熟悉的路径。
+ */
 function resolveCharactersDir(config) {
   let raw = '';
   try {
     const c = config ?? getConfig();
     if (typeof c?.social?.charactersDir === 'string') raw = c.social.charactersDir.trim();
   } catch { raw = ''; }
-  if (!raw) return DEFAULT_CHARACTERS_DIR;
-  try { return path.resolve(raw); } catch { return DEFAULT_CHARACTERS_DIR; }
+  if (raw) {
+    try { return path.resolve(raw); } catch { /* 路径非法 → 落到下面的探测 */ }
+  }
+  if (isCharacterDir(DEFAULT_CHARACTERS_DIR)) return DEFAULT_CHARACTERS_DIR;
+  if (isCharacterDir(BUNDLED_CHARACTERS_DIR)) return BUNDLED_CHARACTERS_DIR;
+  return DEFAULT_CHARACTERS_DIR;
 }
 
 function characterExtOf(name) {
@@ -3958,7 +3978,7 @@ function characterListText(limit, character, dirOverride) {
     lines.push(`${f.name} | ${f.title || '(no title)'} | ${f.size} B | ${formatCardMtime(f.mtimeMs)} | (loose file)`);
   }
   lines.push('A character = one pack folder. Play/reference one with qq_character_pack(character="<pack name>"); read a single file with qq_character_read; list one pack\'s files with qq_character_list(character="<pack name>"). Only the card imported into persona.md is injected into your prompt automatically - every other pack is not.');
-  lines.push('START FROM SKILL.md: every pack keeps its playable definition in SKILL.md (persona voice, mannerisms, relationship map, do/don\'t) - read it FIRST with qq_character_read(character="<pack name>", file="SKILL.md"), then pull only the extra files you actually need (personality.md / profile.md / interaction.md / relations.md / memory.md / conflicts.md / ULTIMATE_ROLEPLAY_PROMPT.md). The library default root is ~/Downloads/characters/characters (one folder per character; a parent folder that contains only more character folders is walked one level down automatically), and the owner can point it elsewhere with social.charactersDir.');
+  lines.push('START FROM SKILL.md: every pack keeps its playable definition in SKILL.md (persona voice, mannerisms, relationship map, do/don\'t) - read it FIRST with qq_character_read(character="<pack name>", file="SKILL.md"), then pull only the extra files you actually need (personality.md / profile.md / interaction.md / relations.md / memory.md / conflicts.md / ULTIMATE_ROLEPLAY_PROMPT.md). The library root is whatever social.charactersDir says; with that unset it is the owner\'s ~/Downloads/characters/characters when that folder exists, otherwise the packs shipped with the bot under <install>/resources/runtime/qq-bridge/characters (one folder per character; a parent folder that contains only more character folders is walked one level down automatically).');
   return lines.join('\n');
 }
 
@@ -4120,6 +4140,7 @@ if (cfg.social?.tools?.characterCards !== false) {
 // 供 tests/character-library.test.js 直接 import 调用（纯逻辑，不依赖 MCP 传输层）
 export {
   DEFAULT_CHARACTERS_DIR,
+  BUNDLED_CHARACTERS_DIR,
   CHARACTER_EXTS,
   CHARACTER_READ_DEFAULT_BYTES,
   CHARACTER_READ_MAX_BYTES,

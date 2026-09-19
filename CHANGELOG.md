@@ -14,6 +14,9 @@
 
 ### 修复
 
+- **全新机器上"装了 21 个角色包，四个角色工具却一个都读不到"**：`social.charactersDir` 没配时，角色库根以前固定指向 `~/Downloads/characters/characters` —— 那是"主人自己放角色库的地方"，新机器上根本不存在，而真正装着出厂包的 `<安装目录>\resources\runtime\qq-bridge\characters` 谁都没看。现在按"存在即用"回落：用户库 → 出厂库 → 老默认；配了 `social.charactersDir` 就完全以它为准。
+- **导入列表和模型读的库不再是两套**：管理端「角色库导入」的扫描根以前是"桥目录 characters 排最前"，出厂库随包进 runtime 之后就永远胜出 —— 你往自己那份库里新加的角色**不会出现在导入列表里**，而模型侧四个工具读的却是用户那份。现在只要配了 `social.charactersDir`，导入列表就以它为准，两边看到同一个库。
+- 导入角色卡时顺手把 `social.meme.activePersona` 记成这个角色（角色专属表情包据此排最前），不再需要手写这个键。
 - **重启管理端不再顺手关掉本机的桥与隔离 DSH**：关窗守卫是按"后端进程还在不在"判定的 —— 后端一没、宽限期（原来 6 秒）一到、guard 文件还没被新后端接管，它就认定"应用关了"，把 NapCat、桥、隔离 DSH 一起收掉。而重启后端时新后端常要 5~20 秒才起来并武装新守卫，于是"重启一次管理端，机器人就哑了"（本机实测被收掉一次）。现在宽限期放宽到 30 秒，`tools/restart-manager.ps1` 也会先退掉那个盯着旧后端的守卫，等新后端自己武装一个新的。
 - **代码同步不再覆盖服务器自己的配置**：`/api/ssh/sync` 打代码包时排除表里只有 `config.json.bak-*`，**`config.json` 本体没被排除**，于是每次"只同步代码"都会把本机那份调试配置覆盖到服务器上。实测后果：远端 `napcat.accessToken` 被换成本机值 → NapCat 回 `retcode 1403 token验证失败`、桥每次连上就被踢（日志 282 条 `code=1005`）、`dsh.baseUrl` 从 3080 变成 10721 → 事件流连不上、`napcat.dockerPathMap/tmpDir/homeDir` 与白名单一起丢失，整台 QQ 哑火而界面每一步都显示 OK。现在代码包排除 `config.json`，解包后再兜底把"同步前那份"换回来（显式推配置仍走它自己的开关），并新增 17 项回归测试 `tools/test-bridge-pack-excludes-config.mjs`。
 - **「重启远端桥」以前其实没重启**：`start-bridge.sh` 不会杀旧桥，新起的实例只能报 `listen EADDRINUSE` 然后自己退出；而这一步的成功判据是 `pgrep` 有没有命中——旧桥正好命中，于是界面永远显示"重启成功"、新代码一行都没生效。现在先停旧桥、等它退干净再起，并把新进程 pid 与到 NapCat 的连接数一起回报。
