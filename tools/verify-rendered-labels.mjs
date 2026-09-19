@@ -26,7 +26,7 @@ const h = React.createElement;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
-/* ---------- 1. 配置键清单（真实文件） ---------- */
+/* ---------- 1. 配置键清单（真实文件 + 桥声明的全部工具开关） ---------- */
 const configs = ['qq-bridge/config.example.json', 'qq-bridge/config.json']
   .filter((f) => fs.existsSync(path.join(ROOT, f)))
   .map((f) => ({ file: f, obj: JSON.parse(read(f)) }));
@@ -39,6 +39,23 @@ for (const c of configs) {
       if (v && typeof v === 'object' && !Array.isArray(v)) walk(v);
     }
   })(c.obj);
+}
+
+/* 【2026-09-19 补】只看本机 config 会漏键：线上 config.json 里写着 social.tools.sendVoice /
+   transcribeVoice，本机那份没有 —— 于是"页面上有没有漏出裸英文 key"这项检查，恰好在真正出问题
+   的那两个键上失效（主人看到「工具与规则」页里两行裸 key，就是这么来的）。
+   这里把 core/config.js 声明的开关默认表整个并进来，检查面 = 桥真正支持的开关集合。 */
+const configJsPath = path.join(ROOT, 'qq-bridge', 'src', 'core', 'config.js');
+if (fs.existsSync(configJsPath)) {
+  const defaults = fs.readFileSync(configJsPath, 'utf8').match(/tools:\s*\{([\s\S]*?)\n\s*\}/);
+  const switchKeys = defaults ? [...defaults[1].matchAll(/([A-Za-z][A-Za-z0-9_]*)\s*:/g)].map((m) => m[1]) : [];
+  cfg.social = cfg.social || {};
+  cfg.social.tools = cfg.social.tools || {};
+  for (const k of switchKeys) {
+    if (!(k in cfg.social.tools)) cfg.social.tools[k] = true;
+    keyNames.add(k);
+  }
+  console.log(`[labels] 工具开关覆盖 ${switchKeys.length} 个（含 core/config.js 的默认表）`);
 }
 
 /* ---------- 2. 用 esbuild 打出可被 Node 导入的探测模块（../api 换成空壳） ---------- */

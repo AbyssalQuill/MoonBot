@@ -205,6 +205,12 @@ const TOOL_LABEL: Record<string, string> = {
   sendMeme: '发表情包（内置表情库）', scheduleList: '定时列表', scheduleCancel: '取消定时', activityHours: '活跃时段',
   // 【2026-09-18】config.example.json 里已有、但标签表漏登的开关：漏了就会在「工具与规则」页裸奔英文 key
   characterCards: '角色卡（角色库）',
+  // 【2026-09-19】同样漏登的四个：桥确实会读这四个开关（console-server 的 ToolEnabled('sendVoice'/
+  // 'transcribeVoice'/'crosschat') 与 mcp-napcat-safe.js 的 tools?.getGroupInfo），
+  // 而线上 config.json 里已经写着 sendVoice / transcribeVoice —— 漏了它们，页面上就是两行裸英文 key。
+  // 门禁在 tools/audit-ui-tool-names.mjs，加工具/开关时它会把这类漏登直接报出来。
+  sendVoice: '发语音（说话）', transcribeVoice: '语音转文字',
+  crosschat: '跨会话互知与留言', getGroupInfo: '查群主/群成员',
 };
 
 /**
@@ -241,6 +247,11 @@ const TOOL_MCP: Record<string, string> = {
   qzoneView: 'qq_qzone_view', sendQzone: 'qq_send_qzone',
   // 【2026-09-19】角色库四个工具由 social.tools.characterCards 一个开关统管（false = 四个都不注册）。
   characterCards: 'qq_character_list / qq_character_read / qq_character_pack / qq_character_search',
+  // 【2026-09-19】语音两个与跨会话/群信息三个：同样要显示英文原名，否则开关行只有中文名、
+  // 无法与 config.json 里的 social.tools.* 对照（也便于照抄进 social.slimTools.deny）。
+  sendVoice: 'qq_send_voice', transcribeVoice: 'qq_transcribe_voice',
+  crosschat: 'qq_crosschat_inbox / qq_crosschat_send',
+  getGroupInfo: 'qq_get_group_owner / qq_get_group_members',
 };
 
 /**
@@ -284,7 +295,8 @@ const MCP_LABEL: Record<string, string> = {
   qq_status: '机器人状态', qq_list_groups: '列出群聊', qq_get_system_config: '读桥系统配置',
   qq_set_system_config: '改桥系统配置',
   // 【2026-09-19】漏登的六个（工具加了、中文名没跟着加 → 精简卡里会显示"未登记"占位）：
-  // 语音两个（无条件注册）与角色库四个（social.tools.characterCards 控制）。
+  // 语音两个（注册是无条件的，但调用期由 console-server 的 ToolEnabled('sendVoice'/'transcribeVoice') 把关）
+  // 与角色库四个（social.tools.characterCards 控制注册）。
   qq_send_voice: '发语音（说话）', qq_transcribe_voice: '语音转文字',
   qq_character_list: '列角色库', qq_character_read: '读角色卡文件',
   qq_character_pack: '取整套角色卡', qq_character_search: '搜角色库',
