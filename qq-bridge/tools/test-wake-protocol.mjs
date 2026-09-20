@@ -196,6 +196,7 @@ const mustHave = [
   ['[TOOLS] 2c 10 字内联 / 超 10 字单独一条', /10 characters or fewer[\s\S]{0,200}its OWN separate bubble/],
   ['[TOOLS] 2d 工具参数数组当正文 = 硬失败', /NEVER SEND THE TOOL-ARGUMENT ARRAY AS TEXT - HARD FAILURE/],
   ['[TOOLS] 2e 代码类不分段（>50 字仍一条）', /CODE IS NEVER SPLIT[\s\S]{0,200}over 50 characters is still one message/],
+  ['[TOOLS] 5b 搜索预算（两次就答，不许反复换词检索）', /SEARCH BUDGET - TWO TRIES, THEN ANSWER[\s\S]{0,300}at most 2 calls per round/],
   // 【2026-09-13 主人要求：默认人设改为 "You are a helpful assistant"，不要小鲸鱼】
   ['主人段落不再有撒娇/顺从注册', null],
 ];

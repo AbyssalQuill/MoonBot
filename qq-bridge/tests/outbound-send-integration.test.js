@@ -12,8 +12,17 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const sandbox = path.join(HERE, '.tmp-outbound-send');
-fs.rmSync(sandbox, { recursive: true, force: true });
+/* 沙箱目录：先用固定名，删不掉就退回带 pid 的名字。
+ * 为什么要退这一步：这个测试会真起 console-server（内部用 node:sqlite 打开 state/*.db），Windows 上
+ * 连接要到进程结束才释放，上一轮剩下的目录偶尔删不掉（EPERM）。那时若继续用固定名，就会读进上一轮
+ * 遗留的 state（社交状态 / 幂等账本 / 限频计数），表现为"偶发 1/5 通过"。带 pid 的名字天然隔离。 */
+let sandbox = path.join(HERE, '.tmp-outbound-send');
+try {
+  fs.rmSync(sandbox, { recursive: true, force: true });
+} catch {
+  sandbox = path.join(HERE, `.tmp-outbound-send-${process.pid}`);
+  fs.rmSync(sandbox, { recursive: true, force: true });
+}
 fs.mkdirSync(path.join(sandbox, 'state'), { recursive: true });
 fs.cpSync(path.join(HERE, '..', 'src'), path.join(sandbox, 'src'), { recursive: true });
 fs.writeFileSync(path.join(sandbox, 'package.json'), JSON.stringify({ name: 'qbh-outbound-send-sandbox', private: true, type: 'module' }));

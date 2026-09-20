@@ -60,6 +60,39 @@ console.log('== ① 归一化：永远守住 DSH 的硬约束 ==');
     assert.equal(normalizeCompaction({}).enabled, true);
     assert.equal(normalizeCompaction({ enabled: false }).enabled, false);
   });
+  /* 【2026-09-20 线上事故回归】阈值被"固定开销"顶穿 = 每一步都压缩一次。
+   * 现场：0.06 × 1M 窗口 = 62.9k token，而该会话每次请求的上下文基线就有 68.7k token
+   * （system 5.36 万字符 + 78 个工具 8.11 万字符 ≈ 2.75 万 token），于是 114 步里触发了 46 次摘要，
+   * 每步之间多花 15~20 秒。这条门禁钉住三件事：
+   *   ① 缺省阈值必须明显高于"基线上下文"（按 1M 窗口算 ≥ 10 万 token）；
+   *   ② 事故值 0.06（以及更小的 0.02）必须被夹到下限以上；
+   *   ③ 压缩后（保留段 + 固定开销）必须远低于阈值，否则会出现"压完立刻又压"。
+   * 基线常量取实测值：1M 窗口下每次请求约 6.9 万 token、其中固定开销约 2.75 万 token。 */
+  const WINDOW = 1048576;
+  const FIXED_OVERHEAD = 27500;   // system + 78 个工具，实测（见 src/core/config.js 注释）
+  const BASELINE = 68700;         // 该会话每次请求的实测上下文
+  check(`① 缺省阈值(${normalizeCompaction({}).thresholdRatio}) × 1M ≥ 10 万 token（高于基线 ${BASELINE}）`, () => {
+    const p = normalizeCompaction({});
+    assert.ok(p.thresholdRatio * WINDOW >= 100000, `实测 ${Math.round(p.thresholdRatio * WINDOW)} token`);
+  });
+  check('② 事故值 0.06 / 0.02 都被夹到下限以上（不会再每步压缩）', () => {
+    for (const v of [0.06, 0.02, 0.005]) {
+      const p = normalizeCompaction({ thresholdRatio: v, retainRatio: 0.01 });
+      assert.ok(p.thresholdRatio * WINDOW > BASELINE, `阈值 ${v} 仍低于基线：${Math.round(p.thresholdRatio * WINDOW)} token`);
+    }
+  });
+  check('③ 压缩后（保留段 + 固定开销）仍远低于阈值 → 不会"压完立刻又压"', () => {
+    const p = normalizeCompaction({});
+    const after = p.retainRatio * WINDOW + FIXED_OVERHEAD;
+    assert.ok(after < p.thresholdRatio * WINDOW * 0.8, `压缩后 ${Math.round(after)} token 逼近阈值 ${Math.round(p.thresholdRatio * WINDOW)}`);
+  });
+  check('④ 出厂 config.example.json 的默认值与代码缺省一致', () => {
+    const example = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'config.example.json'), 'utf8'));
+    const p = normalizeCompaction({});
+    assert.equal(example.dshCompaction.thresholdRatio, p.thresholdRatio);
+    assert.equal(example.dshCompaction.retainRatio, p.retainRatio);
+    assert.equal(example.dshCompaction.toolResultMaxChars, p.toolResultMaxChars);
+  });
 }
 
 console.log('\n== ② 生成的 YAML 是 DSH 认的形状 ==');
@@ -97,11 +130,15 @@ console.log('\n== ② 生成的 YAML 是 DSH 认的形状 ==');
     const allowed = new Set(['auto', 'thresholdRatio', 'retainRatio', 'maxTokens', 'compactionRetries', 'maxOverflowRetries', 'summarizationProvider', 'summarizationModel', 'thresholdChars', 'headChars', 'tailChars']);
     for (const k of keys) assert.ok(allowed.has(k), `未知字段 ${k}`);
   });
-  check('摘要模型两个都填时才写进 YAML（只填一个不生效）', () => {
+  /* 【2026-09-19 主人定稿：摘要一律用会话主模型】不再支持单独指定 summarizationProvider/Model
+   * （单独换服务商 = 另一条额度 + 另一份缓存，实测省不下钱还多一处凭据）。
+   * 老配置里若还留着这两个键，只提示、不写进 patch —— 这条断言就是钉住"别又把它写回去"。 */
+  check('指定的摘要模型被忽略（统一用主模型），并且有提示', () => {
+    const p = normalizeCompaction({ summarizationProvider: 'p', summarizationModel: 'm' });
+    const rows2 = buildCompactionRows(p);
+    assert.equal(/summarization/.test(rows2), false, 'summarization* 不该出现在 YAML 里');
+    assert.ok(p.notes.some((n) => /summarizationProvider/.test(n)), '被忽略时要有 notes 说明');
     assert.equal(/summarization/.test(buildCompactionRows(normalizeCompaction({ summarizationModel: 'x' }))), false);
-    const both = buildCompactionRows(normalizeCompaction({ summarizationProvider: 'p', summarizationModel: 'm' }));
-    assert.match(both, /summarizationProvider: 'p'/);
-    assert.match(both, /summarizationModel: 'm'/);
   });
   check('enabled=false 时块里没有配置行（不覆盖 DSH 默认）', () => {
     const { text } = buildCompactionBlock({ enabled: false });

@@ -48,8 +48,8 @@ export const TUNABLE_SPECS = [
   // —— 上下文治理（2026-09-19 主人要求"一个会话永久用、别让上下文堆积"）——
   { key: 'permanentSession', path: ['social', 'autoReset', 'permanent'], type: 'bool', label: '永久会话（不轮换）', desc: 'true=不再按轮数换会话（上下文交给 DSH 压缩治理，省掉每次换会话的首轮 token）；false=按 wakeThreshold 轮换。开启后改 agentPreset 对老会话不生效（preset 只在建会话时绑定）' },
   { key: 'compactionEnabled', path: ['dshCompaction', 'enabled'], type: 'bool', label: '上下文治理（工具历史剪枝）', desc: 'true=上下文用到窗口阈值时先剪掉超大工具结果（聊天记录不动），仍超阈值才摘要最老一段；false=回到 DSH 默认（窗口 80% 才压缩）' },
-  { key: 'compactionThresholdRatio', path: ['dshCompaction', 'thresholdRatio'], type: 'float', min: 0.02, max: 0.5, label: '压缩触发比例', desc: '上下文用到模型窗口的多少比例开始治理（默认 0.06，1M 窗口 ≈ 63k token）。调小=更早清理、更省 token；但别低于 0.02（2%）：那样每轮都会触发一次压缩（多发一次模型请求 + 改写历史、废掉前缀缓存），响应会变得极慢。调大=保留更多原文' },
-  { key: 'compactionToolResultChars', path: ['dshCompaction', 'toolResultMaxChars'], type: 'float', min: 300, max: 100000, label: '工具结果保留字数', desc: '单个工具结果超过这么多字符就被剪成「开头 + 剪枝标记 + 结尾」（默认 1500）；原始全文仍留在会话日志里可回放' }
+  { key: 'compactionThresholdRatio', path: ['dshCompaction', 'thresholdRatio'], type: 'float', min: 0.08, max: 0.5, label: '压缩触发比例', desc: '上下文用到模型窗口的多少比例开始治理（默认 0.12，1M 窗口 ≈ 12.6 万 token）。别低于 0.08：实测每次请求的上下文基线就有约 6.9 万 token（system + 78 个工具 ≈ 2.75 万 token 固定开销），阈值低于基线 = 每一步都压缩一次，每步多花 15~20 秒、前缀缓存全废（2026-09-20 线上实测：114 步里触发了 46 次摘要）。调大=保留更多原文' },
+  { key: 'compactionToolResultChars', path: ['dshCompaction', 'toolResultMaxChars'], type: 'float', min: 300, max: 100000, label: '工具结果保留字数', desc: '单个工具结果超过这么多字符就被剪成「开头 + 剪枝标记 + 结尾」（默认 8192；设小了会把整段唤醒协议/状态快照剪成零头）；原始全文仍留在会话日志里可回放' }
 ];
 
 export function readCfgPath(arr) { let o = cfgObj; for (const k of arr) { if (o == null || typeof o !== 'object') return undefined; o = o[k]; } return o; }

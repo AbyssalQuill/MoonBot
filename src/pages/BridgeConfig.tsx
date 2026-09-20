@@ -403,14 +403,15 @@ function mcpLabel(fullName: string) {
     + '① 先剪掉超大的工具结果（`tool-result-pruner`）——不发模型请求，聊天记录一个字都不动；'
     + '② 剪完仍超阈值、或提供方报上下文溢出，才把最老一段摘要成 `<compacted-summary>`（`compaction-basic`）。'
     + '阈值一律按「模型窗口的比例」给，换模型自动等比缩放。改这里**立刻生效**（DSH 会热加载那份 patch），不用重启 DSH 或桥。',
-  thresholdRatio: '「触发比例」：上下文用到**模型窗口的百分之多少**就开始治理（默认 0.06 = 6%）。'
-    + '窗口 1M 的模型 ≈ 63k token 触发；窗口 128k 的模型 ≈ 7.7k token 触发 —— 同一个比例换模型自动缩放，不用手改。'
-    + '调小 = 更早清理、单轮上下文更小，但**别调太小**：低于 0.02（2%）时上下文稍微一涨就触发一次压缩，'
-    + '每次压缩都要额外发一次"读完整段上下文写摘要"的模型请求、并改写会话历史（prompt 前缀缓存随之作废，'
-    + '下一轮只能全量重读）—— 表现就是**模型响应变得极其缓慢**。桥的下限是 0.02，低于它会被自动夹回并写日志。'
+  thresholdRatio: '「触发比例」：上下文用到**模型窗口的百分之多少**就开始治理（默认 0.12 = 12%）。'
+    + '窗口 1M 的模型 ≈ 12.6 万 token 触发；窗口 128k 的模型 ≈ 15k token 触发 —— 同一个比例换模型自动缩放，不用手改。'
+    + '**别低于 0.08（8%）**：实测每次请求的上下文基线就有约 **6.9 万 token**（system 提示词 5.4 万字符 + 78 个工具的 8.1 万字符，'
+    + '≈ 2.75 万 token 的固定开销），阈值一旦低于基线就变成**每一步都压缩一次** —— 每次压缩额外发一次"读完整段上下文写摘要"的'
+    + '模型请求、并改写会话历史（prompt 前缀缓存随之作废，下一步只能全量重读）。2026-09-20 线上实测：0.06 时 114 个模型步里触发了'
+    + '**46 次摘要**，每步之间多花 15~20 秒，一个搜索回合拖成 6 分钟。桥的下限是 0.08，低于它会被自动夹回并写日志。'
     + '调大 = 保留更多原文，代价是每轮重读更多 token。DSH 的硬要求：这个值必须**大于**「逐字保留比例」，'
     + '否则插件会拒绝加载（桥会自动夹到合法范围并写日志）。',
-  retainRatio: '「逐字保留比例」：最近这一部分上下文**原样保留**，压缩只动比它更老的部分（默认 0.012 = 1.2%）。'
+  retainRatio: '「逐字保留比例」：最近这一部分上下文**原样保留**，压缩只动比它更老的部分（默认 0.03 = 3%）。'
     + '必须小于「触发比例」。调大 = 最近这段记得更牢、更贵；调小 = 更省，但模型更容易忘掉前几轮的细节。',
   toolResultMaxChars: '「工具结果保留字数」：单个工具结果超过这么多字符（Unicode 码点）就被剪成'
     + '「开头 60% + 一行 `[... tool result middle pruned ...]` + 结尾 20%」（默认 1500）。'
@@ -871,8 +872,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (!c.dshCompaction || typeof c.dshCompaction !== 'object') c.dshCompaction = {};
       const dc = c.dshCompaction;
       if (dc.enabled === undefined) dc.enabled = true;
-      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.06;
-      if (dc.retainRatio === undefined) dc.retainRatio = 0.012;
+      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.12;
+      if (dc.retainRatio === undefined) dc.retainRatio = 0.03;
       if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 8192;
       if (dc.summarizationProvider === undefined) dc.summarizationProvider = '';
       if (dc.summarizationModel === undefined) dc.summarizationModel = '';
