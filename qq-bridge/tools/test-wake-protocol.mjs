@@ -84,6 +84,7 @@ check('A3 主人私聊带 [OWNER] 标记', /\[OWNER\]/.test(first));
 // 首轮走 [Status] + [Recent messages] 窗口（这是既有架构：首轮给上下文，不重复给 [Unread n]）
 check('A4 首轮带上了未读正文（[Status] n unread + 消息正文）', /\[Status\] 1 unread/.test(first) && /在吗/.test(first));
 check('A5 首轮注入里没有 ➤ 哨兵符号', !/➤/.test(first));
+check('A5b 首轮 [Now] 精确到秒并带 epochMs', /\[Now\] \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}:\d{2} \(Beijing, epochMs=\d{13}\)/.test(first), JSON.stringify(first.split('\n').filter((l) => l.startsWith('[Now]'))));
 check('A6 首轮注入里没有【令牌】旧标签', !/【令牌】/.test(first));
 check('A7 首轮注入不再内联 12 条 Rules 大段（原 rulesShort 4,274 字符）', !/Cross-session: one AI, separate contexts per session/.test(first));
 check('A8 首轮注入不再内联回合协议（原 protocolNote 2,886 字符）', !/Round protocol \(applies to every later wake/.test(first));
@@ -103,6 +104,7 @@ check('B2 首行是 [Token]', /^\[Token\] tok-protocol/.test(sentinel));
 check('B3 带 [Wake <原因>] 标签（这一步不用再读状态）', /\[Wake private\]/.test(sentinel));
 check('B4 直接带未读正文', /\[Unread 1\] owner\(id:m2\): 第二条：还在吗$/.test(sentinel));
 check('B5 没有 ➤', !/➤/.test(sentinel));
+check('B5b 哨兵轮也带 [Now] 精确到秒（主人 2026-09-20 要求：和 sqlite 的 ts 同形）', /^\[Now\] \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}:\d{2}$/m.test(sentinel), JSON.stringify(sentinel.split('\n').filter((l) => l.startsWith('[Now]'))));
 check('B6 没有【令牌】', !/【令牌】/.test(sentinel));
 check('B7 没有内联收尾规则（qq_wait_for_messages 那段）', !/qq_wait_for_messages/.test(sentinel));
 check('B8 没有内联"reply and close in the SAME step"', !/SAME step/.test(sentinel));
@@ -152,6 +154,12 @@ const emptyWake = delivered[0]?.text ?? '';
 console.log(`—— 空唤醒：${JSON.stringify(emptyWake.slice(0, 200))}`);
 check('C1 空唤醒仍是数据形态（[Wake proactiveCheck] + [Unread 0]）', /\[Wake proactiveCheck\]/.test(emptyWake) && /\[Unread 0\] nothing new to answer/.test(emptyWake));
 check('C2 空唤醒没有 ➤', !/➤/.test(emptyWake));
+/* 【2026-09-20 主人要求】唤醒要带精确时间戳，与 memory.db 的 chat_messages.ts 同形：
+ *   首轮/完整正文：[Now] 2026-09-20 周日 19:15:23 (Beijing, epochMs=1789902923920)
+ *   哨兵轮（绝大多数唤醒）：[Now] 2026-09-20 周日 19:15:23
+ * 只到分钟时模型算不准"这条多久之前的"，只能多花一步调 qq_get_recent_messages ——
+ * 那一步 = 再发一整份系统提示词与工具表。 */
+check('C2b 哨兵轮/空唤醒带 [Now] 精确到秒', /^\[Now\] \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}:\d{2}$/m.test(emptyWake), JSON.stringify(emptyWake.split('\n').filter((l) => l.startsWith('[Now]'))));
 check('C3 空唤醒 < 600 字符（含抽签行后的上限）', emptyWake.length < 600, `实测 ${emptyWake.length}`);
 check('C4 空唤醒也带 [Meme] 抽签行（每轮都掷）', /^\[Meme\] /m.test(emptyWake));
 

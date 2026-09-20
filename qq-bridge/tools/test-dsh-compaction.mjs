@@ -60,31 +60,34 @@ console.log('== ① 归一化：永远守住 DSH 的硬约束 ==');
     assert.equal(normalizeCompaction({}).enabled, true);
     assert.equal(normalizeCompaction({ enabled: false }).enabled, false);
   });
-  /* 【2026-09-20 线上事故回归】阈值被"固定开销"顶穿 = 每一步都压缩一次。
-   * 现场：0.06 × 1M 窗口 = 62.9k token，而该会话每次请求的上下文基线就有 68.7k token
-   * （system 5.36 万字符 + 78 个工具 8.11 万字符 ≈ 2.75 万 token），于是 114 步里触发了 46 次摘要，
-   * 每步之间多花 15~20 秒。这条门禁钉住三件事：
-   *   ① 缺省阈值必须明显高于"基线上下文"（按 1M 窗口算 ≥ 10 万 token）；
-   *   ② 事故值 0.06（以及更小的 0.02）必须被夹到下限以上；
-   *   ③ 压缩后（保留段 + 固定开销）必须远低于阈值，否则会出现"压完立刻又压"。
-   * 基线常量取实测值：1M 窗口下每次请求约 6.9 万 token、其中固定开销约 2.75 万 token。 */
+  /* 【2026-09-20 线上两次实测定的门禁】
+   * 第一次（0.06）：阈值被"固定开销"顶穿 → 每一步都压缩一次（114 步触发 46 次摘要、每步多 15~20 秒）。
+   * 第二次（0.12）：不再每步压缩，但上下文长期停在 ~11.7 万 token，主人实测"一句话 1 分钱，不划算" ——
+   *   逐条算 token 用量发现花费几乎正比于上下文大小：0~40k ≈ 0.41 分/条、40~70k ≈ 0.56、
+   *   70~90k ≈ 0.79、90~110k ≈ 0.82、110~140k ≈ 1.04 分/条。
+   * 所以缺省值要同时满足两头：**下限**高于固定开销（否则每步压缩），**上限**别让上下文停在十几万（否则每条 1 分）。
+   * 固定开销常量取实测值：system 5.36 万字符 + 78 个工具 8.11 万字符 ≈ 2.75 万 token。 */
   const WINDOW = 1048576;
-  const FIXED_OVERHEAD = 27500;   // system + 78 个工具，实测（见 src/core/config.js 注释）
-  const BASELINE = 68700;         // 该会话每次请求的实测上下文
-  check(`① 缺省阈值(${normalizeCompaction({}).thresholdRatio}) × 1M ≥ 10 万 token（高于基线 ${BASELINE}）`, () => {
+  const FIXED_OVERHEAD = 27500;    // system + 78 个工具，实测（见 src/core/config.js 注释）
+  const COST_TARGET_MAX = 100000;  // 上限：上下文超过 10 万 token 时单条 ≈ 1 分钱
+  check(`① 缺省阈值 × 1M 落在 [8 万, 10 万] token（高于固定开销 ${FIXED_OVERHEAD}、又不至于"一句话 1 分钱"）`, () => {
     const p = normalizeCompaction({});
-    assert.ok(p.thresholdRatio * WINDOW >= 100000, `实测 ${Math.round(p.thresholdRatio * WINDOW)} token`);
+    const t = p.thresholdRatio * WINDOW;
+    assert.ok(t >= 78000, `阈值太低：${Math.round(t)} token（会被固定开销顶穿 → 每步压缩）`);
+    assert.ok(t <= COST_TARGET_MAX, `阈值太高：${Math.round(t)} token（单条会到 1 分钱）`);
   });
-  check('② 事故值 0.06 / 0.02 都被夹到下限以上（不会再每步压缩）', () => {
+  check('② 事故值 0.12 不再是缺省；低于下限的 0.06 / 0.02 / 0.005 都被夹回', () => {
+    assert.notEqual(normalizeCompaction({}).thresholdRatio, 0.12, '0.12 已被实测证明"一句话 1 分钱"');
     for (const v of [0.06, 0.02, 0.005]) {
       const p = normalizeCompaction({ thresholdRatio: v, retainRatio: 0.01 });
-      assert.ok(p.thresholdRatio * WINDOW > BASELINE, `阈值 ${v} 仍低于基线：${Math.round(p.thresholdRatio * WINDOW)} token`);
+      assert.ok(p.thresholdRatio * WINDOW >= 78000, `阈值 ${v} 没被夹够：${Math.round(p.thresholdRatio * WINDOW)} token`);
     }
   });
-  check('③ 压缩后（保留段 + 固定开销）仍远低于阈值 → 不会"压完立刻又压"', () => {
+  check('③ 压缩后（保留段 + 固定开销）离阈值至少还有 2.5 万 token', () => {
     const p = normalizeCompaction({});
     const after = p.retainRatio * WINDOW + FIXED_OVERHEAD;
-    assert.ok(after < p.thresholdRatio * WINDOW * 0.8, `压缩后 ${Math.round(after)} token 逼近阈值 ${Math.round(p.thresholdRatio * WINDOW)}`);
+    const headroom = p.thresholdRatio * WINDOW - after;
+    assert.ok(headroom >= 25000, `余量只有 ${Math.round(headroom)} token → 会"压完立刻又压"`);
   });
   check('④ 出厂 config.example.json 的默认值与代码缺省一致', () => {
     const example = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'config.example.json'), 'utf8'));

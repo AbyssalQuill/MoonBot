@@ -31,17 +31,15 @@ export const PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n';
 const SUMMARY_MAX_TOKENS = 4096;
 /** 剪枝预算的下限：低于它就会出现"保留的比标记还短"，没有意义 */
 const MIN_TOOL_RESULT_CHARS = 300;
-/* 【2026-09-19 / 2026-09-20 两次真实"变慢"事故逼出来的下限】
- * ① 2026-09-19：线上（VPS）的 thresholdRatio 曾被写成 **0.005**（= 模型窗口的 0.5%）。按 1M 窗口算，
- *    上下文刚到 ~5k token 就触发一次压缩 —— 等于**每一轮都在压缩**。下限当时从 0.005 抬到 0.02。
- * ② 2026-09-20（下限还不够）：线上仍是 0.06，可**实测这个会话每次请求的上下文基线就有 68.7k token**
- *    —— system 5.36 万字符（preset 规则）+ 78 个工具 8.11 万字符 ≈ **2.75 万 token 的固定开销**，
- *    加上历史与工具结果，0.06 × 1M = 62.9k 的阈值被**固定开销自己顶穿**：
- *    114 个模型步里触发了 46 次摘要（compaction/start 71 次），每一步之间都夹一次压缩请求，
- *    每步多花 15~20 秒；对应会话未缓存输入 116.9 万 token，全是白花的钱。
- * 所以下限再抬到 0.08（1M 窗口 ≈ 8.4 万 token），并要求**部署默认值**留在 0.12：
- * 任何"阈值低于基线上下文"的配置都会退化成每步压缩 —— 那比不治理更贵、更慢。
- * 判据很直白：`thresholdRatio × 模型窗口` 必须显著大于「system + 工具清单 + 一段历史」的基线。 */
+/* 【2026-09-19 / 2026-09-20 三次实测逼出来的下限（0.08）】
+ * ① 2026-09-19：阈值曾被写成 **0.005**（窗口的 0.5%）→ 上下文刚到 ~5k token 就压缩，等于每轮都压；
+ * ② 2026-09-20 上午：阈值 0.06，可**固定开销就有 2.75 万 token**（system 5.36 万字符 + 78 个工具
+ *    8.11 万字符），加上历史，62.9k 的阈值被顶穿 → 114 个模型步触发 46 次摘要，每步之间多花 15~20 秒；
+ * ③ 2026-09-20 晚：阈值抬到 0.12 后不再每步压缩，但上下文长期停在 ~11.7 万 token，主人实测
+ *    **"一句话 1 分钱，不划算"** —— 逐条算 token 用量：花费几乎正比于上下文大小
+ *    （0~40k ≈ 0.41 分/条，40~70k ≈ 0.56，70~90k ≈ 0.79，110~140k ≈ 1.04 分/条）。
+ * 结论：下限 = 0.08（1M 窗口 ≈ 8.4 万 token，既高于固定开销、又让单条停在 0.7 分上下），
+ * 缺省值也用 0.08。判据很直白：`thresholdRatio × 模型窗口` 要明显大于「system + 工具表」的固定开销。 */
 const MIN_THRESHOLD_RATIO = 0.08;
 
 /** 把任意配置值夹成合法的压缩策略（纯函数；返回值即可直接生成 YAML 的那组数字） */
@@ -52,13 +50,13 @@ export function normalizeCompaction(raw) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
   };
-  // 阈值比例：0.08 ~ 0.5（>0.5 等于没治理；<0.08 会被固定开销顶穿 → 每一步都压缩，见上面的两次事故注释）
-  let thresholdRatio = Math.min(0.5, Math.max(MIN_THRESHOLD_RATIO, num(src.thresholdRatio, 0.12)));
-  if (thresholdRatio !== num(src.thresholdRatio, 0.12)) {
+  // 阈值比例：0.08 ~ 0.5（>0.5 等于没治理；<0.08 会被固定开销顶穿 → 每一步都压缩，见上面的三次实测）
+  let thresholdRatio = Math.min(0.5, Math.max(MIN_THRESHOLD_RATIO, num(src.thresholdRatio, 0.08)));
+  if (thresholdRatio !== num(src.thresholdRatio, 0.08)) {
     notes.push(`thresholdRatio 被夹到 ${thresholdRatio}（低于 ${MIN_THRESHOLD_RATIO} 会被固定开销顶穿 → 每一步都压缩，只会更慢更贵）`);
   }
   // 逐字保留比例：必须在 (0, thresholdRatio) 开区间内 —— DSH 加载期会校验 retainRatio < thresholdRatio
-  const wantRetain = num(src.retainRatio, 0.03);
+  const wantRetain = num(src.retainRatio, 0.02);
   let retainRatio = Math.min(thresholdRatio * 0.9, Math.max(0.0005, wantRetain));
   if (retainRatio >= thresholdRatio) { retainRatio = thresholdRatio * 0.2; notes.push(`retainRatio 被夹到 ${retainRatio}`); }
   else if (retainRatio !== wantRetain) notes.push(`retainRatio 被夹到 ${retainRatio}`);
