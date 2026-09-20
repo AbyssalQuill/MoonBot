@@ -2118,7 +2118,19 @@ export function startConsoleServer() {
         const gapMs = Number(body.gapMs);
         const gaps = Array.isArray(body.gaps) ? body.gaps.map(Number) : [];
         if (!key || (!messages.length && !images.length)) {
-          sendJson({ ok: false, error: 'key、messages、images 至少一个不能为空' }, 400);
+          /* 【2026-09-20 线上实测：模型漏引号 → 整条消息发不出去】
+           * 现场（state/tool-calls.jsonl）：
+           *   12:42:32  args = {"key":"private:1","messages": 主人这么直接啊 我脸都热了, "token":"1"}  → ok:false
+           *   12:42:34  同上再试一次                                                              → ok:false
+           *   12:42:35  {"key":"private:1","token":"1","messages":"主人这么直接啊 我脸都热了"}      → ok:true
+           * 字符串值忘了包引号 → 根本不是合法 JSON → DSH 的宽松解析把这一项丢掉 → 到这里 messages 为空，
+           * 模型只看到"至少一个不能为空"，只能原样重试（白烧两步 ≈ 1.4 分）。所以这里把**最可能的原因
+           * 和确切写法**回执给它，一次就能改对（工具层会把这段原文返回给模型）。
+           * 注意：JSON 只认双引号 —— 单引号不是 JSON，换单引号只会更早失败。 */
+          const hint = key
+            ? '（多半是参数不是合法 JSON：字符串值必须用**双引号**包起来，例如 {"key":"private:1","messages":"你好","token":"…"}；裸文本或单引号都不算 JSON，那一段会被丢弃）'
+            : '';
+          sendJson({ ok: false, error: `key、messages、images 至少一个不能为空${hint}` }, 400);
           return;
         }
         const sendCfgBurst = cfgRef.social?.send ?? {};

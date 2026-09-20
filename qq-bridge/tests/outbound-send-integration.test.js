@@ -158,6 +158,26 @@ await t('E2E5 单条气泡里嵌了数组（不是整条）→ 由 onebotSend �
   assert.equal(r.status >= 400 || r.json.failed >= 1, true, `整批不该静默成功：${JSON.stringify(r.json)}`);
 });
 
+await t('E2E6 key 有、messages 空了（模型漏引号被丢弃）→ 400 且回执写明"用双引号"', async () => {
+  received.length = 0;
+  // 现场（state/tool-calls.jsonl 12:42:32/34）：
+  //   {"key":"private:1","messages": 主人这么直接啊 我脸都热了, "token":"1"}   ← 不是合法 JSON
+  // DSH 的宽松解析把 messages 整个丢掉，模型只看到"至少一个不能为空" → 原样重试两次白烧两步。
+  const r = await post({ key: KEY, token: TOKEN });
+  assert.equal(r.status, 400, `期望 400，实到 ${r.status} ${JSON.stringify(r.json)}`);
+  assert.match(String(r.json.error ?? ''), /至少一个不能为空/);
+  assert.match(String(r.json.error ?? ''), /双引号/, '回执必须点明"字符串值要用双引号"');
+  assert.equal(received.length, 0, '不该发出任何消息');
+});
+
+await t('E2E7 内容里的单引号原样发出（它不是 JSON 语法，桥不改写内容）', async () => {
+  received.length = 0;
+  const r = await post({ key: KEY, messages: "'你好'" });
+  assert.equal(r.status, 200, `期望 200，实到 ${r.status} ${JSON.stringify(r.json)}`);
+  assert.equal(received.length, 1);
+  assert.equal(textsOf(received)[0], "'你好'");
+});
+
 // 收尾：先断开 keep-alive 连接再关服务，避免 Windows 上 libuv 在进程退出时报 UV_HANDLE_CLOSING
 try { onebot.closeAllConnections?.(); } catch {}
 await new Promise((r) => onebot.close(() => r()));
