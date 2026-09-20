@@ -10,6 +10,9 @@ const t = (name, fn) => cases.push([name, fn]);
 // 现场原文（state/tool-calls.jsonl 12:42:32 / 13:2x）
 const SITE_1 = '{"key": "private:1736784911", "messages": 主人这么直接啊 我脸都热了, "token": "1736784911"}';
 const SITE_2 = '{"key": "private:1736784911", "messages": 就知道会这样，那主人打算怎么办呀, "token": "1736784911"}';
+// 现场原文（VPS 会话日志 session-e5ee0b9f… 13:10 的 tool/call 帧，逐字照抄，含全角逗号）
+// 这一条是"工具调用报错"的最后一次现场：修好后模型自己重写了一遍才发出去，桥侧兜底应免掉这一步。
+const SITE_3 = '{"key": "private:1736784911", "messages": 往上就往上吧，主人想怎么样我又拦不住，就是别嫌我腿抖, "token": "1736784911"}';
 
 t('① 现场原文：裸文本的 messages 能被捞回来（后面还跟着别的键）', () => {
   const a = repairToolArgs(SITE_1);
@@ -54,6 +57,19 @@ t('⑧ looksLikeUnquotedArgs 只对"漏引号形状"为真', () => {
   assert.equal(looksLikeUnquotedArgs(SITE_1), true);
   assert.equal(looksLikeUnquotedArgs('{"key":"private:1","messages":"你好"}'), false);
   assert.equal(looksLikeUnquotedArgs('随便一句话'), false);
+});
+
+t('⑨ 生产现场原文（VPS 会话日志逐字照抄）也认', () => {
+  assert.equal(looksLikeUnquotedArgs(SITE_3), true);
+  const a = repairToolArgs(SITE_3);
+  assert.equal(a?.messages, '往上就往上吧，主人想怎么样我又拦不住，就是别嫌我腿抖');
+  assert.equal(a?.key, 'private:1736784911');
+  assert.equal(a?.token, '1736784911');
+});
+
+t('⑩ 已经在框里的合法参数不会被误改（不该走向兜底）', () => {
+  assert.equal(looksLikeUnquotedArgs('{"key":"private:1736784911","messages":["主人~"],"token":"1736784911"}'), false);
+  assert.equal(looksLikeUnquotedArgs('{"key":"private:1736784911","messages":"被夸可爱还让乖","token":"1736784911"}'), false);
 });
 
 for (const [name, fn] of cases) {
