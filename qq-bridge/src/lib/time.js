@@ -47,16 +47,18 @@ export function parseClockMin(text) {
 }
 
 /**
- * 格式化北京时间 YYYY-MM-DD 周X HH:MM:SS（消息时间戳展示用）
+ * 格式化北京时间 YYYY-MM-DD 周X HH:MM（消息时间戳展示用）
  *
- * 【2026-09-20 主人要求：精确到秒，与 memory.db 的 chat_messages.ts 完全同形】
- * 原来是分钟精度（HH:MM）。主人在私聊里问"这个多久之前说的 / 你多久没回我"时，分钟精度不够：
- * 模型要么瞎猜，要么为了拿到准确时间**多花一步**去调 qq_get_recent_messages（那一步 = 再发一整份
- * 系统提示词与工具表）。sqlite 里 chat_messages.ts 本来就是 `YYYY-MM-DD 周X HH:MM:SS`（还有 ts_ms），
- * 唤醒正文与工具结果都对齐到同一个形状，模型看到的时间就能和库里逐条对上。
- * 形态直接复用 beijingTs（它本来就是秒精度），避免两处各写一份格式化。
+ * 【2026-09-20 定稿：给人看的时间保持分钟精度，不要秒】
+ * 中途试过精确到秒（对齐 memory.db 的 chat_messages.ts），主人看完当场定稿"不需要带秒"：
+ * 唤醒正文里的每一行消息、[Status]、工具结果都会带时间，秒级数字只占字符不提信息量。
+ * 需要"精确到毫秒"的只有一处 —— 唤醒的 `[Now]` 行，那里单独附 epochMs（见 wake-send.js），
+ * 模型要算"多久之前"用 epochMs 减去消息行的 ts_ms 即可，不需要把秒铺满整段正文。
  */
 export function fmtBeijing(ts) {
-  if (!ts) return '????-??-?? ??:??:??';
-  return beijingTs(ts);
+  if (!ts) return '????-??-?? ??:??';
+  const d = new Date(Number(ts) + 8 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  // 星期几由北京时间日期精确计算（getUTCDay），不靠猜
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${BJ_WEEK[d.getUTCDay()]} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
 }

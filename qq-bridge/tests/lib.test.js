@@ -29,13 +29,13 @@ assert.equal(bjMinToText(60 * 13 + 5), '13:05');
 assert.equal(bjMinToText(-5), '-1:-5');            // 迁移源行为：负数不归一化且 padStart 对负号串不补零
 assert.equal(bjMinToText(1445), '00:05');          // 跨日
 assert.equal(beijingTs(0), '1970-01-01 周四 08:00:00');
-/* 【2026-09-20 主人要求"[Now] 带精确时间戳，和 sqlite 里一样"】
- * fmtBeijing 是唤醒正文/工具结果里所有消息时间的格式化器，现在与 memory.db 的 chat_messages.ts 逐字同形
- * （精确到秒）。下面这个值就是库里真实存在的一行的时间（ts_ms=1789902923920 → ts='2026-09-20 周日 19:15:23'），
- * 一旦有人把它改回分钟精度，这条断言会立刻红。 */
-assert.equal(fmtBeijing(1789902923920), '2026-09-20 周日 19:15:23');
-assert.equal(fmtBeijing(0), '????-??-?? ??:??:??');   // 缺时间戳时的占位（也带秒）
-assert.equal(fmtBeijing(1789902923920), beijingTs(1789902923920));
+/* 【2026-09-20 定稿：给人看的时间保持分钟精度，不带秒】
+ * fmtBeijing 是唤醒正文/工具结果里所有消息时间的格式化器。中途试过对齐 memory.db 的 chat_messages.ts
+ * （精确到秒），主人当场定稿"不需要带秒"。下面这个值就是库里真实一行（ts_ms=1789902923920）的**分钟**形态，
+ * 一旦有人又把它改成秒级，这条断言会立刻红。 */
+assert.equal(fmtBeijing(1789902923920), '2026-09-20 周日 19:15');
+assert.equal(fmtBeijing(0), '????-??-?? ??:??');   // 缺时间戳时的占位
+assert.equal(beijingTs(1789902923920), '2026-09-20 周日 19:15:23');   // 秒级形态只在需要毫秒对时的地方用
 assert.equal(bjMinutes(0), 480);                   // epoch +8h = 08:00 → 480 分
 assert.equal(BJ_WEEK.length, 7);
 assert.equal(beijingDateKey(new Date(0)), '1970-01-01');

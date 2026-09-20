@@ -393,10 +393,10 @@ export function buildWakePrompt(key, reason) {
   }
   if (lastMsg) statusBits.push(`last from ${String(lastMsg.sender || 'unknown')}(${lastMsg.userId || '?'})[${fmtBeijing(Number(lastMsg.time) || 0)}]: ${String(lastMsg.text || lastMsg.plain || '').slice(0, 20)}`);
   if (lastAiMin != null) statusBits.push(`said ${lastAiMin}min ago`);
-  /* 【2026-09-20 主人要求】[Now] 带精确时间戳，与 memory.db 的 chat_messages 同形：
-   * `YYYY-MM-DD 周X HH:MM:SS (Beijing, epochMs=…)`。原来只到分钟，"这条是多久之前的"算不准，
-   * 模型只能多花一步去调 qq_get_recent_messages —— 而每多一步就重发一整份提示词与工具表。
-   * 秒 + epochMs 让它直接和库里的 ts / ts_ms 对上（epochMs 也方便跨会话对时）。 */
+  /* 【2026-09-20 主人定稿】[Now] 的"精确"落在 epochMs 上，人看的格式仍是分钟（主人："不需要带秒"）。
+   * epochMs 与 memory.db 的 chat_messages.ts_ms 同单位：要算"这条多久之前的"，拿 epochMs 减那条消息的
+   * ts_ms 即可，不必把秒铺满整段正文。只到分钟又没有 epochMs 时模型算不准，只能多花一步调
+   * qq_get_recent_messages（那一步 = 再发一整份系统提示词与工具表）。 */
   const nowMs = Date.now();
   const statusLine = `[Now] ${fmtBeijing(nowMs)} (Beijing, epochMs=${nowMs})\n[Status] ${statusBits.join('; ')}\n\n`;
   const wc = st.wakeConfig || {};
@@ -1546,11 +1546,10 @@ export async function sendWakePrompt(key, reason) {
      * 同一处还带上 [WakeRef]（主人配的插话概率）——见 wakeRefLine 的说明，它必须每轮都在。 */
     const diceLines = voiceTurnHint(key) + memeTurnHint(key);
     const diceBlock = `\n${wakeRefLine(key)}${diceLines ? '\n' + diceLines.replace(/\n+$/, '') : ''}`;
-    /* 【2026-09-20 主人要求：唤醒带上精确时间戳，和 sqlite 里一样】
-     * 哨兵轮（绝大多数唤醒走的就是这条路）以前**完全没有时间行**，模型想知道"这条多久之前的"
-     * 只能再花一步调 qq_get_recent_messages；而每多一步就重发一整份系统提示词与工具表。
-     * 这里补一行 `[Now] YYYY-MM-DD 周X HH:MM:SS`（与 memory.db 的 chat_messages.ts 同形，精确到秒），
-     * 约 32 字符，且它是**稳定前缀**（缓存读计价），比多一次工具往返便宜两个数量级。 */
+    /* 【2026-09-20 主人要求：唤醒要带 [Now]】哨兵轮（绝大多数唤醒走的就是这条路）以前**完全没有时间行**，
+     * 模型想知道"这条多久之前的"只能再花一步调 qq_get_recent_messages；而每多一步就重发一整份系统提示词
+     * 与工具表。这里补一行 `[Now] YYYY-MM-DD 周X HH:MM`（分钟精度，主人定稿"不需要带秒"），约 30 字符，
+     * 且它是**稳定前缀**（缓存读计价），比多一次工具往返便宜两个数量级。 */
     const nowLine = `[Now] ${fmtBeijing(Date.now())}\n`;
 
     // 工具全关的兜底（几乎不会发生）：没有 unread 工具就回退到两行说明版，避免哨兵悬空。
