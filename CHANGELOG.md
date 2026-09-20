@@ -2,6 +2,40 @@
 
 本文件按主题归纳 MoonBot 的用户可见变化，不逐条罗列提交标题。版本号遵循语义化版本；分组约定为「新增能力 / 修复 / 变更与不兼容 / 内部与工程」。
 
+## 1.2.3 — 2026-09-20
+
+### 修复
+
+- **「点进 NapCat 就报 `获取QQ列表失败: Unauthorized` / `获取二维码失败: Unauthorized`」修好了**（主人反馈：没掉登录、链接也带着 token，却时好时坏）。先把机制查清（读 NapCat 自己 WebUI 前端 bundle 得出的确切协议，不是猜的）：NapCat 的页面从 **URL 的 `?token=<明文 token>`** 取值 → 自己算 `sha256(token + ".napcat")` → `POST /api/auth/login` 换一个 **Credential** → 存进 localStorage → 之后所有接口靠 `Authorization: Bearer <Credential>`。**URL 里没有 token（或 token 不对）= 页面永远拿不到 Credential**，于是它自己那几个接口全部回 `{"code":-1,"message":"Unauthorized"}` —— 这正是主人看到的两条报错。而管理器拼链接时的 token 来源以前不可靠：本机那两条链接读的是**管理器配置** `instances.napcatLocal.webuiToken`（旧配置里可能压根没这个键 → 裸链接），服务端那条读的是**上一次 SSH 探测结果**（探测没跑成/路径不同就是空 → 裸链接）。现在四处一起改：① 本机以 **NapCat 自己 `webui.json` 里的 token** 为准（现场真相，`findNapcatOneKey` → `findNapcatConfigDir`）；② 服务端探测到的 token 进缓存（30 分钟），状态没取到时也用"最近一次可用"；③ `/api/state` 在返回链接**之前先验一次真伪** —— 判据就是 NapCat 自己的登录接口 `POST /api/auth/login {hash: sha256(token + ".napcat")}`，候选进不去就换能进去的那个（验证通过的结果进缓存，所以只在第一次/换 token 时多一次本地请求）；④ 界面文案改成"已带 webui token（点开即用）"，真取不到 token 时直说而不是给你一个注定报错的链接。实测（VPS）：`061228` 经该协议换到 Credential、`CheckLoginStatus` 回 `isLogin=true`。
+- **去掉桥的"自动引用"，引用完全交给模型**。引用出过的错全是桥猜出来的：09-15 群里答"投降喵"却挂着「决定，绝地反击」的引用框，09-13 连续 4 条回复引用同一条 90 秒前的老消息。之前靠调参压（零共同词不引、回答最新那条不引），这次按主人定稿**整段删掉** `pickSmartQuote` / `SMART_QUOTE_*`：**只有模型显式传 `replyToMessageId` 才有引用框，桥永远不加**。发送结果里不再有 `autoQuoted` 字段，提示词里也写明"没传就没有引用框，每一个引用都是你自己选的"。回归用例 `tests/no-auto-quote.test.js`（7 项：真起 console-server + 假 OneBot，逐个断言"没传引用就没有 reply 段 / 传了就必须原样带上"）。
+- **「pixiv 发图发错群」根因修复：桥不再替模型猜目标会话**。真因是一条链，三处一起改：
+  1. **工具层缺 key 时不再自动填**。旧逻辑（09-18 为修"缺 key/token 报错"加的）会去问桥"当前在途回合"，多会话同时在途时桥按"最近活动"挑一个当目标 —— 于是群 A 的人要一张图、模型漏传 key，图就发进了当时更活跃的群 B / 主人的私聊。现在缺 key **直接拒绝**，并告诉它去哪抄。
+  2. **唤醒正文新增 `[Session] group:<群号>` / `[Session] private:<QQ>` 行**（`[Token]` 正下方，每一轮都带；约 25 字符、稳定前缀、按缓存读计价）。模型手上一直有确切答案，不需要凭记忆推断；`[Mid-turn]`、回合收尾提醒等注入也都带上了。
+  3. **`/api/social/current-turn` 多个会话在途时不再"挑最近活跃的那个"**，改为如实回 `ambiguous`（连同在途会话列表）。
+- **跨会话发送必须显式声明**：`agentTokenOk` 只校验"令牌是本桥签发、未被吊销"，所以"模型抄错了 key"和"有意跨会话转达"在服务端长得一模一样，桥只能照发。现在按令牌反查调用方会话，**目标不是本会话时一律 403，并把两个会话（尽量带群名）都报出来**：写错 key 的会被当场拦下，确实要跨会话的（主人在私聊让你去群里说话、受信任好友让你转达）加 `crossSession: true` 重发一次即可。`qq_send_message` / `qq_reply` / `qq_send_meme` / `qq_send_pixiv` 四个工具都声明了这个参数；表情包不带引用时是**直连 OneBot** 的，那条路走 `/api/social/check-send`，同一道闸门。用例见 `tests/no-auto-quote.test.js` ③④⑤。
+- **工具日志现在能看出"发去了哪个会话"**：会话令牌就是群号/QQ 号本身，于是 `args` 里的 `key:"private:1736784911"` 一直被打成 `private:***` —— 主人报"发错群"时，**我在日志里根本查不到目标**（这是当时只能靠翻会话日志反推的原因）。现在 tool/call 行额外记一个未脱敏的 `target`（token 照旧脱敏）。
+
+### 新增能力
+
+- **Pixiv 官方 API 优先，镜像站只做兜底**（主人要求）。每条能力按 **官方 app-api（OAuth 长期令牌）→ pixiv.net 自己的 ajax → 第三方镜像站** 的顺序试，失败的来源与原因记进 `sourcesTried` 如实回报。线上实测（2026-09-20，VPS）：搜「初音ミク」**只访问了 `www.pixiv.net/ajax/search/artworks/...`，镜像站一次都没被联系**，259 ms 返回 3 条；按作品号取详情报 `source: web-ajax`，并在 note 里说明为什么没用 app-api。
+- **Pixiv 登录态自动轮换（PHPSESSID 只需给一次）**。新增 `src/lib/pixiv-auth.js`：用官方 Android 客户端那套 OAuth（PKCE，`code_challenge=S256`）把**一次** PHPSESSID 换成长期 `refresh_token`，之后桥每 50 分钟自己换一个 `access_token`（pixiv 每次轮换都会给出**新的** refresh_token，自动落盘 `state/pixiv-token.json`：原子写 tmp+rename、POSIX 0600、已 gitignore）；刷新是 single-flight 的 —— 并发刷新会互相把对方的 refresh_token 顶掉，必须串行。引导命令 `node tools/pixiv-login.mjs --cookie "PHPSESSID=…"`（也支持 `--cookie-file` / `--refresh-token` / `--status`）；失败时逐形状打印 HTTP 状态与响应体（已脱敏），不吞错。**"按名字搜画师"从此不再依赖手贴 cookie**：有令牌就走官方用户搜索，没有则用"已经查过的画师名字"本地缓存兜底（`state/pixiv-artists.json`）。
+- **发图默认原图，不发缩略图**（主人要求）：`qq_send_pixiv` 的 `size` 默认值统一成 **`original`**（作品号、画师号、关键词三条路都一样；以前只有给号码时才默认原图，关键词搜索会退成 1200px 的 master）；`master` 改成显式传。原图超过 15MB 上限时如实报错并提示改 `master`，绝不静默换小图。原图地址优先取官方 `meta_pages[].image_urls.original`。
+- **画师号由桥自己查**：`authorId` 可以直接给**名字**（如 `米山舞`），桥走官方用户搜索定号；只有同名多人且必须让人挑时才把候选交回来。工具说明里写死"**绝不向用户索要 pixiv id / 链接**"，也写清了关键词搜索与"某位画师的作品"的区别。
+- **`[Session]` 行纳入令牌泄露检测**：模型把整行（含群号/QQ 号）抄进 QQ 消息时会被拦下（`src/lib/text-safe.js` 的 `tokenDisclosureIn`）。
+
+### 变更与不兼容
+
+- `qq_send_pixiv` 的 `size` 默认值改变（见上）；`qq_pixiv_search` 新增 `r18`（`exclude`/`only`/`include`）与 1-based 的 `page`。
+- 新增 `crossSession` 参数（4 个发送类工具）。**跨会话发送现在必须显式带上它**，否则 403。
+- `config.json` 新增可选项 `pixiv.refreshToken`（优先级：环境变量 `QQBRIDGE_PIXIV_REFRESH_TOKEN` > 配置 > 令牌文件）；`pixiv.cookie` 仍然保留、仍然只发给 pixiv 自己的域名。
+- 系统提示词里的新规则（`[Session]`、跨会话声明、pixiv 原图与查号）**要 `/reset` 老会话才生效**；人设与发言规则那两份是改动即重新合成，下一轮就带上。
+
+### 内部与工程
+
+- 新增测试：`tests/no-auto-quote.test.js`（7 项）、`tests/pixiv-auth.test.js`（15 项）、`tests/pixiv-source-order.test.js`（8 项）；删除 `tests/smart-quote.test.js`（功能已移除）。`npm run check` 全绿。
+- `src/lib/pixiv.js` 重写来源排序（539 行变动），三个来源先归一成同一行形状再本地筛选，导出名与签名一个没改。
+- 仓库 / 本机 runtime / VPS 三处的关键文件哈希逐一比对一致；安装包内容断言脚本 `tools/verify-installer-content.ps1` 增加 1.2.3 的断言。
+
 ## 1.2.2 — 2026-09-20
 
 ### 修复

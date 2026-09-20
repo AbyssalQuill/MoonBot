@@ -82,7 +82,7 @@ function allVoiceCfg(over = {}) {
 /** 让 sendMessages 能跑起来的最小桥配置（不给真 NapCat 发东西：fetch 已被替身接管）。 */
 qqSend.initQqSendCore({
   sendDelayMs: 0,
-  social: { send: { smartQuoteEnabled: false, linearEnabled: false } },
+  social: { send: { linearEnabled: false } },
   napcat: { httpUrl: 'http://127.0.0.1:3000' }
 });
 

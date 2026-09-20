@@ -94,9 +94,22 @@
 //     （它的 search.php 实测就是 pixiv search 的透传，detail.php 则是它拿自己登录态换来的同一份
 //      ajax 响应；它慢得多：同一张图 2.7~5.7s，还出现过 25s 超时，所以只能兜底）。
 // ══════════════════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════════════════
+// 【2026-09-20 主人定调：官方 pixiv API 优先，镜像站只做兜底】
+//   原话："官方 pixiv API 优先，镜像站只做兜底"（此前本文件是**镜像站优先**，判断依据是
+//   2026-09-18 那会儿以为官网要登录；2026-09-18 晚实测更正过一半，2026-09-19 又加了 cookie 段）。
+//   现在每个能力都按同一套顺序试，并**如实报出这次是谁供的数据**（结果里的 source / sourcesTried）：
+//     ① app-api.pixiv.net（Bearer token，见 lib/pixiv-auth.js）—— 形状最规整，能拿到 meta_pages
+//        原图直链（逐页、不用猜扩展名）；**没登录态时直接跳过**（实测匿名必 400，白等一次超时）。
+//     ② www.pixiv.net/ajax（匿名就能用，2026-09-18 实测四类接口全 200）—— 没配登录态时的主力。
+//     ③ 第三方镜像站（pixivBase()）—— 最慢（同一张图 2.7~5.7s，出现过 25s 超时），只能垫底。
+//   纪律：**cookie 与 Bearer 只发给 pixiv 自己的域名**，镜像站永远看不到任何凭证（见 pixivRequestHeaders）。
+//   每个来源最多重试 1 次、超时短、不空转（镜像站那次重试前等 1.2 秒，它偶发慢；官网是硬失败，等它没意义）。
+// ══════════════════════════════════════════════════════════════════════════════════════════
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getPixivAccessToken, pixivAppHeaders, isPixivHost } from './pixiv-auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** 桥的 config.json（本文件在 qq-bridge/src/lib/ 下 → 上两级就是 qq-bridge/）。 */
@@ -389,46 +402,13 @@ function toResult(it) {
   };
 }
 
-/**
- * 抓镜像站的一页搜索结果（重试 2 次）。
- * 这个平替站**偶发**慢/超时（实测同一条请求 0.4s 正常，偶尔直接挂到 12s 超时），
- * 所以重试一次再放弃 —— 否则一次抖动模型就以为"Pixiv 搜不到"。
- * @returns {Promise<{data:Array, total:number, lastPage:number}>}
- */
-async function fetchPixivPage(keyword, page) {
-  const base = pixivBase();
-  const url = `${base}/api/search.php?keyword=${encodeURIComponent(keyword)}&page=${page}`;
-  let body = null;
-  let lastErr = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const res = await fetch(url, {
-        headers: { 'user-agent': UA, accept: 'application/json, text/plain, */*', referer: `${base}/` },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-      if (!res.ok) throw new Error(`pixiv 搜索 HTTP ${res.status}`);
-      body = await res.json();
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
-    }
-  }
-  if (!body) throw new Error(`pixiv 搜索失败（试了 2 次）：${lastErr?.message ?? lastErr}`);
-  if (body?.error) throw new Error(`pixiv 搜索失败：${body.message || '未知错误'}`);
-  const box = body?.body?.illustManga ?? body?.body?.illust ?? null;
-  return {
-    data: Array.isArray(box?.data) ? box.data : [],
-    total: Number(box?.total) || 0,
-    lastPage: Number(box?.lastPage) || 0,
-  };
-}
-
 /** 扫描摘要的中文一句话（模型只读这段也能明白"没筛全站"）。 */
-function buildScanNotice({ q, scanned, fromPage, toPage, scanPages, total, lastPage, rawScanned, kept, returned, dropped, f, warnings, sort, reachedLimit, exhausted }) {
+function buildScanNotice({ q, scanned, fromPage, toPage, scanPages, total, lastPage, rawScanned, kept, returned, dropped, f, warnings, sort, reachedLimit, exhausted, source, perPage }) {
   const parts = [];
-  parts.push(`本地筛选：搜「${q}」全站共 ${total} 条（镜像站最多给 ${lastPage || '?'} 页，每页 60 条）`);
+  // 来源要写出来（2026-09-20）：三个来源的每页条数与"全站共多少"都不一样，不写清楚模型会把
+  // app-api 的 30 条/页 当成 60 条/页 去推算。
+  const totalText = total ? `全站共 ${total} 条` : '全站条数未知';
+  parts.push(`本地筛选（数据来源 ${source || '?'}，每页 ${perPage || 60} 条）：搜「${q}」${totalText}（上游最多给 ${lastPage || '?'} 页）`);
   parts.push(`本次扫了第 ${fromPage}~${toPage} 页共 ${scanned} 页（上限 ${scanPages} 页），原始 ${rawScanned} 条`);
   const dropBits = [];
   if (dropped.adult) dropBits.push(`R-18 规则 ${dropped.adult} 条`);
@@ -438,7 +418,7 @@ function buildScanNotice({ q, scanned, fromPage, toPage, scanPages, total, lastP
   if (ruleDrop) dropBits.push(`条件不符 ${ruleDrop} 条`);
   parts.push(`筛掉 ${dropBits.length ? dropBits.join('、') : '0 条'}，命中 ${kept} 条，返回 ${returned} 条`);
   parts.push(`r18=${f.r18}、排序=${sort}`);
-  if (exhausted) parts.push('已扫到镜像站最后一页（后面没有了）');
+  if (exhausted) parts.push('已扫到上游最后一页（后面没有了）');
   else if (reachedLimit) parts.push('命中已够 limit，没继续往后翻');
   else parts.push(`扫满 ${scanPages} 页上限仍未凑够 limit（后面还有页，可调大 scanPages 或放宽筛选）`);
   if (warnings.length) parts.push(`提示：${warnings.join('；')}`);
@@ -460,9 +440,12 @@ export async function pixivSearch(query, opts = {}) {
   const limit = Math.min(20, Math.max(1, Number(opts.limit) || 8));
   const f = normalizePixivFilters(opts);
 
-  /* ── 旧路径：调用方一个筛选参数都没用 → 与改动前逐字段一致（只抓 1 页、不排序、只过滤 R-18）── */
+  /* ── 旧路径：调用方一个筛选参数都没用 → 与改动前逐字段一致（只抓 1 页、不排序、只过滤 R-18）──
+   * ⚠️ 这里**故意不加** source/sourcesTried：主人定的硬要求是"不传任何新参数时结果逐字段一致"，
+   *    多一个键就不再一致（离线自测 tools/test-pixiv-filters.mjs 第一段就是钉这件事的）。
+   *    想知道这次是谁供的数据，要么带上任意筛选参数（走下面那条路），要么看 scan.source。 */
   if (!f.engaged) {
-    const box = await fetchPixivPage(q, page);
+    const box = await fetchPixivSearchPage(q, page);
     const safe = box.data.filter((it) => it && it.id && !isAdult(it));
     const filtered = box.data.length - safe.length;
     const results = safe.slice(0, limit).map(toResult);
@@ -485,13 +468,16 @@ export async function pixivSearch(query, opts = {}) {
   let lastPage = 0;
   let exhausted = false;
   let reachedLimit = false;
+  let source = '';            // 第 1 页是谁供的（正常情况全程同一家）
+  let perPage = 0;
+  const sourcesTried = [];    // 这一轮搜索里"试过但全军覆没"的来源（如实报给模型，别假装一切正常）
 
   for (let i = 0; i < f.scanPages; i += 1) {
     const p = page + i;
     if (p > 200) { warnings.push('页码已达 200 上限，停止翻页'); break; }
     let box;
     try {
-      box = await fetchPixivPage(q, p);
+      box = await fetchPixivSearchPage(q, p);
     } catch (e) {
       // 第一页就抓不到 → 按旧行为抛错；中途失败 → 保留已扫到的部分结果（别把第一页的收获也扔掉）
       if (i === 0) throw e;
@@ -500,6 +486,9 @@ export async function pixivSearch(query, opts = {}) {
     }
     scanned += 1;
     toPage = p;
+    if (!source) { source = box.source; perPage = box.perPage; }
+    else if (source !== box.source) warnings.push(`第 ${p} 页换了个来源（${box.source}），不同来源每页条数不同，筛选口径不受影响`);
+    for (const t of box.sourcesTried || []) if (!sourcesTried.includes(t)) sourcesTried.push(t);
     rawScanned += box.data.length;
     if (box.total) total = box.total;
     if (box.lastPage) lastPage = box.lastPage;
@@ -536,9 +525,12 @@ export async function pixivSearch(query, opts = {}) {
     dropped,
     droppedTotal,
     reachedLimit,       // 凑够 limit 了
-    exhausted,          // 扫到镜像站最后一页了
+    exhausted,          // 扫到上游最后一页了
     r18: f.r18,
     sort: f.sort,
+    source,             // 谁供的数据：app-api / web-ajax / mirror（2026-09-20 起官方优先）
+    perPage,
+    sourcesTried,       // 试过但没成的来源（含原因）
     filters: {
       tags: f.tags, author: f.author, orientation: f.orientation,
       minWidth: f.minWidth, minHeight: f.minHeight,
@@ -554,11 +546,13 @@ export async function pixivSearch(query, opts = {}) {
     // 旧字段语义保持：被 R-18 规则丢掉的条数（发图工具的"已过滤 R-18 N 条"提示还在用）
     filtered: dropped.adult + dropped.notR18,
     results,
+    source,
+    sourcesTried,
     scan,
     scanNotice: buildScanNotice({
       q, scanned, fromPage, toPage, scanPages: f.scanPages, total, lastPage,
       rawScanned, kept: kept.length, returned: results.length, dropped, f, warnings, sort: f.sort,
-      reachedLimit, exhausted,
+      reachedLimit, exhausted, source, perPage,
     }),
   };
 }
@@ -622,7 +616,175 @@ export function pixivImageCandidates(work, opts = {}) {
 /** 直联 pixiv 时必须带的 Referer（图床防盗链只认它；ajax 本身带不带都行）。 */
 export const PIXIV_REFERER = 'https://www.pixiv.net/';
 const PIXIV_AJAX = 'https://www.pixiv.net/ajax';
+const PIXIV_APP_API = 'https://app-api.pixiv.net/v1';
 const PIXIV_DIRECT_TIMEOUT_MS = 15000;
+/** app-api 每页 30 条（web ajax 与镜像站是 60 条）—— 翻页与"每页多少"的说明都按来源分开算。 */
+const PIXIV_APP_PAGE_SIZE = 30;
+/** 按画师号取作品时最多向后翻几页 app-api（每页 30 件 → 上限 300 件；超过就不翻了，别把人家的接口当爬虫）。 */
+const PIXIV_USER_WORKS_MAX_PAGES = 10;
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-20 新增：三个来源 + 统一行形状】
+ * 关键约束：**不管哪一家供的数据，进筛选之前必须是同一个形状**（web ajax / 镜像站那套 camelCase）——
+ *   ① 筛选函数（filterPixivItems 那一串）是纯函数、被离线自测钉死了，不能为来源分叉；
+ *   ② 老路径"不传新参数时结果逐字段一致"是硬要求，web ajax / 镜像站的行**原样透传**才算一致。
+ * 所以 app-api 的 snake_case 行在这里一次性翻译成 camelCase，之后全流程不再提"来源"二字。
+ * ⚠️ xRestrict：app-api 缺这个键时**不能补 0** —— isAdult 是 fail-closed（键缺失一律当 R-18），
+ *   补 0 会把 R-18 放行。所以只在原字段存在时才写。
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** app-api 的作品对象 → "镜像站形状"的那一行。 */
+function appApiRowToWebRow(it) {
+  const tags = (Array.isArray(it?.tags) ? it.tags : []).map((t) => String(t?.name ?? t ?? '').trim()).filter(Boolean);
+  const imgs = it?.image_urls ?? {};
+  const row = {
+    id: String(it?.id ?? ''),
+    title: String(it?.title ?? ''),
+    userName: String(it?.user?.name ?? ''),
+    userId: String(it?.user?.id ?? ''),
+    tags,
+    // 缩略图 URL 里带日期路径 —— 搜索结果的"推大图"（pixivImageCandidates）就是靠它，所以必须留着
+    url: String(imgs.square_medium ?? imgs.medium ?? imgs.large ?? imgs.thumb ?? ''),
+    width: Number(it?.width) || 0,
+    height: Number(it?.height) || 0,
+    pageCount: Math.max(1, Number(it?.page_count) || 1),
+    illustType: Number(it?.illust_type) || 0,
+    createDate: String(it?.create_date ?? ''),
+    alt: String(it?.alt ?? ''),
+  };
+  if (it?.x_restrict !== undefined && it?.x_restrict !== null) row.xRestrict = Number(it.x_restrict);
+  if (it?.illust_ai_type !== undefined) row.aiType = Number(it.illust_ai_type);
+  return row;
+}
+
+/** 任意来源的一行 → "镜像站形状"。web ajax / 镜像站本来就是这形状，**原样返回**（老路径一致性靠这行）。 */
+function normalizePixivRow(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  if (raw.image_urls || raw.user) return appApiRowToWebRow(raw);   // app-api 那套（有嵌套的 user/image_urls）
+  return raw;
+}
+
+/** app-api 的作品对象 → web ajax 的 body 形状（详情复用同一个归一化函数，不写第二套字段映射）。 */
+function appApiIllustToWebBody(it) {
+  const row = appApiRowToWebRow(it);
+  const imgs = it?.image_urls ?? {};
+  const metaPages = (Array.isArray(it?.meta_pages) ? it.meta_pages : [])
+    .map((p) => String(p?.image_urls?.original ?? '').trim()).filter(Boolean);
+  return {
+    ...row,
+    description: String(it?.caption ?? ''),
+    tags: { tags: row.tags.map((tag) => ({ tag })) },
+    urls: {
+      original: String(imgs.original ?? metaPages[0] ?? ''),
+      regular: String(imgs.large ?? ''),
+      thumb: String(imgs.square_medium ?? imgs.medium ?? ''),
+    },
+    metaPages,   // ← 逐页原图直链：pixivIllustOriginals 的首选，省掉一次 pages 请求
+  };
+}
+
+/** 失败原因里那句"官网为什么拒绝"（有 message 就带上，没有就空）。 */
+function httpHint(json) {
+  const m = json?.message ?? json?.error?.message;
+  return m ? `（${String(m).replace(/\s+/g, ' ').slice(0, 60)}）` : '';
+}
+
+/** app-api 需要 Bearer：没登录态时抛这个，调用方据此**跳过**（不联网），并在 sourcesTried 里如实说。 */
+const NO_TOKEN_MSG = '没有登录态（跳过：匿名调 app-api 必 400）';
+
+/* ── 关键词搜索：三个来源各一个实现，返回同一个形状 ────────────────────────────────────── */
+
+/** ① 官方 app-api `/v1/search/illust`（Bearer）。 */
+async function appApiSearchPage(keyword, page) {
+  const token = await getPixivAccessToken();
+  if (!token) throw new Error(NO_TOKEN_MSG);
+  const q = new URLSearchParams({
+    word: keyword,
+    search_target: 'partial_match_for_tags',
+    sort: 'date_desc',
+    filter: 'for_android',
+    offset: String((page - 1) * PIXIV_APP_PAGE_SIZE),
+    lang: 'zh',
+  });
+  const r = await fetchPixivJson(`${PIXIV_APP_API}/search/illust?${q.toString()}`, PIXIV_DIRECT_TIMEOUT_MS, pixivAppApiHeaders(token));
+  const arr = r.json?.illusts;
+  if (r.json?.error || !Array.isArray(arr)) throw new Error(`HTTP ${r.status}${httpHint(r.json)}`);
+  return {
+    data: arr.map(normalizePixivRow),
+    total: 0,                                        // app-api 不给全站条数：**如实报 0 = 未知**，别编一个
+    lastPage: r.json?.next_url ? 0 : page,           // 没有 next_url 就是"到底了"
+    perPage: PIXIV_APP_PAGE_SIZE,
+  };
+}
+
+/** ② pixiv web ajax `/ajax/search/artworks/<kw>`（匿名可用）。翻页参数 `p` 与前端 chunk 一致。 */
+async function webAjaxSearchPage(keyword, page) {
+  const url = `${PIXIV_AJAX}/search/artworks/${encodeURIComponent(keyword)}?lang=zh&p=${page}`;
+  const r = await fetchPixivJson(url);
+  const box = r.json?.body?.illustManga ?? r.json?.body?.illust ?? null;
+  if (r.json?.error || !box || !Array.isArray(box.data)) throw new Error(`HTTP ${r.status}${httpHint(r.json)}`);
+  return {
+    data: box.data.map(normalizePixivRow),
+    total: Number(box.total) || 0,
+    lastPage: Number(box.lastPage) || 0,
+    perPage: 60,
+  };
+}
+
+/**
+ * ③ 第三方镜像站 search.php（形状与 web ajax 一致，只是慢）。**不带任何凭证**。
+ *
+ * 为什么这一条要重试 1 次（2026-09-18 的现场记录，原注释移到这里）：这个平替站**偶发**慢/超时
+ * （实测同一条请求 0.4s 正常，偶尔直接挂到 12s 超时），重试一次再放弃 —— 否则一次抖动模型就会
+ * 以为"Pixiv 搜不到"。官网那两条路是硬失败（400/404 立刻回），重试没意义，所以等待只留给这里。
+ */
+async function mirrorSearchPage(keyword, page) {
+  const base = pixivBase();
+  const url = `${base}/api/search.php?keyword=${encodeURIComponent(keyword)}&page=${page}`;
+  const res = await fetch(url, {
+    headers: { 'user-agent': UA, accept: 'application/json, text/plain, */*', referer: `${base}/` },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = await res.json();
+  if (body?.error) throw new Error(body.message || '镜像站说请求有误');
+  const box = body?.body?.illustManga ?? body?.body?.illust ?? null;
+  return {
+    data: Array.isArray(box?.data) ? box.data.map(normalizePixivRow) : [],
+    total: Number(box?.total) || 0,
+    lastPage: Number(box?.lastPage) || 0,
+    perPage: 60,
+  };
+}
+
+/** 来源顺序（主人 2026-09-20 定的"官方优先"）。第 3 项是"重试前等多少毫秒"。 */
+const PIXIV_SEARCH_SOURCES = [
+  ['app-api', appApiSearchPage, 0],
+  ['web-ajax', webAjaxSearchPage, 0],
+  ['mirror', mirrorSearchPage, 1200],   // 只有它偶发慢/超时，值得等一下再试第二次
+];
+
+/**
+ * 按官方→镜像的顺序要一页搜索结果。每个来源最多试 2 次（首次 + 1 次重试）。
+ * @returns {Promise<{data:Array, total:number, lastPage:number, perPage:number, source:string, sourcesTried:string[]}>}
+ */
+async function fetchPixivSearchPage(keyword, page) {
+  const tried = [];
+  for (const [name, run, retryDelayMs] of PIXIV_SEARCH_SOURCES) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const box = await run(keyword, page);
+        return { ...box, source: name, sourcesTried: tried };
+      } catch (e) {
+        const msg = `${name}: ${e?.message ?? e}`;
+        // 只记"这个来源彻底不行了"那一条（第一次失败还不算结论）
+        if (attempt === 1) tried.push(msg);
+        else if (retryDelayMs) await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
+  }
+  throw new Error(`pixiv 搜索失败：三个来源都没给出结果 —— ${tried.join('；')}`);
+}
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
  * 【2026-09-19 新增：pixiv 登录态（cookie）—— 只为"按名字搜画师"这一件事】
@@ -641,6 +803,10 @@ const PIXIV_DIRECT_TIMEOUT_MS = 15000;
  *   ① **只在 pixiv 域名上带 cookie**（见 pixivRequestHeaders）—— 绝不能把登录凭证发给第三方镜像站；
  *   ② cookie 只从本地配置读（config.json 的 pixiv.cookie / 环境变量），**永不写进任何返回值、日志或 QQ 消息**；
  *   ③ 没配 cookie 时"按名字搜"要**明确说不支持**，不许悄悄退化成"关键词搜"（那会给出错误的答案）。
+ *
+ * 【2026-09-20 更新】cookie 从"日常必需"降级为"**只在引导时用一次**"：主人贴一次 PHPSESSID，
+ * 桥拿它换长期 refresh_token（lib/pixiv-auth.js），之后 app-api 用 Bearer、自动轮换，主人再也不用管。
+ * 这一段（config.json 的 pixiv.cookie）留着不删：它是旧安装的兼容路径、也是令牌彻底坏掉时的应急手段。
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
@@ -688,9 +854,10 @@ export function pixivLoggedIn() {
 }
 
 /* ── 「名字 → 画师号」本地缓存（2026-09-19）────────────────────────────────────────────
- * 主人只愿意填一次 cookie，而 cookie 迟早会过期（还没法自动续 —— 续期要账号密码）。
- * 但 cookie 其实**只用来解一次名字**：解出来之后，按画师号发作品、取原图全都不需要登录态。
- * 所以把每次成功解出的候选表按名字落盘 —— cookie 掉了，已经查过的名字照样能用。
+ * 主人只愿意配合一次，而登录态总有失效的时候（2026-09-20 起已经是自动轮换的长期令牌，见
+ * lib/pixiv-auth.js，但令牌也可能被 pixiv 吊销/网络不可达）。而它其实**只在解析名字时需要**：
+ * 解出来之后，按画师号发作品、取原图全都不需要登录态。
+ * 所以把每次成功解出的候选表按名字落盘 —— 登录态掉了，已经查过的名字照样能用。
  * 文件：<qq-bridge>/state/pixiv-artists.json（原子写；最多留 500 条，超出按时间淘汰最旧的）。 */
 const ARTIST_CACHE_PATH = process.env.QQBRIDGE_PIXIV_CACHE_PATH
   ? path.resolve(String(process.env.QQBRIDGE_PIXIV_CACHE_PATH))
@@ -745,19 +912,33 @@ export function artistCacheSize() {
 
 /**
  * pixiv 请求头。**cookie 只发给 pixiv 自己的域名** —— 镜像站是第三方，把登录凭证发过去等于泄露账号。
+ * 【2026-09-20 加固】非 pixiv 主机上，调用方塞进来的 cookie / authorization 也会被**摘掉**：
+ *   以前只有"本函数自己不加"这一层，万一哪天上面多传个头（比如 Bearer），镜像站就白拿一个凭证。
  * @param {string} url 目标地址
  */
 export function pixivRequestHeaders(url, extra = {}) {
-  const u = String(url ?? '');
-  const isPixiv = /^https?:\/\/(?:[a-z0-9-]+\.)*pixiv\.net(?:[/:]|$)/i.test(u);
+  const isPixiv = isPixivHost(url);
   const ck = isPixiv ? pixivCookie() : '';
-  return {
+  const out = {
     'user-agent': UA,
     accept: 'application/json,text/plain,*/*',
     referer: PIXIV_REFERER,
     ...(ck ? { cookie: ck } : {}),
     ...extra,
   };
+  if (!isPixiv) {
+    for (const k of Object.keys(out)) if (/^(cookie|authorization)$/i.test(k)) delete out[k];
+  }
+  return out;
+}
+
+/**
+ * app-api（官方 App 接口）的请求头：**Bearer 换 cookie**。
+ * 为什么这里不带 cookie：app-api 认 Bearer；cookie 那套只对 www.pixiv.net 的 ajax 有用，
+ * 少带一处凭证就少一处泄露面（2026-09-20）。
+ */
+function pixivAppApiHeaders(token) {
+  return { ...pixivAppHeaders(), authorization: `Bearer ${token}` };
 }
 
 /**
@@ -798,28 +979,37 @@ export function normalizeArtistName(s) {
  *   body 有 data/page/tagTranslation/thumbnails/users/zoneConfig 等键，其中
  *   `users[] = { userId, name, comment, image, imageBig, premium, partial, isFollowed, isMypixiv, isBlocking, background, commission }`
  *   —— **没有作品数**（要另外补，见 enrichArtistWorks），`comment` 是签名（消歧很有用）。
- * 仍做宽容解析（认 body.users / body.list / body.data / 裸数组；认 userId|id、name|userName、illusts|works）。
+ * 【2026-09-20 扩展】还要吃 app-api `/v1/search/user` 的 `user_previews[]`：那里用户**包在 `user` 字段里**
+ *   （`{user:{id,name,account,profile_image_urls,is_premium}, illusts:[…该用户的公开作品预览], novels:[…]}`），
+ *   所以 `illusts` 是数组 —— 数组长度当作品数用（`partial` 只代表"这个预览不全"）。
+ * 仍做宽容解析（认 body.users / body.user_previews / body.list / body.data / 裸数组；认 userId|id、name|userName、illusts|works）。
  * @returns {{id:string,name:string,comment:string,works:number,partial:number,premium:boolean,pageUrl:string,avatar:string}[]}
  */
 export function parsePixivUserSearch(json) {
   const b = json?.body ?? json;
   const arr = Array.isArray(b?.users) ? b.users
-    : Array.isArray(b?.list) ? b.list
-      : Array.isArray(b?.data) ? b.data
-        : Array.isArray(b) ? b : [];
-  return arr.map((u) => {
+    : Array.isArray(b?.user_previews) ? b.user_previews
+      : Array.isArray(b?.list) ? b.list
+        : Array.isArray(b?.data) ? b.data
+          : Array.isArray(b) ? b : [];
+  return arr.map((raw) => {
+    const u = raw?.user ?? raw;      // app-api 的 user_previews[i].user
     const id = String(u?.userId ?? u?.id ?? '').trim();
-    const w = Number(u?.illusts ?? u?.works ?? u?.illustCount ?? u?.illust_count);
+    const works = raw?.illusts ?? u?.illusts;
+    const w = Number(Array.isArray(works) ? works.length : works ?? u?.works ?? u?.illustCount ?? u?.illust_count);
     return {
       id,
       name: String(u?.userName ?? u?.name ?? '').trim(),
       comment: String(u?.comment ?? '').replace(/\s+/g, ' ').trim().slice(0, 60),
       works: Number.isFinite(w) ? w : 0,
       worksKnown: Number.isFinite(w),
-      partial: Number(u?.partial) || 0,
-      premium: Boolean(u?.premium),
+      partial: Number(u?.partial ?? (raw?.illusts ? 1 : 0)) || 0,
+      premium: Boolean(u?.premium ?? u?.is_premium),
       pageUrl: /^\d+$/.test(id) ? `https://www.pixiv.net/users/${id}` : '',
-      avatar: String(u?.image ?? u?.profileImageUrl ?? u?.imageBig ?? u?.profile_image_url ?? '').trim(),
+      avatar: String(
+        u?.image ?? u?.profileImageUrl ?? u?.imageBig ?? u?.profile_image_url
+        ?? u?.profile_image_urls?.medium ?? u?.profile_image_urls?.px_170x170 ?? '',
+      ).trim(),
     };
   }).filter((u) => u.id);
 }
@@ -859,10 +1049,11 @@ export function rankArtistCandidates(users, name) {
   return { exact, partial, others, candidates, unique };
 }
 
-/** GET 一个 pixiv/mirror 的 JSON 端点。**不抛 HTTP 状态错**（404 的 JSON 体也要能读到，才能给准话）。 */
-async function fetchPixivJson(url, timeoutMs = PIXIV_DIRECT_TIMEOUT_MS) {
+/** GET 一个 pixiv/mirror 的 JSON 端点。**不抛 HTTP 状态错**（404 的 JSON 体也要能读到，才能给准话）。
+ *  第三个参数用于 app-api：那一路要 Bearer 头（auth 头**只在这里显式传**，绝不下发给镜像站）。 */
+async function fetchPixivJson(url, timeoutMs = PIXIV_DIRECT_TIMEOUT_MS, headers = null) {
   const res = await fetch(url, {
-    headers: pixivRequestHeaders(url),
+    headers: headers ?? pixivRequestHeaders(url),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
@@ -899,6 +1090,9 @@ export function normalizePixivIllustDetail(body, source = 'pixiv') {
       regular: String(b.urls?.regular ?? '').trim(),
       thumb: String(b.urls?.thumb ?? '').trim(),
     },
+    // 逐页原图直链（app-api 的 meta_pages 归一化后就挂在这里）——pixivIllustOriginals 的首选来源，
+    // 有它就不用再问一次 pages 接口。别的来源给不出，就是空数组。
+    metaPages: (Array.isArray(b.metaPages) ? b.metaPages : []).map((u) => String(u ?? '').trim()).filter(Boolean),
     source,
   };
   // fail-closed：xRestrict 缺失/非 0 都当 R-18（与搜索路径的 isAdult 同一口径）
@@ -909,16 +1103,32 @@ export function normalizePixivIllustDetail(body, source = 'pixiv') {
 
 /**
  * 按作品号取详情（元数据 + 可能的原图地址）。
- * 顺序：pixiv 直联 → 镜像站 detail.php（兜底）。两者都失败才抛错，并把两边的原话都带上。
+ * 顺序（2026-09-20 主人定"官方优先"）：app-api `/v1/illust/detail`（Bearer）→
+ * pixiv web ajax `ajax/illust/<id>` → 镜像站 detail.php。三个都失败才抛错，并把三家各自的原话都带上。
  */
 export async function pixivIllustDetail(id) {
   const pid = String(id ?? '').trim();
   if (!/^\d{1,12}$/.test(pid)) throw new Error(`Pixiv 作品号不合法：「${String(id ?? '')}」（应为纯数字，例如 80643572）`);
+  const tried = [];
+
+  // ① app-api：形状是 snake_case，先翻译成 web ajax 形状再走同一个归一化函数
+  const token = await getPixivAccessToken();
+  if (token) {
+    try {
+      const r = await fetchPixivJson(`${PIXIV_APP_API}/illust/detail?illust_id=${pid}&lang=zh`, PIXIV_DIRECT_TIMEOUT_MS, pixivAppApiHeaders(token));
+      const it = r.json?.illust;
+      if (r.json?.error || !it?.id) throw new Error(`HTTP ${r.status}${httpHint(r.json)}`);
+      return withTried(normalizePixivIllustDetail(appApiIllustToWebBody(it), 'app-api'), tried);
+    } catch (e) {
+      tried.push(`app-api: ${e?.message ?? e}`);
+    }
+  } else tried.push(`app-api: ${NO_TOKEN_MSG}`);
+
+  // ② pixiv web ajax（匿名可用；配了 cookie 时带上 cookie，结果一样但不算"登录态必需"）
   const attempts = [
-    ['pixiv', `${PIXIV_AJAX}/illust/${pid}?lang=zh`],
+    ['web-ajax', `${PIXIV_AJAX}/illust/${pid}?lang=zh`],
     ['mirror', `${pixivBase()}/api/detail.php?id=${pid}`],
   ];
-  const errors = [];
   for (const [source, url] of attempts) {
     try {
       const r = await fetchPixivJson(url, source === 'mirror' ? TIMEOUT_MS + 10000 : PIXIV_DIRECT_TIMEOUT_MS);
@@ -926,12 +1136,17 @@ export async function pixivIllustDetail(id) {
       if (r.json?.error || !body || !String(body.id ?? body.illustId ?? '').trim()) {
         throw new Error(`HTTP ${r.status}${r.json?.error ? '（官网说没这个作品或不让看）' : ''}`);
       }
-      return normalizePixivIllustDetail(body, source);
+      return withTried(normalizePixivIllustDetail(body, source), tried);
     } catch (e) {
-      errors.push(`${source}: ${e?.message ?? e}`);
+      tried.push(`${source}: ${e?.message ?? e}`);
     }
   }
-  throw new Error(`取 Pixiv 作品 ${pid} 失败 —— ${errors.join('；')}。请核对作品号，或换成关键词搜索（query）。`);
+  throw new Error(`取 Pixiv 作品 ${pid} 失败 —— ${tried.join('；')}。请核对作品号，或换成关键词搜索（query）。`);
+}
+
+/** 把"试过哪些来源"挂到详情对象上（给工具层/模型看的一句话，别再多一层结构）。 */
+function withTried(detail, tried) {
+  return { ...detail, note: tried.length ? tried.join('；') : '' };
 }
 
 /** 由 p0 原图直链推出同一作品每一页的原图直链。**纯函数，离线可测**（pages 接口失败时的兜底）。 */
@@ -955,36 +1170,74 @@ export function pixivMasterUrl(originalUrl) {
 
 /**
  * 取一个作品的**逐页原图直链**。
- * ① 官网 `ajax/illust/{id}/pages`（首选，实测 100~400ms，逐页给 urls.original）；
- * ② 官网 `ajax/illust/{id}` 的 urls.original + `deriveOriginalPageUrls` 推页（① 失败时）；
- * ③ 镜像站 detail.php 的 urls.original（`pixivIllustDetail` 兜底时已带回来）同样能推。
+ * 顺序（2026-09-20 主人定"官方优先"，且"按作品/画师发送时优先 app-api 的 meta_pages"）：
+ * ① app-api `/v1/illust/detail` 的 `meta_pages[].image_urls.original`（最准：逐页给真原图，不用猜扩展名）；
+ *    详情本身就是 app-api 取的、已经带着 metaPages 时**直接复用**，不再多发一次请求；
+ * ② 官网 `ajax/illust/{id}/pages`（匿名可用，实测 100~400ms，逐页给 urls.original）；
+ * ③ 镜像站 detail.php 的 urls.original（或它的 meta_pages）→ 用 `deriveOriginalPageUrls` 推页；
+ * 都没成时再用详情里的 urls.original 推（老的 'derived' 兜底，行为不变）。
  * @returns {Promise<{urls:string[], source:string, note:string}>}
  */
 export async function pixivIllustOriginals(detail) {
   const id = String(detail?.id ?? '').trim();
   const pageCount = Math.max(1, Number(detail?.pageCount) || 1);
-  let note = '';
+  const tried = [];
+  const noteOf = (extra = '') => [...tried, extra].filter(Boolean).join('；');
+
+  // ① 详情里已经有 meta_pages（app-api 那条路）→ 直接就是答案
+  const meta = Array.isArray(detail?.metaPages) ? detail.metaPages.filter(Boolean) : [];
+  if (meta.length) return { urls: meta, source: 'app-api:meta_pages', note: '' };
+
   if (id) {
+    const token = await getPixivAccessToken();
+    if (token) {
+      try {
+        const r = await fetchPixivJson(`${PIXIV_APP_API}/illust/detail?illust_id=${id}&lang=zh`, PIXIV_DIRECT_TIMEOUT_MS, pixivAppApiHeaders(token));
+        const pages = (Array.isArray(r.json?.illust?.meta_pages) ? r.json.illust.meta_pages : [])
+          .map((p) => String(p?.image_urls?.original ?? '').trim()).filter(Boolean);
+        if (pages.length) return { urls: pages, source: 'app-api:meta_pages', note: noteOf() };
+        tried.push(`app-api: HTTP ${r.status} 没给 meta_pages`);
+      } catch (e) {
+        tried.push(`app-api: ${e?.message ?? e}`);
+      }
+    } else tried.push(`app-api: ${NO_TOKEN_MSG}`);
+
+    // ② 官网 pages
     try {
       const r = await fetchPixivJson(`${PIXIV_AJAX}/illust/${id}/pages?lang=zh`);
       const arr = r.json?.body;
       if (Array.isArray(arr)) {
         const urls = arr.map((p) => String(p?.urls?.original ?? '').trim()).filter(Boolean);
-        if (urls.length) return { urls, source: 'pixiv:pages', note };
-        note = `pixiv pages 没给原图地址（HTTP ${r.status}）`;
+        if (urls.length) return { urls, source: 'pixiv:pages', note: noteOf() };
+        tried.push(`pixiv pages 没给原图地址（HTTP ${r.status}）`);
       } else {
-        note = `pixiv pages 返回了非预期形状（HTTP ${r.status}）`;
+        tried.push(`pixiv pages 返回了非预期形状（HTTP ${r.status}）`);
       }
     } catch (e) {
-      note = `pixiv pages 失败：${e?.message ?? e}`;
+      tried.push(`pixiv pages 失败：${e?.message ?? e}`);
+    }
+
+    // ③ 镜像站兜底（它自己的登录态换来的同一份 ajax 响应；慢，只此一次）
+    try {
+      const r = await fetchPixivJson(`${pixivBase()}/api/detail.php?id=${id}`, TIMEOUT_MS + 10000);
+      const b = r.json?.body ?? {};
+      const urls = (Array.isArray(b.meta_pages) ? b.meta_pages : [])
+        .map((p) => String(p?.image_urls?.original ?? '').trim()).filter(Boolean);
+      const derived = urls.length ? urls : deriveOriginalPageUrls(String(b.urls?.original ?? '').trim(), pageCount);
+      if (derived.length) return { urls: derived, source: 'mirror', note: noteOf() };
+      tried.push(`mirror: HTTP ${r.status} 没给原图地址`);
+    } catch (e) {
+      tried.push(`mirror: ${e?.message ?? e}`);
     }
   }
+
+  // ④ 老兜底：详情里的 p0 原图直链推同作品其它页（来源标注沿用 'derived'，下游自测认这个值）
   const p0 = String(detail?.urls?.original ?? '').trim();
   if (p0) {
     const derived = deriveOriginalPageUrls(p0, pageCount);
-    if (derived.length) return { urls: derived, source: 'derived', note };
+    if (derived.length) return { urls: derived, source: 'derived', note: noteOf() };
   }
-  return { urls: [], source: '', note: note || '拿不到原图地址' };
+  return { urls: [], source: '', note: noteOf('拿不到原图地址') };
 }
 
 /**
@@ -995,18 +1248,64 @@ export async function pixivIllustOriginals(detail) {
  * 找"某人本人的作品"必须走 user 接口：`ajax/user/{uid}/profile/all` 的 `body.illusts` 是 `{id: null}` 表。
  * 实测：uid=26249081 → 29 条；uid=52021072 → 20 条；uid=533797 → 0 条（该号叫 "Kana"，本来就没作品）。
  * pixiv 作品号全局递增，所以**按号倒序 = 按投稿时间新→旧**（这里没有 createDate 可用，只能这么排）。
- * @returns {Promise<{userId:string, ids:string[]}>}
+ *
+ * 顺序（2026-09-20）：app-api `/v1/user/illusts`（Bearer，每页 30 件、跟 next_url 往后翻，上限 10 页）
+ *   → 官网 `profile/all`（一次给全，原来的唯一实现）→ 镜像站 native.php 代拉同一个 profile/all。
+ * ⚠️ app-api 若返回 0 件，**不当作结论**，继续往下试：app-api 那个 type=illust 可能不含某些投稿类型，
+ *    而 profile/all 是"这个人一共投了什么"的权威答案，兜底一遍成本很低。
+ * @returns {Promise<{userId:string, ids:string[], source:string, note:string}>}
  */
 export async function pixivUserWorkIds(userId) {
   const uid = String(userId ?? '').trim();
   if (!/^\d{1,12}$/.test(uid)) throw new Error(`画师号不合法：「${String(userId ?? '')}」（应为纯数字，例如 26249081）`);
-  const r = await fetchPixivJson(`${PIXIV_AJAX}/user/${uid}/profile/all?lang=zh`);
-  const b = r.json?.body;
-  if (r.json?.error || !b) throw new Error(`取画师 ${uid} 的作品列表失败（HTTP ${r.status}）`);
-  const raw = [...Object.keys(b.illusts ?? {}), ...Object.keys(b.manga ?? {})];
-  const ids = [...new Set(raw.filter((x) => /^\d+$/.test(String(x))).map(String))]
-    .sort((a, b2) => Number(b2) - Number(a));
-  return { userId: uid, ids };
+  const tried = [];
+  const sortDesc = (raw) => [...new Set(raw.filter((x) => /^\d+$/.test(String(x))).map(String))]
+    .sort((a, b) => Number(b) - Number(a));
+
+  // ① app-api：每页 30 件，跟 next_url 往后翻
+  const token = await getPixivAccessToken();
+  if (token) {
+    try {
+      const ids = [];
+      for (let i = 0; i < PIXIV_USER_WORKS_MAX_PAGES; i += 1) {
+        const q = new URLSearchParams({ user_id: uid, type: 'illust', filter: 'for_android', offset: String(i * PIXIV_APP_PAGE_SIZE), lang: 'zh' });
+        const r = await fetchPixivJson(`${PIXIV_APP_API}/user/illusts?${q.toString()}`, PIXIV_DIRECT_TIMEOUT_MS, pixivAppApiHeaders(token));
+        const arr = r.json?.illusts;
+        if (r.json?.error || !Array.isArray(arr)) throw new Error(`HTTP ${r.status}${httpHint(r.json)}`);
+        ids.push(...arr.map((x) => String(x?.id ?? '')).filter(Boolean));
+        if (!r.json?.next_url || arr.length < PIXIV_APP_PAGE_SIZE) break;
+      }
+      if (ids.length) return { userId: uid, ids: sortDesc(ids), source: 'app-api', note: tried.join('；') };
+      tried.push('app-api: 0 件（继续用 profile/all 核实）');
+    } catch (e) {
+      tried.push(`app-api: ${e?.message ?? e}`);
+    }
+  } else tried.push(`app-api: ${NO_TOKEN_MSG}`);
+
+  // ② 官网 profile/all（原来的唯一实现，一次给全，也包含漫画）
+  try {
+    const r = await fetchPixivJson(`${PIXIV_AJAX}/user/${uid}/profile/all?lang=zh`);
+    const b = r.json?.body;
+    if (r.json?.error || !b) throw new Error(`HTTP ${r.status}${httpHint(r.json)}`);
+    const ids = sortDesc([...Object.keys(b.illusts ?? {}), ...Object.keys(b.manga ?? {})]);
+    return { userId: uid, ids, source: 'web-ajax', note: tried.join('；') };
+  } catch (e) {
+    tried.push(`web-ajax: ${e?.message ?? e}`);
+  }
+
+  // ③ 镜像站：native.php 代拉同一个 profile/all（形状不一定稳，能认就认）
+  try {
+    const target = `https://www.pixiv.net/ajax/user/${uid}/profile/all?lang=zh`;
+    const url = `${pixivBase()}/api/native.php?url=${encodeURIComponent(target)}`;
+    const r = await fetchPixivJson(url, TIMEOUT_MS + 10000);
+    const b = r.json?.body ?? r.json;
+    const ids = sortDesc([...Object.keys(b?.illusts ?? {}), ...Object.keys(b?.manga ?? {})]);
+    if (ids.length) return { userId: uid, ids, source: 'mirror', note: tried.join('；') };
+    tried.push(`mirror: HTTP ${r.status} 没给作品表`);
+  } catch (e) {
+    tried.push(`mirror: ${e?.message ?? e}`);
+  }
+  throw new Error(`取画师 ${uid} 的作品列表失败（${tried.join('；')}）`);
 }
 
 /** 供工具层用的 R-18 判定（与搜索路径同一个函数，避免两处规则漂移）。 */
@@ -1104,7 +1403,7 @@ async function enrichArtistWorks(users, limit = 8) {
 }
 
 /**
- * 按名字搜画师（**需要登录 cookie**，没配就直接说清楚，不退化成关键词搜）。
+ * 按名字搜画师（**需要登录态**；没登录态就直接说清楚，不退化成关键词搜）。
  *
  * 路由是怎么找到的（留证，免得下次又从头试）：`/ajax/search/users` 这条路由**一直都在**，
  * 之前一直 400「不正确的请求」是因为参数名给错了 —— 它要的是 **`nick`**，不是 `word`。
@@ -1113,32 +1412,62 @@ async function enrichArtistWorks(users, limit = 8) {
  * 实测（带 cookie）：`nick=米山舞` → 1 条命中 `1554775:米山舞`；`nick=七菜` → 10 条同名候选；
  * `nick=<纯数字>`、`nick=自己的英文 ID` → 0 条（它只按**昵称**搜，不按号、不按 @ID）。
  * 匿名（不带 cookie）时同一条请求是 400「不正しいリクエストです。」/「不正确的请求。」
+ * —— 这正是「按名字搜画师」过去要靠主人手贴 cookie 的原因，也是本次做 OAuth 长期令牌的动机。
  *
- * @returns {Promise<{query:string, endpoint:string, users:object[]}>}
+ * 顺序（2026-09-20 主人要的"官方优先"，也是"能一直用"的关键）：
+ *   ① app-api `/v1/search/user?word=`（Bearer，见 lib/pixiv-auth.js —— 长期令牌自动轮换，不再依赖 cookie）；
+ *   ② 官网 `ajax/search/users?nick=`（cookie；就是原来的唯一实现，保留当兜底）；
+ *   ③ 镜像站 native.php 代拉同一个地址（实测它自己没有用户搜索路由，能认就认）。
+ *
+ * @returns {Promise<{query:string, endpoint:string, users:object[], source:string, cached?:boolean, cachedAt?:number}>}
  */
 export async function pixivSearchUsersByName(name) {
   const w = String(name ?? '').trim();
   if (!w) throw new Error('要搜的画师名不能为空');
-  // ① 先查本地缓存：命中就完全不碰网络、也不要求登录态（cookie 过期后已查过的名字照样能用）
+  // ① 先查本地缓存：命中就完全不碰网络、也不要求登录态（令牌失效后已查过的名字照样能用）
   const cached = artistCacheGet(w);
-  if (cached) return { query: w, endpoint: 'cache', users: cached.users, cached: true, cachedAt: cached.at };
-  if (!pixivLoggedIn()) {
-    throw new Error('按名字找画师需要 pixiv 登录态：在 config.json 的 pixiv.cookie 里填一个会话 cookie（免费号即可，填一次即可）。'
+  if (cached) return { query: w, endpoint: 'cache', users: cached.users, cached: true, cachedAt: cached.at, source: 'cache' };
+
+  const token = await getPixivAccessToken();
+  if (!token && !pixivLoggedIn()) {
+    throw new Error('按名字找画师需要 pixiv 登录态：给桥一个 PHPSESSID 换长期令牌即可（**只做一次**：在服务器上跑 '
+      + 'node tools/pixiv-login.mjs --cookie "PHPSESSID=xxx"，之后桥自己续期，不用再给）。'
       + '没登录态时只能改用 authorId（画师号，如 1554775）或作品链接（pixiv.net/artworks/<数字>）；'
       + '关键词搜索搜的是"标题/标签含该名字"的作品，找不到作者本人。'
       + '（已经查过的名字有本地缓存，不受登录态影响。）');
   }
-  // 首选实测可用的那条；后面那条是历史形状，留着当兜底（pixiv 随时可能改）
-  const ends = [pixivUserSearchUrl(w), `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`];
   const tried = [];
+
+  // ① app-api（Bearer）：没有令牌就跳过，别白等一次 400
+  if (token) {
+    try {
+      const r = await fetchPixivJson(`${PIXIV_APP_API}/search/user?word=${encodeURIComponent(w)}&filter=for_android&lang=zh`, PIXIV_DIRECT_TIMEOUT_MS, pixivAppApiHeaders(token));
+      const users = parsePixivUserSearch(r.json);
+      if (users.length) {
+        await enrichArtistWorks(users);
+        artistCacheSet(w, users);
+        return { query: w, endpoint: 'app-api:/v1/search/user', users, cached: false, source: 'app-api' };
+      }
+      tried.push(`app-api → HTTP ${r.status} 无 users`);
+    } catch (e) {
+      tried.push(`app-api → ${e?.message ?? e}`);
+    }
+  } else tried.push(`app-api → ${NO_TOKEN_MSG}`);
+
+  // ② 官网（cookie）；没用 cookie 就如实说跳过
+  // 首选实测可用的那条；后面那条是历史形状，留着当兜底（pixiv 随时可能改）
+  const ends = pixivLoggedIn()
+    ? [pixivUserSearchUrl(w), `${PIXIV_AJAX}/search/users?word=${encodeURIComponent(w)}&s_mode=s_usr&lang=zh`]
+    : [];
+  if (!ends.length) tried.push('web-ajax → 没配 cookie（跳过）');
   for (const url of ends) {
     try {
       const r = await fetchPixivJson(url);
       const users = parsePixivUserSearch(r.json);
       if (users.length) {
         await enrichArtistWorks(users);
-        artistCacheSet(w, users);   // 解开一次就记住：cookie 掉了也能用（主人只填一次的意思）
-        return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users, cached: false };
+        artistCacheSet(w, users);   // 解开一次就记住：登录态掉了也能用（主人只给一次的意思）
+        return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users, cached: false, source: 'web-ajax' };
       }
       const why = r.json?.error ? `error=${String(r.json.message ?? '').slice(0, 40)}` : '无 users 字段';
       tried.push(`${url.replace(PIXIV_AJAX, '')} → HTTP ${r.status} ${why}`);
@@ -1146,8 +1475,24 @@ export async function pixivSearchUsersByName(name) {
       tried.push(`${url.replace(PIXIV_AJAX, '')} → ${e?.message ?? e}`);
     }
   }
+
+  // ③ 镜像站兜底（第三方，不带任何凭证）
+  try {
+    const target = `https://www.pixiv.net/ajax/search/users?nick=${encodeURIComponent(w)}&s_mode=s_usr&p=1&i=0`;
+    const r = await fetchPixivJson(`${pixivBase()}/api/native.php?url=${encodeURIComponent(target)}`, TIMEOUT_MS + 10000);
+    const users = parsePixivUserSearch(r.json);
+    if (users.length) {
+      await enrichArtistWorks(users);
+      artistCacheSet(w, users);
+      return { query: w, endpoint: 'mirror:native.php', users, cached: false, source: 'mirror' };
+    }
+    tried.push(`mirror → HTTP ${r.status} 无 users 字段`);
+  } catch (e) {
+    tried.push(`mirror → ${e?.message ?? e}`);
+  }
+
   throw new Error(`按名字搜「${w}」没拿到结果。逐条试过：${tried.join('；')}。`
-    + '（若全是 400/404，先用 tools/test-pixiv-byid.mjs --login 自检登录态；也可能是 pixiv 改了参数名。）');
+    + '（若全是 400/404，先用 tools/pixiv-login.mjs --status 看登录态；也可能是 pixiv 改了参数名。）');
 }
 
 /**

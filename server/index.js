@@ -561,9 +561,13 @@ function buildRuntimeInfo(id, cfg) {
   if (id === 'napcat-local') {
     /* 【2026-09-15 主人要求】NapCat 界面链接**直接带鉴权**，别再让人手输 token：
      *   http://127.0.0.1:6099/webui/?token=<webuiToken>
-     * （NapCat 的 WebUI 登录页认 ?token=；之前只给 `http://127.0.0.1:6099`，点开还要自己贴 token。） */
+     * （NapCat 的 WebUI 登录页认 ?token=；之前只给 `http://127.0.0.1:6099`，点开还要自己贴 token。）
+     * 【2026-09-20 修「点进去报 Unauthorized」】token 的来源改成**现场真相优先**：
+     *   NapCat 自己 webui.json 里的 token → 管理器配置 → 最近一次验证可用的 → 出厂 truefriend。
+     * 以前只读管理器配置，旧配置里没有这个键时 URL 就是裸链接（页面拿不到 Credential，
+     * 于是「获取QQ列表失败: Unauthorized / 获取二维码失败: Unauthorized」）——见上面 napcatWebuiTokenFor。 */
     const port = cfg.webuiPort || 6099;
-    const tok = String(cfg.webuiToken ?? '').trim();
+    const tok = napcatWebuiTokenFor('local', port, [localNapcatWebuiTokenFromFile(), cfg.webuiToken]);
     url = `http://127.0.0.1:${port}/webui/${tok ? '?token=' + encodeURIComponent(tok) : ''}`;
     probeUrl = `http://127.0.0.1:${port}/webui/`;
   }
@@ -853,6 +857,160 @@ function findNapcatOneKeyAll() {
   return out;
 }
 
+/* ── NapCat WebUI 令牌解析（2026-09-20 修「点进 NapCat 就报 Unauthorized」）──────────────
+ * 现场：主人从管理器点开 NapCat 界面，页面里报
+ *   `获取QQ列表失败: Unauthorized` / `获取二维码失败: Unauthorized`
+ * 而他并没有掉登录，链接也"带着鉴权 token"。查清了机制（读 NapCat 自己的 WebUI 前端 bundle）：
+ *   · 页面从 URL 的 `?token=<明文 token>` 取值 → 自己算 `sha256(token + ".napcat")` →
+ *     `POST /api/auth/login {hash}` 换一个 **Credential** → 存进 localStorage →
+ *     之后所有接口靠 `Authorization: Bearer <Credential>`。
+ *   · 也就是说：**URL 里没有 token（或 token 不对）= 页面永远拿不到 Credential** →
+ *     它自己那几个接口（GetQQLoginList / GetQQLoginQrcode…）全部回 `{"code":-1,"message":"Unauthorized"}`。
+ * 于是根因很直接：管理器拼 URL 时的 token 来源不可靠 ——
+ *   · 本机那两条链接读的是 **管理器配置** `instances.napcatLocal.webuiToken`（旧配置里可能压根没这个键 → URL 不带 token）；
+ *   · 服务端那条读的是**上一次 SSH 探测结果**（探测没跑/没成功时为空 → URL 也不带 token）。
+ * 现场真相只有一个：**NapCat 自己的 `webui.json` 里的 token**。所以这里：
+ *   ① 本机：直接读 NapCat 的配置目录（findNapcatOneKey → findNapcatConfigDir → webui.json）；
+ *   ② 缓存"最近一次确认可用的 token"（本机 / 每台服务器各一份），状态探测与令牌卡片写回时都会更新；
+ *   ③ 顺手用 NapCat 的登录接口**验一次**（后台、fire-and-forget）：候选不对就换成真能登进去的那个，
+ *      并把结果写进缓存，下一次点开就是用对的那个；
+ *   ④ 拼 URL 时**永远带上 token**（拿不到就退回最近一次可用值 / 出厂 truefriend，至少不是裸链接）。
+ */
+const NAPCAT_WEBUI_TOKEN_FALLBACK = 'truefriend';
+/** `${scope}:${port}` → { token, at, verified }；scope 是 'local' 或 server.id */
+const napcatWebuiTokenCache = new Map();
+
+function sha256Hex(s) {
+  return crypto.createHash('sha256').update(String(s ?? '')).digest('hex');
+}
+
+/** 本机 NapCat 的 webui.json 里的 token = **现场真相**（读不到就返回空，不猜）。 */
+function localNapcatWebuiTokenFromFile(shellDir = null) {
+  const dirs = [];
+  try {
+    const onekey = shellDir ? null : findNapcatOneKey();
+    if (onekey?.dir) dirs.push(onekey.dir);
+    else if (shellDir) dirs.push(shellDir);
+  } catch { /* 找不到 OneKey 就只试下面的固定路径 */ }
+  // 出厂 payload 布局：<runtime>/napcat-onekey/NapCat.*.Shell
+  try {
+    const root = join(RUNTIME_ROOT, 'napcat-onekey');
+    if (existsSync(root)) for (const s of readdirSync(root)) if (/^NapCat/i.test(s)) dirs.push(join(root, s));
+  } catch { /* 目录不在就算了 */ }
+  for (const d of dirs) {
+    try {
+      const cfgDir = findNapcatConfigDir(d);
+      if (!cfgDir) continue;
+      const f = join(cfgDir, 'webui.json');
+      if (!existsSync(f)) continue;
+      const w = JSON.parse(readFileSync(f, 'utf-8').replace(/^\uFEFF/, ''));
+      const t = String(w?.token ?? '').trim();
+      if (t) return t;
+    } catch { /* 单个候选读坏不影响其它候选 */ }
+  }
+  return '';
+}
+
+/**
+ * 这个 token 现在真的能被这个 NapCat 接受吗？
+ * 判据就是它自己的登录接口：`POST /api/auth/login {hash: sha256(token + ".napcat")}` → `code === 0`。
+ * （这条形状是从 NapCat 前端 bundle 的 `loginWithToken()` 里读出来的，不是猜的。）
+ */
+async function napcatWebuiTokenWorks(port, token, timeoutMs = 6000) {
+  const t = String(token ?? '').trim();
+  if (!t) return false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hash: sha256Hex(`${t}.napcat`) }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const j = await res.json().catch(() => null);
+    return !!j && Number(j.code) === 0;
+  } catch {
+    return false;   // 端口不通/超时都当作"验不了"，不当作"对不对"
+  }
+}
+
+/** 记下"最近一次确认可用"的 token（状态探测、令牌卡片写回、验证成功时都调这个）。 */
+function rememberNapcatWebuiToken(scope, port, token, verified = false) {
+  const t = String(token ?? '').trim();
+  if (!t) return;
+  const key = `${scope}:${port}`;
+  const prev = napcatWebuiTokenCache.get(key);
+  if (!prev || prev.token !== t || (verified && !prev.verified)) {
+    napcatWebuiTokenCache.set(key, { token: t, at: Date.now(), verified: verified || prev?.verified === true });
+  }
+}
+
+/** 缓存里的候选（未过期；verified 的优先）。 */
+function cachedNapcatWebuiToken(scope, port) {
+  const hit = napcatWebuiTokenCache.get(`${scope}:${port}`);
+  if (!hit) return '';
+  if (Date.now() - hit.at > 30 * 60 * 1000) return '';   // 半小时没再确认过就不算数
+  return hit.token;
+}
+
+/**
+ * 解析要放进 URL 的 WebUI token（同步、绝不联网）：现场真相 → 管理器配置 → 最近可用 → 出厂值。
+ * 同时在后台验一次：如果候选进不去，而别的候选能进，就改用能进的那个（记缓存 + 记日志），下次点开即正确。
+ */
+function napcatWebuiTokenFor(scope, port, candidates = []) {
+  const list = [];
+  const add = (v) => { const t = String(v ?? '').trim(); if (t && !list.includes(t)) list.push(t); };
+  candidates.forEach(add);
+  add(cachedNapcatWebuiToken(scope, port));
+  add(NAPCAT_WEBUI_TOKEN_FALLBACK);
+  const chosen = list[0] || '';
+  void (async () => {
+    try {
+      if (!chosen) return;
+      if (await napcatWebuiTokenWorks(port, chosen)) { rememberNapcatWebuiToken(scope, port, chosen, true); return; }
+      for (const c of list.slice(1)) {
+        if (await napcatWebuiTokenWorks(port, c)) {
+          rememberNapcatWebuiToken(scope, port, c, true);
+          mlog(`[napcat] WebUI 令牌修正：${scope}:${port} 上 ${chosen === c ? '' : `候选 ${chosen ? '(当前)' : '(空)'} 进不去，`}改用验证通过的候选（点开就是对的）`);
+          return;
+        }
+      }
+      mlog(`[napcat] WebUI 令牌验证失败：${scope}:${port} 的候选（${list.length} 个）都进不去 —— NapCat 可能没起/端口不是 ${port}，或它的 token 与配置不一致`);
+    } catch { /* 后台验证失败不影响 URL 生成 */ }
+  })();
+  return chosen;
+}
+
+/**
+ * 先解析、再**验一次**，返回最终该放进 URL 的 token（异步版，给 /api/state 用）。
+ * 为什么值得多等这几百毫秒：主人的症状是"点进去报 Unauthorized，有时候好有时候坏"——
+ * 文件里的 token 与**正在跑的那个 NapCat**实际认的 token 不一致时就会这样（改了配置没重启、
+ * 或 NapCat 是被别人拉起来的）。这里在返回链接之前确认一遍，验证过的结果缓存 30 分钟，
+ * 所以只在"第一次"或"换了 token"时才真的多一次本地请求。
+ */
+async function verifyNapcatWebuiToken(scope, port, candidates = []) {
+  const list = [];
+  const add = (v) => { const t = String(v ?? '').trim(); if (t && !list.includes(t)) list.push(t); };
+  candidates.forEach(add);
+  const cached = cachedNapcatWebuiToken(scope, port);
+  add(cached);
+  add(NAPCAT_WEBUI_TOKEN_FALLBACK);
+  for (const cand of list) {
+    if (cand === cached && napcatWebuiTokenCache.get(`${scope}:${port}`)?.verified) return cand;   // 验过的直接用
+    if (await napcatWebuiTokenWorks(port, cand, 4000)) {
+      rememberNapcatWebuiToken(scope, port, cand, true);
+      if (list[0] && cand !== list[0]) mlog(`[napcat] WebUI 令牌修正：${scope}:${port} 候选 ${list[0].length} 位进不去，改用验证通过的候选（点开就是对的）`);
+      return cand;
+    }
+  }
+  mlog(`[napcat] WebUI 令牌验证失败：${scope}:${port} 的 ${list.length} 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）`);
+  return list[0] || '';
+}
+
+/** 把验证过的 token 提前记进缓存（启动/写盘后调用，避免第一次点开还要现验）。 */
+function primeNapcatWebuiToken(scope, port, token) {
+  rememberNapcatWebuiToken(scope, port, token, false);
+}
+
 /* NapCat 配置目录（放 webui.json / napcat_*.json） */
 function findNapcatConfigDir(shellDir) {
   const candidates = [
@@ -1052,6 +1210,8 @@ function startNapcatLocal(cfgNap) {
               const w = JSON.parse(readFileSync(webuiPath, 'utf-8'));
               if (w.token !== napToken) { w.token = napToken; writeFileSync(webuiPath, JSON.stringify(w, null, 4), 'utf-8'); }
             }
+            // 管理器刚把 token 定成 napToken → 记进缓存，"本机 · NapCat 官方界面"那条链接立刻用对的 token
+            primeNapcatWebuiToken('local', cfgNap.webuiPort || 6099, napToken);
           }
         } catch (e) { console.error('[napcat] token fix:', e.message); }
         // —— 修复2：快速登录账号（免二维码），可用账号从 napcat_*.json 探测 ——
@@ -1436,8 +1596,9 @@ async function resolveServices(cfg, connected) {
    * 现在本机就是本机端口（没跑就如实显示不可达），服务端那组单独给（见下方 remoteServices）。 */
   const localDshUrl = `http://127.0.0.1:${dshIso.port}`;
   // NapCat 本机入口同样**带 webui token**（主人要求：点开就用，不用再输 token）
+  // 【2026-09-20】token 来源改为"现场真相优先 + 现场验证"，见 napcatWebuiTokenFor / verifyNapcatWebuiToken
   const localNapPort = napLocal.webuiPort || 6099;
-  const localNapTok = String(napLocal.webuiToken ?? '').trim();
+  const localNapTok = await verifyNapcatWebuiToken('local', localNapPort, [localNapcatWebuiTokenFromFile(), napLocal.webuiToken]);
   const localNapUrl = `http://127.0.0.1:${localNapPort}/webui/${localNapTok ? '?token=' + encodeURIComponent(localNapTok) : ''}`;
   const localBrUrl = `http://127.0.0.1:${brLocal.webuiPort || 3100}`;
 
@@ -1467,10 +1628,10 @@ async function resolveServices(cfg, connected) {
   if (sshMode && connected) {
     const conn = sshConnections.get(connected.id);
     remoteStatus = await getRemoteServerStatus(connected, conn);          // 复用这条连接（内部 10 秒缓存）
-    const u = remoteServiceUrls(connected, remoteStatus);
+    const u = await remoteServiceUrls(connected, remoteStatus);
     const remoteServices = [
       { id: 'srv-dsh-web', scope: 'remote', name: '服务端 DSH 界面', url: u.dsh, desc: '服务器 systemd dsh-web · 隧道 ' + u.ports.dsh + ' · 已带访问令牌' + (remoteStatus?.dsh?.token ? '' : '（未取到令牌，令牌见服务端日志）') },
-      { id: 'srv-napcat-webui', scope: 'remote', name: '服务端 NapCat 界面', url: u.napcat, desc: '服务器 NapCat WebUI · 隧道 ' + u.ports.napcat + ' · 已带 webui token' + (remoteStatus?.napcat?.webuiToken ? '' : '（未取到 token）') },
+      { id: 'srv-napcat-webui', scope: 'remote', name: '服务端 NapCat 界面', url: u.napcat, desc: '服务器 NapCat WebUI · 隧道 ' + u.ports.napcat + (u.napcatToken ? ' · 已带 webui token（点开即用）' : ' · 没取到 token：页面会要求手输，先在「NapCat 令牌」卡里看清它的值') },
       { id: 'srv-napcat-http', scope: 'remote', name: '服务端 NapCat HTTP API', url: u.napcatHttp, desc: '服务器 OneBot HTTP · 隧道 ' + u.ports.napcatHttp },
       { id: 'srv-bridge', scope: 'remote', name: '服务端桥控制台', url: u.bridge, desc: '服务器 qq-bridge 控制台 · 隧道 ' + u.ports.bridge + (u.bridgeToken ? ' · 已带 console token' : '') },
     ];
@@ -4586,14 +4747,22 @@ function tunnelLocalPort(serverId, name, fallback) {
 }
 
 /** 服务端四个入口的 URL：DSH 带 ?token=（无令牌一律 401），NapCat 带 webui token，桥带 console token */
-function remoteServiceUrls(server, status) {
+async function remoteServiceUrls(server, status) {
   const m = server?.remotePorts ?? {};
   const pDsh = tunnelLocalPort(server.id, 'DSH Web', 13080);
   const pNap = tunnelLocalPort(server.id, 'NapCat WebUI', 13000);
   const pHttp = tunnelLocalPort(server.id, 'NapCat HTTP', 13001);
   const pBr = tunnelLocalPort(server.id, 'Bridge 控制台', 13100);
   const dshTok = String(status?.dsh?.token || '');
-  const napTok = String(status?.napcat?.webuiToken || '');
+  /* 【2026-09-20 修「点开服务端 NapCat 报 Unauthorized」】token 只取"上一次 SSH 探测结果"是不可靠的：
+   * 探测没跑成 / 这台机器的 webui.json 不在探测的固定路径里 → 空 → URL 变裸链接 → 页面拿不到 Credential。
+   * 现在：探测结果 → 最近一次验证可用的 token（缓存）→ 出厂值，**永远带一个 token**，
+   * 并在后台验一次真伪（见 napcatWebuiTokenFor）。 */
+  const napTok = await verifyNapcatWebuiToken(server?.id ?? 'remote', pNap, [(() => {
+    // 探测到就顺手记进缓存：下次状态没取到时（隧道刚重建/探测失败）URL 依然带着对的 token
+    if (status?.napcat?.webuiToken) rememberNapcatWebuiToken(server?.id ?? 'remote', pNap, status.napcat.webuiToken);
+    return status?.napcat?.webuiToken;
+  })()]);
   const brTok = String(status?.bridge?.consoleToken || '');
   return {
     ports: { dsh: pDsh, napcat: pNap, napcatHttp: pHttp, bridge: pBr, remoteDsh: m.dshWeb ?? 3080, remoteNapcat: m.napcatWebui ?? 6099, remoteBridge: m.bridge ?? 3100 },
@@ -4603,6 +4772,8 @@ function remoteServiceUrls(server, status) {
     napcatHttp: `http://127.0.0.1:${pHttp}`,
     bridge: `http://127.0.0.1:${pBr}${brTok ? '/?token=' + encodeURIComponent(brTok) : ''}`,
     bridgeToken: brTok,
+    // 给界面判断"这条 NapCat 链接到底带没带 token"（带了才敢说"点开就用"）
+    napcatToken: napTok,
   };
 }
 
@@ -5146,7 +5317,8 @@ app.get('/api/ssh/status', async (req, res) => {
   const conn = sshConnections.get(server.id);
   if (!conn) return res.json({ ok: false, connected: false, server: { id: server.id, name: server.name, host: server.host }, message: `服务器「${server.name}」未连接：先在 SSH 配置页点「连接」` });
   const st = await getRemoteServerStatus(server, conn, { force: req.query.force === '1' });
-  res.json({ ...st, urls: remoteServiceUrls(server, st).ports, timestamp: new Date().toISOString() });
+  const urls = await remoteServiceUrls(server, st);
+  res.json({ ...st, urls: urls.ports, links: { dsh: urls.dsh, napcat: urls.napcat, napcatHttp: urls.napcatHttp, bridge: urls.bridge }, timestamp: new Date().toISOString() });
 });
 
 

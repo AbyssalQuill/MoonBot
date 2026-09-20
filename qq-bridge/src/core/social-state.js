@@ -1229,7 +1229,7 @@ export function buildWakeReminderPrompt(key) {
   const roleState = readRoleState();
   const roleLine = roleState.role ? `Role: ${roleState.role} (full persona card: qq_get_prompt)\n\n` : '';
   const st = getSocialState(key);
-  const tokenLine = `[Token] ${st.agentToken} (include in every tool call)\n\n`;
+  const tokenLine = `[Token] ${st.agentToken} (include in every tool call)\n[Session] ${key}\n\n`;
   const preSleepMs = Math.max(0, Number(cfgRef.social?.wake?.preSleepWaitMs) || 300000);
   return `${roleLine}${tokenLine}[Reminder] Round not closed: pick the next wake with qq_set_wake_config, or close with qq_mark_read if you saw the messages and decide not to answer. If you mean to dive, observe first via qq_wait_for_messages(timeoutMs=${preSleepMs}), then wind down when nothing needs you.`;
 }

@@ -55,7 +55,7 @@ import { normalizeLoopSignature, isDuplicateSendText } from '../lib/loop-guard.j
 import { faceIdFromArtifactContent, resolveArtifactFaceId } from '../lib/qq-face-parse.js';
 import { compressImageBuffer, finalizeImageBuffer } from '../lib/image-compress.js';
 import { isSafeLocalMediaPath, isProbablySafeImageFileRef } from '../lib/media-guard.js';
-import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, escapeCqText, unquoteJsonString } from '../lib/text-safe.js';
+import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, extractToolTargetKey, escapeCqText, unquoteJsonString } from '../lib/text-safe.js';
 import { normalizeOwnerQQ, normalizeIdList, allowed } from '../lib/config.js';
 import { readRoleState, writeRoleState, sanitizeRoleName, listRoles } from '../lib/role-access.js';
 import { sleep, withTimeout } from '../lib/async.js';
@@ -765,7 +765,7 @@ export async function pumpMux() {
             const callId = frame.event.data?.callId;
             const rawArgs = frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data;
             const args = sanitizeToolArgs(rawArgs);
-            appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args });
+            appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args, target: extractToolTargetKey(rawArgs) || undefined });
             /* 【2026-09-20 根治「模型漏引号 → 消息发不出去」】
              * 现场：`{"key":"…","messages": 主人这么直接啊 我脸都热了,"token":"…"}` 不是合法 JSON，
              * DSH 的宽松解析把这个字段整个丢掉 → 发送端点只看到 messages 为空 → 模型看到报错、原样重试。

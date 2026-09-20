@@ -31,8 +31,10 @@
   "pixiv": {
     "base": "https://x.pixigraph.xyz",
     "cookie": "",
-    "_cookieNote": "可选的 pixiv 登录态（**只为一件事**：按画师**名字**搜人）。填法三种都认：整条 cookie 串、`PHPSESSID=xxxx`、或者只贴那个会话值本身。**免费号就够**（会员只管人气排序/多标签检索，跟找人无关）。**填一次即可**：每解出一个画师号都会落盘缓存（state/pixiv-artists.json），cookie 将来失效时已查过的名字照样能用（按画师号发作品/取原图本来就不需要登录态）；cookie 真失效时桥会每 6 小时自检并主动在 QQ 里提醒主人一次（最多一天一次）。`QQBRIDGE_PIXIV_COOKIE_OFF=1` 可临时停用它而不删配置。三条约束：① 只发给 pixiv 自己的域名，**绝不发给镜像站**（第三方）；② 只从本地配置读，永不写进返回值/日志/QQ 消息；③ 没配时「按名字搜画师」会明确说不支持，不会偷偷退化成关键词搜（那会给出错的答案）。自检：node qq-bridge/tools/test-pixiv-byid.mjs --login；缓存验证：node qq-bridge/tools/test-pixiv-cache.mjs。",
-    "_note": "Pixiv 搜图/发图走的第三方镜像站地址。**2026-09-18 实测更正**：官网其实免登录可用（ajax/illust、ajax/illust/{id}/pages、ajax/search/artworks、ajax/user/{uid}/profile/all 全都能直连，100~400ms），所以现在**元数据与地址直联官网**，这个镜像站只当兜底（它慢得多：同一张图 2.7~5.7s，偶发 15~25s 超时）。换站只改这一行的域名，不用动代码；留空或删掉这个键 = 用内置默认 https://x.pixigraph.xyz。优先级：config.json 的 pixiv.base > 环境变量 QQBRIDGE_PIXIV_BASE > 内置默认（与 dsh.baseUrl 同一套规则，每次调用现读，改完不用重启）。镜像站搜索接口实测只认 keyword 和 page（mode/s_mode/order/bl/type 全部被忽略），所以 qq_pixiv_search / qq_send_pixiv 的标签/作者/构图/尺寸/AI/时间排序筛选都在桥本地做，并支持 scanPages 自动翻页，细节与实测依据见 qq-bridge/src/lib/pixiv.js。"
+    "refreshToken": "",
+    "_cookieNote": "可选的 pixiv 登录态。**2026-09-20 起只需要给一次**：贴一个 PHPSESSID，桥用它换长期 refresh_token（落到 state/pixiv-token.json），之后每 50 分钟自动轮换 access_token，不用再管。填法三种都认：整条 cookie 串、`PHPSESSID=xxxx`、或者只贴会话值本身。**推荐的做法是跑一次引导命令**：`node tools/pixiv-login.mjs --cookie \"PHPSESSID=xxxx\"`（会打印每一步的实测结果，失败时能看到 pixiv 的原始 HTTP 状态/响应体）。留给这个键的意义：旧安装兼容 + 令牌彻底坏掉时的应急。三条约束：① 只发给 pixiv 自己的域名，**绝不发给镜像站**（第三方）；② 只从本地配置读，永不写进返回值/日志/QQ 消息；③ 没登录态时「按名字搜画师」会明确说不支持，不会偷偷退化成关键词搜。自检：node tools/pixiv-login.mjs --status；缓存验证：node tools/pixiv-cache 相关看 tools/test-pixiv-cache.mjs。",
+    "_tokenNote": "长期令牌（一般**不用手填**：由 tools/pixiv-login.mjs 引导或桥自动轮换写入 state/pixiv-token.json）。真要在配置里覆盖时填这里，优先级比文件高（环境变量 QQBRIDGE_PIXIV_REFRESH_TOKEN 又比它高）。注意：这个值等价于账号权限，别提交进仓库、别贴给别人。轮换间隔 50 分钟、距过期 10 分钟内才换；换失败只记 last_error，不会把桥搞挂。",
+    "_note": "Pixiv 搜图/发图走的第三方镜像站地址。**2026-09-20 定稿的来源顺序**：官方 app-api（OAuth 长期令牌）→ pixiv web ajax（匿名可用）→ **这个镜像站兜底**（它慢得多：同一张图 2.7~5.7s，偶发 15~25s 超时）。换站只改这一行的域名，不用动代码；留空或删掉这个键 = 用内置默认 https://x.pixigraph.xyz。优先级：config.json 的 pixiv.base > 环境变量 QQBRIDGE_PIXIV_BASE > 内置默认（与 dsh.baseUrl 同一套规则，每次调用现读，改完不用重启）。⚠️ 任何来源都**只发给 pixiv 自己的域名**带 cookie/Bearer，镜像站永远拿不到凭证。镜像站搜索接口实测只认 keyword 和 page（mode/s_mode/order/bl/type 全部被忽略），所以 qq_pixiv_search / qq_send_pixiv 的标签/作者/构图/尺寸/AI/时间排序筛选都在桥本地做（三个来源先归一成同一行形状），并支持 scanPages 自动翻页，细节与实测依据见 qq-bridge/src/lib/pixiv.js。"
   },
   "ownerQQ": 0,
   "guard": {

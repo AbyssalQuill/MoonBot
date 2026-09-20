@@ -396,135 +396,17 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
   return body.data;
 }
 
-// ── 智能引用：只引用「本回合真正交给过模型、并且这句话就在答的那条」────────────────
-/** 参与相关度打分的词：英文/数字词（≥3 字符）+ 中文 2-gram */
-export function smartQuoteGrams(text) {
-  const t = String(text || '').toLowerCase();
-  const set = new Set();
-  for (const w of t.match(/[a-z0-9]{3,}/g) || []) set.add(w);
-  const cjk = t.replace(/[^\u4e00-\u9fa5]/g, '');
-  for (let j = 0; j + 2 <= cjk.length; j += 1) set.add(cjk.slice(j, j + 2));
-  return set;
-}
-
-export const SMART_QUOTE_WINDOW_MS = 10 * 60 * 1000;   // 候选消息的最大年龄
-export const SMART_QUOTE_FALLBACK_MS = 120 * 1000;     // 没有本回合投递记录时，只认"刚到的"最新一条
-export const SMART_QUOTE_REUSE_MS = 10 * 60 * 1000;    // 同一条消息多久内不再被自动引用
-const SMART_QUOTE_MAX_CANDIDATES = 12;
-
-/* 【2026-09-16 修「零相关也引用 = 引用错误」】
- * 主人 09-15 在群里实测（随后在私聊追问"你群聊里那个，引用错误了吧"）：
- *   群里 猫猫头 发了「吓哭了」+ 一张图 +「决定，绝地反击」+ 两个拍一拍，
- *   bot 回复「投降喵是什么投降法」，气泡上却挂着**「决定，绝地反击」的引用框**（工具结果里
- *   autoQuoted 报出来的就是那条的 messageId）。
- * 复盘：打分循环用 `hit >= bestScore`、初值 -1 且**没有下限**，于是"和这句话 0 个共同词"的候选
- * 也会被选出来 —— 候选多于一条时，这等于**按位置瞎猜**（挑最靠后的那条），正是"引用错误"的来源。
- * 现在两道收紧（方向统一是"**宁可不引用，也不张冠李戴**"，要引用由模型自己传 replyToMessageId）：
- *   ① 候选**多于一条**时至少要有 `SMART_QUOTE_MIN_SCORE` 个共同词才允许自动引用（默认 1）；
- *      候选只有一条时例外 —— 本回合只给过它这一条，引用它没有歧义（旧行为保留）；
- *   ② 打分前剔除"什么/就是/可以"这类高频 2-gram 停用词 —— 它们几乎和任何一句话都"有共同词"。
- */
-export const SMART_QUOTE_MIN_SCORE = 1;
-
-/** 高频中文 2-gram 停用词：命中它们不代表"在答这条"，反而制造假相关。 */
-const SMART_QUOTE_STOP_GRAMS = new Set([
-  '什么', '怎么', '这个', '那个', '我们', '你们', '他们', '她们', '自己', '可以', '不是', '就是',
-  '没有', '一个', '现在', '时候', '然后', '因为', '所以', '但是', '如果', '真的', '知道', '觉得',
-  '应该', '一下', '一样', '这么', '那么', '还是', '已经', '出来', '起来', '不好', '不是', '不能',
-  '不会', '大家', '一点', '有点', '好像', '可能', '意思', '东西', '事情', '问题', '怎么', '为啥',
-]);
-
-function dropStopGrams(grams) {
-  for (const g of [...grams]) if (SMART_QUOTE_STOP_GRAMS.has(g)) grams.delete(g);
-  return grams;
-}
-
-/**
- * 自动智能引用：返回要引用的 messageId（字符串），不引用返回 null。
- *
- * 【2026-09-15 修「引用错误 + 看着像重复回复」】旧实现（2026-09-13 版）给"@过我 / 引用过我"的
- * 消息固定 +3 分，且对消息年龄没有任何约束、同分时保留**更早**的一条。于是只要近 12 条里有一条
- * 老消息引用了 bot，它就永远压过所有新消息：主人实测 —— 22:52:00 起连续 4 条回复
- * （"说好了啊" / "那就说定了" / "笑啥" / "私聊发不了表情包呜呜"）**全部引用了同一条 90 秒前的
- * "等我以后给你接入MC一起玩吧~"**，主人看到的就是"引用错误 + 重复回复"。
- *
- * 现在的判据（宁可不引用，也不张冠李戴）：
- *   ① 候选 = 本回合**真正投递过**的对端消息（`turnSeenUnread` 唤醒正文展示过 ∪ `turnSteeredSeqs`
- *      steer 注入过）—— 模型只可能回答它见过的东西；
- *      没有投递记录（主动发起 / 控制台发送）时，只认最近 2 分钟内到的**最新一条**，否则不引用；
- *   ② 打分只按"和这句话有共同词"（CJK 2-gram / 英文词，每命中 +1，上限 3），同分取更新的一条；
- *   ③ 最近 10 分钟已经自动引用过的消息不再引用（同一条不会被反复引用）。
- */
-export function pickSmartQuote(st, bubbleText, opts = {}) {
-  try {
-    const now = Number(opts.now) || Date.now();
-    const windowMs = Number(opts.windowMs) > 0 ? Number(opts.windowMs) : SMART_QUOTE_WINDOW_MS;
-    const fallbackMs = Number(opts.fallbackMs) > 0 ? Number(opts.fallbackMs) : SMART_QUOTE_FALLBACK_MS;
-    const msgs = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
-    const peers = msgs
-      .filter((m) => m && !m.isSelf && m.messageId
-        && (now - Number(m.time || 0) < windowMs)
-        && Number(m.time || 0) <= now)      // 未来时间戳不算（测试夹具/时钟偏移时别把"还没到的消息"当最新）
-      .slice(-SMART_QUOTE_MAX_CANDIDATES);
-    if (!peers.length) return null;
-
-    const delivered = new Set(
-      [...(Array.isArray(st?.turnSeenUnread) ? st.turnSeenUnread : []),
-        ...(Array.isArray(st?.turnSteeredSeqs) ? st.turnSteeredSeqs : [])]
-        .map(Number).filter((n) => Number.isFinite(n) && n > 0)
-    );
-    let cands = delivered.size ? peers.filter((m) => delivered.has(Number(m.seq))) : [];
-    if (!cands.length) {
-      const latest = peers[peers.length - 1];
-      if (now - Number(latest.time || 0) > fallbackMs) return null;
-      cands = [latest];
-    }
-
-    const usedRecently = new Set(
-      (Array.isArray(st?.recentQuoteIds) ? st.recentQuoteIds : [])
-        .filter((q) => q && now - Number(q.at || 0) < SMART_QUOTE_REUSE_MS)
-        .map((q) => String(q.id))
-    );
-    const pool = cands.filter((m) => !usedRecently.has(String(m.messageId)));
-    if (!pool.length) return null;
-
-    const mine = dropStopGrams(smartQuoteGrams(bubbleText));
-    let best = null;
-    let bestScore = -1;
-    for (const m of pool) {
-      let hit = 0;
-      if (mine.size) {
-        const g = dropStopGrams(smartQuoteGrams(m.tail || m.plain || m.text || ''));
-        for (const x of g) { if (mine.has(x)) { hit += 1; if (hit >= 3) break; } }
-      }
-      // >= ：同分保留时间更靠后（更新）的一条 —— 旧实现用 > 会永远挑最早的
-      if (hit >= bestScore) { bestScore = hit; best = m; }
-    }
-    if (!best) return null;
-    // 【2026-09-16】判定"依据够不够"：候选只有一条（本回合就给过它这一条）→ 无歧义，照旧引用；
-    // 有**多条**候选却一个共同词都没有 → 纯属瞎猜（主人看到的"引用错误"就是这样来的），不引用。
-    const need = pool.length > 1 ? SMART_QUOTE_MIN_SCORE : 0;
-    if (bestScore < need) {
-      log(`[quote] 自动引用放弃：候选有 ${pool.length} 条、最相关的一条只有 ${Math.max(0, bestScore)} 个共同词（需 ≥${need}）—— 宁可不引用，也不张冠李戴（模型要引用可自己传 replyToMessageId）`);
-      return null;
-    }
-    /* 【2026-09-15 修「每句话都引用」】上面挑出来的候选，如果**就是最新一条对端消息**，
-     * 那引用框纯属噪音 —— 大家都在看这一条，谁都知道你在回它。主人实测：私聊里每句回复
-     * 都挂一个引用框，看着很机械。所以：
-     *   · 回答最新那条 → 不自动引用；
-     *   · 只有"你在答一条更早的消息"（候选不是最新的、或有共同词指向更早的）才引用，
-     *     因为这时候引用框真的在帮你说明"我在回哪句"。
-     * 模型想显式引用任何消息，随时可以自己传 replyToMessageId（qq_reply / qq_send_message）。 */
-    const newestPeer = peers[peers.length - 1];
-    if (newestPeer && String(best.messageId) === String(newestPeer.messageId)) return null;
-    if (opts.record !== false && st && typeof st === 'object') {
-      const prev = Array.isArray(st.recentQuoteIds) ? st.recentQuoteIds : [];
-      st.recentQuoteIds = [...prev, { id: String(best.messageId), at: now }].slice(-30);
-    }
-    return String(best.messageId);
-  } catch { return null; }
-}
-
+/* ── 【2026-09-20 主人定稿：彻底去掉"桥自己猜着引用"】────────────────────────────────
+ * 存在过的东西（2026-09-13 ~ 09-20）：桥在发消息时按"共同词"从本回合投递过的消息里挑一条，
+ * 自动加上引用框（pickSmartQuote + SMART_QUOTE_* 一串调参）。它有过两次线上事故：
+ *   ① 零共同词也引用 → 张冠李戴（群里答"投降喵"却挂着「决定，绝地反击」的引用框）；
+ *   ② 每句话都挂引用框，观感机械；后来加"答最新那条就不引用"才压住。
+ * 但这些都只是**调参**，根子上是错的：桥不知道模型在答哪一句，猜错就是引用错误。
+ * 主人 09-20 明确："去除，把引用完全交给模型"。现在规则只剩一条 ——
+ *   **只有模型显式传 replyToMessageId 才有引用；桥永远不加。**
+ * 模型那边有 `(id:xxx)` 展示与 qq_get_recent_messages / qq_get_message_detail，
+ * 它自己认得出该引哪条（引用前必须核对该条自己的 id，见 preset 第 9b 条）。
+ * 本文件不再有任何"智能引用"代码；回归用例见 tests/no-auto-quote.test.js。 */
 /**
  * 全语音模式用：把模型写的正文洗成"能朗读的那部分"。
  *
@@ -562,26 +444,18 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
   // 【2026-09-12 加速】这一次调用 = 一次新的"连发批"：清掉前几轮攒下的连续发送计数，
   // 让批内节奏从 0 / step / 2×step 起算（配合下面"首条不等节拍"，第一条气泡零延迟出）。
   resetSendPace(key);
-  // 自动智能引用：候选 = 本回合真正投递过的那批消息，打分只按"共同词"，同分取更新的一条。
-  // 规则与踩坑经过见本文件上方 pickSmartQuote 的注释（【2026-09-15 修引用错误 / 重复回复观感】）。
-  const pickSmartQuoteFor = (k, bubbleText) => pickSmartQuote(getSocialState(k), bubbleText);
   const sent = [];
   const failed = [];
   const total = Math.max(messages.length, images.length);
   for (let i = 0; i < total; i++) {    const msg = messages[i] ?? '';
     const img = images[i] ?? null;
-    // 模型显式指定的引用(显式 replyToMessageId)永远原样保留——复检只针对「自动智能引用」,
-    // 否则显式引用一条较早消息也会被"必须是最新"规则悄悄摘掉引用, 用户看到的就是"引用失败"。
+    /* 【2026-09-20 主人定稿】引用只可能来自模型显式传的 replyToMessageId。
+     * 旧写法在这里有第二个分支：没传引用时调 pickSmartQuoteFor() 让桥自己挑一条 —— 已删除
+     * （理由见本文件上方那段注释；猜错就是"引用错误"）。多气泡时只有第一条能带引用。 */
     const explicitQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
     const useAt = i === 0 ? atUserId : null;
     enqueueSend(async () => {
-      // 自动智能引用在真正发送那一刻复检(防排队延迟后引用到过时消息); 显式引用不在此列
-      // 自动智能引用：在真正发送那一刻按相关性挑（不再要求"必须是最新一条"）；显式引用永远原样保留。
-      const useReply = i === 0
-        ? (explicitQuote
-          ? String(replyToMessageId).trim()
-          : (cfgRef.social?.send?.smartQuoteEnabled !== false ? pickSmartQuoteFor(key, msg) : null))
-        : null;
+      const useReply = (i === 0 && explicitQuote) ? String(replyToMessageId).trim() : null;
       // 发送线性节拍：pace=null=线性关闭 → 保留调用方传入的旧 delays 节奏；否则由会话连续计数决定。
       //
       // 【2026-09-12 加速 · 这是主人要的"qq_send_message 更快"】**这一条回复的第一条气泡不再等节拍**。

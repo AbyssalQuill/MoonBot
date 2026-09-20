@@ -4,6 +4,9 @@ node_modules/
 
 # Runtime state and local config (never publish)
 state/
+# 上面一行已经覆盖了整个 state/，这一条是**显式**再钉一次：它里面是 pixiv 的长期 OAuth 凭证
+# （refresh_token 等价于账号权限），谁把 state/ 从忽略列表里去掉都必须先看到这一行。
+state/pixiv-token.json
 config.json
 *.log
 *.bak

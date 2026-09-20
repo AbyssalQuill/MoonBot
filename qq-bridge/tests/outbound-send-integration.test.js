@@ -60,7 +60,7 @@ const cfg = {
   social: {
     tools: {},
     send: {
-      smartQuoteEnabled: false, linearEnabled: false, burstMaxMessages: 8,
+      linearEnabled: false, burstMaxMessages: 8,
       maxMessageChars: 1000, maxSendPerMinute: 0, maxSendPerHour: 0,
     },
   },

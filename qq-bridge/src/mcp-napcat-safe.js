@@ -503,8 +503,8 @@ async function resolveMissingSession(wantKey) {
     return { error: e?.message ?? String(e) };
   }
 }
-const MISSING_ARG_HINT = '缺 key/token：唤醒正文第一行就是 `[Token] <值>`，key 用 group:<群号> 或 private:<QQ>；'
-  + '两者照常传就行。如果这一轮确实没有在途会话可推断，就先别发，下一条消息进来时再处理。';
+const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>`，照抄即可；同一区域的 `[Session] group:<群号>` / '
+  + '`[Session] private:<QQ>` 就是本次要发的 key。两者照常传就行。如果这一轮确实没有在途会话可推断，就先别发，下一条消息进来时再处理。';
 
 {
   const rawTool = server.tool.bind(server);
@@ -547,20 +547,33 @@ const MISSING_ARG_HINT = '缺 key/token：唤醒正文第一行就是 `[Token] <
          * 现在**两个字段各判各的**：没声明 key 的工具根本不检查 key，只检查 token。 */
         const missingKey = hasKeyField && (callArgs.key === undefined || callArgs.key === null || callArgs.key === '');
         const missingToken = hasTokenField && (callArgs.token === undefined || callArgs.token === null || callArgs.token === '');
-        if (missingKey || missingToken) {
-          const got = await resolveMissingSession(missingKey ? '' : String(callArgs.key ?? ''));
-          if (got && !got.error) {
-            if (missingKey && got.key) callArgs.key = got.key;
-            if (missingToken && got.token) callArgs.token = got.token;
-            console.error(`[napcat-safe] ${name} 缺 ${[missingKey ? 'key' : '', missingToken ? 'token' : ''].filter(Boolean).join('/')}，已按会话补齐（${got.source || 'fallback'}）: ${callArgs.key || '(仅 token)'}`);
-          } else if (missingToken) {
-            // token 补不上就没法鉴权，只能让模型照着提示重来
+        /* 【2026-09-20 根因修复：桥**不再替模型猜 key**（修「pixiv 发图发错群」）】
+         * 旧写法在缺 key 时问桥 `/api/social/current-turn`，把"当前在途会话"的 key 填进去 ——
+         * 而多会话同时有在途回合时，桥会按"最近活动"挑一个（console-server 的 PICKED-newest-of-N）。
+         * 于是：群 A 的人要一张图，模型漏传 key，图就被发进了当时更活跃的群 B / 主人的私聊。
+         * 现在唤醒正文每一轮都带 `[Session] group:<群号>` 行（wake-send.js 的 sessionLine），
+         * 模型手上一直有确切答案；所以这里**缺 key 直接拒绝并指回那一行**，绝不猜。
+         * 只缺 token 仍然照旧补齐（token 不决定发到哪个会话，补错最多是鉴权失败，不会误导目标）。 */
+        if (missingKey) {
+          console.error(`[napcat-safe] ${name} 缺 key，按新规矩拒绝（不猜会话）`);
+          return {
+            content: [{
+              type: 'text',
+              text: '缺 key。唤醒正文第一行区域有一行 `[Session] group:<群号>` 或 `[Session] private:<QQ>` —— '
+                + '把那一行里的值照抄进 key 即可（例如 [Session] group:123456 → key="group:123456"）。'
+                + '不要凭记忆或用别的会话的 key：桥以前会替你猜目标会话，结果把图片发到过别的群，所以现在缺 key 一律拒绝。'
+            }],
+            isError: true
+          };
+        }
+        if (missingToken) {
+          const got = await resolveMissingSession(String(callArgs.key ?? ''));
+          if (got && !got.error && got.token) {
+            callArgs.token = got.token;
+            console.error(`[napcat-safe] ${name} 缺 token，已按会话补齐（${got.source || 'fallback'}）: ${callArgs.key || '(仅 token)'}`);
+          } else {
             console.error(`[napcat-safe] ${name} 缺 token 且无法推断：${got?.error ?? 'unknown'}`);
             return { content: [{ type: 'text', text: MISSING_ARG_HINT }], isError: true };
-          } else {
-            // 只缺 key（工具自己声明了 key）：补不上就**放行**，让工具自己按 token 推导目标会话 ——
-            // 这比以前直接拒绝强得多（qq_schedule_* 就是这么工作的）。
-            console.error(`[napcat-safe] ${name} 缺 key，交由工具按 token 推导：${got?.error ?? 'unknown'}`);
           }
         }
         if ((hasKeyField && !callArgs.key) || (hasTokenField && !callArgs.token)) {
@@ -781,9 +794,10 @@ registerTool(
     groupId: z.union([z.number(), z.string()]).optional().describe('Legacy param: group id (still accepted; prefer key)'),
     replyToMessageId: z.union([z.number(), z.string()]).describe('Message id being quoted/replied to (non-zero int, may be negative)'),
     message: z.string().describe('Text to send; plain text, no Markdown or CQ codes'),
-    token: z.string().optional().describe('Session token (required in default mode)')
+    token: z.string().optional().describe('Session token (required in default mode)'),
+    crossSession: z.boolean().optional().describe('ONLY when deliberately replying into a different session than the one you are answering; a mismatched key is refused instead of silently sent elsewhere')
   },
-  async ({ key, groupId, replyToMessageId, message, token }) => {
+  async ({ key, groupId, replyToMessageId, message, token, crossSession }) => {
     try {
       const cleanMessage = unquoteJsonString(message);
       // key 优先；模型偶尔用 groupId 老参数 → 转成 group:群号。
@@ -793,7 +807,7 @@ registerTool(
       if (!targetKey) throw new Error('必须传 key（group:群号 或 private:QQ号）或 groupId');
       const data = await agentApi('/api/social/send-message', {
         method: 'POST',
-        body: JSON.stringify({ key: targetKey, messages: cleanMessage, replyToMessageId, token: token || undefined }),
+        body: JSON.stringify({ key: targetKey, messages: cleanMessage, replyToMessageId, token: token || undefined, ...(crossSession === true ? { crossSession: true } : {}) }),
         headers: { 'x-agent-token': token || undefined },
         timeoutMs: 300000
       });
@@ -1171,9 +1185,10 @@ registerTool(
     atUserId: z.union([z.number(), z.string()]).optional().describe('QQ id to @ (group chats; needed for at-mentions). This must be a real person\'s QQ NUMBER - never a messageId: ids you would pass to replyToMessageId are NOT QQ numbers, and mixing them up makes the whole send fail. Never hand-write [CQ:at,qq=...] in the message text - it is sent verbatim as garbage. Not together with a quote; do not overuse.'),
     gapMode: z.enum(['auto', 'fixed', 'byLength']).optional().describe('auto = random (bridge default), fixed = interval, byLength = by text length'),
     gapMs: z.number().optional().describe('Interval for fixed mode (ms)'),
-    gaps: z.array(z.number()).optional().describe('Per-message intervals for fixed mode (length = count - 1)')
+    gaps: z.array(z.number()).optional().describe('Per-message intervals for fixed mode (length = count - 1)'),
+    crossSession: z.boolean().optional().describe('ONLY for deliberately sending into a DIFFERENT session than the one you are answering (e.g. the owner asks you in private to say something in a group): set true to confirm. key MUST be the [Session] value from the wake prompt you are answering - a wrong key is refused instead of silently sent elsewhere, so only set this when the target really is another chat. Never set it to "fix" a mismatch you did not intend.')
   },
-  async ({ key, token, messages, message, images, replyToMessageId, atUserId, gapMode, gapMs, gaps }) => {
+  async ({ key, token, messages, message, images, replyToMessageId, atUserId, gapMode, gapMs, gaps, crossSession }) => {
     try {
       // 兼容模型误用 message 单数字段（schema 也有同名兼容别名）；messages 为空时回退到 message。
       if (messages === undefined || messages === null || (Array.isArray(messages) && messages.length === 0)) {
@@ -1201,7 +1216,7 @@ registerTool(
       const imgList = Array.isArray(images) ? images.map(String).filter(Boolean) : [];
       const data = await agentApi('/api/social/send-message', {
         method: 'POST',
-        body: JSON.stringify({ key, messages: finalMessages, images: imgList, replyToMessageId, atUserId: atUserId ?? null, gapMode, gapMs, gaps }),
+        body: JSON.stringify({ key, messages: finalMessages, images: imgList, replyToMessageId, atUserId: atUserId ?? null, gapMode, gapMs, gaps, ...(crossSession === true ? { crossSession: true } : {}) }),
         headers: { 'x-agent-token': token },
         timeoutMs: 300000
       });
@@ -1967,9 +1982,10 @@ if (cfg.social?.meme?.enabled !== false) {
       token: z.string().describe('Session token'),
       file: z.string().describe('Meme file name from qq_meme_search, e.g., 蓝发女仆生气.webp; "<packId>/<file_name>" also works'),
       pack: z.string().optional().describe('Pack id shown in qq_meme_search results; only needed when several packs contain the same file_name'),
-      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to')
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
+      crossSession: z.boolean().optional().describe('ONLY when deliberately posting into a different session than the one you are answering; a key that is not this session\'s is refused otherwise')
     },
-    async ({ key, token, file, pack, replyToMessageId }) => {
+    async ({ key, token, file, pack, replyToMessageId, crossSession }) => {
       try {
         const packs = orderedMemePacks(getConfig());
         if (!packs.length) return { content: [{ type: 'text', text: memeMissingHint }] };
@@ -2019,7 +2035,7 @@ if (cfg.social?.meme?.enabled !== false) {
         if (hasQuote) {
           const data = await agentApi('/api/social/send-message', {
             method: 'POST',
-            body: JSON.stringify({ key, messages: [], images: [tmpPath], replyToMessageId }),
+            body: JSON.stringify({ key, messages: [], images: [tmpPath], replyToMessageId, ...(crossSession === true ? { crossSession: true } : {}) }),
             headers: { 'x-agent-token': token },
             timeoutMs: 120000
           });
@@ -2034,7 +2050,7 @@ if (cfg.social?.meme?.enabled !== false) {
         // 绕过本文件开头声明的"发送类工具强制白名单"。校验不通过时 agentApi 抛错，由外层 catch 报失败。
         await agentApi('/api/social/check-send', {
           method: 'POST',
-          body: JSON.stringify({ key, token, tool: kind === 'private' ? 'sendPrivate' : 'sendGroup' }),
+          body: JSON.stringify({ key, token, tool: kind === 'private' ? 'sendPrivate' : 'sendGroup', ...(crossSession === true ? { crossSession: true } : {}) }),
           timeoutMs: 15000
         });
         let data;
@@ -2956,37 +2972,41 @@ if (cfg.social?.tools?.imageSearch !== false) {
 }
 
 /* ── Pixiv 找图 / 发图（2026-09-18 主人要求："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
- * 走第三方平替站 x.pixigraph.xyz（官网要登录、机房 IP 常被挡），细节见 lib/pixiv.js 顶部注释。
+ * 【2026-09-20 主人定调：官方 pixiv API 优先，第三方镜像站 x.pixigraph.xyz 只做兜底】
+ *   每条能力都按 app-api（OAuth 长期令牌，见 lib/pixiv-auth.js）→ pixiv web ajax → 镜像站 的顺序试；
+ *   结果里如实报出这次是谁供的数据（搜索的 source/sourcesTried、详情的 source）。细节见 lib/pixiv.js 顶部。
  * 分工与"联网找图"完全同构：qq_pixiv_search 只查不发，qq_send_pixiv 负责真发。
  * 下载仍走 safeFetchBuffer（禁内网、限 15MB、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。
  *
  * 【2026-09-18 加本地筛选 + 自动翻页（方案 A：不登录、不用会员、不加部署）】
  *   实测镜像站只认 keyword / page（mode=s_mode=order=bl=type= 全部被忽略），所以标签/构图/尺寸/AI/
- *   时间排序这些筛选**只能在桥本地做**；本地筛就要多翻几页才凑得齐 → 有 scanPages。
+ *   时间排序这些筛选**只能在桥本地做**（三个来源先归一成同一行形状再筛，见 lib/pixiv.js）；
+ *   本地筛就要多翻几页才凑得齐 → 有 scanPages。
  *   参数含义、取值与"做不到"的边界全写在每个 .describe() 里（工具描述是模型唯一的说明书），
  *   实现细节与实测依据见 lib/pixiv.js；回归自测见 tools/test-pixiv-filters.mjs。 */
 if (cfg.social?.tools?.pixiv !== false) {
   registerTool(
     'qq_pixiv_search',
     'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for an illustration / original picture / fan art of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.'
-      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / r18 / scanPages are all filtered **locally** on the mirror site\'s rows: the mirror only understands keyword and page, no tag or sort parameter. One page is 60 works, at most scanPages pages are scanned (default 3, cap 10); the scan object and scanNotice in the result state honestly which pages were scanned, the site-wide total and the last page - **never present that as "I filtered the whole site"**. Sorting only supports upload time (date_desc newest first / date_asc / random), **not popularity or bookmark count** (the mirror does not return bookmark counts; passing it falls back to date_desc and says so in scan.warnings). R-18/R-18G is excluded by default; only an explicit r18=only/include lets it through.',
+      + '\n\n[SOURCES] The bridge queries the **official Pixiv API first** (app-api, then pixiv.net ajax) and only falls back to a third-party mirror when both fail; every result says which source served it (result.source / scan.source, plus sourcesTried when a source failed).'
+      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / r18 / scanPages are all filtered **locally** on the fetched rows (no source accepts tag/sort parameters). One page is 60 works (30 via app-api), at most scanPages pages are scanned (default 3, cap 10); the scan object and scanNotice in the result state honestly which pages were scanned, the site-wide total (0/unknown when the source does not report one) and the last page - **never present that as "I filtered the whole site"**. Sorting only supports upload time (date_desc newest first / date_asc / random), **not popularity or bookmark count** (no source returns bookmark counts; passing it falls back to date_desc and says so in scan.warnings). R-18/R-18G is excluded by default; only an explicit r18=only/include lets it through.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
       query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ. A keyword is not a tag - use the tags parameter to filter by tag'),
-      page: z.number().optional().describe('Which mirror page to start from (1-based, default 1). It is only the starting point; scanPages walks forward from here'),
+      page: z.number().optional().describe('Which page to start from (1-based, default 1). It is only the starting point; scanPages walks forward from here'),
       limit: z.number().optional().describe('Max rows to return, default 8, cap 20'),
-      r18: z.enum(['exclude', 'only', 'include']).optional().describe('How to treat R-18/R-18G: exclude = drop them (default, safe to post in QQ) / only = R-18 only / include = both. Omitted means exclude. Filtered locally (the mirror ignores mode=r18); in practice this site only returns all-ages works for a plain search (xRestrict is always 0), so "only" is often empty'),
+      r18: z.enum(['exclude', 'only', 'include']).optional().describe('How to treat R-18/R-18G: exclude = drop them (default, safe to post in QQ) / only = R-18 only / include = both. Omitted means exclude. Filtered locally (no source accepts a mode=r18 parameter); anonymous sources mostly return all-ages works for a plain search, so "only" is often empty'),
       tags: z.array(z.string()).optional().describe('Tags that must **all** match - case-insensitive substring match, e.g. ["初音ミク","VOCALOID"]. Passing this enables local filtering'),
       author: z.string().optional().describe('Author: a name -> case-insensitive substring match on userName; pure digits -> exact userId match'),
       orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('Shape: portrait = taller than wide / landscape = wider than tall / square (uses the original width/height; works missing either dimension never match)'),
       minWidth: z.number().optional().describe('Minimum width in pixels (original width); narrower works are dropped. Use it when you want a high-resolution image, e.g. 2000'),
       minHeight: z.number().optional().describe('Minimum height in pixels (original height); shorter works are dropped'),
       multiPage: z.boolean().optional().describe('true = only multi-image works (pageCount>1): for sets / series, or manga with panels'),
-      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (mirror aiType=2, plus an AI-tag fallback; measured: aiType=2 is AI, 1 is hand-drawn)'),
-      illustType: z.enum(['illust', 'manga']).optional().describe('Only illustrations (illust, illustType=0) or manga (manga, illustType=1). This site also has illustType=2 animations (ugoira); neither value includes them'),
-      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random (useful for "just give me any"). **Popularity / bookmark sorting is not supported** - the mirror has no bookmark count; popular/hot/rank fall back to date_desc with the reason written into scan.warnings'),
-      scanPages: z.number().optional().describe('How many pages to walk forward looking for matches: default 3, cap 10 (clamped). Filtering is local and one page holds only 60 works, so too few hits means walking further; scan.pagesScanned is the real number of pages scanned - few results does not mean the site has few'),
+      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (aiType=2, plus an AI-tag fallback; measured: aiType=2 is AI, 1 is hand-drawn)'),
+      illustType: z.enum(['illust', 'manga']).optional().describe('Only illustrations (illust, illustType=0) or manga (manga, illustType=1). illustType=2 animations (ugoira) belong to neither and are excluded by both values'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random (useful for "just give me any"). **Popularity / bookmark sorting is not supported** - no source returns a bookmark count; popular/hot/rank fall back to date_desc with the reason written into scan.warnings'),
+      scanPages: z.number().optional().describe('How many pages to walk forward looking for matches: default 3, cap 10 (clamped). Filtering is local and a page holds only 60 works (30 via app-api), so too few hits means walking further; scan.pagesScanned is the real number of pages scanned - few results does not mean the site has few'),
     },
     async ({ query, page, limit, r18, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
@@ -3002,18 +3022,19 @@ if (cfg.social?.tools?.pixiv !== false) {
 
   registerTool(
     'qq_send_pixiv',
-    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id - sends a work by that artist), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size=master (1200px, safe for QQ) or original (the untouched original file); when you give illustId/authorId the default is original, when you only give query the default is master. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
-      + '\n\n[WORKS BY ONE SPECIFIC ARTIST -> authorId ONLY] A keyword search matches titles/tags that contain the word (searching an artist name usually returns works other people tagged with that name). ① You have a work id -> illustId; ② you have an artist id (pixiv.net/users/<digits>) -> authorId, newest first, index picks which work; ③ an artist id is always better; an artist **name** only works when the bridge has a pixiv login cookie (ambiguous names return candidates for you to pick); ④ neither -> send any one of their works first, the returned authorId is the artist id. Never pass an artist id as illustId.'
-      + '\n\n[LOSSLESS ORIGINAL] size=original sends the Pixiv original file itself (downloaded from pximg, stored byte-for-byte, no scaling, no re-encode, no second compression; the returned sha256/bytes are exactly the bytes that were sent). master is the 1200px jpg. An original over 15MB is refused (the result says so) - use size=master.'
-      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages are filtered **locally** on the mirror rows (the mirror only understands keyword and page); one page is 60 works, at most scanPages pages (default 3, cap 10), and index picks from the **filtered** list. To inspect the filtering first (how many dropped, pages scanned, candidates) use qq_pixiv_search. Sorting supports upload time only (date_desc/date_asc/random), **not popularity/bookmarks** (the mirror has no bookmark count). This tool **always excludes R-18/R-18G** (it deliberately has no r18 parameter, so unsuitable content cannot be posted into QQ); use qq_pixiv_search if you need to see R-18.',
+    'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id or an artist name - the bridge looks the id up itself), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size defaults to **original** on all three paths (the untouched original file); pass size=master for the 1200px jpg. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
+      + '\n\n[WORKS BY ONE SPECIFIC ARTIST] A keyword search matches titles/tags that contain the word (searching an artist name usually returns works other people tagged with that name). ① You have a work id -> illustId; ② you have an artist id (pixiv.net/users/<digits>) -> authorId, newest first, index picks which work; ③ you only have an artist **name** -> pass it as authorId anyway: the bridge resolves ids by name itself (official user search; ambiguous names come back as candidates for you to choose from) - **never ask the user for an artist id**; ④ neither -> send any one of their works first, the returned authorId is the artist id. Never pass an artist id as illustId.'
+      + '\n\n[LOSSLESS ORIGINAL] size=original sends the Pixiv original file itself (per-page urls from the official API when available, downloaded from pximg, stored byte-for-byte, no scaling, no re-encode, no second compression; the returned sha256/bytes are exactly the bytes that were sent). master is the 1200px jpg. An original over 15MB is refused (the result says so) - use size=master.'
+      + '\n\n[SOURCES] The bridge queries the **official Pixiv API first** (app-api, then pixiv.net ajax) and only falls back to a third-party mirror when both fail; the result reports pixivSource (which API gave the metadata) and fetchedVia (pximg-direct or mirror-proxy).'
+      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages are filtered **locally** on the fetched rows; one page is 60 works (30 via app-api), at most scanPages pages (default 3, cap 10), and index picks from the **filtered** list. To inspect the filtering first (how many dropped, pages scanned, candidates) use qq_pixiv_search. Sorting supports upload time only (date_desc/date_asc/random), **not popularity/bookmarks**. This tool **always excludes R-18/R-18G** (it deliberately has no r18 parameter, so unsuitable content cannot be posted into QQ); use qq_pixiv_search if you need to see R-18.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
       query: z.string().optional().describe('Search keyword (used when no illustId/authorId is given), e.g. 初音ミク 壁纸. Note: a keyword search matches tags/titles and cannot find "works by this specific person" - use authorId for that'),
       illustId: z.string().optional().describe('A Pixiv **work id** or a pixiv.net/artworks/<digits> link (NOT an artist id). Sends that exact work; every other search/filter parameter is ignored and size defaults to original'),
-      authorId: z.string().optional().describe('Artist: an **artist id** (pixiv.net/users/<digits>, or the bare number) is the reliable form; an artist **name** also works when the bridge has a pixiv login cookie configured (otherwise it reports it is unsupported). Sends that artist\'s work number `index`, newest first; an ambiguous name returns candidates instead of guessing. Mutually exclusive with illustId; other filter parameters are ignored'),
+      authorId: z.string().optional().describe('Artist: an **artist id** (pixiv.net/users/<digits>, or the bare number) OR an artist **name** - the bridge looks the id up by name itself via the official user search, so never ask the user for an id. Sends that artist\'s work number `index`, newest first; an ambiguous name returns candidates instead of guessing. Mutually exclusive with illustId; other filter parameters are ignored'),
       index: z.number().optional().describe('Zero-based pick (default 0): with authorId = which work of that artist, newest first; with query = which filtered search hit'),
-      size: z.enum(['master', 'original']).optional().describe('original = the Pixiv original file (lossless, byte-for-byte; the default when illustId/authorId is given); master = 1200px jpg (the default when only query is given). An original over 15MB is refused - use master'),
+      size: z.enum(['master', 'original']).optional().describe('Default **original** (the Pixiv original file, lossless, byte-for-byte) for all three paths; pass master for the 1200px jpg (much smaller). An original over 15MB is refused - use master'),
       page: z.number().optional().describe('Which page to send for a multi-page work (0-based, default 0). This is a page **inside the work**, not a search page'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
       tags: z.array(z.string()).optional().describe('Tags that must **all** match (case-insensitive substring), e.g. ["初音ミク","壁紙"]. Passing this enables local filtering'),
@@ -3022,20 +3043,20 @@ if (cfg.social?.tools?.pixiv !== false) {
       minWidth: z.number().optional().describe('Minimum width in pixels (original width); use it when you want a high-resolution image'),
       minHeight: z.number().optional().describe('Minimum height in pixels (original height)'),
       multiPage: z.boolean().optional().describe('true = only multi-image works (pageCount>1); combine with page to pick which image of a set'),
-      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (mirror aiType=2 plus an AI-tag fallback)'),
+      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (aiType=2 plus an AI-tag fallback)'),
       illustType: z.enum(['illust', 'manga']).optional().describe('Only illustrations (illust, illustType=0) or manga (manga, illustType=1); illustType=2 animations (ugoira) are excluded by both values'),
-      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random. **Popularity / bookmark sorting is not supported** (the mirror has no bookmark count); it falls back to date_desc and writes the reason into a warning'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random. **Popularity / bookmark sorting is not supported** (no source returns a bookmark count); it falls back to date_desc and writes the reason into a warning'),
       scanPages: z.number().optional().describe('How many pages to walk forward looking for matches: default 3, cap 10. Filtering is local, so too few hits means walking further'),
+      crossSession: z.boolean().optional().describe('ONLY when deliberately sending into a different session than the one you are answering; the key must be that session\'s own (a key that is not this session\'s is refused)'),
     },
-    async ({ key, token, query, illustId, authorId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
+    async ({ key, token, query, illustId, authorId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages, crossSession }) => {
       try {
         const wantId = parsePixivId(illustId);
         const wantAuthor = String(authorId ?? '').trim();
-        /* size 的默认值分两种来源（2026-09-18 主人定："按号发的必须是原图无损"）：
-         *   · 给了 illustId / authorId = "我就要这一张" → 默认 original（真原图）；
-         *   · 只给 query = "搜一张给我" → 沿用旧的 master（1200px，QQ 友好）。
-         * 显式传 size 时永远以调用方为准。 */
-        const sizeEff = String(size ?? (wantId || wantAuthor ? 'original' : 'master')).toLowerCase() === 'original' ? 'original' : 'master';
+        /* size 的默认值（2026-09-20 主人定："发图默认原图，不要缩略图"）：三条路都默认 original。
+         * 以前只有"给了 illustId/authorId"才默认原图，只给 query 时回落 master —— 主人明确要改掉这一点；
+         * 显式传 size 时永远以调用方为准，怕超 15MB 就传 master。 */
+        const sizeEff = String(size ?? 'original').toLowerCase() === 'master' ? 'master' : 'original';
 
         let work = null;
         let originals = [];       // 逐页原图直链（按号取图时才有）
@@ -3045,8 +3066,8 @@ if (cfg.social?.tools?.pixiv !== false) {
         if (wantId || wantAuthor) {
           /* ── 按作品号 / 按画师号取图（2026-09-18 修「试了 0 个地址」）────────────────
            * 旧写法在这里造了个 thumbUrl 为空的对象就往下走，而候选是**从缩略图推日期路径**的，
-           * 于是 0 个候选 —— 这条路从来没通过。现在先按号把详情和原图直链问出来（pixiv 直联优先，
-           * 镜像站兜底），见 lib/pixiv.js 顶部【按作品号取图】。 */
+           * 于是 0 个候选 —— 这条路从来没通过。现在先按号把详情和原图直链问出来（2026-09-20 起
+           * 官方 app-api 优先，web ajax 次之，镜像站兜底），见 lib/pixiv.js 顶部【按作品号取图】。 */
           if (wantId) {
             work = await pixivIllustDetail(wantId);
           } else {
@@ -3063,13 +3084,14 @@ if (cfg.social?.tools?.pixiv !== false) {
                 content: [{
                   type: 'text',
                   text: `「${resolved.name}」在 Pixiv 上有 ${resolved.candidates.length} 个同名/近似画师，分不清是哪一个，没敢乱发。候选（按"名字完全相等 → 作品多"排的）：\n${lines.join('\n')}\n`
-                    + '把候选（尤其主页链接）念给用户确认，或让 ta 给一个 pixiv.net/users/<数字> 或任意一件作品链接（pixiv.net/artworks/<数字>），再用 authorId / illustId 发。',
+                    + '把候选（尤其主页链接）念给用户确认是哪一个 —— 不要反过来问用户要画师号（号是桥自己查的）；'
+                    + '用户认得主页的话，也可以让 ta 直接给一件作品链接（pixiv.net/artworks/<数字>）走 illustId。',
                 }],
                 isError: true,
               };
             }
             if (resolved.kind !== 'id') {
-              return { content: [{ type: 'text', text: `画师入参不认识：「${wantAuthor}」。给画师号（如 1554775）、pixiv.net/users/<数字> 链接，或者直接用名字（需要桥配了 pixiv 登录 cookie）。` }], isError: true };
+              return { content: [{ type: 'text', text: `画师入参不认识：「${wantAuthor}」。给画师名（桥会自己查号）、画师号（如 1554775）或 pixiv.net/users/<数字> 链接。` }], isError: true };
             }
             const { userId, ids } = await pixivUserWorkIds(resolved.id);
             if (!ids.length) {
@@ -3141,14 +3163,16 @@ if (cfg.social?.tools?.pixiv !== false) {
         const sources = pixivImageSources(work, { page: pageIdx, size: sizeEff, originals });
         let got = null;
         let gotFrom = '';
+        let gotVia = '';          // pximg-direct / mirror-proxy（2026-09-20：如实告诉模型字节是谁给的）
         const tried = [];
         for (const s of sources) {
           try {
             got = await safeFetchBuffer(s.url, MAX_IMAGE_FETCH_BYTES, s.referer ? { referer: s.referer } : null);
             gotFrom = s.url;
+            gotVia = s.referer ? 'pximg-direct' : 'mirror-proxy';
             break;
           } catch (e) {
-            tried.push(`${s.referer ? '[直联] ' : '[代理] '}${s.url.slice(0, 96)} → ${e?.message ?? e}`);
+            tried.push(`${s.referer ? '[直联] ' : '[代理]'}${s.url.slice(0, 96)} → ${e?.message ?? e}`);
           }
         }
         if (!got) {
@@ -3178,6 +3202,8 @@ if (cfg.social?.tools?.pixiv !== false) {
         const body = { key, messages: [], images: [tmpPath] };
         const rid = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
         if (rid) body.replyToMessageId = rid;
+        // 跨会话闸门（见 console-server 的 crossSessionRefusal）：目标不是本会话时要显式声明
+        if (crossSession === true) body.crossSession = true;
         const data = await agentApi('/api/social/send-message', {
           method: 'POST',
           body: JSON.stringify(body),
@@ -3207,6 +3233,10 @@ if (cfg.social?.tools?.pixiv !== false) {
               sha256,
               format: ext,
               fetchedFrom: gotFrom,
+              // 元数据是谁给的（app-api / web-ajax / mirror）+ 字节是谁给的（直联 i.pximg / 镜像代理）
+              pixivSource: work.source || undefined,
+              fetchedVia: gotVia || undefined,
+              contentKind: sizeEff === 'original' ? 'pixiv-original' : 'pixiv-master',
               originalsNote: originalsNote || undefined,
               sent: data?.sent ?? null,
               quoted: data?.quoted ?? null,

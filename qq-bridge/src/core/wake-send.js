@@ -333,6 +333,14 @@ function wakeRefLine(key) {
       : '；qq_set_wake_config 时把 triggers.probability 填成这个值。');
 }
 
+/* 【2026-09-20 唤醒正文补 [Session] 行 —— 修「pixiv 发图发错群」的根因】
+ * 现场：工具层允许"模型没传 key"时由桥去猜（问 /api/social/current-turn 拿"当前在途会话"，
+ * 多会话在途时还按最近活动挑一个），于是**群 A 的问图请求可能被发到群 B**。
+ * 猜错的根源是"模型手上没有确切的 key"：正文里只有 [Token]，key 得靠记忆/推断。
+ * 现在把 key 直接写进正文（`[Session] group:123` / `private:123`，约 25 字符、稳定前缀、缓存读计价），
+ * 同时工具层改成**永不猜 key**：缺 key 就报错并指回这一行。模型照抄即可，不再有猜错的机会。 */
+const sessionLine = (key) => `[Session] ${key}\n`;
+
 export function buildWakePrompt(key, reason) {
   const st = getSocialState(key);
   // 【2026-09-12】首轮也要带 `[OWNER]` 标记：persona 的 [OWNER MODE] 只认这个标记，
@@ -348,7 +356,7 @@ export function buildWakePrompt(key, reason) {
   // 【2026-09-12 令牌行改英文括号】主人要求：【令牌】→ [Token]（英文标签 + 英文方括号）。
   // 语义不变（仍是"本会话当前有效令牌"），但标签换成英文后与其余唤醒标记（[Wake]/[Unread]/[OWNER]）
   // 同一风格；出站泄露检测的标签正则已同步接受 [Token]（见 lib/text-safe.js）。
-  const tokenLine = `[Token] ${st.agentToken}\n${ownerMark}${notOwnerMark}\n`;
+  const tokenLine = `[Token] ${st.agentToken}\n${sessionLine(key)}${ownerMark}${notOwnerMark}\n`;
   const memoryText = formatMemory(st);
   // 注入长期档案（SQLite）：私聊注入对方档案，群聊注入最近活跃群友的档案。
   let profileText = '';
@@ -987,7 +995,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   //     [Mid-turn] N new message(s) after your last bubble - not answered yet.
   //     owner(id:xxx): ……
   // 实测同批 2 条时正文 690 → 约 230 字符；规则一条没丢，只是不再随每次注入重复。
-  const text = `[Token] ${st.agentToken}\n[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
+  const text = `[Token] ${st.agentToken}\n${sessionLine(key)}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
   const mySeq = (steerSeq += 1);
   try {
     const res = await withTimeout(
@@ -1558,7 +1566,7 @@ export async function sendWakePrompt(key, reason) {
     if (!hasAnyTool) {
       const unread = (st.unread || []).length;
       const rMap = { private: 'private', atMention: '@', poke: 'poke', probability: 'probability', proactiveCheck: 'proactive', replyCheck: 'replyCheck' };
-      promptText = `[Token] ${st.agentToken}\n${nowLine}[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}[Session] ${key}\n[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     } else {
       // 哨兵轮 prompt 每轮都带当前令牌：模型不必凭记忆/跨轮次查找 token，
       // 杜绝"上下文轮换后 token 抄错 → 工具全 403 → 模型看不到消息 → 空唤醒乱回"链路。
@@ -1580,7 +1588,7 @@ export async function sendWakePrompt(key, reason) {
        * 实测（state/tool-calls.jsonl 1966 次调用）qq_send_sticker 只有 5 次（≈1/54 条消息），
        * 而配置的概率是 0.6 —— 低 15~20 倍，正是"每会话只掷一次骰"的形状。
        * 抽签函数本身是纯的（只读配置 + Math.random，不写任何状态），所以每轮都掷没有副作用。 */
-      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     }
   } else {
     // 首次唤醒（或轮换到新会话后的首个真实回合）：完整 base + 最近消息滑动窗口 + 重置提示。

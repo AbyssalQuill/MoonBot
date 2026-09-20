@@ -76,8 +76,10 @@ import { state, loadConfig, loadState, saveState, watchConfigFile } from './core
 import { acquireLock, releaseLock } from './core/runtime.js';
 import { enqueueSend, currentSendChain } from './core/send-chain.js';
 import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './core/qq-send.js';
-// Pixiv 登录态自检：cookie 失效时主动提醒主人（主人只填一次，掉了要有人告诉他），见 core/pixiv-watch.js
+// Pixiv 登录态自检：登录态失效时主动提醒主人（长期令牌 + 旧 cookie 两条路），见 core/pixiv-watch.js
 import { startPixivCookieWatch } from './core/pixiv-watch.js';
+// Pixiv 长期令牌自动轮换（PHPSESSID 换一次 refresh_token 之后，桥自己每小时换 access_token）
+import { startPixivTokenRefresh, pixivAuthState } from './lib/pixiv-auth.js';
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from './lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from './lib/social-timeline.js';
 import { createMediaDomain } from './core/media.js';
@@ -411,8 +413,8 @@ async function main() {
   const { sendRich, musicSearch, buildMusicCard } = createMediaDomain(cfg);
   setConsoleMedia(sendRich, musicSearch, buildMusicCard);
 
-  /* Pixiv 登录态看护：只在"配了 cookie 但它失效了"时才给主人发一条私聊提醒（最多一天一次）。
-   * 主人只肯填一次 cookie，而 cookie 没法自动续 —— 那就至少别让他自己去发现它过期了。 */
+  /* Pixiv 登录态看护：只在"登录态失效"时才给主人发一条私聊提醒（最多一天一次）。
+   * 2026-09-20 起登录态的主流形态是 OAuth 长期令牌（自动轮换），cookie 只当旧安装的兼容路径。 */
   try {
     startPixivCookieWatch({
       logger: (m) => log(m),
@@ -421,6 +423,15 @@ async function main() {
     });
   } catch (error) {
     log('[pixiv] 登录态看护启动失败（不影响主流程）:', error?.message ?? error);
+  }
+
+  /* Pixiv 长期令牌自动轮换：每 50 分钟看一眼，access_token 快过期就换，并把轮换后的 refresh_token 落盘。
+   * 只有手里**真的有** refresh_token 才说这句话 —— 没配的时候不该在启动日志里假装有个登录态。 */
+  try {
+    startPixivTokenRefresh({ logger: (m) => log(m) });
+    if (pixivAuthState().hasRefreshToken) log('[pixiv] token 自动轮换已启动（间隔 50 分钟）');
+  } catch (error) {
+    log('[pixiv] token 自动轮换启动失败（不影响主流程）:', error?.message ?? error);
   }
 
   if (!cfg.allow.private.length && !cfg.allow.groups.length && cfg.allowAllWhenEmpty) {

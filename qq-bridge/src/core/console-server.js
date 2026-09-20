@@ -514,6 +514,48 @@ export function startConsoleServer() {
   // default会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
   const SessionAllowed = isSessionAllowedInCurrentMode;
   const ToolEnabled = (flag) => cfgRef.social?.tools?.[flag] !== false;
+
+  /* ── 【2026-09-20 防「发错群」：跨会话发送必须显式声明】────────────────────────────────
+   * 背景（主人 09-20 转述的用户反馈）：pixiv 发图发到别的群去了。查下来的根因有两处，
+   * 一处已在工具层修掉（缺 key 时桥会去猜"当前在途会话"，多会话在途会挑最近活跃的那个），
+   * 另一处就是这里：agentTokenOk() 只要求"token 是本桥签发的合法令牌"，**不要求它属于目标会话**
+   * （跨会话代发是**有意支持**的功能：主人在私聊让 AI 去群里带话，或受信任好友让 AI 转述），
+   * 于是"模型把另一个会话的 key 抄进参数"与"有意跨会话发送"在服务端长得一模一样，桥只能照发。
+   *
+   * 现在把两者拆开：token 自己属于哪个会话 = 调用方会话（callerKeyOfToken）；
+   *   · 目标 == 调用方  → 正常发送（绝大多数调用走这条，零变化）；
+   *   · 目标 != 调用方  → 只有参数里显式写 `crossSession: true` 才放行，否则 403 并**把两个会话都报出来**
+   *     （含群名），让模型自己看清是不是抄错了；确实要跨会话转达的，加上这个字段重发一次即可。
+   * 这样"抄错 key"从"静默发错群"变成"一次明确的 403 + 精确提示"。
+   *
+   * 注意：`trustedCrossSessionUids` 的语义不受影响（受信任好友/主人仍可跨会话发送），只是改成
+   * 需要把 `crossSession: true` 一起传——工具的 schema 里已经声明了这个参数。 */
+  const callerKeyOfToken = (token) => {
+    const t = String(token ?? '').trim();
+    if (!t) return '';
+    for (const [k, st] of social.conversations) if (st && st.agentToken && st.agentToken === t) return k;
+    return '';
+  };
+  const keyLabel = (k) => {
+    try {
+      if (String(k).startsWith('group:')) {
+        const name = getGroupDisplayName(String(k).slice(6));
+        if (name) return `${k}（${name}）`;
+      }
+    } catch { /* 拿不到群名不影响判定 */ }
+    return String(k);
+  };
+  const crossSessionRefusal = (token, targetKey, crossFlag) => {
+    if (crossFlag === true) return '';                       // 模型显式声明"我就是要发到别的会话"
+    const callerKey = callerKeyOfToken(token);
+    if (!callerKey) return '';                               // 认不出调用方（如管理端请求）→ 不拦
+    const target = canonicalKey(targetKey) ?? String(targetKey ?? '');
+    if (!target || target === callerKey) return '';
+    log(`[cross-session] 拒绝：调用方 ${callerKey} 想发到 ${target}（未声明 crossSession:true）`);
+    return `这条调用带的是 ${keyLabel(callerKey)} 的令牌，却要发到 ${keyLabel(target)} —— 桥不替你猜目标会话。`
+      + `如果你就是在回答 ${keyLabel(callerKey)}，把 key 改成 "${callerKey}"（唤醒正文里 [Session] 行就是它）；`
+      + `如果确实要发到 ${keyLabel(target)}（跨会话转达/转发），把参数 crossSession 设为 true 再发一次。`;
+  };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
     const SECURITY_HEADERS = {
@@ -2139,6 +2181,9 @@ export function startConsoleServer() {
           return;
         }
         if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
+        /* 【2026-09-20 防「发错群」】令牌属于哪个会话 = 调用方会话；目标 key 却是另一个会话时，
+         * 这要么是**有意跨会话转达**，要么是**模型抄错了 key**——桥分不出来，所以要求显式声明。 */
+        { const refuse = crossSessionRefusal(req.headers['x-agent-token'], key, body.crossSession); if (refuse) { sendJson({ ok: false, error: refuse }, 403); return; } }
         if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (req.headers['x-agent-token'] && !ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
         if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'default 模式发送必须携带 agent token' }, 403); return; }
@@ -2292,17 +2337,13 @@ export function startConsoleServer() {
           } catch (eLint) {
             log(`[send] 发送后质量软提醒异常（不影响发送结果）: ${eLint?.message ?? eLint}`);
           }
-          /* 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**桥自动加上的引用**也报回去：
-           * 以前自动引用是偷偷加的（结果里 quoted 恒为 null），模型既不知道自己引用了谁、
-           * 也没法解释或纠正。现在 autoQuoted 会列出「第几条气泡引用了哪条消息」。 */
-          const autoQuoted = (Array.isArray(sentMessages) ? sentMessages : [])
-            .map((x, i) => (x && x.quoted ? { bubble: i + 1, quotedId: String(x.quoted) } : null))
-            .filter(Boolean);
+          /* 【2026-09-20 去掉自动引用后，这里不再需要 autoQuoted】以前桥会自己猜着加引用框，
+           * 所以要把"我替你引用了哪条"报回模型；现在引用只可能来自模型显式传的 replyToMessageId，
+           * 上方 `quoted` 就是那条（模型自己传的，它当然知道），再回一个 autoQuoted 只会白占字符。 */
           sendJson({
             ok: true, key, sent: sentMessages.length, failed: sendList.length - sentMessages.length, delays, quoted: quotedInfo,
             ...(idem.skipped.length ? { dedupSkipped: idem.skipped.length } : {}),
             ...(atDropped ? { atUserIdDropped: atDropped } : {}),
-            ...(autoQuoted.length ? { autoQuoted } : {}),
             // atNote 与 burstHint 共用 hint 字段：两个都有时合并，别让后者把 atUserId 的回执吞掉
             ...((atNote || burstHint) ? { hint: [atNote, burstHint].filter(Boolean).join(' ') } : {}),
             ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {})
@@ -2896,6 +2937,9 @@ export function startConsoleServer() {
           return;
         }
         if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
+        /* 跨会话闸门只装在 `/api/social/send-message`（内容发送的主干线，pixiv/表情包/正文都走它）。
+         * 表情/语音这些独立端点没装：它们的工具 schema 里也没有 crossSession 可传，装了就等于
+         * "拒绝且无出口"（模型会照着提示重试到死）。要覆盖它们，先在工具层加上这个参数。 */
         if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (req.headers['x-agent-token'] && !ToolEnabled('sendSticker')) { sendJson({ ok: false, error: '工具未启用：qq_send_sticker' }, 403); return; }
         if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'default 模式发送必须携带 agent token' }, 403); return; }
@@ -4172,20 +4216,15 @@ export function startConsoleServer() {
           sendJson({ ok: true, key: k, token: String(st?.agentToken ?? ''), source: 'active-turn' });
           return;
         }
-        /* 【2026-09-18 修「qq_image_search 之类还是报缺 key/token」】
-         * 多个会话同时在途时旧实现直接回 ambiguous → MCP 包装层补不上 key/token →
-         * 返回那句"缺 key/token"，工具整个失败（主人就踩到了：只传 query 调找图）。
-         * 现在按「最近有活动」挑一个：lastAiSeenAt / lastAiReplyAt / lastIncomingAt 取最新。
-         * 仍然把 ambiguous 的事实带回去（source=PICKED-newest-<n>），调用方可以据此提示"我按最近的会话猜的"。 */
+        /* 【2026-09-20 主人报「pixiv 发图发错群」→ 这里就是那个"猜"的地方，已删掉】
+         * 09-18 为了修"缺 key/token 报错"加的规则是：多个会话在途时按"最近活动"挑一个当目标。
+         * 后果：群 A 的人要图、模型漏传 key → 图发进了当时更活跃的群 B / 主人私聊（发错群）。
+         * 现在改成**绝不代替调用方选会话**：多个在途就回 ambiguous（连同在途会话列表），
+         * 由调用方（MCP 工具层）明确告知模型"照抄唤醒正文的 [Session] 行"，而不是替他猜。
+         * 只传了 key 的那条分支照旧（调用方已经知道自己要哪个会话，只是来拿 token）。 */
         if (active.length > 1) {
-          const score = (k) => {
-            const st = social.conversations.get(k) || {};
-            return Math.max(Number(st.lastAiSeenAt) || 0, Number(st.lastAiReplyAt) || 0, Number(st.lastIncomingAt) || 0, 0);
-          };
-          const picked = active.slice().sort((a, b) => score(b) - score(a))[0];
-          const st = social.conversations.get(picked);
-          log(`[current-turn] ${active.length} 个会话在途，按最近活动挑中 ${picked}（其余：${active.filter((x) => x !== picked).join(', ')}）`);
-          sendJson({ ok: true, key: picked, token: String(st?.agentToken ?? ''), source: `PICKED-newest-of-${active.length}`, active });
+          log(`[current-turn] ${active.length} 个会话同时在途 → 回 ambiguous，不替调用方挑（避免发错群）：${active.join(', ')}`);
+          sendJson({ ok: false, reason: 'ambiguous-active-turn', error: '多个会话同时在途，不能替你挑目标会话', active }, 409);
           return;
         }
         sendJson({ ok: false, reason: 'no-active-turn', active }, 409);
@@ -4204,6 +4243,9 @@ export function startConsoleServer() {
           sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403);
           return;
         }
+        /* 直连 OneBot 的发送路径（如 qq_send_meme 不带引用时）不过 /api/social/send-message，
+         * 但发之前一定会来问一次 check-send —— 跨会话闸门装在这里，那条路才关得上（见 crossSessionRefusal）。 */
+        { const refuse = crossSessionRefusal(token, key, body.crossSession); if (refuse) { sendJson({ ok: false, error: refuse }, 403); return; } }
         if (!SessionAllowed(key)) {
           sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
           return;

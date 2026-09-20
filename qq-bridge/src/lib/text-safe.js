@@ -47,6 +47,28 @@ export function redactSensitive(obj) {
   return obj;
 }
 
+/* 【2026-09-20】把「这次调用要发给哪个会话」单独抽出来落盘。
+ * 为什么需要：会话令牌本身就是 QQ/群号（见本文件下方说明），所以 `key:"private:1736784911"`
+ * 里的号码会被脱敏成 `private:***` —— 结果 **工具日志根本看不出消息发去了哪个会话**，
+ * 主人报「pixiv 发图发错群」时我查不到目标，只能靠翻会话日志。
+ * 群号/QQ 号属于日常信息（本文件下方也这么说），不是凭证；这里只在**工具日志**里补一个
+ * 未脱敏的 `target` 字段用于诊断，token 依然照旧脱敏。 */
+export function extractToolTargetKey(args) {
+  let parsed = args;
+  for (let i = 0; i < 4; i++) {
+    if (typeof parsed !== 'string') break;
+    try { const next = JSON.parse(parsed); parsed = next; if (typeof next !== 'string') break; } catch { break; }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+  const key = parsed.key ?? parsed.targetKey ?? parsed.sessionKey;
+  if (typeof key === 'string' && /^(group|private):\d+$/.test(key.trim())) return key.trim();
+  const gid = parsed.groupId ?? parsed.group_id;
+  if (gid !== undefined && gid !== null && /^\d+$/.test(String(gid))) return `group:${String(gid)}`;
+  const uid = parsed.userId ?? parsed.user_id;
+  if (uid !== undefined && uid !== null && /^\d+$/.test(String(uid))) return `private:${String(uid)}`;
+  return '';
+}
+
 // 工具调用参数清洗（落盘/上报前）：逐层解 JSON 字符串后递归脱敏，避免 token 明文落盘。
 export function sanitizeToolArgs(args) {
   if (args === undefined || args === null) return null;
@@ -79,7 +101,9 @@ export function sanitizeToolArgs(args) {
 //      注：2026-09-12 起唤醒正文里的令牌行由【令牌】改为 [Token]（英文方括号），
 //      所以这里**必须同时认方括号形态**，否则模型把令牌抄进 QQ 消息时不再被拦。
 // “群号 / QQ号 / 账号 / 手机号”等日常称呼标签刻意不在标签表内 → 不误伤。
-const TOKEN_LABEL_SRC = '(?:\\u3010?\\s*(?:会话)?令牌\\s*\\u3011?|\\[\\s*(?:会话|session\\s*)?token\\s*\\]|x-agent-token|sessionToken|session[\\s-]?token|access[\\s-]?token|agent[\\s-]?token|api[\\s-]?key|token|密钥|口令)';
+// 【2026-09-20】新增 `[Session] <key>` 标签：唤醒正文从这一天起带这一行（wake-send.js sessionLine），
+// 而 key 里就含令牌本体（group:<群号> / private:<QQ>），所以模型照抄整行发进 QQ 时必须同样被拦。
+const TOKEN_LABEL_SRC = '(?:\\u3010?\\s*(?:会话)?令牌\\s*\\u3011?|\\[\\s*(?:会话|session\\s*)?token\\s*\\]|\\[\\s*session\\s*\\]|x-agent-token|sessionToken|session[\\s-]?token|access[\\s-]?token|agent[\\s-]?token|api[\\s-]?key|token|密钥|口令)';
 const TOKEN_SEP_SRC = '(?:\\s*(?:是|为|[:=：])\\s*|\\s+)?';
 export function tokenDisclosureIn(text) {
   const s = String(text ?? '');
@@ -92,6 +116,10 @@ export function tokenDisclosureIn(text) {
     try {
       const re = new RegExp(TOKEN_LABEL_SRC + TOKEN_SEP_SRC + '["\'`]?' + esc + '(?![A-Za-z0-9])', 'i');
       if (re.test(s)) return { kind: 'label', token: t };
+      /* [Session] 行的形态是 `[Session] group:868756515`，标签与令牌之间还夹着 `group:`，
+       * 上面那条（标签后直接跟令牌）匹配不到，所以单独再配一条。 */
+      const reSession = new RegExp('\\[\\s*session\\s*\\]\\s*(?:group|private)?\\s*[:：]\\s*["\'`]?' + esc + '(?![A-Za-z0-9])', 'i');
+      if (reSession.test(s)) return { kind: 'label', token: t };
     } catch {}
   }
   return null;
