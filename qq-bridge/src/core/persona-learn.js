@@ -21,7 +21,7 @@ import { STATE_DIR, ROOT } from '../lib/paths.js';
 import { readJsonSafe, atomicWriteJson, atomicWriteText } from '../lib/json-fs.js';
 import { dshReady } from './dsh-session.js';
 import { learnerSessions, learnerWaiters, learnerCollectors, markPersistentLearner, unmarkPersistentLearner, isLearnerSessionGone } from './slang.js';
-import { initMemoryDb, setProfileField, profileDisplayName } from './memory.js';
+import { initMemoryDb, setProfileField, getProfile, profileDisplayName } from './memory.js';
 import { ensureLearningToken } from './learning-token.js';
 import { composePersonaProfile } from './persona-text.js';
 
@@ -479,9 +479,35 @@ export function buildPersonaProfileText(parsed) {
   return composePersonaProfile(parsed);
 }
 
+/**
+ * 【2026-09-20 修「学一轮把主人档案写死成两个词」】
+ * 现场：主人私聊/群里的画像本来是几百字的成文（技术能力、说话风格、常去的梗…），
+ * 09-20 07:41 那一轮学习模型只交了 nickname，`buildPersonaProfileText` 于是产出
+ * `昵称「群魅魔/AbyssalQuill」。` —— **两个词**，而 persistPersonaResult 无条件写库，
+ * 旧的那段长文被整条覆盖（主人的原话："兜底也不用写死两个词啊…我以前是有的是不是被清除了"）。
+ * 判据：新文本明显比旧的短、且旧文本够长（>120 字）时，视为"这轮没学到东西"，**保留旧文**，
+ * 只在旧文里确实缺这个新字段时把它补在后面（补之前先去重，避免堆重复句子）。
+ * 反过来：新文本更长、或旧文本本来就短 → 照常以新的为准（正常的"越学越全"）。
+ */
+export function mergePersonaProfileText(prevText, nextText) {
+  const prev = String(prevText ?? '').trim();
+  const next = String(nextText ?? '').trim();
+  if (!next) return prev;
+  if (!prev) return next;
+  const KEEP_OLD_MIN = 60;       // 旧文至少这么长才值得保（短档案随便覆盖）
+  if (prev.length >= KEEP_OLD_MIN && next.length < Math.max(KEEP_OLD_MIN, prev.length * 0.5)) {
+    return next && !prev.includes(next) ? `${prev}；${next}`.slice(0, 4000) : prev;
+  }
+  return next;
+}
+
 export function persistPersonaResult(uid, parsed, sampleCount) {
   const now = Date.now();
-  const profileText = buildPersonaProfileText(parsed);
+  const rawProfileText = buildPersonaProfileText(parsed);
+  // 【2026-09-20】旧档案比这一轮产出的长得多 → 保留旧的（见 mergePersonaProfileText 顶部事故说明）
+  let prevPersonality = '';
+  try { prevPersonality = String(getProfile(uid)?.personality ?? ''); } catch { prevPersonality = ''; }
+  const profileText = mergePersonaProfileText(prevPersonality, rawProfileText);
   const summary = profileText || `样本 ${sampleCount} 条（本轮没有解析出可用字段，旧档案保留）`;
   // a) profiles 表：**画像写进 personality，绝不碰 notes**。
   //    【2026-09-14 主人反馈】旧版把 `人格学习:${摘要}` 追加进 notes，于是：

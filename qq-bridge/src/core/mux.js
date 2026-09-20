@@ -62,6 +62,8 @@ import { sleep, withTimeout } from '../lib/async.js';
 import { convKey, canonicalKey } from '../lib/keys.js';
 import { log, appendActivity, readActivityTail } from '../lib/log.js';
 import { SILENT_MARKER, isSilentMarker, isSendToolName } from '../lib/markers.js';
+import { looksLikeUnquotedArgs } from '../lib/args-repair.js';
+import { recoverUnquotedSend } from './args-recover.js';
 import { state, loadConfig, loadState, saveState } from './config.js';
 import { sendToQQ, initQqSendCore, setQqSendBot } from './qq-send.js';
 import { cancelKeyedSends } from './send-chain.js';
@@ -109,6 +111,8 @@ import {
   queued, queuedHintAt, queueRetries, pending, visionModelAppliedSessions,
   messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue,
 } from './session-state.js';
+/* 【2026-09-20】"漏引号"的工具调用：原始参数串按 callId 暂存，等它真失败后由桥兜底发送。 */
+const unquotedArgsByCall = new Map();
 import {
   activityWindows, loadActivityWindows, saveActivityWindows, getActivityWindows,
   inActivityWindow, nextActivityWindowStart, activityStatusLine,
@@ -759,8 +763,24 @@ export async function pumpMux() {
           if (frame.event.type === 'tool/call') {
             const toolName = String(frame.event.data?.name ?? '');
             const callId = frame.event.data?.callId;
-            const args = sanitizeToolArgs(frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data);
+            const rawArgs = frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data;
+            const args = sanitizeToolArgs(rawArgs);
             appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args });
+            /* 【2026-09-20 根治「模型漏引号 → 消息发不出去」】
+             * 现场：`{"key":"…","messages": 主人这么直接啊 我脸都热了,"token":"…"}` 不是合法 JSON，
+             * DSH 的宽松解析把这个字段整个丢掉 → 发送端点只看到 messages 为空 → 模型看到报错、原样重试。
+             * 参数解析在 DSH 里，桥改不了它，但**桥在事件流里拿得到原始参数串** —— 所以这里先把可疑的
+             * 原始串按 callId 存下来；等这次调用真的因为"messages 为空"失败时（tool/result 分支），
+             * 再把裸文本捞回来由桥自己发出去（走同一条发送端点，额度/幂等/脱敏都不绕过），
+             * 并把这一批记进幂等账本 —— 模型随后的"重发"会被判成"已经发过了"。
+             * 用户看到的是消息照常到达，而不是一条红色报错。 */
+            if (callId != null && typeof rawArgs === 'string' && isSendToolName(toolName) && looksLikeUnquotedArgs(rawArgs)) {
+              unquotedArgsByCall.set(String(callId), { raw: rawArgs, key, tool: toolName, at: Date.now() });
+              if (unquotedArgsByCall.size > 50) {
+                const oldest = [...unquotedArgsByCall.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+                if (oldest) unquotedArgsByCall.delete(oldest[0]);
+              }
+            }
             if (callId != null) {
               if (isSendToolName(toolName)) {
                 let pending = pendingSendToolCalls.get(frame.sessionId);
@@ -796,6 +816,16 @@ export async function pumpMux() {
             });
             if (callId != null) {
               toolCallNames.get(frame.sessionId)?.delete(String(callId));
+              /* 【2026-09-20 根治】这次调用是不是"漏引号导致 messages 被丢掉"？
+               * 是 → 桥把那段裸文本捞回来自己发（见 tool/call 分支的说明）。 */
+              const stashed = unquotedArgsByCall.get(String(callId));
+              if (stashed) {
+                unquotedArgsByCall.delete(String(callId));
+                if (resultError && /至少一个不能为空/.test(errorText)) {
+                  void recoverUnquotedSend({ key, sid: frame.sessionId, callId: String(callId), stash: stashed, cfg: cfgRef })
+                    .catch((error) => log(`[args-repair] 兜底发送异常：${error?.message ?? error}`));
+                }
+              }
               const pending = pendingSendToolCalls.get(frame.sessionId);
               if (pending?.has(callId)) {
                 pending.delete(callId);
