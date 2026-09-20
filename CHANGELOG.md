@@ -26,6 +26,13 @@
 
 ### 内部与工程
 
+- **提示词精简（主人要求"尽量精简所有提示词且都写成英文，功能不能丢"）**：三份手写提示词合计 56,137 → 45,712 字符（**-18.6%**），规则、工具名、失败判据一条没删：
+  - 系统提示词 `agent.cordis.yml` 39,882 → **30,861**（-22.6%）：合并重复表述、删掉事故叙述与例子，保留每个 [段] 与每条编号规则；中文只留"被引用的原话"（主人 / 你只有一个主人… / 行 慢点打）；
+  - 默认人设 `persona.md` 8,914 → **7,867**（-11.8%，本来就没有中文）：身份/别名/硬触发/主人档位/圈内梗/颜文字签名/外观/群文化/硬边界/轻记忆逐条保留；
+  - 发言规则 `speech-rules.md` 7,341 → **6,984**：规则用英文收拢（10 条 NEVER + 16 条 DO + 5 条防过拟合 + 校准表），**中文只留校准样本**（"左边=AI 味，右边=你"的对照句必须还是中文才有意义）；线上那份是 9-19 之前的旧版（缺防过拟合段），这次一并更新。
+  - 关键门禁全部原样通过（`tools/test-wake-protocol.mjs` 的 D 组：`NO TEXT. SPEAK ONLY THROUGH TOOLS`、裸 `OK`、`FORMATTING - NO EXPLICIT NEWLINES`、`KAOMOJI - ONLY IF THE CHARACTER ASKS FOR THEM`、`NEVER SEND THE TOOL-ARGUMENT ARRAY AS TEXT - HARD FAILURE`、`CODE IS NEVER SPLIT`、`SEARCH BUDGET - TWO TRIES, THEN ANSWER` …），YAML 解析正常，两台机器装好的 preset 48,076 字节。
+  - 工具表（78 个工具 80,932 字符）实测**本来就 97.2% 是英文**（只剩 2,247 个汉字，集中在 pixiv / web-search / learning 那几个），这条没动：收益不到 2k 字符，风险是碰到工具契约。
+- `tools/sync-to-live.ps1` 的 root 文件清单补上 `persona.md` / `speech-rules.md`：这两份是**出厂默认人设与发言规则**（管理端导入/编辑覆盖运行时那份，但全新安装读的是载荷里的），此前**不在任何拷贝清单里**，任何重写都到不了安装包 —— 与当年 `start-bridge.sh` 同一类坑。
 - **「merge 双向合并」按钮以前点了等于没点（两个真 bug）**：主人点 SSH 配置页的同步按钮 → 方向选 `merge 双向合并`，步骤永远停在 `[BAD] 备份本地 state  xcopy 备份失败, 中止`，本地 state 一个字没改。两个根因：① 备份用 `xcopy /E /I /H /Y` 判 `status === 0` —— xcopy 的退出码不止 0 一种成功，且对共享冲突（桥刚被停掉、`memory.db` 句柄还没释放）在非交互下直接算失败，判失败又**中止整个合并**；可回滚路径其实不依赖这份拷贝（紧接着的 rename 会把原目录留成 `state.old-<ts>`）。现在改 `robocopy`（退出码 0~7 都算成功、≥8 才失败，`/R:1 /W:1`）→ 失败退 `tar` → 都失败也只如实记一步、不再中止。② 替换本地 state 那一步写的是 `fs.renameSync(...)`，而本文件的 `fs` 是**具名导入**（没有 `fs` 这个命名空间对象）→ 必然抛 `fs is not defined`。两处都修好后已真机跑通：备份（robocopy）→ 替换（原目录留 `state.old-*`）→ 打包 → 上传覆盖远端 → 重启两端桥，全绿（`server/index.js`）。
 - 顺手把一个真实的落差补齐了：服务器私聊 `private:1736784911` 有 1775 条消息、本机只有 661 条（本机桥停机期间的消息全在服务器那份里），已按"服务器版为基准 + 保留本机独有的 294 条消息"合并（`state.bak-merge-*` / `state.old-*` 两份备份都在），本机独有的 `memory_entries` 也一并补回。
 - **"0.7 分一条还能不能再省"的账（本次实测，别再来回调参）**：把 `state/token-usage.jsonl` 里 1936 次真实请求当量折算（1 分 ≈ 14,962 全价输入 token，缓存命中按 0.115 折算），单步成本 = 0.0668 × (0.115 × 缓存读 + 未缓存 + 3 × 输出)：

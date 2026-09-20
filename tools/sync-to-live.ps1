@@ -69,7 +69,9 @@ foreach ($rel in $bridgeDirs) {
 # copy list (neither here nor in the server sync), so a fresh install shipped no start script at all and
 # the server kept running whatever copy it already had -- found 2026-09-15 when server-side preset
 # refresh silently stayed dead because the new env export never reached the host.
-$bridgeRootFiles = @('start-bridge.sh', 'config.example.json')
+$bridgeRootFiles = @('start-bridge.sh', 'config.example.json', 'persona.md', 'speech-rules.md')
+# 2026-09-20: added persona.md / speech-rules.md -- shipped DEFAULT character + typing rules.
+# They were in no copy list, so compacted rewrites never reached an installer payload.
 Write-Host '=== 1b) bridge root files (deploy scripts) ==='
 foreach ($rel in $bridgeRootFiles) {
   $from = Join-Path $srcBridge $rel
