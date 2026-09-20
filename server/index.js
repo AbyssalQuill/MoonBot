@@ -962,22 +962,10 @@ function napcatWebuiTokenFor(scope, port, candidates = []) {
   candidates.forEach(add);
   add(cachedNapcatWebuiToken(scope, port));
   add(NAPCAT_WEBUI_TOKEN_FALLBACK);
-  const chosen = list[0] || '';
-  void (async () => {
-    try {
-      if (!chosen) return;
-      if (await napcatWebuiTokenWorks(port, chosen)) { rememberNapcatWebuiToken(scope, port, chosen, true); return; }
-      for (const c of list.slice(1)) {
-        if (await napcatWebuiTokenWorks(port, c)) {
-          rememberNapcatWebuiToken(scope, port, c, true);
-          mlog(`[napcat] WebUI 令牌修正：${scope}:${port} 上 ${chosen === c ? '' : `候选 ${chosen ? '(当前)' : '(空)'} 进不去，`}改用验证通过的候选（点开就是对的）`);
-          return;
-        }
-      }
-      mlog(`[napcat] WebUI 令牌验证失败：${scope}:${port} 的候选（${list.length} 个）都进不去 —— NapCat 可能没起/端口不是 ${port}，或它的 token 与配置不一致`);
-    } catch { /* 后台验证失败不影响 URL 生成 */ }
-  })();
-  return chosen;
+  /* 后台验一次：**复用 verifyNapcatWebuiToken**（它带 60 秒失败冷却与唯一的日志点），
+   * 否则这条同步路径会在 NapCat 没起时每次调用都试一遍并写一行日志（实测 5 秒一条，刷屏）。 */
+  void verifyNapcatWebuiToken(scope, port, candidates).catch(() => {});
+  return list[0] || '';
 }
 
 /**
@@ -987,6 +975,10 @@ function napcatWebuiTokenFor(scope, port, candidates = []) {
  * 或 NapCat 是被别人拉起来的）。这里在返回链接之前确认一遍，验证过的结果缓存 30 分钟，
  * 所以只在"第一次"或"换了 token"时才真的多一次本地请求。
  */
+/** 验证失败的冷却：NapCat 没起时 `/api/state` 每几秒来一次，没有冷却就会反复试 + 刷屏日志。 */
+const napcatWebuiVerifyFailAt = new Map();
+const NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS = 60 * 1000;
+
 async function verifyNapcatWebuiToken(scope, port, candidates = []) {
   const list = [];
   const add = (v) => { const t = String(v ?? '').trim(); if (t && !list.includes(t)) list.push(t); };
@@ -994,15 +986,20 @@ async function verifyNapcatWebuiToken(scope, port, candidates = []) {
   const cached = cachedNapcatWebuiToken(scope, port);
   add(cached);
   add(NAPCAT_WEBUI_TOKEN_FALLBACK);
-  for (const cand of list) {
-    if (cand === cached && napcatWebuiTokenCache.get(`${scope}:${port}`)?.verified) return cand;   // 验过的直接用
-    if (await napcatWebuiTokenWorks(port, cand, 4000)) {
+  const cacheKey = `${scope}:${port}`;
+  const failedAt = Number(napcatWebuiVerifyFailAt.get(cacheKey)) || 0;
+  if (Date.now() - failedAt < NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS) return list[0] || '';   // 刚验过且全失败：冷却期内直接用首选，不重复试
+  for (const cand of list.slice(0, 3)) {
+    if (cand === cached && napcatWebuiTokenCache.get(cacheKey)?.verified) return cand;   // 验过的直接用
+    if (await napcatWebuiTokenWorks(port, cand, 2500)) {
+      napcatWebuiVerifyFailAt.delete(cacheKey);
       rememberNapcatWebuiToken(scope, port, cand, true);
-      if (list[0] && cand !== list[0]) mlog(`[napcat] WebUI 令牌修正：${scope}:${port} 候选 ${list[0].length} 位进不去，改用验证通过的候选（点开就是对的）`);
+      if (list[0] && cand !== list[0]) mlog(`[napcat] WebUI 令牌修正：${cacheKey} 首选候选进不去，改用验证通过的候选（点开就是对的）`);
       return cand;
     }
   }
-  mlog(`[napcat] WebUI 令牌验证失败：${scope}:${port} 的 ${list.length} 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）`);
+  napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
+  mlog(`[napcat] WebUI 令牌验证失败：${cacheKey} 的 ${list.length} 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）—— ${Math.round(NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS / 1000)} 秒内不再重试`);
   return list[0] || '';
 }
 
