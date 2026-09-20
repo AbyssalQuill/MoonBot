@@ -2321,6 +2321,37 @@ function copyMissing(from, to) {
   }
 }
 
+/**
+ * 目录备份：robocopy 优先、tar 兜底，返回可读的诊断信息。
+ *
+ * 【2026-09-20 修「服务器记忆 merge 双向合并按钮点了等于没点」】
+ * 现场：主人点 SSH 配置页的「merge 双向合并」，步骤停在 `[BAD] 备份本地 state  xcopy 备份失败, 中止`，
+ * 本地 state 一个字没改 —— 功能看起来压根没落地。根因是这里原来用 `xcopy /E /I /H /Y` 判 `status === 0`：
+ *   ① xcopy 的退出码不止 0 一种成功（1=没找到要复制的文件，2=用户中止…），而且它对**共享冲突**（桥刚被
+ *      停掉、memory.db 句柄还没释放）与长路径/海量小文件的处理是"提示重试"，非交互下直接算失败；
+ *   ② 判失败就 `中止` 整个合并 —— 可回滚路径其实**不依赖这份拷贝**（紧接着的 rename 会把原目录保留成
+ *      `state.old-<ts>`），于是"备份失败"把整个功能变成不可用。
+ * 现在：robocopy（退出码 0~7 都算成功，≥8 才失败；/R:1 /W:1 少重试、带输出便于诊断）→ 失败退 tar 到
+ * `<dst>.tar`。两个都失败也**不再中止**，只如实记一步（原目录仍在，回滚不受影响）。
+ */
+function backupDirBestEffort(src, dst) {
+  try {
+    if (!existsSync(src)) return { ok: false, how: 'none', msg: `源目录不存在: ${src}` };
+    mkdirSync(dst, { recursive: true });
+    const rc = spawnSync('robocopy', [src, dst, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1'], { encoding: 'utf8', timeout: 600000, windowsHide: true });
+    const code = rc.status === null ? 16 : rc.status;
+    if (code < 8) return { ok: true, how: 'robocopy', msg: `robocopy rc=${code}` };
+    const detail = String((rc.stdout || '') + (rc.stderr || '')).trim().slice(-300) || `rc=${code}`;
+    // tar 兜底：同一套代码在别处已经在用 tar，退出码语义干净
+    const tarDst = `${dst}.tar`;
+    const tc = spawnSync('tar', ['-cf', tarDst, '-C', dirname(src), basename(src)], { encoding: 'utf8', timeout: 600000, windowsHide: true });
+    if (tc.status === 0) return { ok: true, how: 'tar', msg: `robocopy 失败(${detail}) → 已用 tar 备份到 ${tarDst}` };
+    return { ok: false, how: 'none', msg: `robocopy rc=${code} ${detail}; tar rc=${tc.status} ${String(tc.stderr || '').slice(-200)}` };
+  } catch (e) {
+    return { ok: false, how: 'none', msg: String(e?.message ?? e) };
+  }
+}
+
 /** 远端安全替换: 先把旧目录 mv 成 .bak-remote-<ts>, 再解包新内容; 解包失败自动回滚旧目录。
  *  dir 取 'state' 或 'stickers-upload'(位于 /root/qq-bridge 下); archive 为远端 tar 路径。 */
 function remoteSwapBash(dir, archive) {
@@ -2511,8 +2542,8 @@ app.post('/api/ssh/sync', async (req, res) => {
       // to-local 可选附加: state / 表情包从远端拉回本地(覆盖本地对应目录, 先本地备份)
       if (wantState || dir === 'merge') {
         const bakDir = join(localDir, `state.bak-local-${Date.now()}`);
-        const xb2 = spawnSync('cmd', ['/c', `xcopy /E /I /H /Y "${join(localDir, 'state')}" "${bakDir}" >nul`], { stdio: 'ignore', timeout: 120000, windowsHide: true });
-        steps.push({ step: '备份本地 state', ok: xb2.status === 0, msg: xb2.status === 0 ? bakDir : '跳过(本地尚无 state)' });
+        const bakPull = backupDirBestEffort(join(localDir, 'state'), bakDir);
+        steps.push({ step: '备份本地 state', ok: bakPull.ok, msg: bakPull.ok ? `${bakPull.how} → ${bakDir}` : `跳过(${bakPull.msg})` });
         const gSt = await sshExecCapture(conn, "cd /root/qq-bridge && tar czf /root/qq-bridge-state-sync.tar.gz --exclude=state/agents --exclude='state/*.log' --exclude=state/bridge.lock state 2>/dev/null && echo packed || echo none", 300000);
         if (gSt.ok && String(gSt.out || '').includes('packed')) {
           const tSt = join(tmpdir(), `qqbridge-state-pull-${Date.now()}.tar.gz`);
@@ -2591,15 +2622,20 @@ app.post('/api/ssh/sync', async (req, res) => {
         if (rM.status !== 0) { await resumeLocal('恢复本地桥(合并失败)'); return res.json({ success: false, steps, message: 'state 合并失败, 未改动任何一端' }); }
         // 备份本地 state → 同卷 rename 替换(失败自动回滚, 不再用跨目录/跨卷 ren)
         const localBak = join(bridgeDir, `state.bak-merge-${Date.now()}`);
-        const xb = spawnSync('cmd', ['/c', `xcopy /E /I /H /Y "${localState}" "${localBak}" >nul`], { stdio: 'ignore', timeout: 120000, windowsHide: true });
-        if (xb.status !== 0) { await resumeLocal('恢复本地桥(备份失败)'); return res.json({ success: false, steps: [...steps, { step: '备份本地 state', ok: false, msg: 'xcopy 备份失败, 中止' }] }); }
-        steps.push({ step: '备份本地 state', ok: true, msg: localBak });
+        /* 备份是 best-effort：失败也继续。回滚路径不依赖它 —— 紧接着的 rename 会把原 state 保留成
+         * `state.old-<ts>`；以前这里判 xcopy 非 0 就中止，整个 merge 直接不可用（主人踩到的就是这个）。 */
+        const bakState = backupDirBestEffort(localState, localBak);
+        steps.push({ step: '备份本地 state', ok: bakState.ok, msg: bakState.ok ? `${bakState.how} → ${localBak}（${bakState.msg}）` : `备份失败（不影响回滚：原 state 会保留为 state.old-*）：${bakState.msg}` });
         const oldState = join(bridgeDir, `state.old-${Date.now()}`);
         try {
-          fs.renameSync(localState, oldState);
-          fs.renameSync(mergedDir, localState);
+          /* 【2026-09-20 修】这里原来写的是 `fs.renameSync(...)`，但本文件的 fs 是**具名导入**
+           * （import { renameSync } from 'fs'），没有 `fs` 这个默认命名空间对象 —— 于是合并走到
+           * 这一步必然抛 `fs is not defined`，本地 state 正好"什么都没改"，和 xcopy 那条一起把
+           * 「merge 双向合并」变成永远失败。改用具名导入。 */
+          renameSync(localState, oldState);
+          renameSync(mergedDir, localState);
         } catch (eS) {
-          try { if (!existsSync(localState) && existsSync(oldState)) fs.renameSync(oldState, localState); } catch {}
+          try { if (!existsSync(localState) && existsSync(oldState)) renameSync(oldState, localState); } catch {}
           await resumeLocal('恢复本地桥(替换失败已回滚)');
           return res.json({ success: false, steps: [...steps, { step: '替换本地 state', ok: false, msg: `本地 state 替换失败, 已回滚: ${eS.message}` }], message: '本地 state 替换失败(已回滚, 未改动)' });
         }
@@ -2639,9 +2675,8 @@ app.post('/api/ssh/sync', async (req, res) => {
                   let bakStk = '';
                   if (existsSync(localUp) && readdirSync(localUp).length > 0) {
                     bakStk = join(bridgeDir, `stickers-upload.bak-merge-${Date.now()}`);
-                    const xStk = spawnSync('cmd', ['/c', `xcopy /E /I /H /Y "${localUp}" "${bakStk}" >nul`], { stdio: 'ignore', timeout: 120000, windowsHide: true });
-                    steps.push({ step: '备份本地表情包', ok: xStk.status === 0, msg: xStk.status === 0 ? bakStk : '备份失败, 中止表情包替换' });
-                    if (xStk.status !== 0) return res.json({ success: false, steps, message: '本地表情包备份失败, 表情包未改动' });
+                    const bakStkRes = backupDirBestEffort(localUp, bakStk);
+                    steps.push({ step: '备份本地表情包', ok: bakStkRes.ok, msg: bakStkRes.ok ? `${bakStkRes.how} → ${bakStk}` : `备份失败（不影响回滚：原目录会保留为 stickers-upload.old-*）：${bakStkRes.msg}` });
                   } else { steps.push({ step: '备份本地表情包', ok: true, msg: '本地无图库, 跳过' }); }
                   if (existsSync(localUp)) {
                     const rn1 = spawnSync('cmd', ['/c', `ren "${localUp}" "${basename(join(bridgeDir, `stickers-upload.old-${Date.now()}`))}"`], { cwd: bridgeDir, stdio: 'ignore', timeout: 60000, windowsHide: true });
