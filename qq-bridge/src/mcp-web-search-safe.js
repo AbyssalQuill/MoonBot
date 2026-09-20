@@ -942,34 +942,34 @@ const server = new McpServer({ name: 'web-search-safe', version: '0.1.0' });
 
 server.tool(
   'web_search',
-  '联网搜索（只读，多平台聚合：Bing / DuckDuckGo / 百度 / 搜狗 / 360 / Mojeek / 雅虎 / Yandex / Brave / Ecosia / Marginalia / Google 新闻 / 维基(中英) / 萌娘百科 / B站视频 / GitHub / Stack Overflow 并行，结果按平台轮转交错合并、按 URL 去重）。'
-  + '通用用途：不认识的说法/梗/黑话、不确定的事实与数字、人名/作品/时事、需要外部资料才能回答的任何问题。'
-  + '**调用次数不限、条数不限**（maxResults 最多 30），5 分钟内的同一查询会命中缓存秒回；'
-  + '一次没搜到就换个说法、换平台再搜，不要因为"搜过了"就不敢再搜。'
-  + '**先搜再答是你的默认动作**：凡是自己不确定的东西，先搜一次再开口，绝不拿"我记得可能是…"糊弄，也不要回头问发问的人"这是什么"。'
-  + '只需要看一条网页正文时用 web_fetch。不执行任何本地操作。',
+  'Web search (read-only, multi-platform aggregate: Bing / DuckDuckGo / Baidu / Sogou / 360 / Mojeek / Yahoo / Yandex / Brave / Ecosia / Marginalia / Google News / Wikipedia (zh+en) / Moegirl / Bilibili / GitHub / Stack Overflow, run in parallel, results interleaved round-robin by platform and de-duplicated by URL). '
+  + 'Use it for anything outside your own knowledge: an unfamiliar word / meme / slang, a fact or number you are unsure of, a person / work / current event, any question that needs outside material. '
+  + '**No call limit, no result limit** (maxResults caps at 30); the same query within 5 minutes hits the cache and answers instantly. '
+  + 'One thin result is not a wall: reword it, switch language or platforms, search again - never hold back because "I already searched". '
+  + '**Search first, then answer is the default**: when you are not sure of something, search once before you speak; never fob anyone off with "I think maybe…", and never bounce the question back to the asker ("what is this?"). '
+  + 'Use web_fetch when you only need the text of one page. It performs no local actions.',
   {
-    query: z.string().describe('搜索词（自然语言即可；可带 site: 限定）'),
-    maxResults: z.number().int().min(3).max(30).optional().describe('返回条数，默认 12'),
+    query: z.string().describe('Search terms (natural language is fine; site: is supported)'),
+    maxResults: z.number().int().min(3).max(30).optional().describe('How many results to return, default 12'),
     platforms: z.array(z.enum(['gnews', 'zhwiki', 'enwiki', 'moegirl', 'duckduckgo', 'bing', 'baidu', 'sogou', 'so360', 'mojeek', 'bilibili', 'github', 'stackoverflow', 'yahoo', 'yandex', 'brave', 'ecosia', 'marginalia'])).optional()
-      .describe('只查指定平台（默认全部）。gnews=Google新闻、zhwiki/enwiki=维基、moegirl=萌娘百科、bilibili=B站视频、github=GitHub仓库、stackoverflow=Stack Overflow，其余是搜索引擎（yahoo/yandex/brave/ecosia/marginalia 在线上实测不通，需要管理员用 QQBRIDGE_SEARCH_EXTRA 挂回来）'),
+      .describe('Search only the listed platforms (default: all). gnews=Google News, zhwiki/enwiki=Wikipedia, moegirl=Moegirl wiki, bilibili=Bilibili video, github=GitHub repos, stackoverflow=Stack Overflow; the rest are search engines (yahoo/yandex/brave/ecosia/marginalia are unreachable from this host, an admin can re-enable them via QQBRIDGE_SEARCH_EXTRA)'),
   },
   async ({ query, maxResults, platforms }) => {
     const clean = sanitizeQuery(query);
     if (!clean) {
-      return { content: [{ type: 'text', text: '查询词为空，已拒绝。' }], isError: true };
+      return { content: [{ type: 'text', text: 'Empty query - refused.' }], isError: true };
     }
     try {
       const result = await searchAll(clean, { maxResults, platforms });
       if (!result.results.length) {
         return {
-          content: [{ type: 'text', text: `没有搜到结果（平台：${JSON.stringify(result.platforms)} 失败：${JSON.stringify(result.failures)}，耗时 ${result.tookMs}ms）。可以换个说法再搜一次。` }],
+          content: [{ type: 'text', text: `No results (platforms: ${JSON.stringify(result.platforms)} failures: ${JSON.stringify(result.failures)}, took ${result.tookMs}ms). Try different wording.` }],
         };
       }
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return {
-        content: [{ type: 'text', text: `搜索失败：${error?.message ?? error}` }],
+        content: [{ type: 'text', text: `Search failed: ${error?.message ?? error}` }],
         isError: true,
       };
     }

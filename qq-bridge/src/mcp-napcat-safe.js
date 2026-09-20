@@ -2968,25 +2968,25 @@ if (cfg.social?.tools?.imageSearch !== false) {
 if (cfg.social?.tools?.pixiv !== false) {
   registerTool(
     'qq_pixiv_search',
-    'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for a 插画/原图/同人图 of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.'
-      + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / r18 / scanPages 全部是在镜像站返回的数据里**本地筛**的：镜像站只认 keyword 和 page，不认任何标签/排序参数。一页 60 条，最多扫 scanPages 页（默认 3、上限 10）；返回里的 scan 对象与 scanNotice 会如实说明"只扫了哪几页 / 全站共 total 条 / lastPage 多少"，**别当成筛了全站**。排序只支持按投稿时间（date_desc 最新优先 / date_asc / random），**不支持按人气或收藏数**（镜像站返回体里根本没有收藏数，硬传会回落成 date_desc 并在 scan.warnings 里说明）。默认排除 R-18/R-18G，只有 r18 明确传 only/include 才放行。',
+    'Search Pixiv illustrations by keyword (read-only, sends nothing). Returns {id, title, author, tags, pageUrl, thumbUrl, pages, size} per work - Pixiv is where most anime/game fan art lives, so use it when someone asks for an illustration / original picture / fan art of a character (e.g. 初音ミク, 原神 荧, 蔚蓝档案 白子) or when web image search gave you low-quality or unrelated results. THEN call qq_send_pixiv with the SAME query (index picks which hit, 0 = first) - never invent Pixiv URLs.'
+      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / r18 / scanPages are all filtered **locally** on the mirror site\'s rows: the mirror only understands keyword and page, no tag or sort parameter. One page is 60 works, at most scanPages pages are scanned (default 3, cap 10); the scan object and scanNotice in the result state honestly which pages were scanned, the site-wide total and the last page - **never present that as "I filtered the whole site"**. Sorting only supports upload time (date_desc newest first / date_asc / random), **not popularity or bookmark count** (the mirror does not return bookmark counts; passing it falls back to date_desc and says so in scan.warnings). R-18/R-18G is excluded by default; only an explicit r18=only/include lets it through.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ。关键词不等于标签，想按标签筛请用 tags 参数'),
-      page: z.number().optional().describe('从第几页开始搜（镜像站页码，从 1 开始，默认 1）。它只是"起点"，配合 scanPages 会自动往后翻'),
-      limit: z.number().optional().describe('最多返回几条，默认 8，上限 20'),
-      r18: z.enum(['exclude', 'only', 'include']).optional().describe('R-18/R-18G 怎么处理：exclude=排除（默认，发到 QQ 安全）/ only=只看 R-18 / include=都要。不传就是 exclude。这是本地筛的（镜像站不认 mode=r18）；实测该站默认搜索只给全年龄作品（xRestrict 全是 0），所以 only 往往是空的'),
-      tags: z.array(z.string()).optional().describe('必须**全部命中**的标签，大小写不敏感、按子串匹配，例如 ["初音ミク","VOCALOID"]。传了它就启用本地筛选'),
-      author: z.string().optional().describe('作者：填名字 → 按 userName 子串匹配（大小写不敏感）；填纯数字 → 按 userId 精确匹配'),
-      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('构图：portrait=竖图(高>宽) / landscape=横图(宽>高) / square=正方（按原图 width/height；宽高缺失的作品不算命中）'),
-      minWidth: z.number().optional().describe('最小宽度（像素，按原图 width）；比它窄的排除。想要高清大图时用，比如 2000'),
-      minHeight: z.number().optional().describe('最小高度（像素，按原图 height）；比它矮的排除'),
-      multiPage: z.boolean().optional().describe('true=只看多图作品（pageCount>1）：要发组图/系列、或者想挑有分镜的漫画时用'),
-      excludeAi: z.boolean().optional().describe('true=排除 AI 生成的作品（镜像站的 aiType=2，另加 AI 标签兜底；实测 aiType=2 才是 AI，1 是手绘）'),
-      illustType: z.enum(['illust', 'manga']).optional().describe('只看插画(illust，illustType=0)或漫画(manga，illustType=1)。本站还有 illustType=2 的动图(ugoira)，不属于这两类，传这两个值都会把它排除'),
-      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('排序：date_desc=最新优先（默认）/ date_asc=最旧优先 / random=随机（"随便来一张"时有用）。**不支持按人气/收藏数排序**——镜像站返回体里没有收藏数；传 popular/hot/rank 这类会回落 date_desc 并在 scan.warnings 里写明原因'),
-      scanPages: z.number().optional().describe('最多往后翻几页找符合条件的作品：默认 3、上限 10（超了按 10 夹）。筛选在本地做、一页只有 60 条，命中太少就得往后翻；返回的 scan.pagesScanned 是实际扫的页数，结果少不代表全站少'),
+      query: z.string().describe('Keyword, e.g. 初音ミク / 原神 荧 / ブルーアーカイブ. A keyword is not a tag - use the tags parameter to filter by tag'),
+      page: z.number().optional().describe('Which mirror page to start from (1-based, default 1). It is only the starting point; scanPages walks forward from here'),
+      limit: z.number().optional().describe('Max rows to return, default 8, cap 20'),
+      r18: z.enum(['exclude', 'only', 'include']).optional().describe('How to treat R-18/R-18G: exclude = drop them (default, safe to post in QQ) / only = R-18 only / include = both. Omitted means exclude. Filtered locally (the mirror ignores mode=r18); in practice this site only returns all-ages works for a plain search (xRestrict is always 0), so "only" is often empty'),
+      tags: z.array(z.string()).optional().describe('Tags that must **all** match - case-insensitive substring match, e.g. ["初音ミク","VOCALOID"]. Passing this enables local filtering'),
+      author: z.string().optional().describe('Author: a name -> case-insensitive substring match on userName; pure digits -> exact userId match'),
+      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('Shape: portrait = taller than wide / landscape = wider than tall / square (uses the original width/height; works missing either dimension never match)'),
+      minWidth: z.number().optional().describe('Minimum width in pixels (original width); narrower works are dropped. Use it when you want a high-resolution image, e.g. 2000'),
+      minHeight: z.number().optional().describe('Minimum height in pixels (original height); shorter works are dropped'),
+      multiPage: z.boolean().optional().describe('true = only multi-image works (pageCount>1): for sets / series, or manga with panels'),
+      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (mirror aiType=2, plus an AI-tag fallback; measured: aiType=2 is AI, 1 is hand-drawn)'),
+      illustType: z.enum(['illust', 'manga']).optional().describe('Only illustrations (illust, illustType=0) or manga (manga, illustType=1). This site also has illustType=2 animations (ugoira); neither value includes them'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random (useful for "just give me any"). **Popularity / bookmark sorting is not supported** - the mirror has no bookmark count; popular/hot/rank fall back to date_desc with the reason written into scan.warnings'),
+      scanPages: z.number().optional().describe('How many pages to walk forward looking for matches: default 3, cap 10 (clamped). Filtering is local and one page holds only 60 works, so too few hits means walking further; scan.pagesScanned is the real number of pages scanned - few results does not mean the site has few'),
     },
     async ({ query, page, limit, r18, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
@@ -2995,7 +2995,7 @@ if (cfg.social?.tools?.pixiv !== false) {
         });
         return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       } catch (error) {
-        return { content: [{ type: 'text', text: `搜 Pixiv 失败：${error?.message ?? error}` }], isError: true };
+        return { content: [{ type: 'text', text: `Pixiv search failed: ${error?.message ?? error}` }], isError: true };
       }
     }
   );
@@ -3003,29 +3003,29 @@ if (cfg.social?.tools?.pixiv !== false) {
   registerTool(
     'qq_send_pixiv',
     'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id - sends a work by that artist), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size=master (1200px, safe for QQ) or original (the untouched original file); when you give illustId/authorId the default is original, when you only give query the default is master. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
-      + '\n\n【找"某人本人的作品"只能用 authorId】关键词搜的是标题/标签含该词的图（搜「米山舞」多半是别人打了她名字标签的作品）。① 有作品号 → illustId；② 有画师号（pixiv.net/users/<数字>）→ authorId，按投稿时间新→旧取第 index 件；③ 有画师号更好，**画师名字**只有在桥配了 pixiv 登录 cookie 时才能用（撞号会返回候选让你挑）；④ 都没有 → 先发 ta 任意一件作品，返回里的 authorId 就是画师号。别把画师号当 illustId。'
-      + '\n\n【原图无损】size=original = Pixiv 原图文件本身（直联 pximg 下载、原字节落盘直发，不缩放不转码不二压；返回的 sha256/bytes 就是这次真发出去的字节）。master 才是 1200px jpg。原图 >15MB 会被挡下（返回会说明），改 size=master。'
-      + '\n\n【本地筛选与翻页】tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages 都是在镜像站返回的数据里**本地筛**的（镜像站只认 keyword 和 page），一页 60 条、最多扫 scanPages 页（默认 3、上限 10）；index 选的是**筛完之后**的第几条。想先看清筛选细节（筛掉多少、扫了几页、有哪些候选）就用 qq_pixiv_search。排序只支持投稿时间（date_desc/date_asc/random），**不支持按人气/收藏数**（镜像站没有收藏数）。本工具**永远排除 R-18/R-18G**（刻意不给 r18 参数，避免把不宜内容发进 QQ），需要看 R-18 只用 qq_pixiv_search。',
+      + '\n\n[WORKS BY ONE SPECIFIC ARTIST -> authorId ONLY] A keyword search matches titles/tags that contain the word (searching an artist name usually returns works other people tagged with that name). ① You have a work id -> illustId; ② you have an artist id (pixiv.net/users/<digits>) -> authorId, newest first, index picks which work; ③ an artist id is always better; an artist **name** only works when the bridge has a pixiv login cookie (ambiguous names return candidates for you to pick); ④ neither -> send any one of their works first, the returned authorId is the artist id. Never pass an artist id as illustId.'
+      + '\n\n[LOSSLESS ORIGINAL] size=original sends the Pixiv original file itself (downloaded from pximg, stored byte-for-byte, no scaling, no re-encode, no second compression; the returned sha256/bytes are exactly the bytes that were sent). master is the 1200px jpg. An original over 15MB is refused (the result says so) - use size=master.'
+      + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages are filtered **locally** on the mirror rows (the mirror only understands keyword and page); one page is 60 works, at most scanPages pages (default 3, cap 10), and index picks from the **filtered** list. To inspect the filtering first (how many dropped, pages scanned, candidates) use qq_pixiv_search. Sorting supports upload time only (date_desc/date_asc/random), **not popularity/bookmarks** (the mirror has no bookmark count). This tool **always excludes R-18/R-18G** (it deliberately has no r18 parameter, so unsuitable content cannot be posted into QQ); use qq_pixiv_search if you need to see R-18.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      query: z.string().optional().describe('搜索关键词（没给 illustId/authorId 时用），例如 初音ミク 壁纸。注意：关键词搜的是标签/标题，搜不到"某人本人的作品"——那种情况用 authorId'),
-      illustId: z.string().optional().describe('Pixiv **作品号**或 pixiv.net/artworks/<数字> 链接（不是画师号）；按号取图，其它搜索/筛选参数不生效，size 默认 original（真原图）'),
-      authorId: z.string().optional().describe('画师：**画师号**（pixiv.net/users/<数字>，或只给数字）最稳；也可以直接填**画师名字**（需要桥配了 pixiv 登录 cookie，否则会明确报不支持）。按投稿时间新→旧取 ta 名下第 index 件作品再发；名字撞号时会返回候选让你挑，不会乱发。与 illustId 二选一，其它筛选参数不生效'),
-      index: z.number().optional().describe('序号（0 开始，默认 0）：给 authorId 时 = 该画师第几新的作品；给 query 时 = 筛选之后第几条搜索结果'),
-      size: z.enum(['master', 'original']).optional().describe('original = Pixiv 原图文件本身（无损、逐字节直发；给 illustId/authorId 时的默认）；master = 1200px jpg（只给 query 时的默认）。原图 >15MB 会被挡下，改用 master'),
-      page: z.number().optional().describe('多图作品发第几页（0 开始，默认 0）。注意这是**作品内的页号**，不是搜索页码'),
+      query: z.string().optional().describe('Search keyword (used when no illustId/authorId is given), e.g. 初音ミク 壁纸. Note: a keyword search matches tags/titles and cannot find "works by this specific person" - use authorId for that'),
+      illustId: z.string().optional().describe('A Pixiv **work id** or a pixiv.net/artworks/<digits> link (NOT an artist id). Sends that exact work; every other search/filter parameter is ignored and size defaults to original'),
+      authorId: z.string().optional().describe('Artist: an **artist id** (pixiv.net/users/<digits>, or the bare number) is the reliable form; an artist **name** also works when the bridge has a pixiv login cookie configured (otherwise it reports it is unsupported). Sends that artist\'s work number `index`, newest first; an ambiguous name returns candidates instead of guessing. Mutually exclusive with illustId; other filter parameters are ignored'),
+      index: z.number().optional().describe('Zero-based pick (default 0): with authorId = which work of that artist, newest first; with query = which filtered search hit'),
+      size: z.enum(['master', 'original']).optional().describe('original = the Pixiv original file (lossless, byte-for-byte; the default when illustId/authorId is given); master = 1200px jpg (the default when only query is given). An original over 15MB is refused - use master'),
+      page: z.number().optional().describe('Which page to send for a multi-page work (0-based, default 0). This is a page **inside the work**, not a search page'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
-      tags: z.array(z.string()).optional().describe('必须**全部命中**的标签（大小写不敏感、子串匹配），例如 ["初音ミク","壁紙"]。传了它就启用本地筛选'),
-      author: z.string().optional().describe('作者：名字 → 按 userName 子串匹配（大小写不敏感）；纯数字 → 按 userId 精确匹配'),
-      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('构图：portrait=竖图(高>宽) / landscape=横图(宽>高) / square=正方（宽高缺失的作品不算命中）'),
-      minWidth: z.number().optional().describe('最小宽度（像素，按原图 width），想要高清大图时用'),
-      minHeight: z.number().optional().describe('最小高度（像素，按原图 height）'),
-      multiPage: z.boolean().optional().describe('true=只看多图作品（pageCount>1）；要发系列图时配合 page 参数挑第几页'),
-      excludeAi: z.boolean().optional().describe('true=排除 AI 生成的作品（镜像站的 aiType=2 + AI 标签兜底）'),
-      illustType: z.enum(['illust', 'manga']).optional().describe('只看插画(illust，illustType=0)或漫画(manga，illustType=1)；illustType=2 的动图(ugoira)不属于这两类，传这两个值都会排除它'),
-      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('排序：date_desc=最新优先（默认）/ date_asc=最旧优先 / random=随机。**不支持按人气/收藏数**（镜像站没有收藏数），硬传会回落 date_desc 并写进警告'),
-      scanPages: z.number().optional().describe('最多往后翻几页找符合条件的作品：默认 3、上限 10。筛选在本地做，命中太少会自动往后翻'),
+      tags: z.array(z.string()).optional().describe('Tags that must **all** match (case-insensitive substring), e.g. ["初音ミク","壁紙"]. Passing this enables local filtering'),
+      author: z.string().optional().describe('Author: a name -> case-insensitive userName substring; pure digits -> exact userId'),
+      orientation: z.enum(['portrait', 'landscape', 'square']).optional().describe('Shape: portrait = taller than wide / landscape = wider than tall / square (works missing either dimension never match)'),
+      minWidth: z.number().optional().describe('Minimum width in pixels (original width); use it when you want a high-resolution image'),
+      minHeight: z.number().optional().describe('Minimum height in pixels (original height)'),
+      multiPage: z.boolean().optional().describe('true = only multi-image works (pageCount>1); combine with page to pick which image of a set'),
+      excludeAi: z.boolean().optional().describe('true = drop AI-generated works (mirror aiType=2 plus an AI-tag fallback)'),
+      illustType: z.enum(['illust', 'manga']).optional().describe('Only illustrations (illust, illustType=0) or manga (manga, illustType=1); illustType=2 animations (ugoira) are excluded by both values'),
+      sort: z.enum(['date_desc', 'date_asc', 'random']).optional().describe('Order: date_desc = newest first (default) / date_asc = oldest first / random. **Popularity / bookmark sorting is not supported** (the mirror has no bookmark count); it falls back to date_desc and writes the reason into a warning'),
+      scanPages: z.number().optional().describe('How many pages to walk forward looking for matches: default 3, cap 10. Filtering is local, so too few hits means walking further'),
     },
     async ({ key, token, query, illustId, authorId, index, size, page, replyToMessageId, tags, author, orientation, minWidth, minHeight, multiPage, excludeAi, illustType, sort, scanPages }) => {
       try {
