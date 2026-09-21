@@ -28,6 +28,11 @@ import {
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 // 发送前要拿"实际拿到的像素"跟档位对账（见 qq_send_pixiv 的档位闸门）：只用它的头部嗅探，纯函数、无副作用。
 import { sniffImageInfo } from './lib/image-compress.js';
+// 【2026-09-21】说说配图：取图 + 体检 + 变成 NapCat `images` 收得下的参数（零落盘优先）。
+// 为什么单独一个模块：发布链路的证据（NapCat 只认 images、base64 会被它自己落盘又自己删）全写在那份文件头注释里。
+import {
+  qzoneImageTmpDir, sweepQzoneImageTmp, prepareQzoneImageArg, collectQzoneImages,
+} from './lib/qzone-image.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 import { resolveToolTier, toolAllowedByTier, measureSchemaShare, TOOL_TIERS } from './lib/tool-tiers.js';
 // 【2026-09-21】工具 schema 的「描述压缩档」：照搬 mcp-compressor 的档位语义（medium=只留第一句 / high=不发描述）
@@ -2384,6 +2389,29 @@ const QZONE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 const QZONE_MSG_LIST = 'https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6';
 const QZONE_RE_FEEDS = 'https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds';
 const QZONE_DOLIKE = 'https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app';
+
+/* 【2026-09-21】说说配图临时文件的**启动清扫**。
+ * 配图走"零落盘优先"（见 lib/qzone-image.js 顶部）：只有字节超过 base64 上限（10MB）才会写临时文件，
+ * 而且是 try/finally 立刻删。万一进程在写盘之后、finally 之前被杀（崩溃/被 kill），残留会一直躺着 ——
+ * 启动时扫一次、只删 **3 小时前的、我们自己命名的** 文件（tmpDir 可能是与表情/文档共用的容器挂载目录，
+ * 按目录清空会误删别人的东西）。与 core/sticker.js:439 / core/docx.js:76 同一套做法。 */
+try {
+  const primary = qzoneImageTmpDir(getConfig(), ROOT);
+  const fallback = path.join(ROOT, 'state', 'qzone-img-tmp');
+  // 也扫一遍"没配 napcat.tmpDir 时的默认目录"：配置改过之后旧残留会留在那一边
+  const dirs = primary === fallback ? [primary] : [primary, fallback];
+  let removed = 0;
+  const names = [];
+  for (const d of dirs) {
+    const swept = sweepQzoneImageTmp(d);
+    removed += swept.removed;
+    names.push(...swept.names);
+  }
+  if (removed) console.error(`[napcat-safe] 启动清扫：删掉 ${removed} 个过期配图临时文件（${names.slice(0, 3).join(', ')}）`);
+} catch (e) {
+  console.error(`[napcat-safe] 配图临时目录清扫失败（不影响启动）: ${e?.message ?? e}`);
+}
+
 async function getQzoneAuth() {
   let cookies = '';
   for (let i = 0; i < 3; i++) {
@@ -2623,21 +2651,66 @@ registerTool(
 
 registerTool(
   'qq_send_qzone',
-  'Post a QZone post (moment). content = post text; optional file = absolute local path of an image/gif to attach (a local machine path is fine). For sharing moods, daily life, and photos.',
+  'Post a QZone post (moment). content = post text. Optional ONE picture with it, sourced by any of: file (a local image/gif path), imageUrl (a direct image link from qq_image_search), imageQuery (the bridge searches the web for that keyword and attaches the best hit), pixivIllustId or pixivQuery (the bridge takes it from Pixiv, original quality).'
+    + '\n\n[IMAGE RULES] Nothing is left behind on disk: the bytes go to NapCat as base64 (NapCat deletes its own temp copy), and only a picture over 10MB is written to a temp file that is deleted the moment the upload finishes, success or failure. Every picture is integrity-checked first (a truncated JPEG/PNG is refused) and pixel-checked against its Pixiv tier - a thumbnail is never attached; if the original was impossible the result says so via tierFallback. If no picture can be obtained or verified, the post is sent as text only (the result explains why) - a broken image is never attached.'
+    + '\n\n[COST] Default is one picture (imageCount caps at 3). Prefer one. imageIndex picks which search hit / which Pixiv work (0 = first). For Pixiv, pixivSize=original is the default; pass master only when the original is over 15MB.'
+    + '\n\n[SOURCE PRECEDENCE] file > imageUrl > pixivIllustId/pixivQuery > imageQuery (only the first non-empty one is used).',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token'),
     content: z.string().describe('Mood text content'),
-    file: z.string().optional().describe('Optional: local image/gif path to attach')
+    file: z.string().optional().describe('Optional: absolute local path of an image/gif to attach (attached through the bridge\'s NapCat path helper, so a Docker NapCat can read it)'),
+    imageUrl: z.string().optional().describe('Optional: direct image URL to attach (e.g. one from qq_image_search). Takes precedence over the search parameters'),
+    imageQuery: z.string().optional().describe('Optional: keyword - the bridge searches the web for a picture (Bing/Baidu) and attaches the best hit, e.g. 蓝鲸 高清'),
+    pixivIllustId: z.string().optional().describe('Optional: a Pixiv work id or pixiv.net/artworks/<digits> link to attach (original quality)'),
+    pixivQuery: z.string().optional().describe('Optional: keyword - the bridge searches Pixiv and attaches the best hit, e.g. 初音ミク 壁紙'),
+    pixivSize: z.enum(['original', 'master']).optional().describe('Pixiv quality: original (default, the untouched file) or master (1200px jpg, use when the original is over 15MB)'),
+    imageIndex: z.number().optional().describe('Zero-based pick (default 0): which search hit / which Pixiv work to attach'),
+    imageCount: z.number().optional().describe('How many pictures to attach: default 1, cap 3 (keep it at 1 unless asked for more)'),
   },
-  async ({ key, token, content, file }) => {
+  async ({ key, token, content, file, imageUrl, imageQuery, pixivIllustId, pixivQuery, pixivSize, imageIndex, imageCount }) => {
     try {
-      const body = { content: String(content ?? '') };
-      if (file) body.file = String(file);
-      const data = await onebot('send_qzone_msg', body);
-      // onebot() 返回的就是 OneBot 响应里的 data，tid 在 data.tid；旧写法只读 data.data.tid（多套了一层）
-      // → 发说说成功后 tid 恒为 null。这里两种形态都兼容。
-      return { content: [{ type: 'text', text: JSON.stringify({ ok: true, tid: data?.tid ?? data?.data?.tid ?? null, content }) }] };
+      const text = String(content ?? '');
+      /* 取图：collectQzoneImages 自己吞掉所有失败（拿不到图 → 空 items + notes），
+       * 所以这里永远不会因为"图挂了"而把整条说说发不出去（主人要的边界）。 */
+      const picked = await collectQzoneImages({
+        file, imageUrl, imageQuery, pixivIllustId, pixivQuery, pixivSize, imageIndex, imageCount,
+        cfg: getConfig(),
+      });
+
+      const prepared = [];
+      try {
+        for (const it of picked.items) {
+          /* 一律走 prepareQzoneImageArg（零落盘优先）—— 本地 file 那条路**不能**直接把原路径交给 helper：
+           * 干跑实测（stub OneBot，见工作区 _qzone_dryrun.mjs）：11MB 的本地图在 auto 模式下 helper 只会
+           * 原样返回**宿主路径**（超过 base64 上限 → 返回 mapped||p），容器里的 NapCat 读不到，正是 docx
+           * 那次「识别URL失败」的同一形状。现在大图会先复制进 napcat.tmpDir（容器挂载目录）再由 helper
+           * 映射成容器路径，发完即删。 */
+          const p = prepareQzoneImageArg(it.buffer, getConfig(), { root: ROOT });
+          prepared.push({ ...p, meta: it });
+        }
+        /* NapCat 的 send_qzone_msg 只读 `images`（napcat.mjs 的 SendQzoneMsg._handle：`e.images ?? []`）——
+         * 旧代码传的 `file` 一直被**静默忽略**（配了图也发不出来、还不报错）。这里换成 images 数组。 */
+        const body = { content: text };
+        if (prepared.length) body.images = prepared.map((p) => p.arg);
+        const data = await onebot('send_qzone_msg', body);
+        // onebot() 返回的就是 OneBot 响应里的 data，tid 在 data.tid；旧写法只读 data.data.tid（多套了一层）
+        // → 发说说成功后 tid 恒为 null。这里两种形态都兼容。
+        const out = { ok: true, tid: data?.tid ?? data?.data?.tid ?? null, content: text };
+        if (prepared.length) {
+          out.images = prepared.map((p) => ({
+            from: p.meta.from, url: p.meta.url, title: p.meta.title, bytes: p.meta.bytes,
+            pixels: p.meta.pixels, tier: p.meta.tier || undefined, fetchedVia: p.meta.via,
+            handedToNapCatAs: p.mode, ...(p.meta.tierFallback ? { tierFallback: p.meta.tierFallback } : {}),
+          }));
+        }
+        if (picked.notes.length) out.imageNotes = picked.notes;
+        if (picked.requested && !prepared.length) out.imageFailures = picked.tried;
+        return { content: [{ type: 'text', text: JSON.stringify(out) }] };
+      } finally {
+        // 无配图时 prepared 为空；有临时文件（>10MB 才会出现）必须成败都删 —— 见 lib/qzone-image.js 顶部策略
+        for (const p of prepared) { if (p.cleanup) await p.cleanup().catch(() => {}); }
+      }
     } catch (error) {
       return { content: [{ type: 'text', text: `发说说失败：${error.message}` }], isError: true };
     }

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
+import { sshServiceAction } from '../api';
 import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, getToolSchemaStats, getMemoryStats, type ToolSchemaStats, type MemoryStats, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
-import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen } from 'lucide-react';
+import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
 import NapcatTokensCard from '../components/NapcatTokensCard';
 import NumInput from '../components/NumInput';
 
@@ -128,6 +129,13 @@ const LABEL: Record<string, string> = {
   'social.enabled': '启用整套智能体',
   'social.sticker.enabled': '启用表情包',
   'social.sticker.collect.enabled': '自动收藏表情',
+  // 【2026-09-21 主人反馈】「表情包」卡里两个字段**都显示成「备注字数上限」**：
+  //   social.sticker.maxRemarkChars（本机 60）与 social.sticker.collect.maxRemarkChars（20）末段同名，
+  //   而 Field/pretty 取名字是按「完整路径 → 末段」逐级回落，两条都命中末段那一句 → 一个名字出现两遍。
+  //   这里按整路径各给一个名字（**只改界面显示，桥里的键名一个字不动**）：
+  //   「表情备注」= 给已有收藏表情写备注时的上限；「收藏备注」= 自动收藏时顺手写的那句。
+  'social.sticker.maxRemarkChars': '表情备注字数上限',
+  'social.sticker.collect.maxRemarkChars': '收藏备注字数上限',
   'social.docx': 'Word 文档额度',
   dailyQuotaChars: '每日额度', interactionCount: '互动次数',
   // 通用
@@ -525,7 +533,7 @@ function mcpLabel(fullName: string) {
   'social.sticker.maxListCount': '一次最多同步多少个收藏表情。收藏很多时建议保持默认，太多了反而拖慢。',
   'social.sticker.includeInPrompt': '把“你有哪些表情、备注是什么”写进发给 AI 的提示里。开着 AI 才知道该用哪个表情；关掉它会“盲发”。',
   'social.sticker.promptMaxStickers': '提示里最多列出几个表情。列太多会占 token；够 AI 挑就行了。',
-  'social.sticker.maxRemarkChars': 'AI 给表情写备注时最多写多少个字。备注越准，下次越知道这表情适合什么场合。',
+  'social.sticker.maxRemarkChars': '「表情备注字数上限」：AI 给**已有收藏表情**写备注（挑表情时看的就是这句描述）时最多写多少个字。备注越准，下次越知道这表情适合什么场合。它和「自动收藏」那一组里的「收藏备注字数上限」不是一回事：那个只管新收藏进来的表情。',
   'social.sticker.collect.enabled': '自动收藏：AI 在群里看到表情很贴语境时，可以把它存进你的 QQ 收藏，慢慢攒自己的表情库。',
   'social.sticker.collect.maxPerMinute': '自动收藏每分钟最多几次，防止突然疯狂收藏刷屏。',
   'social.sticker.collect.maxPerHour': '自动收藏每小时最多几次。',
@@ -778,7 +786,7 @@ function mcpLabel(fullName: string) {
   'social.send.maxGapMs': '条间最大间隔（毫秒）：上限，防止节奏参数配得过大把一回合拖很久。',
 
   // ── 让"审计"一次过：分组键也给一条（有些卡片会把分组键名显示成标题旁的ⓘ）──
-  'social.sticker.collect.maxRemarkChars': '收藏表情时自动写的备注最多几个字（太长会很啰嗦）。',
+  'social.sticker.collect.maxRemarkChars': '「收藏备注字数上限」：自动收藏一张**新**表情时顺手写的那句备注最多几个字（太长会很啰嗦）。与卡里单列的「表情备注字数上限」分开管：那个管已有收藏的表情，这个只管新收藏进来的。',
 };
 
 /** 与 LABEL 分开维护：这里只补"历史上漏登记中文名"的键 */
@@ -1373,7 +1381,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
         {tab === 'common' && cfg && <CommonTab cfg={cfg} ch={ch} onHelp={setHelp} uploadStickers={uploadStickers} remote={remote} writeConfig={(next) => writeBridge({ config: next })} onCfgChange={setCfg}
           apiKeyStatus={apiKeyStatus} onClearApiKey={clearApiKey} saving={saving} target={target} />}
-        {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} />}
+        {tab === 'tools' && cfg && <ToolsTab cfg={cfg} ch={ch} onSave={save} target={target} remoteServerId={remote?.id} />}
 
         {tab === 'persona' && (
           <div className="dp-grid">
@@ -2265,6 +2273,10 @@ function MemePacksCard({ remote }: { remote?: { id: string; name?: string } | nu
   const [toCharacter, setToCharacter] = useState('');
   /** 每个角色"正在改但还没保存"的勾选（没改过的角色直接看 bindings） */
   const [drafts, setDrafts] = useState<Record<string, string[]>>({});
+  /* 【2026-09-21 主人要求】「哪个角色用哪些包」这段能折叠：
+     角色库里角色一多，这段的角色卡就把整张卡撑得比上面「表情包」那张高一大截。
+     默认**展开**（免得看着像少了一块）；收起只影响这一段，勾选/草稿状态照旧留在 drafts 里。 */
+  const [bindOpen, setBindOpen] = useState(true);
 
   const load = async () => {
     setLoading(true); setLoadErr(null);
@@ -2466,44 +2478,67 @@ function MemePacksCard({ remote }: { remote?: { id: string; name?: string } | nu
       )}
 
       {/* ---------- ③ 角色绑定 ---------- */}
+      {/* 标题行 = 折叠开关（整行可点，键盘 Enter/空格也能切；不用 <button> 是为了不跟行内其它元素抢焦点）。
+          收起时连下面那句说明一起收掉，这样折叠才真的省高度。 */}
       <div style={{ marginTop: 10 }}>
-        <b style={{ fontSize: 13 }}>哪个角色用哪些包</b>
-        <div style={{ fontSize: 12.5, color: '#8a7f9e', margin: '2px 0 6px' }}>
-          勾上就写进桥的 <code>config.json</code>（<code>social.meme.personaPacks</code>），保存后立刻生效；
-          一个都不勾 = 这个角色只用出厂那份包。
+        <div
+          role="button" tabIndex={0} aria-expanded={bindOpen}
+          title={bindOpen ? '收起「哪个角色用哪些包」' : '展开「哪个角色用哪些包」'}
+          onClick={() => setBindOpen((v) => !v)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setBindOpen((v) => !v); } }}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', userSelect: 'none' }}
+        >
+          {bindOpen ? <ChevronDown size={14} color="#8a7f9e" /> : <ChevronRight size={14} color="#8a7f9e" />}
+          <b style={{ fontSize: 13 }}>哪个角色用哪些包</b>
+          <span style={{ fontSize: 12, color: '#a99fc0' }}>{bindOpen ? '收起' : '展开'}</span>
         </div>
-        {roleRows.length === 0 && (
-          <div className="lrn-inline-note">还没有角色可用：先到「人设」页用「角色库导入」放一个角色进来，或上传时把「谁都能用」改成某个角色。</div>
-        )}
-        {roleRows.map((r) => {
-          const picked = drafts[r] ?? bindings[r] ?? [];
-          const dirty = JSON.stringify(picked) !== JSON.stringify(bindings[r] ?? []);
-          return (
-            <div key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px solid var(--nc-content2, #eee)', borderRadius: 8, padding: '6px 10px', marginBottom: 6 }}>
-              <b style={{ fontSize: 13, color: '#3d2b4f', minWidth: 90 }}>{r}</b>
-              {packs.length === 0 && <span style={{ fontSize: 12.5, color: '#9a8fb0' }}>还没有包可选</span>}
-              {packs.map((p) => (
-                <label key={p.id} style={{ fontSize: 12.5, display: 'flex', gap: 4, alignItems: 'center', color: '#4a3d5c' }}>
-                  <input type="checkbox" checked={picked.includes(p.id)} disabled={busy}
-                    onChange={(e) => setDrafts((d) => {
-                      const cur = d[r] ?? bindings[r] ?? [];
-                      return { ...d, [r]: e.target.checked ? [...cur, p.id] : cur.filter((x) => x !== p.id) };
-                    })} />
-                  {p.id}
-                </label>
-              ))}
-              <button className="btn btn-sm" style={{ marginLeft: 'auto' }} disabled={busy || !dirty} onClick={() => void saveBind(r)}>
-                {dirty ? '保存这个角色' : '已保存'}
-              </button>
+        {bindOpen && (
+          <>
+            <div style={{ fontSize: 12.5, color: '#8a7f9e', margin: '2px 0 6px' }}>
+              勾上就写进桥的 <code>config.json</code>（<code>social.meme.personaPacks</code>），保存后立刻生效；
+              一个都不勾 = 这个角色只用出厂那份包。
             </div>
-          );
-        })}
+            {roleRows.length === 0 ? (
+              <div className="lrn-inline-note">还没有角色可用：先到「人设」页用「角色库导入」放一个角色进来，或上传时把「谁都能用」改成某个角色。</div>
+            ) : (
+              /* 角色卡列表固定高度内滚（角色多也不会把卡片顶高）：
+                 maxHeight 240 是照上面「表情包」卡量的 —— 那张卡的字段块（social.sticker 十来个字段，
+                 两列排下来约 190px）就是"心里有数的高度"，这里只比它高一点点（+50px），
+                 别再往上加，否则两张卡又不成比例。边框/圆角沿用「工具 schema 精简」那张卡的滚动区同款值。 */
+              <div style={{ maxHeight: 240, overflowY: 'auto', overscrollBehavior: 'contain', border: '1px solid var(--nc-border-200, #e5e5e5)', borderRadius: 8, padding: 8 }}>
+                {roleRows.map((r) => {
+                  const picked = drafts[r] ?? bindings[r] ?? [];
+                  const dirty = JSON.stringify(picked) !== JSON.stringify(bindings[r] ?? []);
+                  return (
+                    <div key={r} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', border: '1px solid var(--nc-content2, #eee)', borderRadius: 8, padding: '6px 10px', marginBottom: 6 }}>
+                      <b style={{ fontSize: 13, color: '#3d2b4f', minWidth: 90 }}>{r}</b>
+                      {packs.length === 0 && <span style={{ fontSize: 12.5, color: '#9a8fb0' }}>还没有包可选</span>}
+                      {packs.map((p) => (
+                        <label key={p.id} style={{ fontSize: 12.5, display: 'flex', gap: 4, alignItems: 'center', color: '#4a3d5c' }}>
+                          <input type="checkbox" checked={picked.includes(p.id)} disabled={busy}
+                            onChange={(e) => setDrafts((d) => {
+                              const cur = d[r] ?? bindings[r] ?? [];
+                              return { ...d, [r]: e.target.checked ? [...cur, p.id] : cur.filter((x) => x !== p.id) };
+                            })} />
+                          {p.id}
+                        </label>
+                      ))}
+                      <button className="btn btn-sm" style={{ marginLeft: 'auto' }} disabled={busy || !dirty} onClick={() => void saveBind(r)}>
+                        {dirty ? '保存这个角色' : '已保存'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void> }) {
+function ToolsTab({ cfg, ch, onSave, target, remoteServerId }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void>; target?: string; remoteServerId?: string }) {
   const v = get(cfg, 'social.tools');
   // 【2026-09-18】MCP 工具原名（qq_send_message 这种英文标识符）默认**不显示**：
   // 界面上一律显示中文名；要跟 config.json 里的 social.tools.* 对照时再勾上这个开关。
@@ -2590,7 +2625,7 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
           ))}
         </div>
       </div>
-<ToolCompressorCard cfg={cfg} ch={ch} onSave={onSave} />
+<ToolCompressorCard cfg={cfg} ch={ch} onSave={onSave} target={target} remoteServerId={remoteServerId} />
       <SlimToolsCard cfg={cfg} ch={ch} onSave={onSave} />
     </div>
   );
@@ -2715,7 +2750,7 @@ function MemoryCard() {
  * 调用从 1 步变 2 步。桥侧已按真实工具名解包（core/mux.js 的 unwrapCompressedToolName），
  * 所以发送判定、幂等账本、回合收尾这些逻辑不受影响。
  * ⚠ 压缩机没装时自动回退直连（绝不把工具表搞没）；改完必须重启隔离 DSH。 */
-function ToolCompressorCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void> }) {
+function ToolCompressorCard({ cfg, ch, onSave, target, remoteServerId }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void>; target?: string; remoteServerId?: string }) {
   const enabled = get(cfg, 'social.toolCompressor.enabled') === true;
   const level = String(get(cfg, 'social.toolCompressor.level') ?? 'medium');
   const toonify = get(cfg, 'social.toolCompressor.toonify') === true;
@@ -2730,8 +2765,26 @@ function ToolCompressorCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => 
     try {
       ch('social.toolCompressor.excludeTools')(draft.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean));
       await onSave();
-      await instanceAction('dsh-isolated', 'restart');
-      setMsg('已保存并重启隔离 DSH（约 15 秒后工具表才换过来）');
+      /* 【2026-09-21 修「配了 max、服务器上还是 medium」】
+       * 现场：config.json 已经是 level:"max"，但 cordis.patch.yml 写着 high、跑着的代理是 -c medium ——
+       * 三份东西各说各话。原因有两条，缺一不可：
+       *   ① 档位是**桥启动时**写进 cordis.patch.yml 的 → 不重启桥，patch 就是旧的；
+       *   ② 代理是**隔离 DSH 启动时**按 patch 里的 args 起的 → 不重启 DSH，进程就是旧的。
+       * 而这里原来只调了 instanceAction('dsh-isolated')，那是**本机**实例：目标是服务器时，
+       * 服务器上桥和 DSH 一个都没重启，于是"改了没生效"，界面上还显示"已保存并重启"。
+       * 现在按 target 走，并且**先桥后 DSH**（顺序反了 DSH 会按旧 patch 起代理）。 */
+      if (target === 'remote') {
+        if (!remoteServerId) throw new Error('目标选了服务器但没选具体哪台');
+        await sshServiceAction(remoteServerId, 'bridge', 'restart');
+        await new Promise((r) => setTimeout(r, 3000));
+        await sshServiceAction(remoteServerId, 'dsh', 'restart');
+        setMsg('已保存并重启**服务器**上的桥 + 隔离 DSH（约 30 秒后工具表才换过来）');
+      } else {
+        await instanceAction('bridge-local', 'restart');
+        await new Promise((r) => setTimeout(r, 3000));
+        await instanceAction('dsh-isolated', 'restart');
+        setMsg('已保存并重启本机的桥 + 隔离 DSH（约 30 秒后工具表才换过来）');
+      }
     } catch (e: any) { setMsg('失败：' + (e?.message || '')); }
     finally { setBusy(false); }
   };
