@@ -359,7 +359,52 @@ export function loadConfig() {
   };
   cfg.social.meme.packs = (Array.isArray(rawMeme.packs) ? rawMeme.packs : []).map(String).filter(Boolean);
 
+  clampSendPace(cfg.social?.send);
+
   return cfg;
+}
+
+/**
+ * 打字节拍的**安全钳制**（2026-09-22 主人报"唤醒后要响应一段时间"之后加的）。
+ *
+ * 现场（线上数据，不是推测）：服务器那份 config.json 的 social.send 被调成
+ * `linearPerCharMs: 650` / `linearCapMs: 15000`（本机运行时是 150/1500，仓库默认 150/4000）。
+ * 于是"一次回复里第 2 条气泡起 = 本条字数 × 650ms"：17 个字 = 11.0 秒。DSH 会话日志里每一条
+ * `qq_send_message` 的结果都带着这个数：delays 5237 / 8050 / 9388 / 10989 / 11753 ms，
+ * 118 次发送总计执行 990 秒 —— 主人感觉到的"唤醒后要响应一段时间"就是它，**不是** MCP 压缩代理
+ * （那段窗口里 `napcat_get_tool_schema` 一步都没有过，即 0 次额外往返），**也不是**模型的思考
+ * （每步首个 token 0.7~1.7s，纯文本步 1~2s，都是命中前缀缓存的正常值）。
+ *
+ * 为什么用钳制而不是只改配置值：这些键**模型自己在私聊里就能改**（console-server.js 的
+ * 可调项名单里有 linearPerCharMs/linearCapMs），只改文件的话下一次自调又会回来。真人聊天打字
+ * 大约 4~5 字/秒（200~250ms/字），所以把 perChar 夹在 [60, 320]、cap 夹在 [800, 6000]：
+ * 拟人的"按字数"节奏完整保留，但绝不会退化成"发一条等十几秒"。`linearEnabled: false`
+ * （完全不延迟）不受影响，仍然原样生效。
+ */
+export function clampSendPace(send) {
+  if (!send || typeof send !== 'object') return send;
+  const clamp = (v, lo, hi) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.min(hi, Math.max(lo, Math.round(n)));
+  };
+  const perChar = clamp(send.linearPerCharMs ?? send.perCharMs, 60, 320);
+  if (perChar != null && perChar !== Number(send.linearPerCharMs)) {
+    log(`[config] 打字节拍钳制：linearPerCharMs ${send.linearPerCharMs} → ${perChar}（按字数等太久 = 一条气泡等十几秒）`);
+    send.linearPerCharMs = perChar;
+  }
+  const cap = clamp(send.linearCapMs ?? send.capMs, 800, 6000);
+  if (cap != null && cap !== Number(send.linearCapMs)) {
+    log(`[config] 打字节拍钳制：linearCapMs ${send.linearCapMs} → ${cap}（上限太大同样会让长句像卡住）`);
+    send.linearCapMs = cap;
+  }
+  const minMs = clamp(send.linearMinMs ?? send.minMs, 0, 2000);
+  if (minMs != null && minMs !== Number(send.linearMinMs)) send.linearMinMs = minMs;
+  // 下限不能高过上限（否则按"等最久"理解就永远顶在上限）
+  const lo = Number(send.linearMinMs);
+  const hi = Number(send.linearCapMs);
+  if (Number.isFinite(lo) && Number.isFinite(hi) && lo > hi) send.linearMinMs = hi;
+  return send;
 }
 
 // ── 状态持久化（QQ 会话 ↔ DSH 会话映射） ─────────────────────────────────────
