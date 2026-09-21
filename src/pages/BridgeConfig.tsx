@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
-import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, getToolSchemaStats, getMemoryStats, type ToolSchemaStats, type MemoryStats, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
 import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen } from 'lucide-react';
 import NapcatTokensCard from '../components/NapcatTokensCard';
@@ -190,6 +190,15 @@ const LABEL: Record<string, string> = {
   /* 【2026-09-19】搜图的镜像站地址：主人反馈镜像站会换域名/镜像挂掉，所以要能自己改。
    * 这一项没登记的话 tools/audit-ui-labels.mjs 会报"未翻译键"（界面会裸奔一个英文键名）。 */
   pixiv: '搜/发 Pixiv 插画', 'pixiv.base': 'Pixiv 镜像站地址',
+  'pixiv.refreshToken': 'Pixiv 长期登录态（自动续期写入，一般不用手填）',
+  /* 【2026-09-21】本次新增的三处设置（[Style] 语感行 / /token 计价 / 工具压缩档）：
+   * tools/audit-ui-labels.mjs 只认这张表，登记在这里界面上才不会裸奔英文键名。 */
+  prompt: '提示词与语感', 'prompt.styleLine': '每轮语感提醒（[Style] 行）',
+  tokenCost: '计价口径（/token 指令）',
+  'tokenCost.pHit': '缓存命中单价（¥/百万 tok）', 'tokenCost.pMiss': '未命中输入单价（¥/百万 tok）',
+  'tokenCost.pOut': '输出单价（¥/百万 tok）', 'tokenCost.peakMult': '高峰时段倍率',
+  'tokenCost.peakHours': '高峰小时（北京时）',
+  'social.slimTools.level': '工具描述压缩档位',
 };
 
 /** MCP 工具中文名（工具与规则页） */
@@ -202,6 +211,8 @@ const TOOL_LABEL: Record<string, string> = {
   sendPoke: '发戳一戳', sendSticker: '发表情包', listStickers: '表情包列表', getStickerImage: '取表情图',
   setStickerRemark: '改表情备注', stickerNote: '表情备注', collectSticker: '收藏表情', getSelfImage: '我的图片',
   getFileContent: '读文件内容', sendQqFace: '发 QQ 表情', faceList: 'QQ 表情列表', memorySearch: '搜聊天记录',
+  /* 【2026-09-21 记忆架构升级】新增的写记忆开关（qq_memory_remember）——工具与规则页要能关掉它 */
+  memoryRemember: '写长期记忆',
   historyDelete: '删聊天记录', historyClear: '清空记录', sendDocx: '发 Word 文档', sendRich: '发卡片消息',
   musicSearch: '搜歌', videoSearch: '看/搜视频', imageSearch: '联网找图发图', pixiv: '搜/发 Pixiv 插画', globalOverview: '全局总览', scheduleMessage: '定时发消息', withdrawMessage: '撤回消息',
   sendForward: '合并转发', like: '点赞', proactiveSend: '主动私聊',
@@ -243,6 +254,8 @@ const TOOL_MCP: Record<string, string> = {
   setStickerRemark: 'qq_set_sticker_remark', stickerNote: 'qq_sticker_note',
   collectSticker: 'qq_collect_sticker', getSelfImage: 'qq_get_self_image', getFileContent: 'qq_get_file_content',
   sendQqFace: 'qq_send_qq_face', faceList: 'qq_face_list', memorySearch: 'qq_memory_search',
+  // 【2026-09-21 记忆架构升级】新工具与它的开关（没有这条映射，审计会判定"这个工具在页面上会消失"）
+  memoryRemember: 'qq_memory_remember',
   historyDelete: 'qq_history_delete', historyClear: 'qq_history_clear', sendDocx: 'qq_send_docx',
   sendRich: 'qq_send_rich', musicSearch: 'qq_music_search', videoSearch: 'qq_video_parse / qq_video_search', imageSearch: 'qq_image_search / qq_send_image', pixiv: 'qq_pixiv_search / qq_send_pixiv', globalOverview: 'qq_global_overview',
   scheduleMessage: 'qq_schedule_message / qq_schedule_list / qq_schedule_cancel',
@@ -374,6 +387,30 @@ function mcpLabel(fullName: string) {
   allowAllPrivate: '私聊专属开关（2026-09-19 主人要求）：**私聊名单为空**时放行所有私聊 —— 群里严格只认名单、私聊谁来都能说上话，就用它。注意：① 只在该类名单为空时生效，私聊名单里填了人就以名单为准；② 黑名单永远优先，拉黑的人照样进不来。',
   allowAllGroups: '群聊专属开关，语义与上面那条一样，只是作用于群聊。默认两个都不勾 = 空名单时谁都不放行。',
   security: '安全选项分组。',
+  'prompt.styleLine': '唤醒正文里每轮都会带的一行语感提醒（默认 `[Style] 说人话：短、有态度，别讲课别列举`）。'
+    + '为什么单独可配：系统提示词里写着"别讲课"也压不住这一轮的语气 —— 小模型对**最近那段上下文**权重最高，'
+    + '所以这句话是最后一道闸。它的长度每轮只有几十字符、且每轮完全相同（稳定前缀，按缓存读计价），成本可忽略。'
+    + '改文案的几个要求：① 保持**每轮完全相同**（别放时间/随机数，否则会打掉前缀缓存）；'
+    + '② 描述的是"怎么说"，不要写具体规则条款（那些属于系统提示词）；③ 留空 = 完全不注入这一行。'
+    + '保存后下一条消息生效（配置文件热加载，无需重启桥）。',
+  'tokenCost.pHit': '缓存命中的输入单价（¥ / 百万 token）。DeepSeek 谷时的缓存命中价约为未命中价的 1/50，'
+    + '所以这个值填大了会把 /token 报出的钱算虚高。默认 0.02。',
+  'tokenCost.pMiss': '未命中（新读入）输入的单价（¥ / 百万 token）。默认 1。',
+  'tokenCost.pOut': '输出 token 的单价（¥ / 百万 token）。默认 4。',
+  'tokenCost.peakMult': '高峰时段整体倍率。默认 2 = 高峰时上述三项单价全部 ×2。填 1 = 不分时段计价。',
+  'tokenCost.peakHours': '算作"高峰"的北京时小时（0-23）。默认 [9,10,11,14,15,16,17]，即上午 09:00-11:59 与下午 14:00-17:59。',
+  'pixiv.refreshToken': 'Pixiv 的长期登录态（OAuth refresh_token）。**一般不用手填**：'
+    + '引导流程会用一次性的 PHPSESSID 换回长期 refresh_token 并自动写在这里，之后按画师名字搜人不再依赖手贴 cookie。'
+    + '填错/过期会导致「按名字搜画师」失败，但直接按作品 id 发图不受影响（那条路走公开接口）。',
+  prompt: '提示词可调项分组。目前只有一项：唤醒正文每轮带的那句语感提醒。',
+  tokenCost: 'QQ 里发 /token 时算钱用的单价分组（¥ / 百万 token）。默认值与管理端「学习」页的实测计量同源；'
+    + '改这里只影响 /token 报出来的钱，不影响提供方的实际计费。',
+  'social.slimTools.level': '工具描述压缩档位（一次点一个档，不用手写几十个工具名）：'
+    + 'off = 全部注册（默认，行为与改动之前一致）；low ≈52%；medium ≈33%；high ≈8.6%（最小闭环：只会说话/引用/收尾/看未读）；'
+    + 'custom = 用下面的白名单/黑名单两张表（老行为）。'
+    + '百分比是**桥实测**的（注册工具时逐个量出来的，不是写死的），卡片上的「桥实测」一行会显示当前真实占比。'
+    + '⚠ 换档后必须重启隔离 DSH 才会生效（工具表只在 DSH 启动时取一次）。'
+    + '注意：`social.tools.*` 那些开关**省不了这份描述**（它们只在调用时返回"工具未启用"），只有这里的档位才会让它从请求里消失。',
   trustedCrossSessionUids: '允许 agent 跨会话读取/带话的 QQ 号（数组），一般只放你自己最信任的好友。',
   deepsleep: '总开关：开启后**所有群聊**的消息入库但不唤醒、不回复、不主动冒泡（省 token）；**私聊照常**。拍一拍等群内事件同样被静默。主人发 /start 可随时恢复（这条命令不经过模型，永远有效）。',
   recommendedHint: '喂给模型的“潜水/唤醒行为规则”长文本；一般不建议新手改动。',
@@ -736,6 +773,13 @@ const LABEL_EXTRA: Record<string, string> = {
   'social.tools.sendDocx': '发 Word 文档',
   'social.tools.getFileContent': '读群文件',
   'social.wake.maxWakePerMinutePrivate': '私聊每分钟唤醒上限', 'social.wake.maxWakePerHourPrivate': '私聊每小时唤醒上限',
+  // 【2026-09-21】[Style] 语感行 + /token 计价参数（两者都在「Core 设置」的通用页签里可改）
+  'prompt.styleLine': '每轮语感提醒（[Style] 行）',
+  'tokenCost.pHit': '缓存命中单价（¥/百万 tok）',
+  'tokenCost.pMiss': '未命中输入单价（¥/百万 tok）',
+  'tokenCost.pOut': '输出单价（¥/百万 tok）',
+  'tokenCost.peakMult': '高峰时段倍率',
+  'tokenCost.peakHours': '高峰小时（北京时）',
 };
 
 /** 开关下方的一行小字提示（按完整路径/字段名精确命中） */
@@ -752,6 +796,8 @@ const TIP: Record<string, string> = {
   'social.turnHold.enabled': '一次唤醒里留住回合，连着补话不用重新唤醒',
   'social.turnHold.privateOnly': '群里不开保持；确有需要再关掉并写死群号',
   'social.turnHold.requestBudgetMs': '必须小于 DSH 插件那侧的单次请求超时',
+  'prompt.styleLine': '留空 = 不注入这一行',
+  'tokenCost.peakHours': '每行一个小时，或写成 [9,10,11,14,15,16,17]',
 };
 
 function pretty(label: string) {
@@ -876,11 +922,26 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (!c.dshCompaction || typeof c.dshCompaction !== 'object') c.dshCompaction = {};
       const dc = c.dshCompaction;
       if (dc.enabled === undefined) dc.enabled = true;
-      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.12;
-      if (dc.retainRatio === undefined) dc.retainRatio = 0.03;
+      /* 【2026-09-21 修】这里原来回填 0.12/0.03，而桥侧默认（qq-bridge/src/core/config.js）是 0.08/0.02 ——
+       * 老配置打开这张卡再点保存，就等于把"上下文治理"悄悄放宽回 0.12：上下文长期停在 ~11.7 万 token，
+       * 实测"一句话 1 分钱"。回填值必须与服务端默认逐字一致，否则界面本身就是个改错值的陷阱。 */
+      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.08;
+      if (dc.retainRatio === undefined) dc.retainRatio = 0.02;
       if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 8192;
       if (dc.summarizationProvider === undefined) dc.summarizationProvider = '';
       if (dc.summarizationModel === undefined) dc.summarizationModel = '';
+      /* 【2026-09-21】提示词可调项：`prompt.styleLine` 是唤醒正文每轮那句语感提醒，
+       * 缺键时要把输入框画出来（否则老配置打开这张卡是空的）。 */
+      if (!c.prompt || typeof c.prompt !== 'object') c.prompt = {};
+      if (c.prompt.styleLine === undefined) c.prompt.styleLine = '[Style] 说人话：短、有态度，别讲课别列举';
+      /* 【2026-09-21】/token 计价参数（¥ / 百万 tok），默认值与管理端「学习」页实测区同源。 */
+      if (!c.tokenCost || typeof c.tokenCost !== 'object') c.tokenCost = {};
+      const tc = c.tokenCost;
+      if (tc.pHit === undefined) tc.pHit = 0.02;
+      if (tc.pMiss === undefined) tc.pMiss = 1;
+      if (tc.pOut === undefined) tc.pOut = 4;
+      if (tc.peakMult === undefined) tc.peakMult = 2;
+      if (tc.peakHours === undefined) tc.peakHours = [9, 10, 11, 14, 15, 16, 17];
       if (!c.social) c.social = {};
       if (!c.social.autoReset || typeof c.social.autoReset !== 'object') c.social.autoReset = {};
       if (c.social.autoReset.permanent === undefined) c.social.autoReset.permanent = false;
@@ -1798,6 +1859,7 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
         desc="让一个会话能长期用下去又不堆积上下文：上下文用到「触发比例」时，隔离 DSH 先剪掉超大的工具结果（不发模型请求、聊天记录一字不动），剪完仍超阈值才把最老一段摘要成 <compacted-summary>。阈值按模型窗口的比例给，换模型自动缩放。改这里立刻生效（DSH 热加载那份 patch），不用重启 DSH 或桥。摘要是用**主模型**（全局语言模型服务商）写的，没有单独的服务商/模型可配。" />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
+      <MemoryCard />
       <ActivityHoursCard cfg={cfg} remote={remote} writeConfig={writeConfig} onCfgChange={onCfgChange} />
 
       <GroupCard title="等待：回复前的停顿" path="social.wait" cfg={cfg} ch={ch} onHelp={onHelp}        desc="模拟真人“想一想再回”：停顿多久、新消息后静默多久。全调 0 = 秒回机器人。" />
@@ -1815,6 +1877,12 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
       {/* 【2026-09-19 主人要求】这张卡只留"模型总开关"：另外两项（回复检查间隔 / 推荐参数）
           一个在「调参」里也有、一个一直没人动过，留在页面上只会让人以为"这些设置还管用"。
           键本身仍在桥里生效（config.json 不动），只是不再从这里编辑。 */}
+      <GroupCard title="提示词与语感（[Style] 行）" path="prompt" cfg={cfg} ch={ch} onHelp={onHelp}
+        only={['styleLine']}
+        desc="唤醒正文每轮都会带的那一句语感提醒。它是离模型最近的一句话，对小模型的语气影响比几十 k 字符的系统提示词更直接 —— 觉得回话「像人机」就改这里。填中文短句；留空 = 不注入这一行。改完保存**下一条消息就生效**，不用重启桥、也不用等会话轮换。" />
+      <GroupCard title="计价口径（/token 指令）" path="tokenCost" cfg={cfg} ch={ch} onHelp={onHelp}
+        only={['pHit', 'pMiss', 'pOut', 'peakMult', 'peakHours']}
+        desc="QQ 里发 /token 时算钱用的单价（¥ / 百万 token）。默认值与管理端「学习」页的实测计量一致：命中按缓存价、未命中按输入价、输出按输出价，高峰时段整体乘一个倍率。改这里只影响 /token 报出来的钱，不影响计费本身。" />
       <GroupCard title="智能体总开关" path="social" only={['enabled']}
         cfg={cfg} ch={ch} onHelp={onHelp}
         desc="整套智能体的总开关：关掉 = 桥不再把消息交给模型（只记录、不回复）。" />
@@ -2549,10 +2617,83 @@ const SLIM_FIXED_OTHER_CHARS = 2556;
  * 只有"**根本不注册**"才真的让 schema 消失 —— 那就是这里改的 `social.slimTools.deny`，
  * 它在桥的 MCP server（mcp-napcat-safe.js）启动时生效。
  */
+/** 「长期记忆」卡（2026-09-21 记忆架构升级）——只看不改。
+ *
+ * 为什么要有这张卡：记忆以前是**看不见的**（写进 SQLite 就没了下文，"到底记住了什么"没人知道）。
+ * 升级之后记忆分了层（永久/长期/短期）、检索走全文索引，那就必须看得见：
+ *   · 永久层（★）每一轮都会出现在唤醒正文的 `[Recall]` 里 —— 所以**它写错了会一直错**，要点开核对；
+ *   · `chat_fts` / `mem_fts` 是检索用的全文索引，显示 -1 表示这份库没有 FTS5 或索引还没建
+ *     （检索会自动退回模糊匹配：能用、只是慢且没有相关性排序）。
+ * 数据来自 manager 只读打开的 qq-bridge/state/memory.db，不改任何东西。 */
+function MemoryCard() {
+  const [s, setS] = useState<MemoryStats | null>(null);
+  const [msg, setMsg] = useState('正在读取…');
+  useEffect(() => {
+    let alive = true;
+    getMemoryStats()
+      .then((r) => { if (!alive) return; if (r?.ok) { setS(r); setMsg(''); } else setMsg(r?.message || '读不到记忆库'); })
+      .catch((e: any) => { if (alive) setMsg(String(e?.message ?? e)); });
+    return () => { alive = false; };
+  }, []);
+  const tierLabel: Record<string, string> = { permanent: '永久（每轮都注入）', durable: '长期（默认）', working: '短期（会过期）' };
+  return (
+    <div className="card">
+      <div className="card-title">长期记忆与档案（SQLite）</div>
+      {s ? (
+        <>
+          <div style={{ fontSize: 13, lineHeight: 1.9 }}>
+            档案 <b>{s.profiles}</b> 人 · 记忆条目 <b>{s.entries}</b> 条（其中永久 <b>{s.permanent}</b> 条）· 聊天记录 <b>{(s.chat || 0).toLocaleString()}</b> 条
+            <br />
+            分层：{(s.tiers || []).map((t) => `${tierLabel[t.tier] || t.tier} ${t.count} 条`).join(' · ') || '（空）'}
+            <br />
+            全文索引：聊天 <b>{s.fts?.chat_fts === -1 ? '未建（检索退回模糊匹配）' : (s.fts?.chat_fts ?? 0).toLocaleString()}</b>
+            {' · '}记忆 <b>{s.fts?.mem_fts === -1 ? '未建' : (s.fts?.mem_fts ?? 0)}</b>
+            {s.ftsRebuiltAt ? ` · 最近重建 ${new Date(s.ftsRebuiltAt).toLocaleString()}` : ''}
+          </div>
+          {s.top && s.top.length > 0 ? (
+            <div style={{ marginTop: 10, fontSize: 12.5, lineHeight: 1.8 }}>
+              <b>永久层（★ = 每一轮都会出现在它眼前的几句话，写错了会一直错）</b>
+              <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+                {s.top.map((e) => (
+                  <li key={e.id}>[★ {e.category}] {e.content}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>
+              还没有永久记忆条目。在 QQ 里对机器人说「记住：……」并让它用 <code>qq_memory_remember</code> 写一条永久层即可。
+            </div>
+          )}
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--nc-foreground-400)', lineHeight: 1.7 }}>
+            记忆写在桥的 <code>state/memory.db</code> 里：聊天记录永久保存（每一条都进全文索引，
+            机器人说"看不到更早的消息"时可以直接检索回来）；永久层条目每轮注入，长期/短期按闲置时间淡出。
+            这张卡只读，不会改动任何数据。
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)' }}>{msg}</div>
+      )}
+    </div>
+  );
+}
+
 function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void> }) {
   const denyRaw = get(cfg, 'social.slimTools.deny');
   const deny: string[] = Array.isArray(denyRaw) ? denyRaw : [];
   const enabled = get(cfg, 'social.slimTools.enabled') === true;
+  /* 【2026-09-21 主人要求「MCP 压缩工具调到 high 档、压缩到 8.6%、并支持管理端切换」】
+   * 档位（off/low/medium/high/custom）由桥的 lib/tool-tiers.js 定义，这里只负责选 + 显示实测结果。
+   * 老配置没有 level 键 → 显示成 custom（＝继续用手写名单），行为不变。 */
+  const level: string = String(get(cfg, 'social.slimTools.level') ?? (enabled ? 'custom' : 'off'));
+  const [stats, setStats] = useState<ToolSchemaStats | null>(null);
+  const [statsMsg, setStatsMsg] = useState('');
+  useEffect(() => {
+    let alive = true;
+    getToolSchemaStats()
+      .then((r) => { if (!alive) return; if (r?.ok) setStats(r); else setStatsMsg(r?.message || '还没有实测数据'); })
+      .catch((e: any) => { if (alive) setStatsMsg(String(e?.message ?? e)); });
+    return () => { alive = false; };
+  }, []);
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
@@ -2603,6 +2744,54 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         <input type="checkbox" checked={enabled} onChange={(e) => ch('social.slimTools.enabled')(e.target.checked)} />
         <span>启用精简名单（关掉 = 所有工具都注册，回到默认）</span>
       </label>
+
+      {/* ── 档位选择（2026-09-21）─────────────────────────────────────────────
+          一次点击就能在"省钱"和"功能"之间挪一格，不用手写几十个工具名。
+          每档后面那个百分比是**桥实测**的（state/tool-schema-stats.json，
+          由 mcp-napcat-safe.js 注册工具时逐个量出来的），不是界面上写死的数字。 */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>压缩档位</span>
+        <select className="input" style={{ maxWidth: 320 }} value={level}
+          onChange={(e) => {
+            const v = e.target.value;
+            ch('social.slimTools.level')(v);
+            // 选档位 = 明确要生效：顺手把总开关打开（否则改了档位却因为 enabled=false 一点没变）
+            if (v !== 'off') ch('social.slimTools.enabled')(true);
+          }}>
+          <option value="off">不裁剪（全部工具）</option>
+          {(stats?.tiers ? Object.keys(stats.tiers) : ['low', 'medium', 'high', 'custom'])
+            .filter((id) => id !== 'off')
+            .map((id) => {
+              const t = stats?.tiers?.[id];
+              const pct = t ? ` · 实测保留 ${(t.share * 100).toFixed(1)}%` : '';
+              return <option key={id} value={id}>{`${id}${t ? `｜${t.label}` : ''}${pct}`}</option>;
+            })}
+        </select>
+        {stats?.tiers?.[level]?.note && (
+          <span style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>{stats.tiers[level].note}</span>
+        )}
+      </div>
+
+      {stats ? (
+        <div style={{ fontSize: 12.5, marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--nc-background-100, #f6f7f9)', lineHeight: 1.7 }}>
+          <b>桥实测（隔离 DSH 真正拿到的那份工具表）</b>：档位 {stats.level}
+          {' · '}注册 <b>{stats.registered}</b>/{stats.available} 个
+          {' · '}工具描述共 <b>{(stats.keptChars || 0).toLocaleString()}</b>/{ (stats.totalChars || 0).toLocaleString()} 字符
+          {' '}（<b>{((stats.share ?? 1) * 100).toFixed(1)}%</b>）≈ <b>{stats.approxTokensPerStep?.toLocaleString()}</b> token/步
+          {' · '}省 <b>{(stats.savedChars || 0).toLocaleString()}</b> 字符
+          <br />
+          各档位若切过去：{Object.entries(stats.tiers || {}).filter(([id]) => id !== 'off' && id !== 'custom').map(([id, t]) =>
+            `${id} ${(t.share * 100).toFixed(1)}%`).join(' · ')}
+          <br />
+          <span style={{ color: 'var(--nc-foreground-400)' }}>
+            数据时间 {stats.at ? new Date(stats.at).toLocaleString() : '—'}；换档位后**必须重启隔离 DSH** 才会重新注册工具并刷新这份实测。
+          </span>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)', marginBottom: 10 }}>
+          {statsMsg || '正在读取桥侧实测数据…'}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'baseline', marginBottom: 10 }}>
         <span style={{ fontSize: 13 }}>

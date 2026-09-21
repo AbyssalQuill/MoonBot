@@ -72,4 +72,17 @@ export function formatFaceList() {
     .join('\n');
 }
 
+/* 【2026-09-21 表情包理解】id → 中文名（读不到返回 ''）。
+ *
+ * 为什么需要：对方发来一个 QQ 原生表情时，原来渲染成 `[表情123]` —— 模型看到的是一个**数字**，
+ * 只能靠猜（或者干巴巴地说"看不懂这个表情"）。而这张表里本来就有 123 = 什么心情。
+ * 现在渲染成 `[表情:偷笑]`，模型直接读到"情绪"这一层，符合"表情是情绪、不是题材"的读法。
+ * 名字以 NapCat 自报的 `q_des` 为准（media-pipe 优先用那个），这里只是**兜底**：
+ * 拿不到在线描述时，至少还有本地这张表，不会退化成光秃秃的编号。 */
+export function faceNameById(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n)) return '';
+  return QQ_FACE_ID_TO_NAME[n] || '';
+}
+
 export { QQ_FACE_TABLE, QQ_FACE_ID_TO_NAME };

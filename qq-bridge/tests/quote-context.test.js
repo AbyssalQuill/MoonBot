@@ -101,9 +101,19 @@ t('⑤ 唤醒正文里没有引用标记时保持原样（不带多余的引用�
 
 t('⑥ 系统提示词里有缩略语与引用归属的规则', () => {
   const preset = fs.readFileSync(path.join(process.cwd(), 'dsh', 'agent-presets', 'default', 'agent.cordis.yml'), 'utf8');
-  assert.match(preset, /ABBREVIATIONS ARE THE ROOM'S LANGUAGE/);
-  assert.match(preset, /quoted someone else -> they are talking to them, not to you/);
-  assert.match(preset, /HOLD THE THREAD/);
+  /* 【2026-09-21 提示词压缩后的断言口径】
+   * 这三条原来钉的是 1.2.5 的**原句**（`ABBREVIATIONS ARE THE ROOM'S LANGUAGE` 之类）。
+   * 2026-09-21 把 [COMPREHEND] 压成短行 spec（TEACHER/缩略语/引用归属一条不删，只是换了更短的写法），
+   * 原句自然就没了 —— 测试跟着失效说明它钉的是"措辞"而不是"规则"。
+   * 现在改成钉**规则本身**：断言那条规则的关键词都在（缩写表、引用归属判据、抓住整条线），
+   * 并且断言规则里点名的中文缩略语样本确实还在（那是最容易被压缩顺手删掉的东西）。
+   * 目的不变：只要有人把这三条规则删掉或删空，这个用例必须红。 */
+  assert.match(preset, /_ABBREVIATIONS|ABBREVIATION/, '缩略语规则不见了');
+  assert.match(preset, /yyds/, '缩略语规则里的中文样本被删空了');
+  assert.match(preset, /xdm\(|srds\(/, '拼音首字母样本不见了');
+  assert.match(preset, /\[引用 X：…\]/, '引用标记的语法没写出来');
+  assert.match(preset, /someone else's -> they talk to them, not you/i, '引用归属判据（引用别人=在跟别人说话）不见了');
+  assert.match(preset, /HOLD_THE_THREAD|HOLD THE THREAD/, '抓住整条线（而不只最后一句）的规则不见了');
 });
 
 try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* Windows 上 sqlite 句柄未释放 */ }

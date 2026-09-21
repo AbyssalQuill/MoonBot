@@ -180,6 +180,7 @@ import {
 import {
   initTokenMeter, setConvKeyResolver, setTokenReconcileHome, startTokenReconcile,
 } from './core/token-meter.js';
+import { initTokenReportCore } from './core/token-report.js';
 import {
   enqueueForRetry, flushQueue, deliverPrompt, drainPromptQueue, drainAllPromptQueues,
   QUEUE_MAX, initPromptDeliverCore, setPromptApi, setPromptMediaResolver,
@@ -344,6 +345,8 @@ async function main() {
   // 发送抽签（语音 / 表情包的概率与冷却）：桥侧掷骰后写进唤醒正文，不让模型自己猜概率
   initSendDice(cfg);
   initTokenMeter(cfg);
+  /* 【2026-09-21】/token 指令：用与「学习」页实测区同一套口径算今日花费（单价走 cfg.tokenCost）。 */
+  initTokenReportCore(cfg);
   // 用量对账：DSH 自己的 projcache 里有按会话累计的权威 token 数（tokenUsage.totals）。
   // 单帧漏记（帧里没有 sessionId / 会话刚好结束）会让面板偏低，这里定期把差额补成
   // reconciled:true 的行，使面板 == DSH 侧真实值。找不到 DSH home 时静默跳过（不影响主流程）。

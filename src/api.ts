@@ -660,6 +660,26 @@ export const getBridgeConfig = () => api<BridgeResp>('/bridge/config');
 export const saveBridgeConfig = (body: Record<string, any>) =>
   api<BridgeResp>('/bridge/config', { method: 'POST', body: JSON.stringify(body) });
 export const resetSpeechRules = () => api<BridgeResp>('/bridge/speech-reset', { method: 'POST' });
+/* 工具 schema 压缩档的**实测**统计（桥在注册工具时量的；用来显示"当前档位到底省了多少"） */
+export interface ToolSchemaTierStat { label: string; note: string; share: number; keptChars: number; keptCount: number }
+export interface ToolSchemaStats {
+  ok: boolean; message?: string; at?: number; level?: string; enabled?: boolean; source?: string;
+  registered?: number; available?: number; totalChars?: number; keptChars?: number; share?: number;
+  savedChars?: number; approxTokensPerStep?: number;
+  tiers?: Record<string, ToolSchemaTierStat>;
+  top?: Array<{ name: string; cost: number }>;
+}
+export const getToolSchemaStats = () => api<ToolSchemaStats>('/bridge/tool-schema-stats');
+/* 记忆架构（v1.3.0）总览：分层 + 全文索引（只读 memory.db） */
+export interface MemoryStats {
+  ok: boolean; message?: string;
+  profiles?: number; entries?: number; chat?: number; permanent?: number;
+  tiers?: Array<{ tier: string; count: number }>;
+  fts?: Record<string, number>;
+  ftsVersion?: string; ftsRebuiltAt?: number;
+  top?: Array<{ id: number; uid: string; category: string; content: string; tier: string }>;
+}
+export const getMemoryStats = () => api<MemoryStats>('/bridge/memory-stats');
 
 /* ================= 群聊活跃时段（按会话存，走桥控制台；本机/服务端两种 scope） ================= */
 export interface ActivityHoursRow { key: string; windows: string; inWindow?: boolean; nextWindowStart?: string; ok: boolean; error?: string }

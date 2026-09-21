@@ -5,6 +5,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { forwardIdFromData } from '../forward.js';
 import { safeFetchBuffer } from '../safe-fetch.js';
+// 【2026-09-21 表情包理解】原生表情渲染成 `[表情:名字(id)]`，让模型读到情绪而不是一个数字
+import { faceNameById } from '../qq-faces.js';
 
 export async function segmentsToText(segments, options = {}) {
   const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
@@ -26,7 +28,16 @@ export async function segmentsToText(segments, options = {}) {
         }
         break;
       }
-      case 'face': out.push(`[表情${d.id ?? ''}]`); break;
+      /* 【2026-09-21 表情包理解】原生表情原来渲染成 `[表情123]`：模型只看到一个数字，读不出情绪。
+       * 本地 id→中文名表里有 123 = 什么心情，于是渲染成 `[表情:偷笑(123)]` ——
+       * 这个格式本来就是 lib/qq-face-parse.js 明确支持的反解格式（发回来照样能翻成真表情），
+       * 所以既让模型"读得懂"，又不会在转述时变成纯文本。查不到名字时保持原样（`[表情123]`）。 */
+      case 'face': {
+        const fid = d.id ?? '';
+        const fname = faceNameById(fid);
+        out.push(fname ? `[表情:${fname}(${fid})]` : `[表情${fid}]`);
+        break;
+      }
       case 'image': out.push('[图片]'); break;
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;

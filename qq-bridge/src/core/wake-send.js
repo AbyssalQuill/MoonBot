@@ -9,7 +9,7 @@ import { getComposedPersonaStamp } from '../lib/preset-compose.js';
 import { currentMode, selfNickname, isSessionAllowedInCurrentMode } from './mode.js';
 import { state, saveState } from './config.js';
 import { createStandbySession, ensureSession } from './dsh-session.js';
-import { formatMemory, formatProfileText, formatContactsLine, recentChatMessages, fetchUnreadChatMessages, markMessagesRead } from './memory.js';
+import { formatMemory, formatProfileText, formatContactsLine, recentChatMessages, fetchUnreadChatMessages, markMessagesRead, memoryDigest } from './memory.js';
 import { formatGroupInfoLine, formatGroupListLine } from './group-cache.js';
 // 语音/表情包：唤醒正文里注入一行「本轮轮到哪一种」的抽签数据（概率与冷却在管理端配：
 // 语音在「语音」页，表情包在桥配置页的「表情包」卡）。两边都关着/概率 0 时不会注入多余内容。
@@ -348,8 +348,28 @@ const sessionLine = (key) => `[Session] ${key}\n`;
  * 这是教科书腔（定义句式 + 步骤腔 + 并列清单），正是"像人机"的主因。
  * 系统提示词里已经有 [SPEECH RULES] 的 TEACHER MODE 与 [COMPREHEND] 3b，但小模型对**最近那段上下文**
  * 的权重最高：模板化的规则藏在几十 k 字符的系统提示词里，往往压不住这一轮正文的语气。
- * 所以正文里带一句 34 字符的提醒（每轮固定 = 稳定前缀，按缓存读计价，成本可忽略）。 */
-const styleLine = '[Style] 说人话：短、有态度，别讲课别列举\n';
+ * 所以正文里带一句 34 字符的提醒（每轮固定 = 稳定前缀，按缓存读计价，成本可忽略）。
+ *
+ * 【2026-09-21 主人要求「[style] 提示词也要支持管理端 Core 设置界面编辑」】
+ * 文案改走 config.json 的 `prompt.styleLine`（管理端 Core 设置可改，保存后下一条唤醒即生效）。
+ * 默认值仍与 1.2.4 定稿逐字一致；置空 = 不注入这一行。
+ * 读的时候**剥掉控制字符与换行**（它会被拼进正文的一行里，混进换行会撑破唤醒正文的结构），
+ * 并缓存住上一次的结果字符串 —— 保证同一轮配置下拼出来的正文逐字节相同（前缀缓存友好）。 */
+const DEFAULT_STYLE_LINE = '[Style] 说人话：短、有态度，别讲课别列举';
+let styleLineCache = { key: null, text: '' };
+export function currentStyleLine() {
+  const raw = cfgRef?.prompt?.styleLine;
+  const text = raw === undefined || raw === null ? DEFAULT_STYLE_LINE : String(raw);
+  const key = text;
+  if (styleLineCache.key === key) return styleLineCache.text;
+  const clean = text.replace(/[\r\n\u0000-\u001f]+/g, ' ').trim().slice(0, 200);
+  styleLineCache = { key, text: clean ? `${clean}\n` : '' };
+  return styleLineCache.text;
+}
+/** 当前生效的 [Style] 文案（管理端展示用，不带结尾换行） */
+export function styleLineText() {
+  return currentStyleLine().trim();
+}
 
 /* 【2026-09-20 修「它看不见我引用的那条消息」】
  * 现场（主人私聊，2026-09-21 13:29）：主人引用机器人的「这就是你养的那群吗」回了一句
@@ -390,7 +410,7 @@ export function buildWakePrompt(key, reason) {
   // 【2026-09-12 令牌行改英文括号】主人要求：【令牌】→ [Token]（英文标签 + 英文方括号）。
   // 语义不变（仍是"本会话当前有效令牌"），但标签换成英文后与其余唤醒标记（[Wake]/[Unread]/[OWNER]）
   // 同一风格；出站泄露检测的标签正则已同步接受 [Token]（见 lib/text-safe.js）。
-  const tokenLine = `[Token] ${st.agentToken}\n${sessionLine(key)}${styleLine}${ownerMark}${notOwnerMark}\n`;
+  const tokenLine = `[Token] ${st.agentToken}\n${sessionLine(key)}${currentStyleLine()}${ownerMark}${notOwnerMark}\n`;
   const memoryText = formatMemory(st);
   // 注入长期档案（SQLite）：私聊注入对方档案，群聊注入最近活跃群友的档案。
   let profileText = '';
@@ -412,7 +432,24 @@ export function buildWakePrompt(key, reason) {
     log(`[memory] 档案注入失败: ${error?.message ?? error}`);
   }
   const contactsText = formatContactsLine();
-  const memoryLine = [memoryText, contactsText, profileText ? `[Profile] ${profileText}` : ''].filter(Boolean).join('\n') + '\n\n';
+  /* 【2026-09-21 记忆架构升级】`[Recall]`：永久层 / 高重要度记忆的**短摘要**（每轮都在）。
+   * 为什么放在这里而不是系统提示词里：系统提示词一旦变化就会**整段前缀缓存失效**（那一步全价重读
+   * 几万 token）。摘要放在唤醒正文这个"每轮本来就新"的位置，代价只是它自己那几百字符，
+   * 换来的是"主人定过的规矩和关于他的事实**永远在**"——这正是主人要的"永久记忆"。
+   * 内容稳定（排序确定、不含随机数），所以同一批记忆下逐字节相同，不会额外扰动什么。 */
+  let recallText = '';
+  try {
+    const uid = key.startsWith('private:') ? key.split(':')[1]
+      : key.startsWith('group:') ? String(cfgRef?.ownerQQ ?? '') : '';
+    recallText = memoryDigest({ uid, limit: 14, maxChars: 700 });
+  } catch (error) {
+    log(`[memory] 记忆摘要注入失败: ${error?.message ?? error}`);
+  }
+  const memoryLine = [
+    memoryText, contactsText,
+    recallText ? `[Recall] 你长期记住的事（永久层，别忘；要改就用 qq_memory_remember）\n${recallText}` : '',
+    profileText ? `[Profile] ${profileText}` : '',
+  ].filter(Boolean).join('\n') + '\n\n';
   const participationText = formatParticipation(st);
   const participationLine = participationText ? `${participationText}\n\n` : '';
   const preSleepMs = Math.max(0, Number(cfgRef.social?.wake?.preSleepWaitMs) || 300000);
@@ -1032,7 +1069,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   //     [Mid-turn] N new message(s) after your last bubble - not answered yet.
   //     owner(id:xxx): ……
   // 实测同批 2 条时正文 690 → 约 230 字符；规则一条没丢，只是不再随每次注入重复。
-  const text = `[Token] ${st.agentToken}\n${sessionLine(key)}${styleLine}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
+  const text = `[Token] ${st.agentToken}\n${sessionLine(key)}${currentStyleLine()}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
   const mySeq = (steerSeq += 1);
   try {
     const res = await withTimeout(
@@ -1603,7 +1640,7 @@ export async function sendWakePrompt(key, reason) {
     if (!hasAnyTool) {
       const unread = (st.unread || []).length;
       const rMap = { private: 'private', atMention: '@', poke: 'poke', probability: 'probability', proactiveCheck: 'proactive', replyCheck: 'replyCheck' };
-      promptText = `[Token] ${st.agentToken}\n${nowLine}[Session] ${key}\n${styleLine}[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}[Session] ${key}\n${currentStyleLine()}[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     } else {
       // 哨兵轮 prompt 每轮都带当前令牌：模型不必凭记忆/跨轮次查找 token，
       // 杜绝"上下文轮换后 token 抄错 → 工具全 403 → 模型看不到消息 → 空唤醒乱回"链路。
@@ -1625,7 +1662,7 @@ export async function sendWakePrompt(key, reason) {
        * 实测（state/tool-calls.jsonl 1966 次调用）qq_send_sticker 只有 5 次（≈1/54 条消息），
        * 而配置的概率是 0.6 —— 低 15~20 倍，正是"每会话只掷一次骰"的形状。
        * 抽签函数本身是纯的（只读配置 + Math.random，不写任何状态），所以每轮都掷没有副作用。 */
-      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n${styleLine}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n${currentStyleLine()}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     }
   } else {
     // 首次唤醒（或轮换到新会话后的首个真实回合）：完整 base + 最近消息滑动窗口 + 重置提示。

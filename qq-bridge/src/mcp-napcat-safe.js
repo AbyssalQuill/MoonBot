@@ -26,6 +26,7 @@ import {
 } from './lib/pixiv.js';
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
+import { resolveToolTier, toolAllowedByTier, measureSchemaShare, TOOL_TIERS } from './lib/tool-tiers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -611,51 +612,106 @@ const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>
   };
 }
 
-// ── 工具 schema 精简（2026-09-12）：token 账单上最大的一刀 ────────────────────────────
+// ── 工具 schema 精简（2026-09-12 起；2026-09-21 升级成「压缩档」）─────────────────────
 // 实测（QQ 主会话的 request/header）：tools **72,692 字符 ≈ 22.7k tokens**、system 13.1k 字符 ≈ 3.3k，
 // 单次请求合计 ≈ 26k tokens —— 也就是说**每一分钱里 87% 是工具 JSON schema**，
 // 而且**每一步都会把这整包重发一次**（靠前缀缓存按缓存读计价，占账单约 61%）。
 // 所以"少注册一个用不到的工具"比"把提示词写短几个字"重要两个数量级。
+// 复算工具：`node tools/tool-schema-meter.mjs`（会真的起一次本文件、逐个量 schema 尺寸）。
 //
 // ⚠️ 一个必须记住的事实：`config.json` 里的 `social.tools.*` 开关**根本省不了 schema**。
 //    console-server.js 的 `ToolEnabled()` 只在**调用时**返回 403（"工具未启用"），
 //    工具描述照样每次全量下发。要真的省，只能**根本不注册** —— 就是这里做的。
 //    （交接文档 §4.7b.3 曾写"关掉 = schema 整段消失"，那是错的；本文件是更正。）
 //
+// 2026-09-21 主人要求「MCP 压缩工具调到 high 档、压缩到 8.6%、并支持管理端切换」：
+//   · 档位定义在 lib/tool-tiers.js（off / low / medium / high / custom，含实测百分比与名单）；
+//   · 本文件按档位决定**注册哪些**（白名单语义 = 名单外根本不注册）；
+//   · 注册完把**实测**结果写 state/tool-schema-stats.json 并打到 stderr ——
+//     管理端「工具 schema 精简」卡直接读它显示"当前档位实际留了多少字符、占百分之几"，
+//     这样"省了多少"是可验证的数，而不是配置里的一句承诺。
 // 开关语义（可一键回退）：
-//   `social.slimTools.enabled === true` → 按名单精简：
+//   `social.slimTools.enabled !== true` → **全部注册**，行为与改动之前**完全一致**；
+//   `social.slimTools.level` = off/low/medium/high → 按该档名单；
+//   `social.slimTools.level` = custom（或老配置只有 allow/deny）→ 走手写名单：
 //        · `deny` 里的工具 **不注册**（黑名单；名单以外的照常注册 → 将来新增工具默认可见，不会"忘了加白名单"）；
 //        · `allow` 非空时改成**只注册 allow 里的**（白名单，最省，但新增工具要手动加）。
-//   未配置 / enabled 不为 true → **全部注册**，行为与改动之前**完全一致**。
 // 改动这份名单只需要重启隔离 DSH（DSH 启动时向 MCP server 取一次工具表），不用改别的地方。
 // 名单里的工具名**允许带或不带 MCP server 前缀**（`mcp__napcat__qq_x` 与 `qq_x` 等价）。
 // 踩过的坑：管理端「出厂默认名单」写的是**带前缀**的全名，而这里注册用的是裸名 →
 // deny 名单一条都匹配不上 → 实际裁剪 0 个、"省 schema" 静默失效（实测：77 个工具一个没少）。
 // 现在两边都归一化，谁写都能生效；`qq_status` 用裸 server.tool 注册，本来就不参与裁剪。
 const bareToolName = (n) => String(n).replace(/^mcp__[A-Za-z0-9_-]+__/, '');
-const toNameSet = (arr) => new Set((Array.isArray(arr) ? arr : []).map(bareToolName));
-const slimTools = getConfig().social?.slimTools;
-const SLIM_ON = !!slimTools && slimTools.enabled === true;
-const SLIM_ALLOW = (SLIM_ON && Array.isArray(slimTools.allow) && slimTools.allow.length)
-  ? toNameSet(slimTools.allow)
-  : null;
-const SLIM_DENY = (SLIM_ON && Array.isArray(slimTools.deny))
-  ? toNameSet(slimTools.deny)
-  : null;
-if (SLIM_ON && (SLIM_ALLOW || SLIM_DENY)) {
+const TIER = resolveToolTier(getConfig().social?.slimTools);
+const SLIM_ON = TIER.level !== 'off';
+// 实测账本：注册期逐个累加（只算进请求体的三样：name / description / inputSchema）。
+const schemaMeter = { tools: [], totalChars: 0, keptChars: 0, keptCount: 0 };
+const schemaCostOf = (name, description, params) => {
+  try { return JSON.stringify({ name, description: description ?? '', inputSchema: params ?? {} }).length; }
+  catch { return String(name).length + String(description ?? '').length; }
+};
+if (SLIM_ON) {
   // stdout 是 MCP 的协议通道，日志一律走 stderr
-  console.error(`[napcat-safe] 精简工具集已启用：${SLIM_ALLOW ? `白名单 ${SLIM_ALLOW.size} 个` : `黑名单 ${SLIM_DENY ? SLIM_DENY.size : 0} 个`}（social.slimTools）`);
+  console.error(`[napcat-safe] 工具 schema 精简已启用：档位=${TIER.level}（${TIER.source}）`
+    + `${TIER.keep ? ` 白名单 ${TIER.keep.size} 个` : TIER.allow ? ` 白名单 ${TIER.allow.size} 个` : TIER.deny ? ` 黑名单 ${TIER.deny.size} 个` : ''}`);
 }
 
-/** 注册工具；精简模式下被排除的**直接不注册** —— 它的 JSON schema 从此不出现在任何一次请求里。 */
+/** 注册工具；精简模式下被排除的**直接不注册** —— 它的 JSON schema 从此不出现在任何一次请求里。
+ *  同时把尺寸记进 schemaMeter：注册完写一份实测统计给管理端读。 */
 function registerTool(name, ...rest) {
   const bare = bareToolName(name);
-  if (SLIM_ALLOW && !SLIM_ALLOW.has(bare)) return;
-  if (!SLIM_ALLOW && SLIM_DENY && SLIM_DENY.has(bare)) return;
+  const cost = schemaCostOf(name, rest[0], rest[1] && typeof rest[1] === 'object' ? rest[1] : {});
+  schemaMeter.tools.push({ name: bare, cost });
+  schemaMeter.totalChars += cost;
+  if (!toolAllowedByTier(bare, TIER)) return;
+  schemaMeter.keptChars += cost;
+  schemaMeter.keptCount += 1;
   return server.tool(name, ...rest);
 }
 
-server.tool(
+/** 把实测结果落盘（管理端「工具 schema 精简」卡读它显示"实际省了多少"）。
+ *  MCP server 是 DSH 的子进程，写盘失败绝不能影响工具注册 —— 全部包在 try 里。 */
+function flushSchemaStats() {
+  try {
+    const share = schemaMeter.totalChars > 0 ? schemaMeter.keptChars / schemaMeter.totalChars : 1;
+    const payload = {
+      at: Date.now(),
+      level: TIER.level,
+      enabled: SLIM_ON,
+      source: TIER.source,
+      registered: schemaMeter.keptCount,
+      available: schemaMeter.tools.length,
+      totalChars: schemaMeter.totalChars,
+      keptChars: schemaMeter.keptChars,
+      share: Number(share.toFixed(4)),
+      savedChars: schemaMeter.totalChars - schemaMeter.keptChars,
+      approxTokensPerStep: Math.round(schemaMeter.keptChars / 3.2),
+      // 各档位若切过去会是多少（同一份尺寸表算出来的，管理端可以并列显示做选择）
+      tiers: Object.fromEntries(Object.entries(TOOL_TIERS).map(([id, def]) => {
+        const keep = Array.isArray(def?.keep) ? new Set(def.keep.map(bareToolName)) : null;
+        const m = measureSchemaShare(schemaMeter.tools, keep);
+        return [id, { label: def?.label ?? id, note: def?.note ?? '', share: Number(m.share.toFixed(4)), keptChars: m.keptChars, keptCount: m.keptCount }];
+      })),
+      top: [...schemaMeter.tools].sort((a, b) => b.cost - a.cost).slice(0, 12),
+    };
+    fs.mkdirSync(path.join(ROOT, 'state'), { recursive: true });
+    const file = path.join(ROOT, 'state', 'tool-schema-stats.json');
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(tmp, file);
+    console.error(`[napcat-safe] 工具 schema 实测：注册 ${payload.registered}/${payload.available} 个，`
+      + `${payload.keptChars}/${payload.totalChars} 字符（${(share * 100).toFixed(1)}%）≈ ${payload.approxTokensPerStep} token/步`);
+  } catch (e) {
+    console.error(`[napcat-safe] 工具 schema 统计落盘失败（不影响工具）: ${e?.message ?? e}`);
+  }
+}
+process.on('exit', flushSchemaStats);
+
+
+/* qq_status 走 registerTool（原来直接 server.tool，不进账本）：
+ * 它是自检通道、体积只 198 字符，lib/tool-tiers.js 里写死"任何档位都保留"，
+ * 但**必须被记进 schemaMeter** —— 否则管理端看到的"全量字符数"少一个工具，百分比就不准。 */
+registerTool(
   'qq_status',
   'Query the QQ bot\'s login status and account info (read-only).',
   {},
@@ -2620,6 +2676,40 @@ if (cfg.social?.tools?.memorySearch !== false) {
         return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `搜索聊天历史失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.social?.tools?.memoryRemember !== false) {
+  /* 【2026-09-21 记忆架构升级】长期记忆的**写入**入口。
+   * 与 qq_profile_set（结构化档案）分工：档案是"这个人是什么样"，这里是"我必须一直记得的一件事"
+   * （主人定的规矩、承诺、重要事件）。tier=permanent 的条目会**每一轮**出现在唤醒正文的 [Recall] 里，
+   * 所以写进去的必须是"值得每轮都读一遍"的一句话 —— 提示词里写死了这条纪律。 */
+  registerTool(
+    'qq_memory_remember',
+    'Write ONE durable long-term memory (rule / fact / promise about a person) so it survives context rotation. Use when the owner states a standing rule ("以后都这样" / "别再…" / "记住…"), corrects you, or a lesson cost real pain. tier: permanent = never fades and shows in every wake (use for owner rules/identity); durable = default, fades after ~90 idle days; working = short-lived. Never store secrets, tokens or private/intimate content, never a chat log. One sentence per call.',
+    {
+      content: z.string().describe('ONE sentence, concrete and self-contained (no pronouns like "he" without a name)'),
+      token: z.string().describe('Session token'),
+      key: z.string().optional().describe('Session key; omit to let the bridge pick (private chat = that person, group = the owner)'),
+      tier: z.enum(['permanent', 'durable', 'working']).optional().describe('permanent = never fades + injected every wake; durable = default; working = fades in ~7 days'),
+      category: z.string().optional().describe('Short label: rule / owner / identity / fact / event / note (default note)'),
+      pin: z.boolean().optional().describe('true = pin it (same effect as tier=permanent: never fades, injected every wake)'),
+      tags: z.string().optional().describe('A few keywords for later recall, comma separated')
+    },
+    async ({ content, token, key, tier, category, pin, tags }) => {
+      try {
+        const q = new URLSearchParams({ content });
+        if (key) q.set('key', key);
+        if (tier) q.set('tier', tier);
+        if (category) q.set('category', category);
+        if (pin) q.set('pin', '1');
+        if (tags) q.set('tags', tags);
+        const data = await agentApi(`/api/social/memory-remember?${q.toString()}`, { headers: { 'x-agent-token': token }, timeoutMs: 15000 });
+        return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `写长期记忆失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

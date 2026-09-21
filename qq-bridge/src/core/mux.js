@@ -81,6 +81,8 @@ import {
 } from './sticker.js';
 import { resolveNameToUid } from './memory.js';
 import { markMessagesRead } from './memory.js';
+/* 【2026-09-21 主人要求】/token：自动发出今日 token 总量与花费（口径与管理端实测区一致）。 */
+import { buildTokenReportText } from './token-report.js';
 import {
   cancelPendingEntry, handlePendingAnswer, handlePokeNotice, handleInputStatusNotice,
   registerPending, initEventsAuxCore, setEventsAuxApi,
@@ -448,6 +450,22 @@ export async function handleIncoming(kind, id, event, cfgRef) {
     if (plainContent === '/status') {
       const rs = readRoleState();
       await sendToQQ(key, `会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfgRef) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
+      return;
+    }
+    /* ── /token [天数]：今日 token 消耗总量 + 花费（桥侧直接算，不经过模型）───────────
+     * 【2026-09-21 主人要求】"加一个 /token 指令，输入自动发送今日的 token 消耗总量与钱数消耗"。
+     * 口径与管理端「学习」页的实测区逐字一致（见 core/token-report.js 顶部注释）；
+     * 单价可在 config.json 的 tokenCost 段覆盖。回复是多行短句，sendToQQ 会按行发成多个气泡。 */
+    if (plainContent === '/token' || /^\/token\s+\d{1,2}$/.test(plainContent)) {
+      const daysArg = Number(plainContent.split(/\s+/)[1]) || 1;
+      try {
+        const r = buildTokenReportText({ days: daysArg });
+        await sendToQQ(key, r.text);
+        log(`[command] ${key} /token ${daysArg}：${JSON.stringify(r.data)}`);
+      } catch (error) {
+        await sendToQQ(key, `用量读不出来：${error?.message ?? error}`);
+        log(`[command] ${key} /token 失败: ${error?.message ?? error}`);
+      }
       return;
     }
     // ── /op [del] <QQ号|昵称>：设置/取消管理员（仅主人）──────────────────

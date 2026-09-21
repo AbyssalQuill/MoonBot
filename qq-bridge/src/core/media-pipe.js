@@ -8,6 +8,8 @@ import { isProbablySafeImageFileRef, isSafeLocalMediaPath } from '../lib/media-g
 import { mimeFromBuffer, mimeFromUrl, base64FromMaybe } from '../lib/media-meta.js';
 import { finalizeImageBuffer, ensureDeliverableImage, IMAGE_HARD_MAX_SIDE } from '../lib/image-compress.js';
 import { visionSplitEnabled as useVisionSplit, describeImageWithVisionModel } from './vision.js';
+// 【2026-09-21 表情包理解】收到 QQ 原生表情、又拿不到在线描述时，用本地 id→中文名表兜底
+import { faceNameById } from '../qq-faces.js';
 
 export const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // 单条消息图片总字节上限（调大以支持收藏大图/大 gif；safeFetchBuffer 调用处显式传参）
 export const MAX_MEDIA_PIXELS = 64_000_000; // 单张图片像素上限，防止“图片炸弹”解码拖垮 DSH
@@ -146,11 +148,15 @@ export async function fetchOneBotImage(media) {
 
 export async function fetchFaceMedia(media) {
   const faceId = Number(media.faceId);
+  /* 【2026-09-21 表情包理解】本地表兜底：拿不到 NapCat 的在线描述时，
+   * 也要把 `[表情#123]`（一个数字，模型只能猜）降级成 `[表情:偷笑]`（一句情绪）。 */
+  const localName = faceNameById(faceId);
+  const fallbackText = localName ? `[表情:${localName}]` : `[表情#${media.faceId}]`;
   if (!Number.isInteger(faceId)) return { text: `[表情#${media.faceId}]` };
   try {
     const face = await botRef.fetchFaceEntity(faceId, { timeoutMs: 12000 });
     if (face && typeof face === 'object') {
-      const desc = face.q_des || (Array.isArray(face.emoji_name_alias) && face.emoji_name_alias[0]) || '';
+      const desc = face.q_des || (Array.isArray(face.emoji_name_alias) && face.emoji_name_alias[0]) || localName || '';
       if (face.url) {
         try {
           const fetched = await safeFetchBuffer(String(face.url), MAX_MEDIA_BYTES);
@@ -165,12 +171,12 @@ export async function fetchFaceMedia(media) {
           log(`表情图片抓取失败: ${error?.message ?? error}`);
         }
       }
-      return { text: desc ? `[表情:${desc}]` : `[表情#${media.faceId}]` };
+      return { text: desc ? `[表情:${desc}]` : fallbackText };
     }
   } catch (error) {
     log(`fetchFaceEntity 失败: ${error?.message ?? error}`);
   }
-  return { text: `[表情#${media.faceId}]` };
+  return { text: fallbackText };
 }
 
 /**

@@ -3313,6 +3313,71 @@ export function readDshProviderModels() {
   return { providers, sources };
 }
 
+/* ── 工具 schema 压缩档：桥侧实测统计（2026-09-21 主人要求"压缩到 8.6% 并支持管理端切换"）────
+ * 数字从哪来：qq-bridge/src/mcp-napcat-safe.js 在**注册工具时**逐个量 name+description+inputSchema
+ * 的 JSON 尺寸，注册完写 `qq-bridge/state/tool-schema-stats.json`（含各档位若切过去会是多少）。
+ * 为什么不让前端自己算：前端那张 `TOOL_SCHEMA_CHARS` 是静态快照，改一次工具描述就失真；
+ * 这份是**隔离 DSH 真正拿到的那份工具表**的实测值 —— "省了多少"必须可验证。
+ * 只读，不落任何配置。 */
+app.get('/api/bridge/tool-schema-stats', (_req, res) => {
+  try {
+    const dir = findBridgeDir();
+    const file = path.join(dir, 'state', 'tool-schema-stats.json');
+    if (!existsSync(file)) {
+      res.json({ ok: false, message: '还没有实测数据：隔离 DSH 启动并加载 MCP 工具表之后才会有（重启一次隔离 DSH 即可生成）' });
+      return;
+    }
+    const raw = readTextStripBom(file);
+    const j = JSON.parse(raw);
+    res.json({ ok: true, ...j, file });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+/* ── 记忆架构（v1.3.0）总览：分层记忆 + 全文索引的实际情况（2026-09-21）──────────────
+ * 主人要求"升级记忆架构、档案架构"，那就得看得见：永久层有多少条、索引建好没有、检索能不能用。
+ * 只读打开 memory.db（与「群友档案」页同一个只读句柄），任何一步失败都回 ok:false + 人话原因，
+ * 绝不让"记忆库还没建"变成页面报错。列名做兼容（老库没有 tier/pinned 列时按 0 处理）。 */
+app.get('/api/bridge/memory-stats', async (_req, res) => {
+  let db = null;
+  try {
+    db = await openBridgeMemoryDbRo();
+    const cols = new Set(db.prepare('PRAGMA table_info(memory_entries)').all().map((r) => r.name));
+    const has = (c) => cols.has(c);
+    const one = (sql, ...p) => { try { return Number(db.prepare(sql).get(...p)?.c || 0); } catch { return 0; } };
+    const tiers = has('tier')
+      ? db.prepare("SELECT COALESCE(NULLIF(tier,''),'durable') AS t, COUNT(*) AS c FROM memory_entries GROUP BY t").all().map((r) => ({ tier: r.t, count: Number(r.c) || 0 }))
+      : [{ tier: 'durable', count: one('SELECT COUNT(*) AS c FROM memory_entries') }];
+    const fts = {};
+    for (const name of ['chat_fts', 'mem_fts']) {
+      try { fts[name] = Number(db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get()?.c || 0); }
+      catch { fts[name] = -1; }   // -1 = 该库没有 FTS5 / 索引还没建
+    }
+    let meta = {};
+    try {
+      for (const r of db.prepare('SELECT k, v FROM memory_meta').all()) meta[r.k] = r.v;
+    } catch { /* 老库没有 memory_meta */ }
+    const top = has('pinned')
+      ? db.prepare("SELECT id, uid, category, content, pinned, tier, importance FROM memory_entries WHERE pinned = 1 OR tier = 'permanent' ORDER BY importance DESC, COALESCE(updated_at, created_at) DESC LIMIT 12").all()
+        .map((r) => ({ id: Number(r.id), uid: r.uid || '', category: r.category || '', content: String(r.content || '').slice(0, 160), tier: r.tier || 'permanent' }))
+      : [];
+    res.json({
+      ok: true,
+      profiles: one('SELECT COUNT(*) AS c FROM profiles'),
+      entries: one('SELECT COUNT(*) AS c FROM memory_entries'),
+      chat: one('SELECT COUNT(*) AS c FROM chat_messages'),
+      permanent: has('pinned') ? one("SELECT COUNT(*) AS c FROM memory_entries WHERE pinned = 1 OR tier = 'permanent'") : 0,
+      tiers, fts,
+      ftsVersion: meta.fts_version || '',
+      ftsRebuiltAt: Number(meta.fts_rebuilt_at) || 0,
+      top,
+    });
+  } catch (e) {
+    res.json({ ok: false, message: e.message });
+  } finally {
+    try { db?.close(); } catch { /* 忽略 */ }
+  }
+});
+
 app.get('/api/bridge/config', (_req, res) => {
   try {
     const cfg = readBridgeCfg();

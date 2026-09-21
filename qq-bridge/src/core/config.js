@@ -84,6 +84,26 @@ export function loadConfig() {
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
     consolePort: file.consolePort ?? 3100,
     consoleToken: file.consoleToken ?? '',
+    /* ── 【2026-09-21】提示词类的可调项（管理端「Core 设置」可改，即时生效）─────────────
+     * styleLine：唤醒正文每轮那一行语感提醒（1.2.4 加的「[Style] 说人话」）。
+     *   为什么要做成可配置：它是**离模型最近、对语气影响最大**的一句话，主人应当能自己改词，
+     *   而不必等一次发版。默认值与 1.2.4 定稿逐字一致（改默认值等于改语感，别乱动）。
+     *   空串 = 不注入这一行（想完全交给系统提示词时用）。 */
+    prompt: {
+      styleLine: '[Style] 说人话：短、有态度，别讲课别列举',
+      ...(file.prompt ?? {})
+    },
+    /* ── 【2026-09-21】/token 指令的计价参数（¥ / 百万 tok）─────────────────────────────
+     * 默认值与管理端「学习」页 src/pages/Learning.tsx::COST_DEFAULT 同源，两边算出来必须一致；
+     * 改这里会同时改变 /token 的口径（面板那边仍读它自己的 localStorage，需各自设置）。 */
+    tokenCost: {
+      pHit: 0.02,
+      pMiss: 1,
+      pOut: 4,
+      peakMult: 2,
+      peakHours: [9, 10, 11, 14, 15, 16, 17],
+      ...(file.tokenCost ?? {})
+    },
     security: {
       interceptNotify: true,
       ...(file.security ?? {})

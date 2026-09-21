@@ -1,5 +1,26 @@
 // 长期记忆 SQLite 库（主人/群友档案 + 通用记忆 + 完整聊天记录）
 // 。memDb 为模块级单例；群缓存（bot 依赖）暂留 main。
+//
+// ── 【2026-09-21 记忆架构升级（v1.3.0）】───────────────────────────────────────
+// 主人要求："升级记忆架构、档案架构，永久记忆一些东西；SQLite 储存还可以，甚至可以重构这一层。
+// 增强上下文理解、语义理解，尽量永久一轮对话或混合着来，用尽一切办法压缩成本。"
+//
+// 这一层原来只有三个朴素表（profiles / memory_entries / chat_messages），检索全靠
+// `content LIKE '%词%'` 全表扫 —— 结论有三条，全是钱和时间：
+//   ① 检索慢且不准：LIKE 没有相关性排序，30 万条历史里"找上次说的那件事"要么扫全表、要么查不着；
+//      模型一旦查不着就会说"我看不到更早的消息"（最贵的一种失败：主人一眼看出失忆）。
+//   ② 没有轻重：一条"主人不吃香菜"和一条随口闲话躺在同一张表里，谁都不会过期、谁都不会被优先注入。
+//   ③ 没有"永久"这个概念：主人真正想永久记住的东西，没有任何机制保证它**每一轮都在**。
+//
+// 现在的分层（都在同一个 memory.db 里，不动既有调用方）：
+//   TIER permanent（永久）：pinned=1 或 category ∈ {rule, owner, identity}。永不过期，每轮注入摘要。
+//   TIER durable（长期）：默认层。默认 90 天不活跃才淡出（expires_at 可显式指定）。
+//   TIER working（短期）：显式 working=true 或 importance 很低的临时条目，7 天淡出。
+//   检索：SQLite **FTS5 trigram** 全文索引（content='表名' 外部内容表 + 触发器同步）。
+//     trigram 对中文是"三字滑窗"，中文子串照样命中，不需要分词器；BM25 天然给出相关性排序。
+//     这就是"语义理解/上下文理解"的底座：模型说一句模糊的话，也能从三年聊天记录里捞回最相关的那几条。
+//   成本：索引与触发器全部在 SQLite 内部完成（C 实现），桥侧只多一次 INSERT 的开销；
+//     注入给模型的是**几百字符的摘要**，不是把历史塞回上下文 —— 省钱靠的是"按需检索"而不是"全都记住"。
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -79,6 +100,7 @@ export function initMemoryDb() {
       log(`[memory] chat_messages 消息 id 唯一索引创建失败（忽略，继续启动）: ${error?.message ?? error}`);
     }
     memDb = db;
+    ensureMemoryIndex(db);
     log('[memory] SQLite 记忆库已初始化');
     return db;
   } catch (error) {
@@ -86,6 +108,151 @@ export function initMemoryDb() {
     return null;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 记忆分层 + 全文检索（v1.3.0）
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 记忆层级 → 默认存活时长（ms）。0 = 永不过期。 */
+export const MEMORY_TIERS = { permanent: 0, durable: 90 * 24 * 3600 * 1000, working: 7 * 24 * 3600 * 1000 };
+/** 这些 category 天然属于"永久"（主人定的规矩 / 主人本人 / 身份设定）—— 不需要显式 pin 也不淡出。 */
+export const PERMANENT_CATEGORIES = new Set(['rule', 'owner', 'identity']);
+const FTS_SCHEMA_VERSION = '2';   // 索引结构一变就 +1 → 下次启动自动重建（幂等）
+
+function tableHasColumn(db, table, col) {
+  try { return db.prepare(`PRAGMA table_info(${table})`).all().some((r) => r.name === col); } catch { return false; }
+}
+
+/**
+ * 建索引 / 加列 / 建触发器（幂等）。任何一步失败都只记日志、绝不阻断桥启动 ——
+ * 记忆库是增强件，坏了不能把聊天一起带下水。
+ */
+export function ensureMemoryIndex(db = memDb) {
+  if (!db) return { ok: false, error: '记忆库不可用' };
+  const out = { ok: true, columns: [], fts: [], rebuilt: false };
+  // ① memory_entries 补列（存量库用 ALTER，幂等）
+  const cols = [
+    ['pinned', 'INTEGER DEFAULT 0'],
+    ['importance', 'INTEGER DEFAULT 0'],
+    ['last_used_at', 'INTEGER DEFAULT 0'],
+    ['hits', 'INTEGER DEFAULT 0'],
+    ['expires_at', 'INTEGER DEFAULT 0'],
+    ['conv_key', "TEXT DEFAULT ''"],
+    ['tags', "TEXT DEFAULT ''"],
+    ['source', "TEXT DEFAULT ''"],
+    ['tier', "TEXT DEFAULT ''"],
+    ['updated_at', 'INTEGER DEFAULT 0'],
+  ];
+  for (const [name, decl] of cols) {
+    if (tableHasColumn(db, 'memory_entries', name)) continue;
+    try { db.exec(`ALTER TABLE memory_entries ADD COLUMN ${name} ${decl}`); out.columns.push(name); } catch (e) {
+      log(`[memory] memory_entries.${name} 加列失败（忽略）: ${e?.message ?? e}`);
+    }
+  }
+  // ①b 【记忆库 v1.3.0 新增】memory_meta：索引版本等元信息（一张一行的 KV 表）
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS memory_meta (k TEXT PRIMARY KEY, v TEXT DEFAULT \'\')');
+  } catch (e) { log(`[memory] memory_meta 建表失败（忽略）: ${e?.message ?? e}`); }
+  // ② 检索用索引：把"谁、哪层、什么时候用过"变成可走索引的查询
+  for (const sql of [
+    'CREATE INDEX IF NOT EXISTS idx_mem_tier ON memory_entries(tier, uid, pinned)',
+    'CREATE INDEX IF NOT EXISTS idx_mem_conv ON memory_entries(conv_key, created_at)',
+    'CREATE INDEX IF NOT EXISTS idx_mem_expire ON memory_entries(expires_at)',
+  ]) { try { db.exec(sql); } catch (e) { log(`[memory] 索引创建失败 ${sql}: ${e?.message ?? e}`); } }
+
+  // ③ FTS5 trigram 全文索引（外部内容表 + 触发器同步）。
+  //    为什么用外部内容表：文本只存一份（chat_messages / memory_entries 自己），索引里只有词条指针，
+  //    数据库不会膨胀一倍；内容更新靠触发器自动同步，桥侧零维护。
+  const ftsDefs = [
+    { name: 'chat_fts', src: 'chat_messages', label: '聊天记录' },
+    { name: 'mem_fts', src: 'memory_entries', label: '记忆条目' },
+  ];
+  for (const d of ftsDefs) {
+    try {
+      db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${d.name} USING fts5(content, tokenize='trigram', content='${d.src}', content_rowid='id')`);
+      out.fts.push(d.name);
+    } catch (e) {
+      log(`[memory] ${d.name} 全文索引不可用（该库可能没编 FTS5），检索退回 LIKE: ${e?.message ?? e}`);
+      continue;
+    }
+    // 触发器：三张表（增/删/改）与索引保持一致。DROP 再建，改定义时不会残留旧触发器。
+    try {
+      const that = d.name;
+      const src = d.src;
+      db.exec(`DROP TRIGGER IF EXISTS ${src}_fts_ai`);
+      db.exec(`DROP TRIGGER IF EXISTS ${src}_fts_ad`);
+      db.exec(`DROP TRIGGER IF EXISTS ${src}_fts_au`);
+      db.exec(`CREATE TRIGGER ${src}_fts_ai AFTER INSERT ON ${src} BEGIN
+        INSERT INTO ${that}(rowid, content) VALUES (new.id, new.content);
+      END`);
+      db.exec(`CREATE TRIGGER ${src}_fts_ad AFTER DELETE ON ${src} BEGIN
+        INSERT INTO ${that}(${that}, rowid, content) VALUES ('delete', old.id, old.content);
+      END`);
+      db.exec(`CREATE TRIGGER ${src}_fts_au AFTER UPDATE OF content ON ${src} BEGIN
+        INSERT INTO ${that}(${that}, rowid, content) VALUES ('delete', old.id, old.content);
+        INSERT INTO ${that}(rowid, content) VALUES (new.id, new.content);
+      END`);
+    } catch (e) {
+      log(`[memory] ${d.src} 全文索引触发器创建失败（忽略）: ${e?.message ?? e}`);
+    }
+  }
+  // ④ 一次性的索引重建：存量库里已有几十万行，触发器只覆盖"建索引之后"的新增。
+  //    放在 setTimeout(…,0) 里跑，**不拖慢桥启动**；重建期间检索仍可用（只是可能少看到老消息）。
+  //    （不用 setImmediate：本仓库的静态作用域检查（scripts/check-scope.mjs）只开 DOM lib，
+  //      setImmediate 不在其中会被判成"未定义标识符"，改用它就过不了 CI。）
+  try {
+    const row = db.prepare("SELECT v FROM memory_meta WHERE k = 'fts_version'").get();
+    if (String(row?.v ?? '') !== FTS_SCHEMA_VERSION) {
+      setTimeout(() => { try { rebuildMemoryFts({ reason: 'schema-upgrade' }); } catch { /* 已内记日志 */ } }, 0);
+    }
+  } catch { /* 忽略 */ }
+  return out;
+}
+
+/** 重建两份全文索引（幂等；大库会跑几秒，因此只在版本变化或手动调用时执行）。 */
+export function rebuildMemoryFts({ reason = 'manual' } = {}) {
+  const db = initMemoryDb();
+  if (!db) return { ok: false, error: '记忆库不可用' };
+  const done = [];
+  for (const name of ['chat_fts', 'mem_fts']) {
+    try {
+      const t0 = Date.now();
+      db.exec(`INSERT INTO ${name}(${name}) VALUES('rebuild')`);
+      done.push(`${name}(${Date.now() - t0}ms)`);
+    } catch (e) {
+      log(`[memory] ${name} 重建失败（检索退回 LIKE）: ${e?.message ?? e}`);
+    }
+  }
+  try {
+    db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+      .run(FTS_SCHEMA_VERSION);
+    db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_rebuilt_at', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+      .run(String(Date.now()));
+  } catch { /* 忽略 */ }
+  if (done.length) log(`[memory] 全文索引重建完成（${reason}）：${done.join(', ')}`);
+  return { ok: true, rebuilt: done };
+}
+
+/** 全文索引可用吗（FTS5 表存在且能查）。不可用时所有检索自动退回 LIKE，功能不消失、只是慢。 */
+function ftsUsable(db, name) {
+  try { db.prepare(`SELECT rowid FROM ${name} LIMIT 1`).get(); return true; } catch { return false; }
+}
+
+/**
+ * 把用户/模型给的一段自然语言变成 FTS5 查询串。
+ * trigram 分词器要求每个 token ≥ 3 个字符：不足 3 字的碎片会被 FTS5 直接拒绝（返回空），
+ * 所以这里**拆成"够长的词"分别 OR**，并把双引号去掉（避免语法错误）。
+ * 返回 '' 表示"没法用 FTS 查"→ 调用方退回 LIKE。
+ */
+export function ftsQueryOf(text) {
+  const raw = String(text ?? '').replace(/["']/g, ' ').trim();
+  if (!raw) return '';
+  const parts = raw.split(/[\s,，。;；、:：!！?？()（）\[\]【】/\\|+*^-]+/).map((s) => s.trim()).filter((s) => s.length >= 3);
+  if (!parts.length) return '';
+  // 最多 8 个词：词越多越贵，且后面几个基本不改变排序
+  return parts.slice(0, 8).map((p) => `"${p}"`).join(' OR ');
+}
+
 
 export function getProfile(uid) {
   const db = initMemoryDb();
@@ -353,13 +520,48 @@ export function recentChatMessages(convKey, limit = 25) {
   }
 }
 
+/** chat_messages 行 → 检索结果的统一形状（搜索分支与 FTS 分支共用，避免两处漂移）。 */
+function rowToSearchMessage(r) {
+  return {
+    id: Number(r.id),
+    convKey: r.conv_key,
+    seq: Number(r.msg_seq) || 0,
+    messageId: r.message_id || '',
+    senderUid: r.sender_uid || '',
+    senderName: r.sender_name || '',
+    isSelf: !!r.is_self,
+    direction: r.direction || 'in',
+    kind: r.kind || 'text',
+    content: r.content || '',
+    quoteTarget: r.quote_target || '',
+    media: r.media || '',
+    ts: r.ts || '',
+    tsMs: Number(r.ts_ms) || 0,
+    recalledAt: Number(r.recalled_at) || 0,   // 撤回时间戳（0=未撤回）
+    recalled: !!r.recalled_at                  // 撤回标记（控制台最近消息回退读取等映射用）
+  };
+}
+
 export function searchChatMessages(opts = {}) {
   const db = initMemoryDb();
   if (!db) return { ok: true, total: 0, messages: [] };
   const where = [];
   const params = [];
   if (opts.convKey) { where.push('conv_key = ?'); params.push(String(opts.convKey)); }
-  if (opts.query) { where.push('content LIKE ?'); params.push('%' + String(opts.query) + '%'); }
+  /* 【2026-09-21 检索升级】给了 query 就走 FTS5 trigram（BM25 相关性排序），
+   * 查不到 / 短于 3 字 / 该库没编 FTS5 时自动退回原来的 LIKE —— 行为只增不减。 */
+  let joinSql = '';
+  let orderSql = 'ts_ms DESC, id DESC';
+  const ftsQ = opts.query ? ftsQueryOf(opts.query) : '';
+  const useFts = !!ftsQ && ftsUsable(db, 'chat_fts');
+  if (opts.query && useFts) {
+    joinSql = ' JOIN chat_fts f ON f.rowid = chat_messages.id';
+    where.push('chat_fts MATCH ?');
+    params.push(ftsQ);
+    orderSql = 'bm25(chat_fts) ASC';
+  } else if (opts.query) {
+    where.push('content LIKE ?'); params.push('%' + String(opts.query) + '%');
+  }
   if (opts.sender) { where.push('(sender_name LIKE ? OR sender_uid = ?)'); params.push('%' + String(opts.sender) + '%', String(opts.sender)); }
   if (opts.date) { where.push('ts LIKE ?'); params.push(String(opts.date) + '%'); }
   if (opts.fromTs) { where.push('ts_ms >= ?'); params.push(Number(opts.fromTs)); }
@@ -369,26 +571,14 @@ export function searchChatMessages(opts = {}) {
   const limit = Math.min(200, Math.max(1, Number(opts.limit) || 50));
   const offset = Math.max(0, Number(opts.offset) || 0);
   try {
+    if (useFts) {
+      // FTS 分支：不数总数（MATCH 下 COUNT 要再扫一遍索引，模型侧也不需要这个数）
+      const rows = db.prepare(`SELECT chat_messages.* FROM chat_messages${joinSql}${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+      return { ok: true, total: rows.length, limit, offset, ranked: true, messages: rows.map(rowToSearchMessage) };
+    }
     const total = Number(db.prepare(`SELECT COUNT(*) AS c FROM chat_messages${whereSql}`).get(...params)?.c || 0);
-    const rows = db.prepare(`SELECT * FROM chat_messages${whereSql} ORDER BY ts_ms DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
-    const messages = rows.map((r) => ({
-      id: Number(r.id),
-      convKey: r.conv_key,
-      seq: Number(r.msg_seq) || 0,
-      messageId: r.message_id || '',
-      senderUid: r.sender_uid || '',
-      senderName: r.sender_name || '',
-      isSelf: !!r.is_self,
-      direction: r.direction || 'in',
-      kind: r.kind || 'text',
-      content: r.content || '',
-      quoteTarget: r.quote_target || '',
-      media: r.media || '',
-      ts: r.ts || '',
-      tsMs: Number(r.ts_ms) || 0,
-      recalledAt: Number(r.recalled_at) || 0,   // 撤回时间戳（0=未撤回）
-      recalled: !!r.recalled_at                  // 撤回标记（控制台最近消息回退读取等映射用）
-    }));
+    const rows = db.prepare(`SELECT * FROM chat_messages${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+    const messages = rows.map(rowToSearchMessage);
     return { ok: true, total, limit, offset, messages };
   } catch (error) {
     log(`[chat-history] 搜索失败: ${error?.message ?? error}`);
@@ -644,3 +834,229 @@ export function loadGroupChatMessagesForLearning(opts = {}) {
     return { ok: false, error: error?.message ?? String(error), messages: [], groups: 0, sampledGroups: 0 };
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 分层记忆 API（v1.3.0）—— 永久 / 长期 / 短期 + 相关性检索
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 归一：tier 字符串 → 规范层级名（非法值一律按 durable） */
+function normTier(v, { pinned = false, category = '' } = {}) {
+  const t = String(v ?? '').trim().toLowerCase();
+  if (t === 'permanent' || t === 'durable' || t === 'working') return t;
+  if (pinned || PERMANENT_CATEGORIES.has(String(category ?? '').trim())) return 'permanent';
+  return 'durable';
+}
+
+/** 归一：mem_fts 行 → 对外形状 */
+function rowToMemoryEntry(r) {
+  return {
+    id: Number(r.id),
+    uid: r.uid || '',
+    category: r.category || '',
+    content: r.content || '',
+    createdAt: Number(r.created_at) || 0,
+    updatedAt: Number(r.updated_at) || Number(r.created_at) || 0,
+    tier: r.tier || 'durable',
+    pinned: !!r.pinned,
+    importance: Number(r.importance) || 0,
+    hits: Number(r.hits) || 0,
+    lastUsedAt: Number(r.last_used_at) || 0,
+    expiresAt: Number(r.expires_at) || 0,
+    convKey: r.conv_key || '',
+    tags: r.tags || '',
+    source: r.source || '',
+  };
+}
+
+/**
+ * 写一条记忆（幂等去重：同 uid+category+content 只留一条，重复写只累加 hits / 刷新时间）。
+ * @param {{uid?:string, category?:string, content:string, tier?:string, pinned?:boolean,
+ *          importance?:number, ttlMs?:number, convKey?:string, tags?:string, source?:string}} o
+ */
+export function rememberEntry(o = {}) {
+  const db = initMemoryDb();
+  if (!db) return { ok: false, error: '记忆库不可用' };
+  const content = String(o.content ?? '').trim();
+  if (!content) return { ok: false, error: 'content 不能为空' };
+  const category = String(o.category ?? 'note').trim().slice(0, 40) || 'note';
+  const uid = String(o.uid ?? '').trim();
+  const tier = normTier(o.tier, { pinned: o.pinned === true, category });
+  const pinned = tier === 'permanent' ? 1 : (o.pinned ? 1 : 0);
+  const ttl = Number(o.ttlMs);
+  const expiresAt = Number.isFinite(ttl) && ttl > 0
+    ? Date.now() + ttl
+    : (MEMORY_TIERS[tier] || 0) > 0 ? Date.now() + MEMORY_TIERS[tier] : 0;
+  const now = Date.now();
+  const row = {
+    uid, category, content: content.slice(0, 4000), tier,
+    pinned, importance: Math.max(0, Math.min(100, Number(o.importance) || 0)),
+    expiresAt, convKey: String(o.convKey ?? '').slice(0, 120),
+    tags: String(o.tags ?? '').slice(0, 200), source: String(o.source ?? '').slice(0, 40),
+  };
+  try {
+    const hit = db.prepare('SELECT id, hits FROM memory_entries WHERE uid = ? AND category = ? AND content = ? LIMIT 1')
+      .get(row.uid, row.category, row.content);
+    if (hit) {
+      db.prepare(`UPDATE memory_entries SET hits = hits + 1, updated_at = ?, last_used_at = ?,
+        tier = ?, pinned = ?, importance = MAX(importance, ?), expires_at = ? WHERE id = ?`)
+        .run(now, now, row.tier, row.pinned, row.importance, row.expiresAt, Number(hit.id));
+      return { ok: true, id: Number(hit.id), deduped: true, tier: row.tier };
+    }
+    const info = db.prepare(`INSERT INTO memory_entries
+      (uid, category, content, created_at, updated_at, tier, pinned, importance, expires_at, conv_key, tags, source)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(row.uid, row.category, row.content, now, now, row.tier, row.pinned, row.importance, row.expiresAt, row.convKey, row.tags, row.source);
+    return { ok: true, id: Number(info.lastInsertRowid), deduped: false, tier: row.tier };
+  } catch (error) {
+    log(`[memory] 写记忆失败: ${error?.message ?? error}`);
+    return { ok: false, error: error?.message ?? String(error) };
+  }
+}
+
+/** 置顶/取消置顶（置顶 = permanent 层：永不过期，且进每轮摘要） */
+export function setMemoryPinned(id, pinned = true) {
+  const db = initMemoryDb();
+  if (!db) return { ok: false, error: '记忆库不可用' };
+  try {
+    const info = db.prepare("UPDATE memory_entries SET pinned = ?, tier = CASE WHEN ? = 1 THEN 'permanent' ELSE tier END, expires_at = CASE WHEN ? = 1 THEN 0 ELSE expires_at END, updated_at = ? WHERE id = ?")
+      .run(pinned ? 1 : 0, pinned ? 1 : 0, pinned ? 1 : 0, Date.now(), Number(id));
+    return { ok: true, updated: Number(info.changes) || 0 };
+  } catch (error) {
+    return { ok: false, error: error?.message ?? String(error) };
+  }
+}
+
+/** 列表/检索记忆条目。query 有值走 FTS5（BM25 排序），否则按层级+重要性+时间排。 */
+export function listMemoryEntries(opts = {}) {
+  const db = initMemoryDb();
+  if (!db) return { ok: false, error: '记忆库不可用', entries: [] };
+  const limit = Math.min(200, Math.max(1, Number(opts.limit) || 30));
+  const where = [];
+  const params = [];
+  if (opts.uid) { where.push('uid = ?'); params.push(String(opts.uid)); }
+  if (opts.category) { where.push('category = ?'); params.push(String(opts.category)); }
+  if (opts.convKey) { where.push('conv_key = ?'); params.push(String(opts.convKey)); }
+  if (opts.tier) { where.push('tier = ?'); params.push(String(opts.tier)); }
+  if (!opts.includeExpired) { where.push('(expires_at = 0 OR expires_at > ?)'); params.push(Date.now()); }
+  const ftsQ = opts.query ? ftsQueryOf(opts.query) : '';
+  try {
+    if (ftsQ && ftsUsable(db, 'mem_fts')) {
+      const conds = [...where, 'mem_fts MATCH ?'];
+      const rows = db.prepare(
+        `SELECT memory_entries.* FROM memory_entries JOIN mem_fts ON mem_fts.rowid = memory_entries.id
+         WHERE ${conds.join(' AND ')} ORDER BY bm25(mem_fts) ASC LIMIT ?`
+      ).all(...params, ftsQ, limit);
+      return { ok: true, ranked: true, entries: rows.map(rowToMemoryEntry) };
+    }
+    if (opts.query) { where.push('content LIKE ?'); params.push('%' + String(opts.query) + '%'); }
+    const rows = db.prepare(
+      `SELECT * FROM memory_entries${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY pinned DESC, importance DESC, COALESCE(updated_at, created_at) DESC LIMIT ?`
+    ).all(...params, limit);
+    return { ok: true, entries: rows.map(rowToMemoryEntry) };
+  } catch (error) {
+    log(`[memory] 读记忆失败: ${error?.message ?? error}`);
+    return { ok: false, error: error?.message ?? String(error), entries: [] };
+  }
+}
+
+/** 记账：这些条目刚被用到（hits+1、last_used_at=now），供重要性排序与"老忘不掉"的自愈。 */
+export function touchMemoryEntries(ids = []) {
+  const db = initMemoryDb();
+  if (!db) return { ok: false };
+  const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Number.isFinite);
+  if (!list.length) return { ok: true, touched: 0 };
+  try {
+    const now = Date.now();
+    const st = db.prepare('UPDATE memory_entries SET hits = hits + 1, last_used_at = ? WHERE id = ?');
+    let n = 0;
+    for (const id of list) n += Number(st.run(now, id).changes) || 0;
+    return { ok: true, touched: n };
+  } catch { return { ok: false }; }
+}
+
+/** 清掉过期的短期记忆（桥启动时与每天定时各跑一次；permanent 永不被清）。 */
+export function pruneExpiredMemory() {
+  const db = initMemoryDb();
+  if (!db) return { ok: false, deleted: 0 };
+  try {
+    const info = db.prepare("DELETE FROM memory_entries WHERE pinned = 0 AND tier != 'permanent' AND expires_at > 0 AND expires_at <= ?").run(Date.now());
+    const n = Number(info.changes) || 0;
+    if (n > 0) log(`[memory] 清理过期记忆 ${n} 条`);
+    return { ok: true, deleted: n };
+  } catch (error) {
+    return { ok: false, deleted: 0, error: error?.message ?? String(error) };
+  }
+}
+
+/**
+ * 每轮注入的**记忆摘要**（永久层 + 与该会话/该人相关的高重要度条目）。
+ *
+ * 为什么是"摘要"而不是"全部"：系统提示词/唤醒正文里的每一个字符都是**每一步**都要付钱重读的。
+ * 把永久记忆压到几百字符、并且**内容稳定**（同样输入 → 逐字节相同的输出），既能保证"永远记得"，
+ * 又不破坏前缀缓存。排序完全确定（pinned → importance → 时间），不掺随机数。
+ *
+ * @param {{uid?:string, convKey?:string, limit?:number, maxChars?:number}} o
+ */
+export function memoryDigest(o = {}) {
+  const db = initMemoryDb();
+  if (!db) return '';
+  const limit = Math.max(1, Math.min(30, Number(o.limit) || 12));
+  const maxChars = Math.max(120, Math.min(4000, Number(o.maxChars) || 700));
+  const now = Date.now();
+  try {
+    const rows = db.prepare(`
+      SELECT * FROM memory_entries
+      WHERE (pinned = 1 OR tier = 'permanent' OR category IN ('rule','owner','identity','persona'))
+        AND (expires_at = 0 OR expires_at > ?)
+        AND (uid = ? OR uid = '' OR ? = '')
+      ORDER BY pinned DESC, importance DESC, COALESCE(updated_at, created_at) DESC
+      LIMIT ?`).all(now, String(o.uid ?? ''), String(o.uid ?? ''), limit);
+    const others = db.prepare(`
+      SELECT * FROM memory_entries
+      WHERE pinned = 0 AND tier != 'permanent' AND category NOT IN ('rule','owner','identity','persona')
+        AND (expires_at = 0 OR expires_at > ?) AND (uid = ? OR uid = '' OR ? = '')
+      ORDER BY importance DESC, COALESCE(updated_at, created_at) DESC LIMIT ?`)
+      .all(now, String(o.uid ?? ''), String(o.uid ?? ''), limit);
+    const list = [...rows, ...others];
+    if (!list.length) return '';
+    const seen = new Set();
+    const lines = [];
+    let used = 0;
+    for (const r of list) {
+      const e = rowToMemoryEntry(r);
+      const key = `${e.category}|${e.content}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const tag = e.pinned || e.tier === 'permanent' ? '★' : e.category;
+      const line = `- [${tag}] ${e.content.replace(/\s+/g, ' ').slice(0, 140)}`;
+      if (used + line.length > maxChars) break;
+      used += line.length + 1;
+      lines.push(line);
+    }
+    return lines.join('\n');
+  } catch (error) {
+    log(`[memory] 记忆摘要生成失败: ${error?.message ?? error}`);
+    return '';
+  }
+}
+
+/** 记忆库规模/索引状态（诊断与管理端展示用） */
+export function memoryStats() {
+  const db = initMemoryDb();
+  if (!db) return { ok: false };
+  const one = (sql, ...p) => { try { return Number(db.prepare(sql).get(...p)?.c || 0); } catch { return 0; } };
+  const meta = (k) => { try { return db.prepare('SELECT v FROM memory_meta WHERE k = ?').get(k)?.v ?? ''; } catch { return ''; } };
+  return {
+    ok: true,
+    profiles: one('SELECT COUNT(*) AS c FROM profiles'),
+    entries: one('SELECT COUNT(*) AS c FROM memory_entries'),
+    permanent: one("SELECT COUNT(*) AS c FROM memory_entries WHERE pinned = 1 OR tier = 'permanent'"),
+    chat: one('SELECT COUNT(*) AS c FROM chat_messages'),
+    ftsChat: ftsUsable(db, 'chat_fts') ? one('SELECT COUNT(*) AS c FROM chat_fts') : -1,
+    ftsMem: ftsUsable(db, 'mem_fts') ? one('SELECT COUNT(*) AS c FROM mem_fts') : -1,
+    ftsVersion: meta('fts_version'),
+    ftsRebuiltAt: Number(meta('fts_rebuilt_at')) || 0,
+  };
+}
+

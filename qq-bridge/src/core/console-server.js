@@ -104,6 +104,8 @@ import {
   persistChatMessage, searchChatMessages, deleteChatMessages, clearChatHistory,
   recentChatMessages, fetchUnreadChatMessages, markMessagesRead, markChatRecalled,
   formatMemory, appendMemory, initMemoryCore,
+  // 【2026-09-21 记忆架构升级】分层记忆的写入/检索/置顶/统计（/api/social/memory-remember 等）
+  rememberEntry, listMemoryEntries, setMemoryPinned, memoryDigest, memoryStats, pruneExpiredMemory,
 } from './memory.js';
 import {
   evaluateWakeTrigger, buildWakePrompt, sendWakePrompt,
@@ -3733,6 +3735,64 @@ export function startConsoleServer() {
         return;
       }
       // 完整聊天记录检索/管理：MCP qq_memory_search / qq_history_delete / qq_history_clear
+      /* ── 【2026-09-21 记忆架构升级】分层长期记忆的读写入口 ──────────────────────────
+       *   GET  /api/social/memory-remember  写入一条（tier/pin/category/tags/ttl）
+       *   GET  /api/social/memory-notes     检索/列出（query 走 FTS5，无 query 按层级+重要度排）
+       *   GET  /api/social/memory-stats     库规模 + 全文索引状态（诊断/管理端）
+       * 对应 MCP 工具 qq_memory_remember / qq_memory_notes。写接口只认本会话令牌。 */
+      if (req.method === 'GET' && url.pathname === '/api/social/memory-remember') {
+        const key = String(url.searchParams.get('key') ?? '').trim();
+        const token = req.headers['x-agent-token'];
+        if (key && token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim' }, 403); return; }
+        if (key && token && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+        if (token && !ToolEnabled('memoryRemember')) { sendJson({ ok: false, error: '工具未启用：qq_memory_remember' }, 403); return; }
+        const content = String(url.searchParams.get('content') ?? '').trim();
+        if (!content) { sendJson({ ok: false, error: 'content 不能为空（一句话说清要永久记住的事）' }, 400); return; }
+        const uidParam = String(url.searchParams.get('uid') ?? '').trim();
+        // 归属：显式 uid 优先；否则私聊记到对方头上，群聊记到主人头上（群里的规矩是主人的规矩）
+        const uid = uidParam || (key.startsWith('private:') ? key.split(':')[1] : String(cfgRef?.ownerQQ ?? ''));
+        const r = rememberEntry({
+          uid,
+          category: String(url.searchParams.get('category') ?? 'note'),
+          content,
+          tier: String(url.searchParams.get('tier') ?? ''),
+          pinned: url.searchParams.get('pin') === '1' || url.searchParams.get('pin') === 'true',
+          importance: Number(url.searchParams.get('importance')) || 0,
+          ttlMs: Number(url.searchParams.get('ttlMs')) || 0,
+          convKey: key,
+          tags: String(url.searchParams.get('tags') ?? ''),
+          source: 'model',
+        });
+        sendJson(r, r.ok ? 200 : 500);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/social/memory-notes') {
+        const key = String(url.searchParams.get('key') ?? '').trim();
+        const token = req.headers['x-agent-token'];
+        if (key && token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim' }, 403); return; }
+        if (key && token && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+        if (token && !ToolEnabled('memorySearch')) { sendJson({ ok: false, error: '工具未启用：qq_memory_search' }, 403); return; }
+        const uidParam = String(url.searchParams.get('uid') ?? '').trim();
+        const uid = uidParam || (key.startsWith('private:') ? key.split(':')[1] : '');
+        const r = listMemoryEntries({
+          uid: uid || undefined,
+          query: String(url.searchParams.get('query') ?? '').trim() || undefined,
+          category: String(url.searchParams.get('category') ?? '').trim() || undefined,
+          tier: String(url.searchParams.get('tier') ?? '').trim() || undefined,
+          limit: Number(url.searchParams.get('limit')) || 20,
+        });
+        // 与 qq_memory_search 同一套省额度纪律：逐条截断 + 总量封顶，绝不把几万字塞回上下文
+        const MAX_CHARS = 6000;
+        const entries = (r.entries || []).map((e) => ({ id: e.id, tier: e.tier, category: e.category, content: String(e.content).slice(0, 200), pinned: e.pinned || undefined }));
+        const out = { ok: r.ok !== false, ranked: !!r.ranked, count: entries.length, entries };
+        while (out.entries.length > 1 && JSON.stringify(out).length > MAX_CHARS) { out.entries.pop(); out.truncated = true; }
+        sendJson(out);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/social/memory-stats') {
+        sendJson({ ok: true, ...memoryStats(), digestChars: memoryDigest({ limit: 14, maxChars: 700 }).length });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/social/history-search') {
         const key = String(url.searchParams.get('key') ?? '').trim();
         const query = String(url.searchParams.get('query') ?? '').trim();
