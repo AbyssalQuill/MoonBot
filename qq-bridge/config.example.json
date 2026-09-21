@@ -257,7 +257,9 @@
     "slimTools": {
       "enabled": false,
       "_note": "工具 schema 压缩档（2026-09-21）。工具 JSON schema 实测占一次请求约 87% 的 token，而且每一步都重发一遍 —— 这是账单上最大的一刀。level 一次点一个档位，不用手写几十个工具名：off=全注册；low≈50%；medium≈39%；high≈29%（实测用到的能力一个不丢）；extreme≈7%（会丢能力）；custom=用手写的 allow/deny 两张表（老行为）。百分比是**桥实测**的：管理端「工具 schema 精简」卡读 state/tool-schema-stats.json（由 mcp-napcat-safe.js 注册时逐个量出来的），复算脚本 qq-bridge/tools/tool-schema-meter.mjs。改名之后必须重启隔离 DSH 才会重新注册工具表。",
+      "_schemaLevelNote": "描述文字压缩档（2026-09-21，照开源 mcp-compressor 的档位语义）：与 level 是两个正交旋钮 —— level 决定注册哪些工具，schemaLevel 决定注册了的那份 schema 写多长。off=原样；medium=每条描述只留第一句；high=完全不发描述（工具与参数一个不少）。在真实 JSON Schema 格式上实测：100% / 71.4% / 31.1%（90 个工具）。改完必须重启隔离 DSH 才生效。",
       "level": "off",
+      "schemaLevel": "off",
       "deny": []
     },
     "turnHold": {

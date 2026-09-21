@@ -334,6 +334,17 @@ export function readDefaultModel(home) {
  * 而 remember 工具只允许写 user/project 两层 —— 用默认的 global 模式，机器人自己写下的要求/教训
  * **每次都得先 recall 一次模型调用**才看得见。用 all 模式它们一直都在眼前（代价是每步多几百~几千字符，
  * 见 README 的用量说明；条目写少而精就不明显）。
+ *
+ * 【2026-09-21 成本实测后改 extractInterval：8 → 40（主人要求"把这类重建减半"）】
+ * 拿线上 14 天、5,326 次请求复盘账单发现：**72% 的钱花在"未命中输入"，而其中 42% 来自单次重读 ≥60k token
+ * 的请求**（平均一次重读 116,925 token、单次 ¥0.155），成因就是上下文被重建 —— 而这个插件的记忆摘要
+ * 写在**系统提示词**里，**每写一条记忆就把整个前缀作废一次**（实测 09-20 一天 132 次 prune + 78 次 summary）。
+ * `extractMode: event-counter` + `extractInterval` 决定"攒多少个事件提炼一次"：
+ *   8  → 平均每 8 个事件就可能写一条 → 一天十几次前缀作废；
+ *   40 → 频率降到 1/5，省下的正是那 42% 里的一大块。
+ * 代价是"自动学到的规矩/教训"入库变慢（仍然会学，只是没那么勤）；主人显式说"记住…"时走的是
+ * qq_memory_remember / remember 工具，**不受这个间隔影响**。
+ * 要恢复更勤的学习：把 extractInterval 改回小值，或把 autoExtract 设为 false 彻底关掉自动提炼。
  */
 export function ensureMemorySettings(target) {
   if (isDesktopDshHome(target.home)) throw new Error(`refuse: desktop home ${target.home}`);
@@ -347,7 +358,7 @@ export function ensureMemorySettings(target) {
     '  warmupOnStart: true',
     '  autoExtract: true',
     '  extractMode: event-counter',
-    '  extractInterval: 8',
+    '  extractInterval: 40',
     '  summaryMode: all',
     '  recallTopK: 10',
     '  maxNodeKb: 600',

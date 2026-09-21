@@ -199,6 +199,7 @@ const LABEL: Record<string, string> = {
   'tokenCost.pOut': '输出单价（¥/百万 tok）', 'tokenCost.peakMult': '高峰时段倍率',
   'tokenCost.peakHours': '高峰小时（北京时）',
   'social.slimTools.level': '工具描述压缩档位',
+  'social.slimTools.schemaLevel': '描述文字压缩档位（不裁功能）',
 };
 
 /** MCP 工具中文名（工具与规则页） */
@@ -405,6 +406,12 @@ function mcpLabel(fullName: string) {
   prompt: '提示词可调项分组。目前只有一项：唤醒正文每轮带的那句语感提醒。',
   tokenCost: 'QQ 里发 /token 时算钱用的单价分组（¥ / 百万 token）。默认值与管理端「学习」页的实测计量同源；'
     + '改这里只影响 /token 报出来的钱，不影响提供方的实际计费。',
+  'social.slimTools.schemaLevel': '描述文字压缩档（与上面的"名单档位"是两个正交的旋钮）：上面决定**注册哪些工具**，'
+    + '这里决定**注册了的那份 schema 写多长** —— 压的是描述文字，工具一个不少、参数一个不少（名字/类型/枚举/必填照旧）。'
+    + '档位语义照搬开源的 mcp-compressor（atlassian-labs）：medium = 每条描述只留第一句；high = 完全不发描述。'
+    + '在我们真实的 JSON Schema 格式上实测：不压 100% / 中度 71.4% / 高度 31.1%（90 个工具）。'
+    + '⚠ high 是激进档：描述是模型判断"什么时候用这个工具"的主要依据，去掉后只能靠工具名猜；'
+    + '换来的差额是每步约 1.9 万 token（本机口径）。改完必须重启隔离 DSH 才会重新注册工具表。',
   'social.slimTools.level': '工具描述压缩档位（一次点一个档，不用手写几十个工具名）：'
     + 'off = 全部注册（默认，行为与改动之前一致）；low ≈50%（只砍"实测零调用"的大块头：pixiv/富卡片/角色卡/点歌/定时/空间…）；medium ≈39%（再收一圈）；high ≈29%（**实测被调用过的能力一个都不丢**——发米姆、语音、查记忆、看历史图都在，这是"不丢功能"的地板）；extreme ≈7%（只留说话/引用/收尾/看未读八件套，**会真的砍掉在用的能力**，只在必须省钱时用）；'
     + 'custom = 用下面的白名单/黑名单两张表（老行为）。'
@@ -2770,6 +2777,34 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         {stats?.tiers?.[level]?.note && (
           <span style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>{stats.tiers[level].note}</span>
         )}
+      </div>
+
+      {/* ── 描述压缩档（2026-09-21，主人要求"照 mcp 开源压缩工具那一套"）────────────────
+          与上面的"名单档位"是**两个正交的旋钮**：上面决定"注册哪些工具"，这里决定
+          "注册了的那份 schema 写多长"。压的是**描述文字**，工具一个不少、参数一个不少
+          （名字/类型/枚举/必填照旧）—— 也就是"压缩本身，不是精简功能"。
+          档位语义照搬 atlassian-labs/mcp-compressor（它自己的档位是 low/medium/high/max），
+          在**我们真实的 JSON Schema 格式**上实测：中度 71.4%、高度 31.1%。 */}
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>描述压缩档</span>
+        <select className="input" style={{ maxWidth: 300 }}
+          value={String(get(cfg, 'social.slimTools.schemaLevel') ?? stats?.schemaLevel ?? 'off')}
+          onChange={(e) => ch('social.slimTools.schemaLevel')(e.target.value)}>
+          {(stats?.schemaLevelInfo ? Object.keys(stats.schemaLevelInfo) : ['off', 'medium', 'high']).map((id) => {
+            const info = stats?.schemaLevelInfo?.[id];
+            return <option key={id} value={id}>{info ? `${id}｜${info.label}` : id}</option>;
+          })}
+        </select>
+        {(() => {
+          const cur = String(get(cfg, 'social.slimTools.schemaLevel') ?? stats?.schemaLevel ?? 'off');
+          const note = stats?.schemaLevelInfo?.[cur]?.note;
+          return note ? <span style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>{note}</span> : null;
+        })()}
+      </div>
+      <div style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)', marginBottom: 10, lineHeight: 1.7 }}>
+        实测（本机出厂 90 个工具）：不压 <b>100%</b> · 中度 <b>71.4%</b>（每条描述只留第一句）·
+        高度 <b>31.1%</b>（完全不发描述，但<b>工具与参数一个不少</b>）。
+        复算：<code>node tools/schema-level-meter.mjs</code>。改完同样要重启隔离 DSH 才会重新注册。
       </div>
 
       {stats ? (

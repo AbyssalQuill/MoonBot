@@ -667,6 +667,9 @@ export interface ToolSchemaStats {
   registered?: number; available?: number; totalChars?: number; keptChars?: number; share?: number;
   savedChars?: number; approxTokensPerStep?: number;
   tiers?: Record<string, ToolSchemaTierStat>;
+  /** 描述压缩档（2026-09-21）：与"名单档位"正交，压的是描述文字，工具一个不少 */
+  schemaLevel?: string;
+  schemaLevelInfo?: Record<string, { label: string; note: string }>;
   top?: Array<{ name: string; cost: number }>;
 }
 export const getToolSchemaStats = () => api<ToolSchemaStats>('/bridge/tool-schema-stats');

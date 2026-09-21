@@ -27,6 +27,8 @@ import {
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 import { resolveToolTier, toolAllowedByTier, measureSchemaShare, TOOL_TIERS } from './lib/tool-tiers.js';
+// 【2026-09-21】工具 schema 的「描述压缩档」：照搬 mcp-compressor 的档位语义（medium=只留第一句 / high=不发描述）
+import { normalizeSchemaLevel, applyDesc, slimShape, SCHEMA_LEVEL_INFO } from './lib/tool-schema-compress.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -656,23 +658,53 @@ const schemaCostOf = (name, description, params) => {
   try { return JSON.stringify({ name, description: description ?? '', inputSchema: params ?? {} }).length; }
   catch { return String(name).length + String(description ?? '').length; }
 };
+/** 压缩后的**真实**进请求体尺寸：zod 参数表要先转成 JSON Schema 才能量准（描述其实在 properties 里）。
+ *  zod 是 v4，用它自带的 `z.toJSONSchema()`（`zod-to-json-schema@3` 不认 v4，实测只吐出 `$schema`）。
+ *  量不准就退回估算（只估工具名+描述），绝不因为统计把注册流程搞坏。 */
+const schemaCostOfFor = (name, description, shape) => {
+  try {
+    const json = z.toJSONSchema(z.object(shape ?? {}), { target: 'draft-7', io: 'input', unrepresentable: 'any' });
+    return JSON.stringify({ name, description: description ?? '', inputSchema: json }).length;
+  } catch {
+    return schemaCostOf(name, description, shape);
+  }
+};
 if (SLIM_ON) {
   // stdout 是 MCP 的协议通道，日志一律走 stderr
   console.error(`[napcat-safe] 工具 schema 精简已启用：档位=${TIER.level}（${TIER.source}）`
     + `${TIER.keep ? ` 白名单 ${TIER.keep.size} 个` : TIER.allow ? ` 白名单 ${TIER.allow.size} 个` : TIER.deny ? ` 黑名单 ${TIER.deny.size} 个` : ''}`);
 }
+/* 【2026-09-21】描述压缩档（与上面的"名单档位"是两个正交的旋钮）：
+ *   名单档位 = 注册**哪些**工具；描述档位 = 注册了的那份**写多长**。
+ * 环境变量 QQB_SCHEMA_LEVEL 可临时覆盖（实测脚本用），正式生效值来自 config.json 的
+ * social.slimTools.schemaLevel（管理端「工具 schema 精简」卡里选）。 */
+const SCHEMA_LEVEL = normalizeSchemaLevel(
+  String(process.env.QQB_SCHEMA_LEVEL || '').trim() || getConfig().social?.slimTools?.schemaLevel,
+);
+if (SCHEMA_LEVEL !== 'off') {
+  console.error(`[napcat-safe] 工具描述压缩档=${SCHEMA_LEVEL}（${SCHEMA_LEVEL_INFO[SCHEMA_LEVEL]?.label ?? ''}）`);
+}
 
 /** 注册工具；精简模式下被排除的**直接不注册** —— 它的 JSON schema 从此不出现在任何一次请求里。
- *  同时把尺寸记进 schemaMeter：注册完写一份实测统计给管理端读。 */
+ *  同时把尺寸记进 schemaMeter：注册完写一份实测统计给管理端读。
+ *
+ *  【2026-09-21 描述压缩档】`social.slimTools.schemaLevel` 按 mcp-compressor 的档位语义压**描述文字**：
+ *  工具一个不少、参数一个不少（名字/类型/枚举/必填都照旧），只是工具描述与每个参数的描述被压短或去掉。
+ *  两档一起算账：list 档位决定"注册哪些"，schema 档位决定"注册了的那份写多长"。 */
 function registerTool(name, ...rest) {
   const bare = bareToolName(name);
-  const cost = schemaCostOf(name, rest[0], rest[1] && typeof rest[1] === 'object' ? rest[1] : {});
+  const rawDesc = typeof rest[0] === 'string' ? rest[0] : '';
+  const rawShape = rest[1] && typeof rest[1] === 'object' ? rest[1] : {};
+  const cost = schemaCostOf(name, rawDesc, rawShape);
   schemaMeter.tools.push({ name: bare, cost });
   schemaMeter.totalChars += cost;
   if (!toolAllowedByTier(bare, TIER)) return;
-  schemaMeter.keptChars += cost;
+  const keptDesc = applyDesc(rawDesc, SCHEMA_LEVEL);
+  const keptShape = slimShape(rawShape, SCHEMA_LEVEL, z);
+  const keptCost = schemaCostOfFor(name, keptDesc, keptShape);
+  schemaMeter.keptChars += keptCost;
   schemaMeter.keptCount += 1;
-  return server.tool(name, ...rest);
+  return server.tool(name, keptDesc, keptShape, ...rest.slice(2));
 }
 
 /** 把实测结果落盘（管理端「工具 schema 精简」卡读它显示"实际省了多少"）。
@@ -688,6 +720,9 @@ function flushSchemaStats() {
     const payload = {
       at: Date.now(),
       level: TIER.level,
+      // 【2026-09-21】描述压缩档（与名单档位正交）：管理端同一张卡上一起显示、一起切换
+      schemaLevel: SCHEMA_LEVEL,
+      schemaLevelInfo: SCHEMA_LEVEL_INFO,
       enabled: SLIM_ON,
       source: TIER.source,
       registered: schemaMeter.keptCount,
