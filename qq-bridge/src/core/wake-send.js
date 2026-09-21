@@ -341,6 +341,16 @@ function wakeRefLine(key) {
  * 同时工具层改成**永不猜 key**：缺 key 就报错并指回这一行。模型照抄即可，不再有猜错的机会。 */
 const sessionLine = (key) => `[Session] ${key}\n`;
 
+/* 【2026-09-20 主人反馈「精简提示词之后人机味更重了」→ 每轮正文给一句语感提醒】
+ * 现场证据（机器人真发出去的话，取自会话日志）：
+ *   「def是定义函数的关键字，后面跟函数名和括号，缩进里面写函数体，Python语法就这样规定的」
+ *   「这是让你证假言三段论里的肯定前件：P∧(P→Q)⇒Q」→「先由合取消解拿 P 和 P→Q…收工」
+ * 这是教科书腔（定义句式 + 步骤腔 + 并列清单），正是"像人机"的主因。
+ * 系统提示词里已经有 [SPEECH RULES] 的 TEACHER MODE 与 [COMPREHEND] 3b，但小模型对**最近那段上下文**
+ * 的权重最高：模板化的规则藏在几十 k 字符的系统提示词里，往往压不住这一轮正文的语气。
+ * 所以正文里带一句 34 字符的提醒（每轮固定 = 稳定前缀，按缓存读计价，成本可忽略）。 */
+const styleLine = '[Style] 说人话：短、有态度，别讲课别列举\n';
+
 export function buildWakePrompt(key, reason) {
   const st = getSocialState(key);
   // 【2026-09-12】首轮也要带 `[OWNER]` 标记：persona 的 [OWNER MODE] 只认这个标记，
@@ -356,7 +366,7 @@ export function buildWakePrompt(key, reason) {
   // 【2026-09-12 令牌行改英文括号】主人要求：【令牌】→ [Token]（英文标签 + 英文方括号）。
   // 语义不变（仍是"本会话当前有效令牌"），但标签换成英文后与其余唤醒标记（[Wake]/[Unread]/[OWNER]）
   // 同一风格；出站泄露检测的标签正则已同步接受 [Token]（见 lib/text-safe.js）。
-  const tokenLine = `[Token] ${st.agentToken}\n${sessionLine(key)}${ownerMark}${notOwnerMark}\n`;
+  const tokenLine = `[Token] ${st.agentToken}\n${sessionLine(key)}${styleLine}${ownerMark}${notOwnerMark}\n`;
   const memoryText = formatMemory(st);
   // 注入长期档案（SQLite）：私聊注入对方档案，群聊注入最近活跃群友的档案。
   let profileText = '';
@@ -995,7 +1005,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   //     [Mid-turn] N new message(s) after your last bubble - not answered yet.
   //     owner(id:xxx): ……
   // 实测同批 2 条时正文 690 → 约 230 字符；规则一条没丢，只是不再随每次注入重复。
-  const text = `[Token] ${st.agentToken}\n${sessionLine(key)}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
+  const text = `[Token] ${st.agentToken}\n${sessionLine(key)}${styleLine}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
   const mySeq = (steerSeq += 1);
   try {
     const res = await withTimeout(
@@ -1566,7 +1576,7 @@ export async function sendWakePrompt(key, reason) {
     if (!hasAnyTool) {
       const unread = (st.unread || []).length;
       const rMap = { private: 'private', atMention: '@', poke: 'poke', probability: 'probability', proactiveCheck: 'proactive', replyCheck: 'replyCheck' };
-      promptText = `[Token] ${st.agentToken}\n${nowLine}[Session] ${key}\n[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}[Session] ${key}\n${styleLine}[Wake ${rMap[reason] || reason}] ${unread} unread${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     } else {
       // 哨兵轮 prompt 每轮都带当前令牌：模型不必凭记忆/跨轮次查找 token，
       // 杜绝"上下文轮换后 token 抄错 → 工具全 403 → 模型看不到消息 → 空唤醒乱回"链路。
@@ -1588,7 +1598,7 @@ export async function sendWakePrompt(key, reason) {
        * 实测（state/tool-calls.jsonl 1966 次调用）qq_send_sticker 只有 5 次（≈1/54 条消息），
        * 而配置的概率是 0.6 —— 低 15~20 倍，正是"每会话只掷一次骰"的形状。
        * 抽签函数本身是纯的（只读配置 + Math.random，不写任何状态），所以每轮都掷没有副作用。 */
-      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n${styleLine}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     }
   } else {
     // 首次唤醒（或轮换到新会话后的首个真实回合）：完整 base + 最近消息滑动窗口 + 重置提示。
