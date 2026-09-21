@@ -700,7 +700,8 @@ function flushSchemaStats() {
       // 各档位若切过去会是多少（同一份尺寸表算出来的，管理端可以并列显示做选择）
       tiers: Object.fromEntries(Object.entries(TOOL_TIERS).map(([id, def]) => {
         const keep = Array.isArray(def?.keep) ? new Set(def.keep.map(bareToolName)) : null;
-        const m = measureSchemaShare(schemaMeter.tools, keep);
+        const drop = Array.isArray(def?.drop) ? new Set(def.drop.map(bareToolName)) : null;
+        const m = measureSchemaShare(schemaMeter.tools, keep, drop);
         return [id, { label: def?.label ?? id, note: def?.note ?? '', share: Number(m.share.toFixed(4)), keptChars: m.keptChars, keptCount: m.keptCount }];
       })),
       top: [...schemaMeter.tools].sort((a, b) => b.cost - a.cost).slice(0, 12),

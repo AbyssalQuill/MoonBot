@@ -102,12 +102,18 @@ for (const t of out.tools.slice(0, 25)) {
 if (out.tiers) {
   console.log('\n候选档位（social.slimTools.level）:');
   for (const [id, def] of Object.entries(out.tiers)) {
-    if (!def || !Array.isArray(def.keep)) { console.log(`  ${id}: （无名单）`); continue; }
-    const keep = new Set(def.keep.map(bare));
+    // keep = 白名单（只留这些）；drop = 黑名单（砍掉这些，其余都留）。两者都没有就是"不裁剪"。
+    if (!def || (!Array.isArray(def.keep) && !Array.isArray(def.drop))) { console.log(`  ${id}: （无名单）`); continue; }
+    const keep = Array.isArray(def.keep) ? new Set(def.keep.map(bare)) : null;
+    const drop = Array.isArray(def.drop) ? new Set(def.drop.map(bare)) : null;
     let kept = 0;
-    for (const t of out.tools) if (keep.has(t.name) || t.name === 'qq_status') kept += t.cost;
+    let n = 0;
+    for (const t of out.tools) {
+      const isKept = keep ? keep.has(t.name) : (drop ? !drop.has(t.name) : true);
+      if (isKept) { kept += t.cost; n += 1; }
+    }
     const pct = (kept / out.totalChars * 100);
     const extra = levelArg && id === levelArg ? '   ← 目标档' : '';
-    console.log(`  ${id.padEnd(8)} 保留 ${kept.toLocaleString()} 字符（${pct.toFixed(1)}%）≈ ${Math.round(kept / 3.2).toLocaleString()} token/步，省 ${(100 - pct).toFixed(1)}%${extra}`);
+    console.log(`  ${id.padEnd(8)} 保留 ${String(n).padStart(3)} 个 / ${kept.toLocaleString()} 字符（${pct.toFixed(1)}%）≈ ${Math.round(kept / 3.2).toLocaleString()} token/步，省 ${(100 - pct).toFixed(1)}%${extra}`);
   }
 }

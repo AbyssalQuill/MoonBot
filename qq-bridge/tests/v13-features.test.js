@@ -96,16 +96,36 @@ await check('② 档位未开总开关时不裁剪', () => {
   assert.equal(toolAllowedByTier('qq_send_pixiv', r), true);
 });
 
-await check('② high 档：核心工具留、pixiv/语音/角色卡砍掉，qq_status 永远留', () => {
+await check('② high 档：实测被调用过的能力一个都不丢，零调用的庞然大物砍掉', () => {
   const r = resolveToolTier({ enabled: true, level: 'high' });
   assert.equal(r.level, 'high');
-  for (const keep of ['qq_send_message', 'qq_reply', 'qq_mark_read', 'qq_get_unread_messages']) {
+  // 协议闭环 + 服务器调用日志里出现过的工具，切 high 后必须还在
+  for (const keep of ['qq_send_message', 'qq_reply', 'qq_mark_read', 'qq_get_unread_messages',
+    'qq_meme_search', 'qq_send_meme', 'qq_send_voice', 'qq_profile_set', 'qq_memory_search',
+    'qq_get_message_images', 'qq_get_recent_messages']) {
     assert.equal(toolAllowedByTier(keep, r), true, `应保留 ${keep}`);
   }
-  for (const drop of ['qq_send_pixiv', 'qq_send_voice', 'qq_character_read', 'qq_send_rich']) {
+  // 实测 0 次调用、体积最大的那批：high 档砍掉
+  for (const drop of ['qq_send_pixiv', 'qq_send_rich', 'qq_character_read', 'qq_music_search']) {
     assert.equal(toolAllowedByTier(drop, r), false, `应砍掉 ${drop}`);
   }
   assert.equal(toolAllowedByTier('qq_status', r), true);
+});
+
+await check('② extreme 档：只留八件套，且明确是"会丢功能"的极限档（与 high 不同）', () => {
+  const high = resolveToolTier({ enabled: true, level: 'high' });
+  const extreme = resolveToolTier({ enabled: true, level: 'extreme' });
+  assert.equal(toolAllowedByTier('qq_send_meme', high), true, 'high 不该丢发米姆');
+  assert.equal(toolAllowedByTier('qq_send_meme', extreme), false, 'extreme 会丢发米姆（已在 note 里警告）');
+  assert.equal(toolAllowedByTier('qq_send_message', extreme), true);
+  assert.equal(toolAllowedByTier('qq_status', extreme), true);
+});
+
+await check('② low 档走"不要"名单：名单外一律保留（新增工具默认可见）', () => {
+  const r = resolveToolTier({ enabled: true, level: 'low' });
+  assert.equal(toolAllowedByTier('qq_send_pixiv', r), false);
+  assert.equal(toolAllowedByTier('qq_send_message', r), true);
+  assert.equal(toolAllowedByTier('qq_某个将来才会有的工具', r), true, '黑名单语义：不在名单里就该保留');
 });
 
 await check('② 老配置（只有 enabled+deny、没有 level）走 custom 黑名单，行为不变', () => {
@@ -122,7 +142,7 @@ await check('② 手写 allow 优先于档位名单（明确点名要什么）',
   assert.equal(toolAllowedByTier('qq_send_message', r), false);
 });
 
-await check('② 实测占比：按字符加权算（不是按工具个数），名单外一个字符都不算', () => {
+await check('② 实测占比：按字符加权算（不是按工具个数），档位严格递减', () => {
   const tools = [
     { name: 'qq_send_message', cost: 2744 }, { name: 'qq_send_pixiv', cost: 6277 },
     { name: 'qq_reply', cost: 1387 }, { name: 'qq_send_rich', cost: 4866 },
@@ -131,9 +151,9 @@ await check('② 实测占比：按字符加权算（不是按工具个数），
     { name: 'qq_list_groups', cost: 208 }, { name: 'qq_status', cost: 198 },
   ];
   const total = tools.reduce((s, t) => s + t.cost, 0);
-  const m = measureSchemaShare(tools, new Set(TOOL_TIERS.high.keep));
+  const m = measureSchemaShare(tools, new Set(TOOL_TIERS.extreme.keep));
   assert.equal(m.totalChars, total);
-  // high 名单里 8 个工具：2744+1387+643+407+420+451+208+198
+  // extreme 名单里这 8 个都在：2744+1387+643+407+420+451+208+198
   assert.equal(m.keptChars, 6458);
   assert.equal(m.keptCount, 8);
   assert.ok(m.share < 1);
@@ -141,6 +161,9 @@ await check('② 实测占比：按字符加权算（不是按工具个数），
   const all = measureSchemaShare(tools, null);
   assert.equal(all.keptChars, total);
   assert.equal(all.share, 1);
+  // low 用 drop 名单：砍掉两个大块头、其余保留
+  const low = measureSchemaShare(tools, null, new Set(TOOL_TIERS.low.drop));
+  assert.equal(low.totalChars - low.keptChars, 6277 + 4866);
 });
 
 // ── ③ 记忆检索的查询串 ────────────────────────────────────────────────────────

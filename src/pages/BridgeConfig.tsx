@@ -406,7 +406,7 @@ function mcpLabel(fullName: string) {
   tokenCost: 'QQ 里发 /token 时算钱用的单价分组（¥ / 百万 token）。默认值与管理端「学习」页的实测计量同源；'
     + '改这里只影响 /token 报出来的钱，不影响提供方的实际计费。',
   'social.slimTools.level': '工具描述压缩档位（一次点一个档，不用手写几十个工具名）：'
-    + 'off = 全部注册（默认，行为与改动之前一致）；low ≈45%；medium ≈28%；high ≈7%（最小闭环：只会说话/引用/收尾/看未读）；'
+    + 'off = 全部注册（默认，行为与改动之前一致）；low ≈50%（只砍"实测零调用"的大块头：pixiv/富卡片/角色卡/点歌/定时/空间…）；medium ≈39%（再收一圈）；high ≈29%（**实测被调用过的能力一个都不丢**——发米姆、语音、查记忆、看历史图都在，这是"不丢功能"的地板）；extreme ≈7%（只留说话/引用/收尾/看未读八件套，**会真的砍掉在用的能力**，只在必须省钱时用）；'
     + 'custom = 用下面的白名单/黑名单两张表（老行为）。'
     + '百分比是**桥实测**的（注册工具时逐个量出来的，不是写死的），卡片上的「桥实测」一行会显示当前真实占比。'
     + '⚠ 换档后必须重启隔离 DSH 才会生效（工具表只在 DSH 启动时取一次）。'
@@ -2759,7 +2759,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
             if (v !== 'off') ch('social.slimTools.enabled')(true);
           }}>
           <option value="off">不裁剪（全部工具）</option>
-          {(stats?.tiers ? Object.keys(stats.tiers) : ['low', 'medium', 'high', 'custom'])
+          {(stats?.tiers ? Object.keys(stats.tiers) : ['low', 'medium', 'high', 'extreme', 'custom'])
             .filter((id) => id !== 'off')
             .map((id) => {
               const t = stats?.tiers?.[id];
