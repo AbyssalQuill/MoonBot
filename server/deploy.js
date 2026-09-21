@@ -4,7 +4,7 @@
  *
  * 流程(每步写日志, GUI 轮询 /api/ssh/deploy/status)：
  *  0. 校验源/目标都在服务器列表, 连两端
- *  1. 目标机基础环境探测与安装: nodejs/npm/docker/python3 + 全局 dsh + mcp-compressor
+ *  1. 目标机基础环境探测与安装: nodejs/npm/docker/python3 + 全局 dsh + mcp-compressor(pip, 仓库内无调用, 见第 992 行说明)
  *  2. 源机短暂停机(停 dsh-web / napcat / bridge) → 本地打包成 tar.gz(stage)
  *  3. 源机立即恢复运行(总停机 ≈ 打包耗时, 与传输带宽无关)
  *  4. 逐包经 manager 流式转发到目标机并原地解包(不落目标机中间文件)
@@ -989,10 +989,20 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       const ok = (r.out || '').includes('DSH_OK');
       taskLine(task, `  dsh: ${ok ? '已安装' : '未装上'}${isLocal ? `（跟随本机 ${dshVer || '默认'}）` : ''} ${r.out.split('\n').filter(Boolean).slice(-1)[0] || ''}`);
     });
-    await step('安装 mcp-compressor (MCP 压缩器)', async () => {
+    /* 【2026-09-21 事实核查后的诚实说明】这一步只是**把 pip 包装上**，仓库里没有任何代码调用它。
+     * 全面搜过一遍（qq-bridge/ 含 config*.json、src/、dsh/、scripts/、tools/、plugins/，以及
+     * server/、dsh-runtime/、dist/、release/ 与各 .yml/.json）：`mcp-compressor` 只在本文件出现，
+     * 既不是 CLI、也不是 MCP proxy、也没有被任何进程 import；MCP server 是 DSH 直接
+     * `node src/mcp-napcat-safe.js` 起的（lib/dsh-side.js 的 mcpBlock），中间没有包装进程。
+     * 也就是说：**它跟"工具描述压缩"这件事无关**。真正的工具压缩是 social.slimTools 那套
+     * （注册期按档位根本不注册 → 描述从请求里彻底消失，见 lib/tool-tiers.js 与 mcp-napcat-safe.js）。
+     * 那为什么还留着这一步：主人可能在**仓库之外**自己用它（把一堆 MCP 工具包成更少的工具）。
+     * 所以不删，但把原来那句错误的失败提示改对 —— 原来写"仅 napcat MCP 压缩不可用"会让人以为
+     * 仓库里有运行时 MCP 压缩，进而去排查一个不存在的东西（本文件顶上那句"安装 mcp-compressor"同理）。 */
+    await step('安装 mcp-compressor (pip 工具；仓库内无调用，仅供仓库外自用)', async () => {
       const r = await runCmd(dstConn, `(pip3 show mcp-compressor >/dev/null 2>&1 || python3 -m pip show mcp-compressor >/dev/null 2>&1) && echo ok || (pip3 install --break-system-packages mcp-compressor==0.31.9 2>&1 | tail -2 || python3 -m pip install --break-system-packages mcp-compressor==0.31.9 2>&1 | tail -2)`, 600000);
       if (!r.ok) throw new Error(r.err || 'pip 安装失败');
-    }).catch((e) => { taskLine(task, `  ⚠ mcp-compressor 安装失败(不影响 DSH/桥主体, 仅 napcat MCP 压缩不可用): ${e.message}`); });
+    }).catch((e) => { taskLine(task, `  ⚠ mcp-compressor 未装上（**不影响 DSH 与桥**：仓库里没有任何代码调用它；工具描述压缩走 social.slimTools 档位，与这个包无关）: ${e.message}`); });
     // 校验 dsh 可执行（失败也不再直接中止：下面桥/DSH 起不来时日志会给出更具体的原因）
     const dshCheck = await runCmd(dstConn, `which dsh || echo NO_DSH`, 15000);
     if (dshCheck.out.includes('NO_DSH')) {
