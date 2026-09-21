@@ -149,7 +149,12 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
   let lastActivity = now();
   let lastRenew = 0;
   let notLandedLogged = false;   // "报已交付但没落地"只喊一次，避免 200ms 轮询刷屏
-  let typingDeferLogged = false; // 【2026-09-16 打字窗合并】"对方还在打字所以继续攒"也只喊一次
+  let typingDeferLogged = false;
+  /* 【2026-09-21 修「连发时卡一段」】对方持续打字时这个循环会用固定 POLL_MS 一直重试：
+   * 实测日志 15:08:10~15:08:11 一百多毫秒一次连刷十几条 steer-defer，直到步边界才解开 ——
+   * 主人感觉到的「卡一段」就是它（不是模型慢）。改成指数退避：头两次仍很快（打字快的人不受影响），
+   * 之后 150→300→600→1200ms 逐步拉长，最多 1.5s；一旦不是 defer 立刻归零。 */
+  let steeringDeferStreak = 0; // 【2026-09-16 打字窗合并】"对方还在打字所以继续攒"也只喊一次
   const budgetEnd = now() + requestBudgetMs;
 
   const finish = (reason) => {
@@ -206,7 +211,8 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
       } catch (error) {
         errText = String(error?.message ?? error);
       }
-      log(`[hold] ${key} steer 结果：${ok === true ? '成功' : (ok === 'typing-defer' ? '推迟（对方还在打字）' : '未成功')}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}`);
+      log(`[hold] ${key} steer 结果：${ok === true ? '成功' : (ok === 'typing-defer' ? '推迟（对方还在打字）' : '未成功')}（返回 ${JSON.stringify(ok)}）${errText ? ' 异常=' + errText : ''}${steeringDeferStreak > 1 ? `（打字挡住 ${steeringDeferStreak} 次后）` : ''}`);
+      if (ok !== 'typing-defer' && steeringDeferStreak > 0) steeringDeferStreak = 0;
       if (ok === 'typing-defer') {
         // 【2026-09-16 打字窗合并】对方还在打字 → 这一批**继续攒**：不投、不改水位、**不关回合**。
         // 为什么不能走下面的 finish()：那会让 DSH 收尾这一轮、消息退回下一轮唤醒 —— 主人要的是
@@ -216,7 +222,9 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
           typingDeferLogged = true;
           log(`[hold] ${key} 对方还在打字 → 这 ${batch.length} 条继续入队（回合不关、水位不动），等 ta 打完一次注入`);
         }
-        await sleep(POLL_MS);
+        steeringDeferStreak += 1;
+        const backoffMs = Math.min(1500, POLL_MS * Math.pow(2, steeringDeferStreak - 1));
+        await sleep(backoffMs);
         continue;
       }
       if (ok !== true) {
