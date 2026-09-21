@@ -73,3 +73,7 @@ pnpm-workspace.yaml
 
 # ---- test sandboxes (rebuilt on every run, never committed) ----
 /qq-bridge/tests/.tmp-*/
+
+# 临时部署包（别进仓库）
+/_*.tar
+
