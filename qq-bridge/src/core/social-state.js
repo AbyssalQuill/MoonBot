@@ -1132,6 +1132,45 @@ export function suggestQuietMs(st) {
 // 额外水位 _mediaAttachedSeq：记录最近一次已附图的最高消息 seq——若模型附图后没 mark_read/没回复
 // （比如判断无需回直接收尾），同批图不会在下一次唤醒里再次附上，杜绝"每轮都带同一张旧图"循环；
 // 模型仍可用 qq_get_message_images 主动取图。
+/**
+ * 从一批消息里挑"可以附进 prompt 的图片/表情"——**唤醒附图与在途回合注入共用这一条规则**。
+ *
+ * 为什么必须共用（2026-09-22 主人报"附图片好像有问题"，这就是根因）：
+ *   图片附件原来只挂在**唤醒**那条路（sendWakePrompt → deliverRef(..., {media})）上，而在途注入
+ *   （wake-send.js 的 steerIntoRunningTurn）是自己直接调 apiRef.sessions.prompt 的，content 里
+ *   **只有一个 text 块**。偏偏"忙时把消息塞进在途回合"才是主路径（steer 默认开），于是主人在模型
+ *   正跑着时发的图**从来进不了模型的眼睛**：模型只看到 `owner(id:…): [图片] [image]` 一行占位文本，
+ *   回一句"图没传过来"。挑选规则只留这里一份，两条路都调它，免得再漂移。
+ *
+ * 规则（与老 collectFreshWakeMedia 的语义一字不差地搬过来）：
+ *   ① 跳过自己发的；② 消息 seq 必须**高于**已附图水位（同一张图绝不附第二次，
+ *   否则会退化成"每轮都把同一张旧图再附一遍"）；③ 只认 kind=image / face；④ 最多 cap 张。
+ * @param {Array} msgs 候选消息（顺序由调用方决定：唤醒那条路传新→旧）
+ * @param {number} floor 当前"已附图水位"（st._mediaAttachedSeq）
+ * @param {number} limit 本次最多附几张
+ * @returns {{media:Array, floor:number}} floor = 这批里**真的采纳了图**的最大 seq（调用方在投递成功后落账）
+ */
+export function pickAttachableMedia(msgs, floor = 0, limit = MAX_MEDIA_COUNT) {
+  const out = [];
+  const floor0 = Number(floor) || 0;
+  const cap = Math.max(0, Number(limit) || 0);
+  let floorNext = floor0;
+  for (const m of Array.isArray(msgs) ? msgs : []) {
+    if (out.length >= cap) break;
+    if (!m || m.isSelf) continue;
+    if (!Array.isArray(m.media) || m.media.length === 0) continue;
+    const seqN = Number(m.seq) || 0;
+    if (seqN > 0 && seqN <= floor0) continue; // 已经附图过的消息不再重复附
+    let added = false;
+    for (const md of m.media) {
+      if (out.length >= cap) break;
+      if (md && typeof md === 'object' && (md.kind === 'image' || md.kind === 'face')) { out.push(md); added = true; }
+    }
+    if (added && seqN > floorNext) floorNext = seqN;
+  }
+  return { media: out, floor: floorNext };
+}
+
 export function collectFreshWakeMedia(key, st) {
   if (!st || !Array.isArray(st.recentMessages)) return [];
   const unreadSeqs = new Set((Array.isArray(st.unread) ? st.unread : []).map((m) => m && Number(m.seq)).filter((n) => Number.isFinite(n) && n > 0));
@@ -1153,14 +1192,11 @@ export function collectFreshWakeMedia(key, st) {
     if (!m || m.isSelf) continue;
     const seqN = Number(m.seq) || 0;
     if (!(unreadSeqs.has(seqN) || Number(m.time) > lastAiT)) continue;
-    if (seqN > 0 && seqN <= attachedFloor) continue; // 已经附图过的消息不再重复附
-    if (!Array.isArray(m.media) || m.media.length === 0) continue;
-    let added = false;
-    for (const md of m.media) {
-      if (out.length >= MAX_MEDIA_COUNT) break;
-      if (md && typeof md === 'object' && (md.kind === 'image' || md.kind === 'face')) { out.push(md); added = true; }
-    }
-    if (added && seqN > maxSeqSeen) maxSeqSeen = seqN;
+    // 挑选规则走 pickAttachableMedia（在途注入那条路用**同一套**，见该函数注释）
+    const picked = pickAttachableMedia([m], attachedFloor, MAX_MEDIA_COUNT - out.length);
+    if (!picked.media.length) continue;
+    out.push(...picked.media);
+    if (picked.floor > maxSeqSeen) maxSeqSeen = picked.floor;
   }
   /* 【2026-09-18 同上】水位只应该在"这之前的图都处理过了"时推进。
    * 旧写法只在**真的附上了图**时推进 maxSeqSeen，于是"一条没图的消息"不影响水位 —— 看着对，

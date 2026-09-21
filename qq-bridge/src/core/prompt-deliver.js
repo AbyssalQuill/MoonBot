@@ -25,6 +25,10 @@ export function initPromptDeliverCore(cfg) { cfgRef = cfg; }
 export function setPromptApi(api) { apiRef = api; }
 /** resolveMediaList（媒体解析，main 侧实现）注入 */
 export function setPromptMediaResolver(fn) { mediaResolver = fn; }
+/** 【2026-09-22】读取已注入的媒体解析器：在途回合注入（wake-send.js 的 steerIntoRunningTurn）
+ *  必须用**同一个**实现去取图 —— 那份实现里已经有"DSH 附件层单边像素硬上限"的闸门
+ *  （media-pipe.js 的 gateImage/ensureDeliverableImage），另写一份必然漂移。 */
+export function getPromptMediaResolver() { return mediaResolver; }
 
 export const enqueueForRetry = (key, promptText, opts = {}) => {
   const items = queued.get(key) ?? [];

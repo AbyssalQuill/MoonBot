@@ -24,9 +24,11 @@ import { memeTurnHint } from './send-dice.js';
 import { midTurnSteerGate, midTurnSteerText, STEER_IN_TURN_DEFER_MAX_MS } from './typing-hold.js';
 import {
   getSocialState, saveSocialState, social, seenForwardIds,
-  cancelReplyCheck, setupSleepTimer, collectFreshWakeMedia, isInSleepWindow,
+  cancelReplyCheck, setupSleepTimer, collectFreshWakeMedia, pickAttachableMedia, isInSleepWindow,
   formatParticipation, isConversationBusy, scheduleWake,
 } from './social-state.js';
+// 【2026-09-22】在途回合注入要附图和唤醒一样取图（同一份解析器），见 steerIntoRunningTurn 顶部注释
+import { getPromptMediaResolver } from './prompt-deliver.js';
 import { buildCrossChatBlock } from './crosschat.js';
 import { activityStatusLine } from './activity.js';
 import { armPendingWakeLease, disarmPendingWakeLease } from './turn-guard.js';
@@ -1071,12 +1073,57 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   // 实测同批 2 条时正文 690 → 约 230 字符；规则一条没丢，只是不再随每次注入重复。
   const text = `[Token] ${st.agentToken}\n${sessionLine(key)}${currentStyleLine()}[Mid-turn] ${unreadToSend.length} new message(s) after your last bubble - not answered yet.\n${lines.join('\n')}`;
   const mySeq = (steerSeq += 1);
+  /* 【2026-09-22 修「在途注入吞图」——主人报"附图片好像有问题，修复"】
+   * 现场（线上 state/social-state.json + DSH 会话日志一起对出来的）：
+   *   · 主人**在模型正跑着那一步时**发了一张图，消息本身把 media 记下来了（`media=[image]`）；
+   *   · 可投出去的那条 [Mid-turn] 正文只有 `owner(id:…): [图片] [image]` 一行纯文本，
+   *     会话日志里 `mediaType` 出现 **0 次**（= 这个会话从来没收到过任何图像块）；
+   *   · 模型于是回「那张真没传过来 只有个[图片]占位」，主人再发一次，还是看不见。
+   * 根因：**图片附件只挂在唤醒那条路**上（sendWakePrompt → deliverRef(key, text, {media})），
+   *   而本函数是直接调 apiRef.sessions.prompt 的，content 里**只有一个 text 块**。
+   *   偏偏"忙时把消息塞进在途回合"恰恰是主路径（steer 默认开、turn-hold 又把回合吊得很长），
+   *   所以主人平时聊天时发的图**从来进不了模型的眼睛**——不是识图模型的问题，也不是工具的问题。
+   * 修法：两条路共用 pickAttachableMedia 挑图（social-state.js，一份规则）、共用
+   *   getPromptMediaResolver 取字节（media-pipe.js 那份，里面守着 DSH 附件层的像素硬上限）。
+   * 水位 `_mediaAttachedSeq` 只在**图真的投出去之后**才推进：被拒就回退纯文本重投，图留给下一轮再试。 */
+  const attach = pickAttachableMedia(unreadToSend, st._mediaAttachedSeq);
+  let imageParts = [];
+  if (attach.media.length) {
+    const resolver = getPromptMediaResolver();
+    if (typeof resolver !== 'function') {
+      log(`[steer] ${key} 这批里有 ${attach.media.length} 张图，但媒体解析器还没注入 → 本轮只发文本`);
+    } else {
+      try {
+        imageParts = await resolver(attach.media);
+      } catch (error) {
+        log(`[steer] ${key} 附图解不出来（${error?.message ?? error}）→ 本轮只发文本`);
+        imageParts = [];
+      }
+    }
+  }
+  // 解析失败会退化成 text 占位（media-pipe.js 的 MEDIA_PLACEHOLDER_HINT 会照实告诉模型"这张图没到你手上"）
+  const textOnly = [{ type: 'text', text }];
+  const content = imageParts.length ? [...textOnly, ...imageParts] : textOnly;
+  let attachedCount = imageParts.filter((p) => p && p.type === 'image').length;
   try {
-    const res = await withTimeout(
-      apiRef.sessions.prompt({ sessionId, mode: 'steer', content: [{ type: 'text', text }] }),
+    let res = await withTimeout(
+      apiRef.sessions.prompt({ sessionId, mode: 'steer', content }),
       15000,
       `steer ${key}`
     );
+    if (attachedCount && !res?.result?.ok) {
+      /* 带图被拒（DSH 附件层 attachment-error / 网关不收图）→ **回退纯文本重投**，
+       * 与唤醒那条路的兜底同一条规矩：宁可这次少一张图，也绝不让这一批消息送不出去。
+       * 图**不推进水位**（只有成功分支才落账），所以下一次唤醒/注入还会再试一次这张图。 */
+      log(`[steer] ${key} 带图注入被拒（${res?.result?.error?.message ?? res?.result?.error?.code ?? '未知'}）→ 回退纯文本重投（图留到下一轮）`);
+      imageParts = [];
+      attachedCount = 0;
+      res = await withTimeout(
+        apiRef.sessions.prompt({ sessionId, mode: 'steer', content: textOnly }),
+        15000,
+        `steer ${key}`
+      );
+    }
     if (res?.result?.ok) {
       // 本周期封口：直到下一个模型步结束（turn-hold 钩子再次被调用）之前，不再注入第二次。
       steerCycleAt.set(key, Date.now());
@@ -1084,6 +1131,12 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
         for (const [k, t] of steerCycleAt) if (Date.now() - t > 600000) steerCycleAt.delete(k);
       }
       log(`[steer] ${key} 已把 ${unreadToSend.length} 条新消息塞进在途回合（第 ${mySeq} 次，session=${sessionId.slice(0, 20)}…）`);
+      // 图真的投出去了 → 才推进"已附图水位"（和唤醒那条路同一个水位，同一张图绝不附第二次）
+      if (attachedCount) {
+        st._mediaAttachedSeq = Math.max(Number(st._mediaAttachedSeq) || 0, Number(attach.floor) || 0);
+        saveSocialState();
+        log(`[steer] ${key} 顺带把 ${attachedCount} 张图一起给了它（涵盖 seq≤${attach.floor} 的图，下一轮不再重复附）`);
+      }
       // 记下"这一回合接管了哪些 seq"（turn-hold 地基①）。回合结束时 mux 会把它们并入
       // "本回合负责的消息"集合，于是：①被回复后能进 answeredMessageIds（不进 → 下一轮重复回复）；
       // ②能从 unread 里清掉（不清 → 永久未读 → 下一轮又展示一遍 → 又重复回复）。
@@ -1727,6 +1780,10 @@ export async function sendWakePrompt(key, reason) {
     // 以图像内容投递给视觉模型，任何尺寸都能看清）。取最近消息里非自己发的、新鲜的
     // 图片/表情，最多 MAX_MEDIA_COUNT 个；没有就不带。
     const wakeMedia = collectFreshWakeMedia(key, st);
+    // 【2026-09-22】附图必须**看得见**：这条路上原来一步日志都没有，"图到底附没附上"只能靠读
+    // DSH 会话日志反推（主人报"附图片好像有问题"时就是这么查的）。附了就写一行；
+    // 在途注入那条路同理（见 steerIntoRunningTurn 里 `顺带把 N 张图一起给了它`）。
+    if (wakeMedia.length) log(`[default] 唤醒附图 ${wakeMedia.length} 张给 ${key}（视觉附件，直投模型）`);
     // 注入活跃时段状态行：群且配了活跃时段时，提示当前在/不在活跃窗口，指导收尾潜水时长。
     // 已全活跃（mode=active / anyMessage）的会话不再注入——时段约束在“转活跃”后不应继续生效。
     const fullActive = st?.wakeConfig?.mode === 'active' || st?.wakeConfig?.triggers?.anyMessage === true;
