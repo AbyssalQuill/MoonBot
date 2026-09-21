@@ -186,22 +186,53 @@ export function normalizeCompressorLevel(v) {
 }
 
 let compressorProbe = null;      // { ok, command, version, reason, at }
-/** 找 mcp-compressor 可执行文件（`which` / 常见路径），结果缓存 10 分钟。 */
-export function resolveToolCompressor({ log = () => {}, force = false } = {}) {
-  const now = Date.now();
-  if (!force && compressorProbe && now - compressorProbe.at < 10 * 60 * 1000) return compressorProbe;
-  const cands = [
+/** 找 mcp-compressor 可执行文件（PATH 里有就直接用，否则探常见安装位置），结果缓存 10 分钟。
+ *  【2026-09-21 Windows 上实测到的坑】`pip install mcp-compressor` 装出来的是
+ *  `%LOCALAPPDATA%\Programs\Python\Python3XX\Scripts\mcp-compressor.exe`，
+ *  它在**当前 shell 的 PATH 里**（`where mcp-compressor` 找得到），但 DSH 是管理器拉起的进程、
+ *  继承的是另一个环境，PATH 不一定带 Python 的 Scripts 目录 —— 于是"明明装了却判成没装"、
+ *  静默回退直连。所以这里把 Windows 上几个常见的 Scripts 位置也列成候选（含版本通配）。 */
+export function compressorCandidates() {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const list = [
     process.env.QQB_MCP_COMPRESSOR || '',
     'mcp-compressor',
     '/usr/local/bin/mcp-compressor',
     '/usr/bin/mcp-compressor',
-    path.join(process.env.HOME || '/root', '.local', 'bin', 'mcp-compressor'),
-  ].filter(Boolean);
+    path.join(home, '.local', 'bin', 'mcp-compressor'),
+  ];
+  // Windows：%LOCALAPPDATA%\Programs\Python\Python3*\Scripts\mcp-compressor.exe
+  try {
+    const bases = [
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python'),
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Launcher'),
+      'C:\\Python313', 'C:\\Python312', 'C:\\Python311',
+    ].filter((b) => b && fs.existsSync(b));
+    for (const base of bases) {
+      let subs = [];
+      try { subs = fs.readdirSync(base, { withFileTypes: true }).filter((e) => e.isDirectory() && /^Python3/i.test(e.name)).map((e) => e.name); } catch { /* 忽略 */ }
+      for (const sub of subs) list.push(path.join(base, sub, 'Scripts', 'mcp-compressor.exe'));
+      list.push(path.join(base, 'Scripts', 'mcp-compressor.exe'));
+    }
+  } catch { /* 忽略 */ }
+  return [...new Set(list.filter(Boolean))];
+}
+
+export function resolveToolCompressor({ log = () => {}, force = false } = {}) {
+  const now = Date.now();
+  if (!force && compressorProbe && now - compressorProbe.at < 10 * 60 * 1000) return compressorProbe;
+  const cands = compressorCandidates();
   for (const c of cands) {
     try {
-      const which = c.includes('/') ? (fs.existsSync(c) ? c : '') : '';
-      if (which) { compressorProbe = { ok: true, command: which, reason: 'path', at: now }; return compressorProbe; }
-      if (c.includes('/')) continue;
+      const isPath = /[\\/]/.test(c);
+      if (isPath) {
+        if (!fs.existsSync(c)) continue;
+        const r = spawnSync(c, ['--version'], { timeout: 8000, encoding: 'utf8' });
+        // 路径存在但要能真的跑起来（有的机器只剩个坏掉的 shim）
+        compressorProbe = { ok: r.status === 0, command: c, version: String(r.stdout || '').trim().slice(0, 40), reason: 'path', at: now };
+        if (compressorProbe.ok) { log(`[dsh-side] 找到 MCP 压缩代理：${c} ${compressorProbe.version}`); return compressorProbe; }
+        continue;
+      }
       const r = spawnSync(c, ['--version'], { timeout: 8000, encoding: 'utf8' });
       if (r.status === 0) {
         compressorProbe = { ok: true, command: c, version: String(r.stdout || '').trim().slice(0, 40), reason: 'which', at: now };
