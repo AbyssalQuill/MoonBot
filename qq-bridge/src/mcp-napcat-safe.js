@@ -678,6 +678,11 @@ function registerTool(name, ...rest) {
 /** 把实测结果落盘（管理端「工具 schema 精简」卡读它显示"实际省了多少"）。
  *  MCP server 是 DSH 的子进程，写盘失败绝不能影响工具注册 —— 全部包在 try 里。 */
 function flushSchemaStats() {
+  /* QQB_SCHEMA_STATS_ONLY=1 = 只加载、不落盘。给 tools/tool-schema-meter.mjs 用：
+   * 它会把 QQB_SLIM_TOOLS_OFF 和这个变量一起打开去量"不裁剪的全量"，
+   * 如果照样落盘，就会把**真实生效档位**的那份实测统计覆盖成"off/100%"——
+   * 管理端那张卡读到的就成了一个并不生效的数字（实测踩到过，所以这里加了这个开关）。 */
+  if (process.env.QQB_SCHEMA_STATS_ONLY === '1') return;
   try {
     const share = schemaMeter.totalChars > 0 ? schemaMeter.keptChars / schemaMeter.totalChars : 1;
     const payload = {

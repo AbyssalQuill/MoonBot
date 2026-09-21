@@ -25,7 +25,8 @@ const levelArg = (() => { const i = argv.indexOf('--level'); return i >= 0 ? arg
 function startServer(serverFile, timeoutMs = 25000) {
   // QQB_SLIM_TOOLS_OFF=1：量的是"不裁剪时全部工具"的体积 —— 这才能算出
   // 各档位"占不裁剪时的百分之几"（分母必须是服务端定义的全部工具，而不是当前注册过的那批）。
-  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, QQB_SLIM_TOOLS_OFF: '1' } });
+  // QQB_SCHEMA_STATS_ONLY=1：本脚本只量、不落盘 —— 否则会把真实档位的实测统计覆盖成"off/100%"。
+  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, QQB_SLIM_TOOLS_OFF: '1', QQB_SCHEMA_STATS_ONLY: '1' } });
   let stdout = '';
   let stderr = '';
   let seq = 100;
