@@ -256,7 +256,7 @@
     "_charactersNote": "角色库（角色卡）目录：**一个角色 = 一个子目录 = 一个角色包**（如 atri/{SKILL.md, ULTIMATE_ROLEPLAY_PROMPT.md, personality.md, profile.md, interaction.md, relations.md, memory.md, conflicts.md, manifest.json, sources/wiki.md}）；库根下散装的 *.md 也算卡片，列出时会标 (loose file)。四个【只读】工具：qq_character_list（列角色包；带 character= 时列某个包里的文件）、qq_character_read（读包内一份，默认 SKILL.md → manifest.json → ULTIMATE_ROLEPLAY_PROMPT* → personality.md；默认截断 32KB、上限 128KB）、qq_character_pack（一次拼回核心几份：SKILL → personality → profile → interaction → relations → memory → conflicts → ULTIMATE*，默认封顶 24KB、上限 128KB）、qq_character_search（关键词搜片段）。只读 .md/.txt/.json，包内递归深度 ≤ 2 层，拒绝 ..、绝对路径与符号链接逃逸；目录不存在时回清楚的空结果+原因，不报错。留空或删掉这个键 = 用默认值 <用户主目录>/Downloads/characters/characters。开关在 social.tools.characterCards（false = 四个工具都不注册）。JSON 不支持注释，说明放这个键里，运行时忽略。",
     "slimTools": {
       "enabled": false,
-      "_note": "工具 schema 压缩档（2026-09-21）。工具 JSON schema 实测占一次请求约 87% 的 token，而且每一步都重发一遍 —— 这是账单上最大的一刀。level 一次点一个档位，不用手写几十个工具名：off=全注册；low≈52%；medium≈33%；high≈8.6%（最小闭环）；custom=用手写的 allow/deny 两张表（老行为）。百分比是**桥实测**的：管理端「工具 schema 精简」卡读 state/tool-schema-stats.json（由 mcp-napcat-safe.js 注册时逐个量出来的），复算脚本 qq-bridge/tools/tool-schema-meter.mjs。改名之后必须重启隔离 DSH 才会重新注册工具表。",
+      "_note": "工具 schema 压缩档（2026-09-21）。工具 JSON schema 实测占一次请求约 87% 的 token，而且每一步都重发一遍 —— 这是账单上最大的一刀。level 一次点一个档位，不用手写几十个工具名：off=全注册；low≈45%；medium≈28%；high≈7%（最小闭环）；custom=用手写的 allow/deny 两张表（老行为）。百分比是**桥实测**的：管理端「工具 schema 精简」卡读 state/tool-schema-stats.json（由 mcp-napcat-safe.js 注册时逐个量出来的），复算脚本 qq-bridge/tools/tool-schema-meter.mjs。改名之后必须重启隔离 DSH 才会重新注册工具表。",
       "level": "off",
       "deny": []
     },

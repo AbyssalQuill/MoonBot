@@ -10,9 +10,9 @@
 // 而且省下多少没人知道（得过且过 = 名单写错也看不出来）。现在改成**四档 + 自定义**：
 //
 //   off      不裁剪（默认；行为与改动之前完全一致）
-//   low      ≈ 52%  —— 只砍掉最肥的少数"小众能力"（pixiv 发图、富卡片、语音、角色卡、点歌、定时…）
-//   medium   ≈ 30%  —— 群聊日常够用：发/收/引用/表情/记忆/查资料/主动搭话
-//   high     ≈ 8.6% —— 最小闭环：只会"说话 + 收尾 + 看未读"（成本极限档，功能明显受限）
+//   low      ≈ 45%  —— 只砍掉最肥的少数"小众能力"（pixiv 发图、富卡片、语音、角色卡、点歌、定时…）
+//   medium   ≈ 28%  —— 群聊日常够用：发/收/引用/表情/记忆/查资料/主动搭话
+//   high     ≈ 7%   —— 最小闭环：只会"说话 + 收尾 + 看未读"（成本极限档，功能明显受限）
 //   custom   走 social.slimTools.allow / deny 两张手写名单（老行为，仍然完全支持）
 //
 // 百分比是**实测**的（mcp-napcat-safe.js 注册时把每个工具的 JSON 尺寸加起来算），
@@ -29,7 +29,7 @@
 export const TOOL_TIERS = {
   off: { label: '不裁剪', note: '全部工具都注册（默认；与改动之前行为一致）', keep: null },
   low: {
-    label: '低（≈52%）',
+    label: '低（≈45%）',
     note: '只砍掉最占体积的小众能力：pixiv 发图、富卡片、语音、角色卡、点歌、定时消息、QQ空间',
     keep: [
       // ── 说话与收尾 ──
@@ -51,7 +51,7 @@ export const TOOL_TIERS = {
     ],
   },
   medium: {
-    label: '中（≈30%）',
+    label: '中（≈28%）',
     note: '群聊日常够用：发/收发/引用/表情/记忆/查资料/主动搭话；不要 pixiv、语音、富卡片、角色卡、定时、空间',
     keep: [
       'qq_send_message', 'qq_send_burst', 'qq_reply', 'qq_mark_read', 'qq_set_wake_config',
@@ -64,8 +64,8 @@ export const TOOL_TIERS = {
     ],
   },
   high: {
-    label: '高（≈8.6%）',
-    note: '最小闭环：只会「说话 + 引用 + 收尾 + 看未读」。名字里的数字是实测占比（相对不裁剪时的 74,422 字符）',
+    label: '高（≈7%）',
+    note: '最小闭环：只会「说话 + 引用 + 收尾 + 看未读」。名字里的数字是实测占比（相对"不裁剪时全部已定义工具"的 89,681 字符；划分母的口径写在 tool-schema-meter.mjs 里）',
     keep: [
       'qq_send_message', 'qq_reply', 'qq_mark_read',
       'qq_get_prompt', 'qq_social_state', 'qq_get_unread_messages', 'qq_list_groups',

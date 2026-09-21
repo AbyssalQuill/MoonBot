@@ -642,7 +642,13 @@ const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>
 // deny 名单一条都匹配不上 → 实际裁剪 0 个、"省 schema" 静默失效（实测：77 个工具一个没少）。
 // 现在两边都归一化，谁写都能生效；`qq_status` 用裸 server.tool 注册，本来就不参与裁剪。
 const bareToolName = (n) => String(n).replace(/^mcp__[A-Za-z0-9_-]+__/, '');
-const TIER = resolveToolTier(getConfig().social?.slimTools);
+/* QQB_SLIM_TOOLS_OFF=1 = 本次启动忽略压缩档、全部注册。
+ * 只给**实测工具**用（tools/tool-schema-meter.mjs）：要算"占不裁剪时的百分之几"，
+ * 分母必须是**服务端定义的全部工具**，而注册过的工具表里没有没注册那些的尺寸。
+ * DSH 启动时不设它，行为与改动前完全一致。 */
+const TIER = process.env.QQB_SLIM_TOOLS_OFF === '1'
+  ? { level: 'off', keep: null, allow: null, deny: null, source: 'env-off' }
+  : resolveToolTier(getConfig().social?.slimTools);
 const SLIM_ON = TIER.level !== 'off';
 // 实测账本：注册期逐个累加（只算进请求体的三样：name / description / inputSchema）。
 const schemaMeter = { tools: [], totalChars: 0, keptChars: 0, keptCount: 0 };
@@ -4305,6 +4311,12 @@ export {
 // 启动 MCP stdio server（修复: 缺少 connect 导致进程静默退出）
 // QQB_MCP_NO_LISTEN=1 时只加载模块、不连 stdio：给 tests/character-library.test.js 直接用纯函数。
 // DSH spawn 时不设这个变量，启动行为与改动前完全一致。
+/* 【2026-09-21 工具 schema 实测统计必须在这里落盘，不能只挂 process.on('exit')】
+ * 上面挂的 exit 钩子是**兜底**：Windows 上被 TerminateProcess 结束的进程不会跑 exit 处理器
+ * （实测 tools/tool-schema-meter.mjs 杀掉子进程后 state/tool-schema-stats.json 根本没生成）。
+ * 工具注册是自顶向下同步完成的，走到这一行时账本已经齐了 —— 所以**在这里主动写一次**，
+ * 保证管理端那张卡在任何情况下都读得到实测值；exit 钩子留着只是为了覆盖"中途异常退出"。 */
+flushSchemaStats();
 if (process.env.QQB_MCP_NO_LISTEN !== '1') {
   await server.connect(new StdioServerTransport());
 }

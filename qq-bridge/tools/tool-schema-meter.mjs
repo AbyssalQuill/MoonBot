@@ -23,7 +23,9 @@ const AS_JSON = argv.includes('--json');
 const levelArg = (() => { const i = argv.indexOf('--level'); return i >= 0 ? argv[i + 1] : ''; })();
 
 function startServer(serverFile, timeoutMs = 25000) {
-  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'] });
+  // QQB_SLIM_TOOLS_OFF=1：量的是"不裁剪时全部工具"的体积 —— 这才能算出
+  // 各档位"占不裁剪时的百分之几"（分母必须是服务端定义的全部工具，而不是当前注册过的那批）。
+  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, QQB_SLIM_TOOLS_OFF: '1' } });
   let stdout = '';
   let stderr = '';
   let seq = 100;
