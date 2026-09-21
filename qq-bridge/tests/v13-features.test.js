@@ -136,10 +136,17 @@ await check('② 老配置（只有 enabled+deny、没有 level）走 custom 黑
   assert.equal(toolAllowedByTier('qq_send_message', r), true);
 });
 
-await check('② 手写 allow 优先于档位名单（明确点名要什么）', () => {
-  const r = resolveToolTier({ enabled: true, level: 'high', allow: ['qq_send_voice'] });
+await check('② 选了具体档位时，手写 allow/deny 一律忽略（避免"档位说要留、老 deny 说要砍"的自相矛盾）', () => {
+  const r = resolveToolTier({ enabled: true, level: 'high', allow: ['qq_send_voice'], deny: ['qq_send_message'] });
+  assert.equal(toolAllowedByTier('qq_send_message', r), true, '档位说留就得留，老 deny 不该生效');
   assert.equal(toolAllowedByTier('qq_send_voice', r), true);
-  assert.equal(toolAllowedByTier('qq_send_message', r), false);
+  assert.equal(toolAllowedByTier('qq_send_pixiv', r), false);
+  assert.equal(r.allow, null);
+  assert.equal(r.deny, null);
+  // 手写名单只在 custom 档生效
+  const c = resolveToolTier({ enabled: true, level: 'custom', allow: ['qq_send_voice'], deny: [] });
+  assert.equal(toolAllowedByTier('qq_send_voice', c), true);
+  assert.equal(toolAllowedByTier('qq_send_message', c), false);
 });
 
 await check('② 实测占比：按字符加权算（不是按工具个数），档位严格递减', () => {

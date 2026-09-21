@@ -138,12 +138,19 @@ export function resolveToolTier(slimTools = {}) {
   const allow = toSet(slimTools?.allow);
   const deny = toSet(slimTools?.deny);
   if (!enabled) return { level: 'off', keep: null, drop: null, allow: null, deny: null, source: 'disabled' };
-  // 手写白名单优先级最高（主人明确点名要什么），其次才是档位名单
-  if (level === 'custom') return { level, keep: allow, drop: null, allow, deny, source: allow ? 'custom-allow' : 'custom-deny' };
-  const def = TOOL_TIERS[level] || {};
-  const keep = Array.isArray(def.keep) ? new Set(def.keep.map(bareToolName)) : null;
-  const drop = Array.isArray(def.drop) ? new Set(def.drop.map(bareToolName)) : null;
-  return { level, keep, drop, allow, deny, source: keep ? `tier:${level}` : drop ? `tier:${level}-drop` : 'off' };
+  /* 选了具体档位（非 custom）时，**allow/deny 两张手写表一律忽略**。
+   * 为什么：线上 config.json 里本来就躺着一张 16 条的 deny 名单（老配置），而档位白名单里也含着
+   * `qq_memory_query` 这类被调用过的工具 —— 两张表同时生效就会出现"档位说要留、老 deny 说要砍"的
+   * 自相矛盾，而且失手砍掉的正是机器人在用的工具（这类冲突在真机上极难被发现：工具静默消失，
+   * 模型只会说"我调不到那个工具"）。档位 = 唯一答案，手写表只在 custom 档生效。 */
+  if (level !== 'custom') {
+    const def = TOOL_TIERS[level] || {};
+    const keep = Array.isArray(def.keep) ? new Set(def.keep.map(bareToolName)) : null;
+    const drop = Array.isArray(def.drop) ? new Set(def.drop.map(bareToolName)) : null;
+    return { level, keep, drop, allow: null, deny: null, source: keep ? `tier:${level}` : drop ? `tier:${level}-drop` : 'off' };
+  }
+  // custom：手写白名单优先（主人明确点名要什么），其次黑名单
+  return { level, keep: allow, drop: null, allow, deny, source: allow ? 'custom-allow' : 'custom-deny' };
 }
 
 /** 该工具要不要注册（唯一判据；`qq_status` 永远保留 —— 它是自检通道，198 字符不值一提）。 */
