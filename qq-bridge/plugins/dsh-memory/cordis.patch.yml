@@ -1,0 +1,5 @@
+# dsh-memory bundle 层:一行 insert,把本插件挂进 profile 组合。
+# 插件 inject systemPrompt / tools / commands / llm(base bundle 已含),全部就位后该行激活。
+- insert:
+    - id: dsh-memory
+      name: '@meomeo-dev/dsh-memory'

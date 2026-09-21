@@ -1,0 +1,67 @@
+{
+  "name": "@meomeo-dev/dsh-memory",
+  "version": "0.5.6",
+  "description": "Long-term memory bundle for DeepSeek Harness — durable, cross-session semantic facts (rules/lessons) in JSONL truth-source files with a rendered Markdown projection, recalled by a warm multi-node v4-flash team.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meomeo-dev/dsh-memory.git"
+  },
+  "type": "module",
+  "main": "lib/src/index.js",
+  "types": "lib/src/index.d.ts",
+  "files": [
+    "lib",
+    "panel/dist",
+    "lmemory",
+    "cordis.patch.yml"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/dsh-commands": ">=0.1.0-rc.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.0",
+    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.0",
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-connection": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-commands": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "3.18.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.0.0",
+    "vitest": "^2.0.0",
+    "yaml": "^2.9.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\"",
+    "gen:schema": "node scripts/gen-schema.mjs",
+    "panel:build": "vite build -c src/web-ui/panel/vite.config.ts",
+    "build": "pnpm gen:schema && pnpm clean && tsc -p tsconfig.json && pnpm panel:build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/web-ui/panel/tsconfig.json --noEmit"
+  }
+}

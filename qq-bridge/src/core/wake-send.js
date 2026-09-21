@@ -351,6 +351,30 @@ const sessionLine = (key) => `[Session] ${key}\n`;
  * 所以正文里带一句 34 字符的提醒（每轮固定 = 稳定前缀，按缓存读计价，成本可忽略）。 */
 const styleLine = '[Style] 说人话：短、有态度，别讲课别列举\n';
 
+/* 【2026-09-20 修「它看不见我引用的那条消息」】
+ * 现场（主人私聊，2026-09-21 13:29）：主人引用机器人的「这就是你养的那群吗」回了一句
+ * 「你说这个，我本来就养了你一个」，机器人却答「查不到 / 我拿不到引用内容」。
+ * 落库数据证实桥**解析成功了**（chat_messages.content =
+ *   `[引用 DeepSeek Harness：这就是你养的那群吗 ᗜ ‸ ᗜ]你说这个，我本来就养了你一个`），
+ * 但**发给模型的那一行没带上**：这里原来写的是 `m.plain || m.text` —— 而 `plain` 正是
+ * 「不含引用原文」的那份（mux 专门为"指令/指向性判定"准备的）。于是引用原文在最后一跳被丢掉，
+ * 模型只能看到光秃秃的半句话（"这个就是说我，不是说你"这类误解就是这么来的）。
+ * 修法：优先取带引用标记的那一份（text），没有引用时 text 与 plain 本来就相同 → 行为不变。
+ * 引用行再给一点额外额度：引用原文是"这句话在对谁说"的唯一线索，掐掉它就等于没修。 */
+export function unreadBody(m, cap = 160) {
+  const full = String(m?.text ?? '');
+  const bare = String(m?.plain ?? '');
+  let pick = (full && full !== bare) ? full : (bare || full);
+  const quoted = /^\[引用[^\]]*\]/.exec(pick);
+  if (quoted) {
+    // 引用原文过长时先掐引用，保证"他这次说了什么"读得全（引用本身只留前 120 字符）
+    const marker = quoted[0].length > 126 ? `${quoted[0].slice(0, 120)}…]` : quoted[0];
+    pick = marker + pick.slice(quoted[0].length);
+    return pick.slice(0, cap + 140);
+  }
+  return pick.slice(0, cap);
+}
+
 export function buildWakePrompt(key, reason) {
   const st = getSocialState(key);
   // 【2026-09-12】首轮也要带 `[OWNER]` 标记：persona 的 [OWNER MODE] 只认这个标记，
@@ -404,7 +428,10 @@ export function buildWakePrompt(key, reason) {
     if (waiting) {
       const who = waiting.isOwner ? 'owner' : (waiting.sender || 'peer');
       const id = waiting.messageId ? `(id:${waiting.messageId})` : '';
-      const body = String(waiting.plain || waiting.text || '').replace(/\s+/g, ' ').slice(0, 60);
+      /* 【2026-09-20 引用上下文】这一行是"这一步该答哪条"的指针，**必须带引用原文**：
+       * 主人引用机器人一句回话时，原来这里只放他打的那半句（plain），模型看不到被引用的内容，
+       * 于是答"查不到 / 拿不到引用内容"。改走 unreadBody（有引用就给 [引用 X：…] + 他的话）。*/
+      const body = unreadBody(waiting, 60).replace(/\s+/g, ' ');
       const nUnread = (st.unread || []).filter((m) => m && !m.isSelf).length;
       statusBits.push(`waiting on ${who}${id}: ${body}${nUnread > 1 ? ` (+${nUnread - 1} earlier unanswered)` : ''}`);
     }
@@ -994,7 +1021,7 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
   }
   const lines = unreadToSend.map((m) => {
     const who = m.isOwner ? 'owner' : (m.sender || (m.userId ? `uid:${m.userId}` : '?'));
-    const body = String(m.plain || m.text || '').slice(0, STEER_TEXT_CAP);
+    const body = unreadBody(m, STEER_TEXT_CAP);
     return `${who}${m.messageId ? `(id:${m.messageId})` : ''}${m.atSelf ? ' @me' : ''}: ${body}${m.hasMedia ? ' [image]' : ''}`;
   });
   // 【2026-09-12 二次精简（主人要求）】这段文本会**留在上下文里**：注入一次，之后本回合每一步都要
@@ -1516,7 +1543,7 @@ export async function sendWakePrompt(key, reason) {
       const lines = unreadMsgs.map((m) => {
         const who = m.isOwner ? 'owner' : (m.sender || (m.userId ? `uid:${m.userId}` : '?'));
         const id = m.messageId ? `(id:${m.messageId})` : '';
-        const body = String(m.plain || m.text || '').slice(0, UNC_TEXT);
+        const body = unreadBody(m, UNC_TEXT);
         const extra = m.hasMedia ? ' [image]' : (m.hasFile ? ' [file]' : '');
         const at = m.atSelf ? ' @me' : '';
         return `${who}${id}${at}: ${body}${extra}`;

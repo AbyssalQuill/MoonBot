@@ -239,7 +239,7 @@ import {
 import { handleIncoming, pumpMux, initMuxCore, setMuxApi, setMuxBot } from './core/mux.js';
 import { startDshWatch, writeLastMode, initDshWatchCore, setDshWatchApi, setDshWatchBot } from './core/dsh-watch.js';
 import { startConsoleServer, initConsoleCore, setConsoleApi, setConsoleBot, setConsoleMedia, setConsoleLastModeSink } from './core/console-server.js';
-import { resolveDshTarget, isInstalled, installToIsolatedDsh, installPresets } from './lib/dsh-side.js';
+import { resolveDshTarget, isInstalled, installToIsolatedDsh, installPresets, ensureBuiltinPlugins } from './lib/dsh-side.js';
 
 // 路径与 JSON 读写已外置：lib/paths.js、lib/json-fs.js（见上方 import）
 
@@ -290,6 +290,15 @@ async function main() {
         } catch (eWatch) { log(`[dsh-side] 人设监视启动失败：${eWatch?.message ?? eWatch}`); }
       } catch (ePre) {
         log(`[dsh-side] preset 刷新失败（继续用现有 preset）: ${ePre?.message ?? ePre}`);
+      }
+      /* 【2026-09-20 长期记忆插件】每次启动都幂等装配一遍（link + profile 注册 + settings 的 memory 段）。
+       * 为什么不能只在 installToIsolatedDsh 里做：那条路被 marker 挡住，装过一次就不再跑，
+       * 于是升级上来的老安装永远不会有它（与 preset 那次踩的坑同型）。 */
+      try {
+        ensureBuiltinPlugins(target);
+        log('[dsh-side] 内置插件已装配（qq-mode-console / 长期记忆 dsh-memory）');
+      } catch (ePlug) {
+        log(`[dsh-side] 内置插件装配失败（记忆/控制台插件可能不可用）: ${ePlug?.message ?? ePlug}`);
       }
       if (isInstalled(target)) return;
       log(`[dsh-side] 内置隔离 DSH 未安装 qq-bridge 端（${target.home}），自动安装…`);

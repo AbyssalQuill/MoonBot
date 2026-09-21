@@ -2,6 +2,26 @@
 
 本文件按主题归纳 MoonBot 的用户可见变化，不逐条罗列提交标题。版本号遵循语义化版本；分组约定为「新增能力 / 修复 / 变更与不兼容 / 内部与工程」。
 
+## 1.2.5 — 2026-09-20
+
+### 修复
+
+- **「它看不见我引用的那条消息」——引用原文在最后一跳被丢掉，已修**（主人 2026-09-21 私聊实测："你能看见我引用的消息吗" → 机器人答「查不到 / 这次这条我没拿到引用内容」）。整条链查清了：桥**解析是成功的**（`chat_messages.content` 里明明白白写着 `[引用 DeepSeek Harness：这就是你养的那群吗 ᗜ ‸ ᗜ]你说这个，我本来就养了你一个`），但**发给模型的那一行没带上** —— 唤醒正文渲染时写的是 `m.plain || m.text`，而 `plain` 正是 mux 专门为"指令/指向性判定"准备的**不含引用原文**的那一份。于是模型只看到光秃秃的半句话，只能答"我拿不到引用内容"。三处渲染统一改成 `unreadBody()`（有引用就给 `[引用 谁：原文] + 他的话`，没有引用时行为与原来完全一致）：首轮正文的 `[Status] waiting on owner(id:…)`、哨兵轮的 `[Unread …]`、以及回合中途注入的 `[Mid-turn]`。回归用例 `tests/quote-context.test.js`（7 项，含"超长引用先掐引用、保住正文"与"没有引用时不加料"）。
+- **看不懂缩略语、把别人的话当成在跟自己说**（主人同一轮反馈："这个就是说我，不是说你，语义理解增强一点吗"）：`[COMPREHEND]` 新增两条 —— **2b 缩略语就是这屋里的语言**（yyds / xswl / kdl / awsl / zqsg / dbq / emo / tt / 6 / 草 / 栓Q / 蚌埠住了 / 绝绝子 / 尊嘟假嘟 / 破防 / 抽象，拼音首字母 xdm / jr / srds / yjgj / nsdd，以及"考式=考试"这类错别字与语音识别错字：从上下文读意思，**绝不在回复里把缩写展开、也绝不纠正别人打字**，实在读不出来才查一次 qq_slang_query / web_search）；**2c 抓住整条线而不是最后一句**（话题移了就跟着移，聊正在发生的事，别只回答"点到你名字"的那一句）；同时把 2 号规则里 `[引用 …]` 的归属写死：引用的是别人 → 那是在跟别人说话，别当成在找你。
+
+### 新增能力
+
+- **内置 DSH 装上长期记忆插件（`remember` / `recall`），机器人"记住主人的要求和教训"现在跨会话生效**（主人要求：把桌面端 DSH 的记忆插件集成进项目自带的那套 DSH）。用的是桌面端同款 `@meomeo-dev/dsh-memory`（随包 vendored 到 `qq-bridge/plugins/dsh-memory/`，58 个文件 0.7MB）：`remember` 写一条持久记忆、`recall` 语义召回（返回完整字段供溯源）、`memory-find` 过滤、`memory-update` / `memory-forget` 改删，外加 `/lmemory` 命令与 Web 面板；记忆本体是 `<DSH home>/lmemory/` 下的 JSONL 真源 + Markdown 投影。
+  - **装配方式**：桥每次启动幂等装配（`src/lib/dsh-side.js` 的 `ensureMemoryPlugin`）—— ① 把插件**真实拷贝**到 `<home>/profiles/node_modules/@meomeo-dev/dsh-memory`；② 注册进 profile 的 `dependencies` + `dsh.profile.bundles`；③ 按**本实例自己的** `agent-default-model` 写 `settings.yaml` 的 `memory` 段（provider / model / reviewModel），免得默认值 `deepseek-official` 在别的 provider 上一路报错。服务器端（`/root/.dsh`，deepseek-official）与 Windows 本机（小米 MiMo）都已实测装配成功。
+  - **为什么必须真实拷贝**：Node 解析裸包名按**真实路径**向上找 `node_modules`。只做 junction 时真实路径是 `<repo>/qq-bridge/plugins/dsh-memory`，而仓库的 `node_modules` 只带了 `schemastery`（`qq-mode-console` 恰好只用它），这个插件 import 的 `@deepseek-ai/dsh-tools / dsh-llm / dsh-settings / dsh-system-prompt / dsh-commands` 一个都没有 → 整棵插件树加载失败、**隔离 DSH 直接起不来**（实测报 `Cannot find package '@deepseek-ai/dsh-tools'`）。拷到 `profiles/node_modules/` 后向上解析命中随包 DSH 的扁平安装面，与市场装出来的插件同一条路；拷贝带签名（版本+文件数+字节数+最新 mtime），源变了才重拷。
+  - **兼容补丁（1 处）**：插件 0.5.6 为 dsh `0.1.0-rc` 线编译，静态导入的 `settingsNamespace` 在 dsh `0.1.2` 起被删除（改用普通字符串做命名空间）→ 实测报 `does not provide an export named 'settingsNamespace'`。vendored 副本改成命名空间导入 + 运行时回退（两条线都能用），原因写在文件里。
+  - **行为设置**：`summaryMode: all`（默认只把 global 层逐条注入系统提示词、user/project 层只给计数，而 `remember` 只允许写 user/project —— 用默认值的话机器人自己写下的要求**每次都得先 `recall` 一次模型调用**才看得见）；`autoExtract: true` + `extractInterval: 8`（每隔若干回合自动把对话里值得留的规则/教训提炼成条目）；`warmupOnStart: true`。
+  - **提示词**：`[LEARNING]` 新增一段 —— 主人提出**长期要求**（"以后都这样 / 别再… / 记住…"）、纠正你、或吃到教训时用 `remember` 写**一句话**；回答他可能早已定过规矩的事之前先 `recall`，**记忆与当下冲动冲突时以记忆为准**；不写密钥与私密内容，也不主动复述"你以前说过"。
+
+### 内部与工程
+
+- 新增 vendored 依赖 `qq-bridge/plugins/dsh-memory/`（含兼容补丁）；`src/lib/dsh-side.js` 新增 `ensureMemoryPlugin` / `ensureMemorySettings` / `ensureBuiltinPlugins`，`src/bridge.js` 启动时幂等装配 —— 老安装升级上来也会自动装上（不受 install marker 阻拦）。
+
 ## 1.2.4 — 2026-09-20
 
 ### 修复

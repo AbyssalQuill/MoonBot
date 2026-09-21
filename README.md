@@ -2,7 +2,7 @@
 
 Windows 桌面应用，用于部署和管理 QQ 机器人。把 NapCat、QQ 桥接层、DeepSeek Harness 与模型服务商整合为一个可安装程序，提供图形化配置、进程编排、日志查看与远程部署。
 
-当前版本 **1.2.4**，产品名 MoonBot Pro，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)，1.0.0 那版的发布说明留档在 [docs/release-1.0.0.md](docs/release-1.0.0.md)。
+当前版本 **1.2.5**，产品名 MoonBot Pro，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)，1.0.0 那版的发布说明留档在 [docs/release-1.0.0.md](docs/release-1.0.0.md)。
 
 <p>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
@@ -91,7 +91,7 @@ qq-bridge  入口 src/bridge.js  控制台 :3100
 | 桥工具层 | `qq-bridge/src/mcp-*.js` | 三组 MCP server，向 agent 暴露 QQ/NapCat、学习语料与联网工具 |
 | 桥基础库 | `qq-bridge/src/lib/*.js` | OneBot 客户端、消息解析、媒体工具、Pixiv、日志、路径与文本处理等无副作用的工具函数 |
 | 隔离 DSH | `qq-bridge/dsh/agent-presets/qq-chat/` | agent preset：`preset.yml` 提供 `[WAKE TYPES]` 等行为规则，`qq-tool-restrict.mjs` 限制可用工具 |
-| DSH 插件 | `qq-bridge/plugins/dsh-qq-hold/`、`qq-bridge/plugins/qq-mode-console/` | 回合保持与模式控制台两个本地插件 |
+| DSH 插件 | `qq-bridge/plugins/dsh-qq-hold/`、`qq-bridge/plugins/qq-mode-console/`、`qq-bridge/plugins/dsh-memory/` | 回合保持、模式控制台，以及长期记忆（remember/recall，随包 vendored）三个本地插件 |
 | NapCat | `napcat-onekey/bootmain/` | 便携版 NapCat 与 QQ，启动脚本 `napcat.bat`、扫码登录用 `napcat.quick.bat` |
 
 两侧的配置与数据不混：管理端配置在 `%USERPROFILE%\.qq-bridge-manager\config.json`，桥配置在 `<运行时>\qq-bridge\config.json`，模板见 `qq-bridge/config.example.json`。
@@ -248,7 +248,7 @@ MoonBot Public/
 │   │   ├─ lib/              基础库：OneBot 客户端、消息解析、媒体工具、Pixiv 等
 │   │   └─ mcp-*.js          三组 MCP server
 │   ├─ dsh/                  agent preset
-│   ├─ plugins/              DSH 插件（dsh-qq-hold、qq-mode-console）
+│   ├─ plugins/              DSH 插件（dsh-qq-hold、qq-mode-console、dsh-memory）
 │   ├─ scripts/              运维脚本
 │   ├─ tools/                开发与回归工具（含设备身份固定脚本）
 │   ├─ tests/                单元测试
