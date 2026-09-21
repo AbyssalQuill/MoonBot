@@ -200,6 +200,9 @@ const LABEL: Record<string, string> = {
   'tokenCost.peakHours': '高峰小时（北京时）',
   'social.slimTools.level': '工具描述压缩档位',
   'social.slimTools.schemaLevel': '描述文字压缩档位（不裁功能）',
+  'social.toolCompressor': '工具压缩代理', 'social.toolCompressor.enabled': '启用压缩代理',
+  'social.toolCompressor.level': '代理压缩档位', 'social.toolCompressor.excludeTools': '代理额外排除的工具',
+  'social.toolCompressor.toonify': '工具结果转 TOON',
 };
 
 /** MCP 工具中文名（工具与规则页） */
@@ -406,6 +409,20 @@ function mcpLabel(fullName: string) {
   prompt: '提示词可调项分组。目前只有一项：唤醒正文每轮带的那句语感提醒。',
   tokenCost: 'QQ 里发 /token 时算钱用的单价分组（¥ / 百万 token）。默认值与管理端「学习」页的实测计量同源；'
     + '改这里只影响 /token 报出来的钱，不影响提供方的实际计费。',
+  'social.toolCompressor': '开源 mcp-compressor 代理（2026-09-21 接上）：DSH 不再直连 napcat MCP，'
+    + '改连代理；代理只把 2 个包装工具发给模型（napcat_get_tool_schema / napcat_invoke_tool），工具清单压进描述里。'
+    + '实测相对完整工具表：低 38.8% / 中 14.0% / 高 6.2% / 极限 3.6%。'
+    + '代价是遇到本轮没用过的工具要"先查 schema 再调用"，一步变两步；桥侧已按真实工具名解包，不影响发送判定与幂等账本。'
+    + '⚠ 压缩机没装（pip3 install mcp-compressor）时自动回退直连，不会把工具表搞没。改完必须重启隔离 DSH。',
+  'social.toolCompressor.enabled': '是否让隔离 DSH 走压缩代理。关掉 = 直连（默认）。'
+    + '桥每次启动会做一次廉价探测：找不到 mcp-compressor 可执行文件就自动回退直连并把原因写进日志。',
+  'social.toolCompressor.level': '代理压缩档位（对应 mcp-compressor 的 --compression）：'
+    + '低 = 保留完整描述；中 = 每条描述只留第一句；高 = 工具清单里不带描述；极限 = 连参数都不带。'
+    + '档位越低模型越依赖"先查 schema"，调用步数越多。建议先用中档实测几轮，拿 /token 对一次账再定。',
+  'social.toolCompressor.excludeTools': '交给代理之前先从后端排除的工具（后端原名，如 qq_send_pixiv），'
+    + '逗号或换行分隔。与「工具 schema 精简」那张卡的名单是叠加关系：两边都会把工具挡在模型视线之外。',
+  'social.toolCompressor.toonify': '把工具返回的 JSON 转成 TOON 再交给模型（更省 token，但模型看到的格式变了）。'
+    + '默认关闭：格式一变，模型对该工具结果的读法可能跟着变，建议先在低价值工具上试。',
   'social.slimTools.schemaLevel': '描述文字压缩档（与上面的"名单档位"是两个正交的旋钮）：上面决定**注册哪些工具**，'
     + '这里决定**注册了的那份 schema 写多长** —— 压的是描述文字，工具一个不少、参数一个不少（名字/类型/枚举/必填照旧）。'
     + '档位语义照搬开源的 mcp-compressor（atlassian-labs）：medium = 每条描述只留第一句；high = 完全不发描述。'
@@ -2573,6 +2590,7 @@ function ToolsTab({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) =
           ))}
         </div>
       </div>
+<ToolCompressorCard cfg={cfg} ch={ch} onSave={onSave} />
       <SlimToolsCard cfg={cfg} ch={ch} onSave={onSave} />
     </div>
   );
@@ -2680,6 +2698,84 @@ function MemoryCard() {
       ) : (
         <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)' }}>{msg}</div>
       )}
+    </div>
+  );
+}
+
+/** 「工具压缩代理」卡（2026-09-21 主人要求）：接开源的 mcp-compressor 当代理。
+ *
+ * 它与下面那张「工具 schema 精简」是**两层不同的压缩**：
+ *   · 这里（代理层）：DSH 不再直连 napcat MCP，改连代理；代理只把 2 个包装工具发给模型，
+ *     把压缩过的工具清单塞进包装工具的描述里。实测（挂我们真实的 90 个工具跑）：
+ *       low 38.8% · medium 14.0% · **high 6.2%** · max 3.6%。
+ *   · 下面那张（注册层）：桥自己按名单决定注册哪些工具、按档位压描述文字。
+ * 两层可以叠加：代理开着时，桥侧那份 schema 也会被代理再压一次。
+ *
+ * 代价（要如实说）：模型遇到**本轮没用过**的工具要先 `get_tool_schema` 再 `invoke_tool`，
+ * 调用从 1 步变 2 步。桥侧已按真实工具名解包（core/mux.js 的 unwrapCompressedToolName），
+ * 所以发送判定、幂等账本、回合收尾这些逻辑不受影响。
+ * ⚠ 压缩机没装时自动回退直连（绝不把工具表搞没）；改完必须重启隔离 DSH。 */
+function ToolCompressorCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: any) => void; onSave: () => Promise<void> }) {
+  const enabled = get(cfg, 'social.toolCompressor.enabled') === true;
+  const level = String(get(cfg, 'social.toolCompressor.level') ?? 'medium');
+  const toonify = get(cfg, 'social.toolCompressor.toonify') === true;
+  const excludeRaw = get(cfg, 'social.toolCompressor.excludeTools');
+  const exclude: string[] = Array.isArray(excludeRaw) ? excludeRaw : [];
+  const [draft, setDraft] = useState(exclude.join('\n'));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const ratio: Record<string, string> = { low: '38.8%', medium: '14.0%', high: '6.2%', max: '3.6%' };
+  const saveAndRestart = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      ch('social.toolCompressor.excludeTools')(draft.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean));
+      await onSave();
+      await instanceAction('dsh-isolated', 'restart');
+      setMsg('已保存并重启隔离 DSH（约 15 秒后工具表才换过来）');
+    } catch (e: any) { setMsg('失败：' + (e?.message || '')); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="card">
+      <div className="card-title">工具压缩代理（开源 mcp-compressor）</div>
+      <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 12, lineHeight: 1.7 }}>
+        打开后隔离 DSH <b>不再直连 napcat MCP</b>，而是连代理：代理只把 <b>2 个</b> 工具
+        （<code>napcat_get_tool_schema</code> / <code>napcat_invoke_tool</code>）发给模型，
+        把压过的工具清单塞进包装工具的描述里。实测相对完整工具表：
+        <b>低档留 38.8%、中档 14.0%、高档 6.2%、极限档 3.6%</b>（下拉里每项也标了）。
+        <br />
+        代价：模型遇到<b>本轮没用过</b>的工具要先查 schema 再调用（一步变两步）；
+        桥已按真实工具名解包，发送判定/幂等账本不受影响。<b>压缩机没装会自动回退直连</b>。
+      </div>
+      <label className="switch-row" style={{ marginBottom: 10 }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => ch('social.toolCompressor.enabled')(e.target.checked)} />
+        <span>启用压缩代理（关掉 = 直连，回到默认）</span>
+      </label>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>压缩档位</span>
+        <select className="input" style={{ maxWidth: 260 }} value={level} onChange={(e) => ch('social.toolCompressor.level')(e.target.value)}>
+          {['low', 'medium', 'high', 'max'].map((id) => (
+            <option key={id} value={id}>{id}｜约保留 {ratio[id]}</option>
+          ))}
+        </select>
+        <label className="switch-row" style={{ marginBottom: 0, fontWeight: 400, fontSize: 12.5 }}>
+          <input type="checkbox" checked={toonify} onChange={(e) => ch('social.toolCompressor.toonify')(e.target.checked)} />
+          <span>工具返回的 JSON 转 TOON（更省，但格式变了）</span>
+        </label>
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, marginBottom: 4 }}>
+          额外排除的后端工具名（每行一个，对应上面那张卡的 <code>qq_xxx</code> 原名；留空 = 不排除）
+        </div>
+        <textarea className="textarea" style={{ minHeight: 70, fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace", fontSize: 12 }}
+          value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={'qq_send_pixiv\nqq_schedule_message'} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={saveAndRestart}>
+          {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存并重启隔离 DSH
+        </button>
+        {msg && <span style={{ fontSize: 13 }}>{msg}</span>}
+      </div>
     </div>
   );
 }

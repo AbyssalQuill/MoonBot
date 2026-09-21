@@ -164,6 +164,57 @@ export function installPresets(target) {
   }
 }
 
+/* 桥把当前配置注进来（installToIsolatedDsh 拿不到 cfg，而代理开关来自配置）。 */
+let sideCfg = null;
+export function setDshSideConfig(cfg) { sideCfg = cfg || null; }
+
+/* ── 【2026-09-21】MCP 工具压缩代理（开源 mcp-compressor）────────────────────────────
+ * 主人要求"用那套开源 MCP 压缩工具"。它是个**代理**：DSH 不再直连我们的 napcat MCP，
+ * 而是连它，由它把 90 个工具压成 2 个包装工具（`<server>_invoke_tool` / `_get_tool_schema`），
+ * 工具清单塞进包装工具的描述里。实测（挂我们真实的 90 个工具跑）：
+ *     low 38.8% · medium 14.0% · **high 6.2%** · max 3.6%（相对完整工具表）
+ * 代价：模型遇到不熟的工具要先 get_tool_schema 再 invoke_tool = **一步变两步**；
+ *      桥侧靠工具名做的判断必须先解包（见 core/mux.js 的 unwrapCompressedToolName）。
+ *
+ * ⚠️ 必须有 fallback：压缩机没装 / 起不来时**绝不能**把工具表搞没（那等于机器人失能）。
+ *    所以这里只做一次廉价的可用性探测，探不到就直连，并把原因写进日志。
+ */
+export const COMPRESSOR_LEVELS = ['low', 'medium', 'high', 'max'];
+export function normalizeCompressorLevel(v) {
+  const id = String(v ?? '').trim().toLowerCase();
+  return COMPRESSOR_LEVELS.includes(id) ? id : 'medium';
+}
+
+let compressorProbe = null;      // { ok, command, version, reason, at }
+/** 找 mcp-compressor 可执行文件（`which` / 常见路径），结果缓存 10 分钟。 */
+export function resolveToolCompressor({ log = () => {}, force = false } = {}) {
+  const now = Date.now();
+  if (!force && compressorProbe && now - compressorProbe.at < 10 * 60 * 1000) return compressorProbe;
+  const cands = [
+    process.env.QQB_MCP_COMPRESSOR || '',
+    'mcp-compressor',
+    '/usr/local/bin/mcp-compressor',
+    '/usr/bin/mcp-compressor',
+    path.join(process.env.HOME || '/root', '.local', 'bin', 'mcp-compressor'),
+  ].filter(Boolean);
+  for (const c of cands) {
+    try {
+      const which = c.includes('/') ? (fs.existsSync(c) ? c : '') : '';
+      if (which) { compressorProbe = { ok: true, command: which, reason: 'path', at: now }; return compressorProbe; }
+      if (c.includes('/')) continue;
+      const r = spawnSync(c, ['--version'], { timeout: 8000, encoding: 'utf8' });
+      if (r.status === 0) {
+        compressorProbe = { ok: true, command: c, version: String(r.stdout || '').trim().slice(0, 40), reason: 'which', at: now };
+        log(`[dsh-side] 找到 MCP 压缩代理：${c} ${compressorProbe.version}`);
+        return compressorProbe;
+      }
+    } catch { /* 试下一个 */ }
+  }
+  compressorProbe = { ok: false, command: '', reason: '未找到 mcp-compressor 可执行文件（pip 装一个即可：pip3 install mcp-compressor）', at: now };
+  log(`[dsh-side] 未找到 MCP 压缩代理，工具代理关闭：${compressorProbe.reason}`);
+  return compressorProbe;
+}
+
 function mcpBlock() {
   const node = process.execPath;
   const servers = {
@@ -171,6 +222,13 @@ function mcpBlock() {
     'mcp-napcat-host': path.join(REPO_ROOT, 'src', 'mcp-host-server.js'),
     'mcp-web-search-safe': path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js'),
   };
+  // 压缩代理只挂在 napcat 这一路上（工具最多、体积最大）；另两个保持直连。
+  const tc = sideCfg?.social?.toolCompressor ?? {};
+  const wantProxy = tc.enabled === true;
+  const probe = wantProxy ? resolveToolCompressor({ log }) : { ok: false, reason: '未启用' };
+  const useProxy = wantProxy && probe.ok;
+  if (wantProxy && !probe.ok) log(`[dsh-side] 工具压缩代理已勾选但不可用，回退直连：${probe.reason}`);
+
   let out = '# === qq-bridge MCP BEGIN ===\n';
   for (const [id, script] of Object.entries(servers)) {
     out += '- insert:\n';
@@ -179,9 +237,24 @@ function mcpBlock() {
     out += `      config:\n`;
     out += `        serverName: ${id.replace('mcp-', '')}\n`;
     out += `        transport: stdio\n`;
-    out += `        command: ${yamlQuoteForPath(node)}\n`;
-    out += `        args:\n`;
-    out += `          - ${yamlQuoteForPath(script)}\n`;
+    if (id === 'mcp-napcat' && useProxy) {
+      const level = normalizeCompressorLevel(tc.level);
+      const exclude = Array.isArray(tc.excludeTools) ? tc.excludeTools.map(String).filter(Boolean) : [];
+      out += `        command: ${yamlQuoteForPath(probe.command)}\n`;
+      out += `        args:\n`;
+      out += `          - '-c'\n          - ${level}\n`;
+      out += `          - '-n'\n          - napcat\n`;
+      if (exclude.length) out += `          - '--exclude-tools'\n          - ${exclude.join(',')}\n`;
+      if (tc.toonify === true) out += `          - '--toonify'\n`;
+      out += `          - '--'\n`;
+      out += `          - ${yamlQuoteForPath(node)}\n`;
+      out += `          - ${yamlQuoteForPath(script)}\n`;
+      log(`[dsh-side] napcat MCP 走压缩代理：档位=${level}${exclude.length ? ` 排除 ${exclude.length} 个` : ''}（工具表由代理发给模型）`);
+    } else {
+      out += `        command: ${yamlQuoteForPath(node)}\n`;
+      out += `        args:\n`;
+      out += `          - ${yamlQuoteForPath(script)}\n`;
+    }
     if (id === 'mcp-napcat') out += '        toolCallTimeoutMs: 725000\n';
   }
   out += '# === qq-bridge MCP END ===\n';

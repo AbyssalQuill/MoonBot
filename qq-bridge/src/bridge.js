@@ -180,8 +180,7 @@ import {
 import {
   initTokenMeter, setConvKeyResolver, setTokenReconcileHome, startTokenReconcile,
 } from './core/token-meter.js';
-import { initTokenReportCore } from './core/token-report.js';
-import {
+import { initTokenReportCore } from './core/token-report.js';import {
   enqueueForRetry, flushQueue, deliverPrompt, drainPromptQueue, drainAllPromptQueues,
   QUEUE_MAX, initPromptDeliverCore, setPromptApi, setPromptMediaResolver,
 } from './core/prompt-deliver.js';
@@ -240,7 +239,7 @@ import {
 import { handleIncoming, pumpMux, initMuxCore, setMuxApi, setMuxBot } from './core/mux.js';
 import { startDshWatch, writeLastMode, initDshWatchCore, setDshWatchApi, setDshWatchBot } from './core/dsh-watch.js';
 import { startConsoleServer, initConsoleCore, setConsoleApi, setConsoleBot, setConsoleMedia, setConsoleLastModeSink } from './core/console-server.js';
-import { resolveDshTarget, isInstalled, installToIsolatedDsh, installPresets, ensureBuiltinPlugins } from './lib/dsh-side.js';
+import { resolveDshTarget, isInstalled, installToIsolatedDsh, installPresets, ensureBuiltinPlugins, setDshSideConfig, patchProfileCordis } from './lib/dsh-side.js';
 
 // 路径与 JSON 读写已外置：lib/paths.js、lib/json-fs.js（见上方 import）
 
@@ -347,6 +346,10 @@ async function main() {
   initTokenMeter(cfg);
   /* 【2026-09-21】/token 指令：用与「学习」页实测区同一套口径算今日花费（单价走 cfg.tokenCost）。 */
   initTokenReportCore(cfg);
+  /* 【2026-09-21】把配置注给 dsh-side：napcat MCP 要不要走 mcp-compressor 压缩代理由它决定。
+   * 代理开关变了要重写 cordis.patch.yml（幂等）并重启隔离 DSH 才生效，与工具档位同一条路径。 */
+  setDshSideConfig(cfg);
+  try { patchProfileCordis(resolveDshTarget()); } catch (e) { log(`[dsh-side] 重写 MCP 块失败（不影响启动）：${e?.message ?? e}`); }
   // 用量对账：DSH 自己的 projcache 里有按会话累计的权威 token 数（tokenUsage.totals）。
   // 单帧漏记（帧里没有 sessionId / 会话刚好结束）会让面板偏低，这里定期把差额补成
   // reconciled:true 的行，使面板 == DSH 侧真实值。找不到 DSH home 时静默跳过（不影响主流程）。

@@ -115,6 +115,27 @@ import {
 } from './session-state.js';
 /* 【2026-09-20】"漏引号"的工具调用：原始参数串按 callId 暂存，等它真失败后由桥兜底发送。 */
 const unquotedArgsByCall = new Map();
+
+/* ── 【2026-09-21】mcp-compressor 代理模式：把包装工具还原成真实工具名 ──────────────
+ * 代理打开时，DSH 看到的工具表只有 `<server>_invoke_tool` 与 `<server>_get_tool_schema`
+ * 两个（工具清单被压进前者的描述里）。模型实际发起的是：
+ *     napcat_invoke_tool { tool_name: 'qq_send_message', tool_input: { key, messages, token } }
+ * 桥里几十处判断都按真实工具名走，所以在**事件入口**统一解包一次，后面全都不用改。
+ * 认不出来（名字不像包装工具、参数不是对象、没有 tool_name）就原样返回 ——
+ * 非代理模式下行为与以前**完全一致**。 */
+const COMPRESSOR_WRAPPER_RE = /(?:^|__)(?:[A-Za-z0-9_-]+_)?(?:invoke_tool|get_tool_schema)$/;
+export function unwrapCompressedToolName(name, rawArgs) {
+  const n = String(name ?? '');
+  if (!COMPRESSOR_WRAPPER_RE.test(n)) return n;
+  try {
+    const obj = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+    const inner = obj && typeof obj === 'object' ? (obj.tool_name ?? obj.toolName ?? obj.name) : '';
+    const innerName = String(inner ?? '').trim();
+    // 只认"看起来像我们自己的工具名"，免得把别的东西误当工具名
+    if (innerName && (/^qq_[a-z0-9_]+$/i.test(innerName) || /^mcp__[A-Za-z0-9_-]+__/.test(innerName))) return innerName;
+  } catch { /* 参数不是 JSON 就当没这回事 */ }
+  return n;
+}
 import {
   activityWindows, loadActivityWindows, saveActivityWindows, getActivityWindows,
   inActivityWindow, nextActivityWindowStart, activityStatusLine,
@@ -779,9 +800,17 @@ export async function pumpMux() {
             }
           }
           if (frame.event.type === 'tool/call') {
-            const toolName = String(frame.event.data?.name ?? '');
+            /* 【2026-09-21 接了 mcp-compressor 代理之后，先把真实工具名解包出来】
+             * 代理模式下面向模型只有两个包装工具（`<server>_invoke_tool` / `<server>_get_tool_schema`），
+             * 真正要调的工具名藏在 `invoke_tool` 的参数里（args.tool_name）。而桥下面这一整段
+             * （发送类判定、漏引号兜底、幂等账本、抽签登记、回合收尾）**全是按真实工具名做判断的**（49 处），
+             * 不解包就等于全部失灵：消息发出去了不记账、引用/收尾逻辑认不出来。
+             * 所以这里统一还原一次：拿到的 toolName 一律是**后端真实工具名**。 */
+            const rawToolName = String(frame.event.data?.name ?? '');
+            const rawArgsForName = frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data;
+            const toolName = unwrapCompressedToolName(rawToolName, rawArgsForName);
             const callId = frame.event.data?.callId;
-            const rawArgs = frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data;
+            const rawArgs = rawArgsForName;
             const args = sanitizeToolArgs(rawArgs);
             appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args, target: extractToolTargetKey(rawArgs) || undefined });
             /* 【2026-09-20 根治「模型漏引号 → 消息发不出去」】
