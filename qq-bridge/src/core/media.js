@@ -6,11 +6,38 @@ import { log } from '../lib/log.js';
 import { enqueueSend } from './send-chain.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
+import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from '../safe-fetch.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
 // 网易云接口统一请求头（这几个接口对 Referer 敏感，缺了会返回空 result）
 const NETEASE_HEADERS = { Referer: 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' };
+
+/* 封面取图的统一请求头。
+ * ⚠️ 先说清一个**实测否掉的猜测**：线上那条 `y.gtimg.cn` 封面 404 **不是**缺 Referer/UA 造成的。
+ * 本机实测同一个 URL 的 5 种组合（无头 / 只 UA / 只 Referer / 桌面 UA+Referer / 现状 UA+range）
+ * 结果**逐条完全一致**：真 albummid 永远 200 image/jpeg，坏的那条永远 404。加头解决不了它（真因见
+ * ensureJpegCover / qqAlbumCoverBySongMid 上的注释）。这里仍然带上 Referer + 桌面 UA，是因为
+ * 调用方传进来的 `image` 可能是别的图床（pximg 那类按 Referer 防盗链，safe-fetch 里已有同样的先例）。 */
+const COVER_HEADERS = {
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  referer: 'https://y.qq.com/',
+  accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+};
+/* 封面探活只读"头部若干字节"来判真伪，不落盘（正文由签名服务自己去取）——
+ * 上限 64KB 是"读头部"的量级；整图下载走 safe-fetch 的 MAX_IMAGE_FETCH_BYTES(15MB)，两者分工不同。 */
+const COVER_PROBE_MAX_BYTES = 64 * 1024;
+const COVER_PROBE_TIMEOUT_MS = 6000;
+
+/** 真图片字节白名单：JPEG / PNG / WebP（实测候选里只出现过 JPEG 与 PNG）。
+ *  比 safe-fetch 的 looksLikeImageBuffer 更严（那个还放 GIF）—— 卡片封面槽只吃静态图。 */
+export function isRealCoverBytes(buf) {
+  if (!buf || buf.length < 12) return false;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;                          // JPEG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;       // PNG
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return true; // WebP
+  return false;
+}
 
 /**
  * 封面 URL 归一化 —— 手机端"网易云卡片白框"的根因处理（2026-09-16 实测，非推测）。
@@ -325,14 +352,39 @@ export function createMediaDomain(cfg) {
    * **被 JSON 编码过一次的字符串**，只 parse 一层就拿不到 `app`/`preview`，于是每一张卡都被误判成
    * "卡片构造失败（card=link）"。那个坑现在已在 tools/test-qq-card-sign.mjs 里处理掉。
    *
-   * 所以这里只做**诊断**（把封面的真实字节格式打到日志里，方便下次一眼看出"是不是 JPEG"），
-   * 绝不再改写 URL。网易云那种"字节是 PNG"的情况，由它自己的 CDN 参数解决（见 normalizeCoverUrl 的 `type=jpg`）。 */
+   * 所以这里**不再改写 URL**，只做**把关 + 诊断**（把封面的真实字节格式打到日志里，方便下次一眼看出
+   * "是不是真图"）。网易云那种"字节是 PNG"的情况，由它自己的 CDN 参数解决（见 normalizeCoverUrl 的 `type=jpg`）。 */
+  /* 【2026-09-19 本机实测】**封面 404 的真因不是请求头，而且 404 的东西以前照样被发出去了。**
+   *
+   * ① 请求头不是原因（实测，不是推测）：把线上那条 404 的 URL 与一条好的 URL 放在一起，
+   *    用 5 种组合各打一遍 —— 无头 / 只 UA=Mozilla/5.0 / 只 Referer / 桌面 UA+Referer / 现状 UA+range：
+   *      好 albummid `004fXSyj3bWTMN` → 五种全是 200 image/jpeg、magic ffd8ff（36246 字节）
+   *      坏的那条 `0047TsYA2meOa2`  → 五种全是 404（y.gtimg.cn 空体 text/plain；y.qq.com 102 字节
+   *                                  text/html，magic 54686520 = "The " 的 ASCII）
+   *    连尺寸模板（90x90/150x150/300x300/500x500/800x800）× 两个域（y.gtimg.cn / y.qq.com）交叉打了 20 次，
+   *    坏的那些**一次都没成功**。所以加 Referer/UA 修不了它。
+   * ② 真因：那个 mid 根本不是 albummid。拿 c.y.qq.com 官方搜索接口回查同一首歌
+   *    （`w=夜空的寂静`）→ `songmid=0047TsYA2meOa2`、**`albummid` 是空的**；而封面模板
+   *    `photo_new/T002R300x300M000<albummid>.jpg` 只认 albummid → 必然是 404。
+   *    修法见 `qqAlbumCoverBySongMid()`：拿不到 albummid 就找官方接口补，补不到才走兜底。
+   * ③ 真正让用户看见"卡片没封面"的是这一段旧代码：它探到 404 后**照样把 URL 原样返回**并打印
+   *    "仍然原样发出去"。所以这里从"只诊断"改成"**把关**"：不是真图片字节就返回空串，
+   *    由调用方走兜底（QQ 音乐 → 官方分享链接；网易云 → NapCat 原生卡），
+   *    **绝不把一个 404 页/空体当封面交给签名服务**（否则 QQ 收到的就是"有卡无图"）。
+   * ⚠️ 仍然**绝不代理**封面（见上一大段）：代理会让签名服务把它转存成手机不渲染的 qq.ugcimg.cn 链接。 */
   function ensureJpegCover(cover, ct = '', opts = {}, magic = '') {
     const raw = String(cover ?? '').trim();
     if (!raw) return '';
-    const isJpeg = magic ? /^ffd8ff$/i.test(magic) : /^image\/jpe?g$/i.test(String(ct));
-    if (!isJpeg) {
-      log(`[cover] 注意：封面不是真 JPEG（magic=${magic || '未知'} ct=${ct || '未知'}）—— 仍然原样发出去（绝不代理，代理会让签名服务转存成手机不渲染的 qq.ugcimg.cn 链接）：${raw.slice(0, 90)}`);
+    /* magic 优先（探活时读到的真实首字节），没有 magic 才退回 content-type ——
+     * 线上那个 404 的 content-type 是 text/plain，但换一个 CDN 完全可能是 200 image/jpeg 包着 HTML。 */
+    const okMagic = /^(ffd8ff|89504e|524946)$/i.test(String(magic || ''));
+    const isImage = magic ? okMagic : /^image\/(jpeg|jpg|png|webp)$/i.test(String(ct || ''));
+    if (!isImage) {
+      log(`[cover] 封面不是真图片（magic=${magic || '未知'} ct=${ct || '未知'}）—— **丢掉这张封面、走兜底**（绝不把 404 页/空体当封面发出去）：${raw.slice(0, 90)}`);
+      return '';
+    }
+    if (/^(89504e|524946)$/i.test(String(magic || ''))) {
+      log(`[cover] 封面是真图片但不是 JPEG（magic=${magic} ct=${ct}）—— 原样发（网易云那类 PNG 由它自己的 type=jpg 参数解决，绝不代理）`);
     }
     return raw;
   }
@@ -346,8 +398,9 @@ export function createMediaDomain(cfg) {
    *     —— 同一个 URL 实测**前一次 404 text/plain、几分钟后 200 image/jpeg**（CDN 边缘/防盗链级别的不稳定）；
    *   · 聚合站 secapi 返回的封面是同一个模板的**另一个 albummid**，同样会坏。
    * 所以"谁优先"这种规则没有意义 —— **必须探活**：谁真能取到就用谁。
-   * 全部探不到就等 800ms 再探一轮（抖动多半是瞬时的），最后兜底返回第一个候选
-   * （绝不能因为"封面探不到"就让整张卡片发不出去）。
+   * 全部探不到就等 800ms 再探一轮（抖动多半是瞬时的）；**仍然探不到就不再拿封面**，
+   * 走调用方的兜底（这条在 2026-09-19 改掉：见 pickImage 末尾——旧代码"兜底用第一个候选"，
+   * 结果把一张 404 页当封面发了出去，线上就是"卡片有、封面空白"）。
    */
   /* 【2026-09-19 修「QQ音乐卡又没封面了」】封面域名 `y.gtimg.cn` → `y.qq.com`。
    *
@@ -359,40 +412,137 @@ export function createMediaDomain(cfg) {
    * 而 `y.qq.com` 是腾讯主域、更稳。所以统一改写成 `y.qq.com`；别的域名（网易云、p.qpic.cn…）原样不动。 */
   const preferStableQqCover = (u) => String(u ?? '').trim().replace(/^https?:\/\/y\.gtimg\.cn\//i, 'https://y.qq.com/');
 
-  /** 探一个图片 URL：{ ok, ct, magic, status }。
+  /** 探一个图片 URL：{ ok, ct, magic, status, bytes }。
    *  **magic** = 头 3 字节的十六进制。为什么要它：线上实测网易云的封面 URL 写着 `.jpg`、
    *  content-type 也报 `image/jpg`，**但字节是 PNG**（magic `89504e`）—— 光看扩展名和 content-type
-   *  分不出来，而手机端正是按内容判断、于是不渲染（这就是"电脑能看手机不行"的最后一个原因）。 */
+   *  分不出来，而手机端正是按内容判断、于是不渲染（这就是"电脑能看手机不行"的最后一个原因）。
+   *
+   *  【2026-09-19 本机实测后改写的三处】
+   *   · 不能再只信 `content-type`：线上那条 404 是 `text/plain`（y.gtimg.cn）/`text/html`（y.qq.com），
+   *     但别的 CDN 完全可能 200 + `image/jpeg` 包一段 HTML → **必须按首字节判**（isRealCoverBytes）。
+   *   · 丢掉 `range: bytes=0-16`：它让好 URL 返回 206 + 17 字节（本身没错，实测仍能判 magic），
+   *     但正文被截成 17 字节后就没法校验 RIFF/WEBP 这种"要看到第 12 字节"的格式，也拿不到真实 content-length。
+   *   · 明确 `redirect: 'follow'` + 6s 超时 + 只读 64KB 就掐断（实测这两个域都不跳转，
+   *     `final` 与请求 URL 一致；留着是因为 CDN 换签名地址时会 302 到带 token 的图）。 */
+  async function readBoundedBytes(res, maxBytes) {
+    const reader = res?.body?.getReader?.();
+    if (!reader) return Buffer.alloc(0);
+    const chunks = [];
+    let size = 0;
+    try {
+      while (size < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) { chunks.push(Buffer.from(value)); size += value.length; }
+      }
+    } catch { /* 读一半被掐断没关系：只要够判格式 */ } finally { try { await reader.cancel(); } catch {} }
+    return Buffer.concat(chunks).subarray(0, maxBytes);
+  }
+
   async function probeImage(u) {
     try {
-      const res = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0', range: 'bytes=0-16' }, signal: AbortSignal.timeout(6000) });
+      const res = await fetch(u, { headers: COVER_HEADERS, redirect: 'follow', signal: AbortSignal.timeout(COVER_PROBE_TIMEOUT_MS) });
       const ct = String(res.headers.get('content-type') || '');
-      let magic = '';
-      try { magic = Buffer.from(await res.arrayBuffer()).subarray(0, 3).toString('hex'); } catch { try { res.body?.cancel(); } catch {} }
-      return { ok: (res.ok || res.status === 206) && /^image\//i.test(ct), ct, magic, status: res.status };
+      const buf = await readBoundedBytes(res, COVER_PROBE_MAX_BYTES);
+      const magic = buf.subarray(0, 3).toString('hex');
+      return { ok: res.ok && isRealCoverBytes(buf), ct, magic, status: res.status, bytes: buf.length };
     } catch (error) {
-      return { ok: false, ct: '', magic: '', status: 0, err: String(error?.message ?? error) };
+      return { ok: false, ct: '', magic: '', status: 0, bytes: 0, err: String(error?.message ?? error) };
     }
   }
 
-  /** 挑一个能取到的封面，并把它**实际的 content-type** 一并带回来（后面判断要不要转 JPG 用）。 */
-  async function pickImage(candidates) {
+  /** 挑一个**真能取到真图片**的封面，并把它实际的 content-type 一并带回来。 */
+  async function pickImage(candidates, rescue = null) {
     const list = [...new Set(candidates.map((u) => String(u ?? '').trim()).filter(Boolean))];
-    if (!list.length) return { url: '', ct: '', magic: '' };
-    for (let round = 0; round < 2; round += 1) {
-      for (const u of list) {
+    const probeList = async (arr) => {
+      for (const u of arr) {
         const p = await probeImage(u);
         if (p.ok) return { url: u, ct: p.ct, magic: p.magic };
         log(`[cover] 候选封面取不到（${p.status} ${String(p.ct).slice(0, 20)}${p.err ? ' ' + p.err : ''}），换下一个：${u.slice(0, 90)}`);
       }
+      return null;
+    };
+    /* rescue() 可能调外网接口（QQ 官方 API），失败/超时都只当"补不到候选"，绝不让它把卡片拖挂。 */
+    const safeRescue = async () => {
+      try {
+        const extra = await rescue();
+        return (Array.isArray(extra) ? extra : []).map((u) => String(u ?? '').trim()).filter(Boolean);
+      } catch (error) {
+        log(`[cover] 补封面候选失败：${error?.message ?? error}`);
+        return [];
+      }
+    };
+    if (!list.length) {
+      /* 候选被前面的规则剔干净了（例如"只给了 songmid 拼的封面"）——**仍然要试一次 rescue**：
+       * 线上那条 0047TsYA2meOa2 就正好走这条（聚合站/调用方给的唯一候选是 songmid 拼的假封面）。 */
+      const hit = typeof rescue === 'function' ? await probeList(await safeRescue()) : null;
+      if (hit) return hit;
+      log('[cover] 没有可用的封面候选（含补出来的候选），不拿封面，走兜底');
+      return { url: '', ct: '', magic: '' };
+    }
+    for (let round = 0; round < 2; round += 1) {
+      const hit = await probeList(list);
+      if (hit) return hit;
       if (round === 0) await sleep(800);
     }
-    log(`[cover] 所有候选封面都探不到，兜底用第一个：${list[0].slice(0, 90)}`);
-    return { url: list[0], ct: '', magic: '' };
+    /* 全部探不到时再试一次"补出来的候选"（QQ 音乐：用官方接口按 songmid 补 albummid，见下）。 */
+    if (typeof rescue === 'function') {
+      const fresh = [...new Set(await safeRescue())].filter((u) => !list.includes(u));
+      if (fresh.length) log(`[cover] 换用官方接口补出来的封面候选再探：${fresh.map((u) => u.slice(0, 90)).join(' , ')}`);
+      const hit = await probeList(fresh);
+      if (hit) return hit;
+    }
+    /* 【2026-09-19 关键改动】不再"兜底用第一个"。
+     * 旧行为把探活失败的第一个候选当封面返回，于是**一张 404 页/空体被当成封面发给签名服务**
+     * （线上症状：卡片有、封面空白，日志还写着"仍然原样发出去"）。
+     * 现在统一返回空串，由调用方走**已经写好的兜底**：QQ 音乐 → 官方分享链接；网易云 → NapCat 原生卡。
+     * 宁可少一张卡，也不发一张"有卡无图"的卡。 */
+    log(`[cover] 所有候选封面都探不到真图片（含补出来的候选），本轮不拿任何一张当封面，走兜底：${list.map((u) => u.slice(0, 90)).join(' , ')}`);
+    return { url: '', ct: '', magic: '' };
   }
 
   async function firstWorkingImage(candidates) {
     return (await pickImage(candidates)).url;
+  }
+
+  /**
+   * 【2026-09-19 新加·修「QQ音乐卡没封面」的**真因**】按 songmid 向 QQ 官方接口要**真 albummid**，
+   * 再拼出封面候选。
+   *
+   * 线上那条永远 404 的 URL 是 `y.gtimg.cn/music/photo_new/T002R300x300M0000047TsYA2meOa2.jpg`：
+   * 用 c.y.qq.com 官方搜索接口回查同一首歌（`w=夜空的寂静`）→ `songmid=0047TsYA2meOa2`、`albummid` 为空。
+   * **songmid（歌曲 id）被拼进了 albummid（专辑 id）的位置**，所以无论带什么头、试什么尺寸都只能 404
+   * （实测 5 尺寸 × 2 域 = 10 次全 404）。跟着聚合站/搜索接口给的空 albummid 走，这条路永远修不好。
+   *
+   * 官方接口实测可用（本机跑过）：
+   *   POST https://u.y.qq.com/cgi-bin/musicu.fcg
+   *     {req_1:{module:'music.pf_song_detail_svr',method:'get_song_detail',param:{song_mid}}}
+   *   → data.track_info.album.mid
+   *   001b3yxJ17AH7C → 003D4IPK14WX7e → 封面 `T002R300x300M000003D4IPK14WX7e.jpg` 实测 **200 image/jpeg、10637 字节**
+   * （这个接口在线上一直通 —— 同一段注释里记着：取 vkey 那条被机房 IP 判无效，但歌名/封面这条是好的。）
+   */
+  async function qqAlbumCoverBySongMid(songmid) {
+    const mid = String(songmid ?? '').trim();
+    if (!mid) return [];
+    try {
+      const res = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+        method: 'POST',
+        headers: { ...COVER_HEADERS, 'content-type': 'application/json' },
+        body: JSON.stringify({ comm: { ct: 24, cv: 0 }, req_1: { module: 'music.pf_song_detail_svr', method: 'get_song_detail', param: { song_mid: mid } } }),
+        signal: AbortSignal.timeout(8000)
+      });
+      const body = await res.json().catch(() => null);
+      const albumMid = String(body?.req_1?.data?.track_info?.album?.mid ?? '').trim();
+      if (!albumMid || albumMid === mid) {
+        log(`[cover] 官方接口没给出可用的 albummid（songmid=${mid}，拿到「${albumMid}」），不猜、直接走兜底`);
+        return [];
+      }
+      log(`[cover] QQ 音乐缺 albummid，已用官方接口按 songmid 补出 ${albumMid}（songmid=${mid}）`);
+      return [`https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg`];
+    } catch (error) {
+      log(`[cover] 按 songmid 补 albummid 失败（songmid=${mid}）：${error?.message ?? error}`);
+      return [];
+    }
   }
 
   /** 外部图 → QQ 图床 URL（失败就原样返回，绝不让卡片因此发不出去）。 */
@@ -408,10 +558,11 @@ export function createMediaDomain(cfg) {
     if (!src || isQqHosted(src)) return src;
     if (qqHostedCache.has(src)) return qqHostedCache.get(src);
     try {
-      const res = await fetch(src, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(12000) });
-      if (!res.ok) return src;
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (!buf.length || buf.length > 4 * 1024 * 1024) return src;
+      /* 【2026-09-19】改用 safe-fetch 的抓图助手：SSRF 校验 + 逐跳重定向重校验 + 统一体积上限
+       * （MAX_IMAGE_FETCH_BYTES=15MB，全桥一个常量）+ **非图片字节直接拒**。
+       * 原来的裸 fetch 自带 4MB 上限，且对"返回的其实是 HTML/404 页"毫无察觉。 */
+      const { buffer: buf } = await safeFetchBuffer(src, MAX_IMAGE_FETCH_BYTES, COVER_HEADERS);
+      if (!buf.length) return src;
       const tmpDir = String(cfg.napcat?.tmpDir || '').trim() || path.join(process.cwd(), 'state', 'image-tmp');
       fs.mkdirSync(tmpDir, { recursive: true });
       const tmp = path.join(tmpDir, `cover-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`);
@@ -676,8 +827,10 @@ export function createMediaDomain(cfg) {
        * 它就照着抄），于是卡片挂的是另一首歌的封面。
        * 所以优先级改回来：**桥自己解析出来的封面优先**，模型的 `image` 只当最后一档兜底。
        * 探测（firstWorkingImage）照旧 —— 它能同时解决"y.gtimg.cn 间歇性 404"。 */
+      /* 【2026-09-19】封面统一过 `ensureJpegCover` 把关：探活拿不到真图片字节时它返回空串，
+       * 下面的 `!cover` 分支就会退到 NapCat 原生卡 —— 而不是把一张取不到的 URL 塞进卡片。 */
       const coverPick = await pickImage([song.cover, explicitCover]);
-      const cover = coverPick.url;
+      const cover = ensureJpegCover(coverPick.url, coverPick.ct, { w: 300, h: 300, fit: 'cover' }, coverPick.magic);
       const title = song?.title || givenTitle || '网易云音乐';
       const artist = song?.artist || givenArtist || '';
       const link = `${title}${artist ? ' ' + artist : ''} https://music.163.com/#/song?id=${pid}`;
@@ -690,7 +843,7 @@ export function createMediaDomain(cfg) {
         /* 【2026-09-19 定稿】url 用**手机歌曲页**（真卡用的就是这种；桌面页会被 QQ 盖上"将要访问"）。 */
         url: neteaseMobileSongUrl(pid),
         title,
-        image: await ensureQqHostedImage(ensureJpegCover(cover, coverPick.ct, { w: 300, h: 300, fit: 'cover' }, coverPick.magic))
+        image: await ensureQqHostedImage(cover)
       };
       if (artist) data.singer = artist;
       /* 【2026-09-19 定稿·这是"手机端没封面"的最终答案】
@@ -743,8 +896,31 @@ export function createMediaDomain(cfg) {
       /* **桥自己解析的那张优先**（聚合站按 songmid/歌名回检匹配过，肯定是这首歌的），
        * 调用方传的 `image` 只兜底 —— 它是从聊天记录里别的卡片抄来的话就gg了（主人实测"封面不对"就是这么来的）。
        * `song.coverExplicit` 是解析器专门留的"调用方传的那张"（不能和 song.cover 混）。 */
-      const qqPick = await pickImage([song?.cover, song?.coverExplicit, qqExplicitCover]);
-      const qqCover = preferStableQqCover(qqPick.url);
+      /* 【2026-09-19 本机实测】**先剔掉"把 songmid 当 albummid"的候选**：线上那条永远 404 的 URL
+       * 是 `photo_new/T002R300x300M0000047TsYA2meOa2.jpg`，而 `0047TsYA2meOa2` 经官方搜索接口回查
+       * 是**这首歌的 songmid**（同一首歌的 `albummid` 是空的）—— 拿它拼 albummid 模板必然 404，
+       * 探活纯属浪费，还可能被当成"探不到也只能凑合用"的封面发出去。
+       * 顺便把候选统一过 `preferStableQqCover`：**探的就是要发出去的那条 URL**（避免"探 y.gtimg.cn、
+       * 发 y.qq.com"这种不一致）。 */
+      const asAlbumCoverMid = (u) => {
+        const m = /\/photo_new\/T002R\d+x\d+M000([A-Za-z0-9]+)\.jpg/i.exec(String(u || ''));
+        return m ? m[1] : '';
+      };
+      const qqCoverCandidates = [song?.cover, song?.coverExplicit, qqExplicitCover]
+        .map(preferStableQqCover)
+        .filter((u) => {
+          const mid = asAlbumCoverMid(u);
+          if (mid && mid.toLowerCase() === pid.toLowerCase()) {
+            log(`[cover] 丢掉把 songmid 当 albummid 拼出来的封面候选（实测必然 404）：${String(u).slice(0, 90)}`);
+            return false;
+          }
+          return true;
+        });
+      /* 探活；全探不到时用官方接口按 songmid 补真 albummid 再探一轮（见 qqAlbumCoverBySongMid）。
+       * 补出来的候选也过一遍 preferStableQqCover，保证"探的就是发出去的那条 URL"。 */
+      const qqPick = await pickImage(qqCoverCandidates, async () => (await qqAlbumCoverBySongMid(pid)).map(preferStableQqCover));
+      /* 把关：不是真图片字节（magic 不是 JPEG/PNG/WebP）就返回空串 → 下面走官方分享链接兜底。 */
+      const qqCover = ensureJpegCover(qqPick.url, qqPick.ct, { w: 300, h: 300, fit: 'cover' }, qqPick.magic);
       /* 【2026-09-19 修「QQ音乐又没封面」——真因是**卡片根本没生成**】
        * 线上现场：请求 `musicId=0039MnYb0qxYhV`，聚合站返回的最佳匹配却是
        * `songDetail/004Fs2FP1EvZYc`（另一个版本，songmid 不同）→ 被"按 songmid 回检"判为对不上
@@ -765,7 +941,7 @@ export function createMediaDomain(cfg) {
           note: '连封面都拿不到，发官方分享链接（QQ 客户端自己渲染卡片）'
         };
       }
-      const data = { type: cardType, url: MUSIC_CARD_STYLE === 'music' ? url : qqMobilePlayUrl(pid), title, image: await ensureQqHostedImage(ensureJpegCover(qqCover, qqPick.ct, { w: 300, h: 300, fit: 'cover' }, qqPick.magic)) };
+      const data = { type: cardType, url: MUSIC_CARD_STYLE === 'music' ? url : qqMobilePlayUrl(pid), title, image: await ensureQqHostedImage(qqCover) };
       if (artist) data.singer = artist;
       if (cardType === 'custom' && MUSIC_CARD_STYLE === 'music') data.content = artist || 'QQ音乐';
       /* 【2026-09-19 定稿】**不带 audio** → 签名服务签出 `com.tencent.tuwen.lua` + `view:news`

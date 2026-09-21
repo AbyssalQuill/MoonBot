@@ -565,7 +565,10 @@ function buildRuntimeInfo(id, cfg) {
      * 【2026-09-20 修「点进去报 Unauthorized」】token 的来源改成**现场真相优先**：
      *   NapCat 自己 webui.json 里的 token → 管理器配置 → 最近一次验证可用的 → 出厂 truefriend。
      * 以前只读管理器配置，旧配置里没有这个键时 URL 就是裸链接（页面拿不到 Credential，
-     * 于是「获取QQ列表失败: Unauthorized / 获取二维码失败: Unauthorized」）——见上面 napcatWebuiTokenFor。 */
+     * 于是「获取QQ列表失败: Unauthorized / 获取二维码失败: Unauthorized」）——见上面 napcatWebuiTokenFor。
+     * 【2026-09-21 主人要求：服务器在跑时本地既不起也不探】下面那次验证会被
+     * verifyNapcatWebuiToken 里的 localNapcatOffReason 闸门拦下（判据与日志见该函数），
+     * 所以这里不再每分钟戳一次 local:6099、也不再刷「令牌验证失败」。 */
     const port = cfg.webuiPort || 6099;
     const tok = napcatWebuiTokenFor('local', port, [localNapcatWebuiTokenFromFile(), cfg.webuiToken]);
     url = `http://127.0.0.1:${port}/webui/${tok ? '?token=' + encodeURIComponent(tok) : ''}`;
@@ -857,6 +860,34 @@ function findNapcatOneKeyAll() {
   return out;
 }
 
+/* ── 「本机 NapCat 现在到底该不该被探」───────────────────────────────────────────────
+ * 现场（主人 2026-09-21 的日志 %APPDATA%\moonbot\moonbot-backend.log，整夜每 60 秒一条）：
+ *   [autostart] 按实例配置跳过（不随应用启动）：napcat-local, dsh-isolated, bridge-local
+ *   [napcat] WebUI 令牌验证失败：local:6099 的 2 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）—— 60 秒内不再重试
+ * 而主人那台机器的配置（homedir\.qq-bridge-manager\config.json）写得很清楚：
+ *   activeServerId = "mtsne5al"（目标在服务器 202.61.72.79）
+ *   instances.napcatLocal = { enabled: true, autoStartOnBoot: false, webuiPort: 6099 }
+ * 也就是「本机 NapCat 明确不跑、当前目标是服务器」。autostart **已经**如实跳过它（上面第一条日志就是它写的），
+ * 但"拼链接"这条路没看这份配置：/api/state（前端 4 秒一轮询）每次都会走到
+ * verifyNapcatWebuiToken('local', 6099, …)，戳不通就写一行「令牌验证失败」——
+ * 探测本身毫无意义（本机 NapCat 根本没起），日志却看起来像真出了故障。
+ * 主人原话：「服务器起的时候本地不该起」。判据只取 **autostart 用的同一份配置**，不猜实例语义：
+ *   ① cfg.autoStartOnBoot === false                → 全局「不自动启动」，本机这套不常驻
+ *   ② instances.napcatLocal.autoStartOnBoot === false → 实例级同名开关（主人这份配置命中的就是它）
+ *   ③ cfg.activeServerId 非空                      → 当前目标是服务器那套（界面也已整体切成服务端语义，见 src/pages/Home.tsx 的 serverMode）
+ * 三条都不成立（= 用户确实在跑本机那套）→ 行为与以前**一字不变**。
+ * 注意：这里只管"探不探/写不写日志"。**起**由 scheduleAutoStart 管（它本来就按 ①② 跳过），
+ * 手动点「启动」不受影响（主人可能就是要切回本机，见 Home.tsx 的本机语义分支）。
+ */
+function localNapcatOffReason(cfg = null) {
+  const c = cfg ?? loadConfig();
+  const nap = c?.instances?.napcatLocal ?? {};
+  if (c?.autoStartOnBoot === false) return '总开关 autoStartOnBoot=false（本机这套不随应用启动）';
+  if (nap.autoStartOnBoot === false) return 'instances.napcatLocal.autoStartOnBoot=false（本机 NapCat 不随应用启动）';
+  if (c?.activeServerId) return '当前目标是服务器（activeServerId=' + c.activeServerId + '）';
+  return '';
+}
+
 /* ── NapCat WebUI 令牌解析（2026-09-20 修「点进 NapCat 就报 Unauthorized」）──────────────
  * 现场：主人从管理器点开 NapCat 界面，页面里报
  *   `获取QQ列表失败: Unauthorized` / `获取二维码失败: Unauthorized`
@@ -979,13 +1010,18 @@ function napcatWebuiTokenFor(scope, port, candidates = []) {
 const napcatWebuiVerifyFailAt = new Map();
 const NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS = 60 * 1000;
 
-async function verifyNapcatWebuiToken(scope, port, candidates = []) {
+async function verifyNapcatWebuiToken(scope, port, candidates = [], { factoryFallback = true } = {}) {
   const list = [];
   const add = (v) => { const t = String(v ?? '').trim(); if (t && !list.includes(t)) list.push(t); };
   candidates.forEach(add);
   const cached = cachedNapcatWebuiToken(scope, port);
   add(cached);
   add(NAPCAT_WEBUI_TOKEN_FALLBACK);
+  /* 【2026-09-21】本机 NapCat 没启用 / 当前目标是服务器 → **一次都不探、一行都不写**（判据见 localNapcatOffReason）。
+   * 闸门放在这个函数里，因为它是**唯一**的探测点 + 唯一的日志点：buildRuntimeInfo、resolveServices
+   * 以及将来任何新增调用点都拦得住，不会再有人绕过它去戳 local:6099。
+   * 返回首选候选（有现场真相就用现场真相），只是不做网络验证 —— 调用方拿到的 token 与以前同形。 */
+  if (scope === 'local' && localNapcatOffReason()) return list[0] || '';
   const cacheKey = `${scope}:${port}`;
   const failedAt = Number(napcatWebuiVerifyFailAt.get(cacheKey)) || 0;
   if (Date.now() - failedAt < NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS) return list[0] || '';   // 刚验过且全失败：冷却期内直接用首选，不重复试
@@ -1000,7 +1036,13 @@ async function verifyNapcatWebuiToken(scope, port, candidates = []) {
   }
   napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
   mlog(`[napcat] WebUI 令牌验证失败：${cacheKey} 的 ${list.length} 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）—— ${Math.round(NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS / 1000)} 秒内不再重试`);
-  return list[0] || '';
+  /* 【2026-09-21 修「链接带着 token 却 Unauthorized」】远端（scope = server.id）：出厂值 truefriend 只是
+   * **一个待验证的候选**，验不过就绝不塞进 URL —— 它不是从目标端读来的（现场真相是服务端
+   * /root/napcat/config/webui.json，见 buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），
+   * 塞进去的表现恰恰就是主人报的「页面带着 token 却报 Unauthorized」。
+   * 本机仍按老约定带一个 token（NapCat 自己 webui.json 就是现场真相，URL 没 token 页面同样拿不到 Credential）。 */
+  const usable = factoryFallback ? list : list.filter((t) => t !== NAPCAT_WEBUI_TOKEN_FALLBACK);
+  return usable[0] || '';
 }
 
 /** 把验证过的 token 提前记进缓存（启动/写盘后调用，避免第一次点开还要现验）。 */
@@ -1594,6 +1636,9 @@ async function resolveServices(cfg, connected) {
   const localDshUrl = `http://127.0.0.1:${dshIso.port}`;
   // NapCat 本机入口同样**带 webui token**（主人要求：点开就用，不用再输 token）
   // 【2026-09-20】token 来源改为"现场真相优先 + 现场验证"，见 napcatWebuiTokenFor / verifyNapcatWebuiToken
+  // 【2026-09-21】本机 NapCat 没启用时（判据见 localNapcatOffReason）这次"现场验证"根本不会发网络请求，
+  // 也不会写日志；上面那条链接保持不变（主人要的是"别探、别刷日志"，不是"删掉入口"），
+  // 而"打开 NapCat 界面"的实际入口在 serverMode 下走的是服务端那条（见下方 remoteServices 与 /api/open）。
   const localNapPort = napLocal.webuiPort || 6099;
   const localNapTok = await verifyNapcatWebuiToken('local', localNapPort, [localNapcatWebuiTokenFromFile(), napLocal.webuiToken]);
   const localNapUrl = `http://127.0.0.1:${localNapPort}/webui/${localNapTok ? '?token=' + encodeURIComponent(localNapTok) : ''}`;
@@ -1628,7 +1673,7 @@ async function resolveServices(cfg, connected) {
     const u = await remoteServiceUrls(connected, remoteStatus);
     const remoteServices = [
       { id: 'srv-dsh-web', scope: 'remote', name: '服务端 DSH 界面', url: u.dsh, desc: '服务器 systemd dsh-web · 隧道 ' + u.ports.dsh + ' · 已带访问令牌' + (remoteStatus?.dsh?.token ? '' : '（未取到令牌，令牌见服务端日志）') },
-      { id: 'srv-napcat-webui', scope: 'remote', name: '服务端 NapCat 界面', url: u.napcat, desc: '服务器 NapCat WebUI · 隧道 ' + u.ports.napcat + (u.napcatToken ? ' · 已带 webui token（点开即用）' : ' · 没取到 token：页面会要求手输，先在「NapCat 令牌」卡里看清它的值') },
+      { id: 'srv-napcat-webui', scope: 'remote', name: '服务端 NapCat 界面', url: u.napcat, desc: '服务器 NapCat WebUI · 隧道 ' + u.ports.napcat + (u.napcatToken ? (u.napcatTokenVerified ? ' · 已带 webui token（点开即用）' : ' · 已带 webui token，但没验通过（隧道不通 / NapCat 没起 / 令牌与它自己 webui.json 不一致）——点开若报 Unauthorized，先在「NapCat 令牌」卡里核对它的值') : ' · 没取到 token（读不到服务端 webui.json）：页面会要求手输，先在「NapCat 令牌」卡里看清它的值') },
       { id: 'srv-napcat-http', scope: 'remote', name: '服务端 NapCat HTTP API', url: u.napcatHttp, desc: '服务器 OneBot HTTP · 隧道 ' + u.ports.napcatHttp },
       { id: 'srv-bridge', scope: 'remote', name: '服务端桥控制台', url: u.bridge, desc: '服务器 qq-bridge 控制台 · 隧道 ' + u.ports.bridge + (u.bridgeToken ? ' · 已带 console token' : '') },
     ];
@@ -1802,7 +1847,16 @@ app.get('/api/open', async (req, res) => {
     || pool.find((s) => s.id.includes(target || ''))
     || (!scope ? r.services.find((s) => s.id.includes(target || '')) : null);
   if (!svc) return res.status(404).json({ success: false, message: `未知服务: ${target}${scope ? '（scope=' + scope + '）' : ''}` });
-  res.json({ success: svc.reachable, url: svc.url, reachable: svc.reachable, mode: r.mode, name: svc.name, scope: svc.scope ?? 'local', iframeBlocked: !!svc.iframeBlocked, iframeBlockReason: svc.iframeBlockReason || '' });
+  /* 【2026-09-21 主人要求：服务器在跑时本地既不起也不探】没显式指定 scope 时（前端/脚本问"打开 NapCat 界面"
+   * 就是这种），如果命中的是**本机**那份而本机 NapCat 并没启用（判据见 localNapcatOffReason），
+   * 就把请求落到**真正在用**的那份（服务端 NapCat，经隧道 13000）—— 把 127.0.0.1:6099 的链接递给主人
+   * 只会得到"打不开"或页面里那句 Unauthorized。显式 scope=local 时仍严格按 scope 找（那条规则见上，不越界）。 */
+  let picked = svc;
+  if (!scope && svc.scope === 'local' && /napcat/i.test(String(svc.id)) && localNapcatOffReason(cfg)) {
+    const remoteNap = r.services.find((s) => s.id === 'srv-napcat-webui');
+    if (remoteNap) picked = remoteNap;
+  }
+  res.json({ success: picked.reachable, url: picked.url, reachable: picked.reachable, mode: r.mode, name: picked.name, scope: picked.scope ?? 'local', iframeBlocked: !!picked.iframeBlocked, iframeBlockReason: picked.iframeBlockReason || '' });
 });
 
 /* ------------------------------------------------------------------ */
@@ -4824,7 +4878,18 @@ async function remoteServiceUrls(server, status) {
     // 探测到就顺手记进缓存：下次状态没取到时（隧道刚重建/探测失败）URL 依然带着对的 token
     if (status?.napcat?.webuiToken) rememberNapcatWebuiToken(server?.id ?? 'remote', pNap, status.napcat.webuiToken);
     return status?.napcat?.webuiToken;
-  })()]);
+  })()], { factoryFallback: false });
+  /* 【2026-09-21】这条链接的 token **必须**来自目标端（服务端 /root/napcat/config/webui.json，走上面那条
+   * 已建立的 SSH 连接读回，见 buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），并且要真的能登录进去才算数。
+   * 以前验证失败时会把出厂值 truefriend 塞进 URL —— 那不是从目标端读来的，主人看到的正是
+   * 「链接带着 token 却 Unauthorized」。现在 false 表示"没验通过"，如实交给界面去说，
+   * 不再让「点开即用」这句话撒谎（见 resolveServices 里 srv-napcat-webui 的 desc）。 */
+  const napTokVerified = (() => {
+    const hit = napcatWebuiTokenCache.get(`${server?.id ?? 'remote'}:${pNap}`);
+    // 只有"这个 token 本人"被验证通过过才算（缓存里可能留着另一个已验证的 token，
+    // 而这次探测拿回来的是新值 —— 那种情况要算"没验过"，别让界面说"点开即用"）。
+    return !!hit && hit.verified === true && hit.token === napTok;
+  })();
   const brTok = String(status?.bridge?.consoleToken || '');
   return {
     ports: { dsh: pDsh, napcat: pNap, napcatHttp: pHttp, bridge: pBr, remoteDsh: m.dshWeb ?? 3080, remoteNapcat: m.napcatWebui ?? 6099, remoteBridge: m.bridge ?? 3100 },
@@ -4836,6 +4901,8 @@ async function remoteServiceUrls(server, status) {
     bridgeToken: brTok,
     // 给界面判断"这条 NapCat 链接到底带没带 token"（带了才敢说"点开就用"）
     napcatToken: napTok,
+    // 【2026-09-21】带了 token ≠ 能用：只有真的用它对目标端登录成功过才算 verified（见上面说明）
+    napcatTokenVerified: napTokVerified,
   };
 }
 
@@ -7565,6 +7632,15 @@ app.post('/api/shutdown', async (req, res) => {
 function scheduleAutoStart() {
   try {
     const cfg = loadConfig();
+    /* 【2026-09-21 主人要求】本机 NapCat 不启用（配置明确关掉 / 当前目标是服务器）时说**一句**就够了：
+     * 跳过探测这件事本身已经由 localNapcatOffReason 的闸门兜住（见 verifyNapcatWebuiToken），
+     * 但"为什么日志里不再有【本机 NapCat】的动静"要留个凭据，否则以后排查的人会以为探测坏了。
+     * 只在这里写一次（这个函数在 app.listen 回调里调用一次）；绝不像以前那样每分钟一条
+     * 「[napcat] WebUI 令牌验证失败：local:6099 …」（主人日志里整夜刷屏的就是它）。 */
+    const localNapOff = localNapcatOffReason(cfg);
+    if (localNapOff) {
+      mlog(`[napcat] 本地 NapCat 未启用（${localNapOff}），跳过探测：不再验证 127.0.0.1:${Number(cfg.instances?.napcatLocal?.webuiPort) || 6099} 的 WebUI 令牌`);
+    }
     if (cfg.autoStartOnBoot === false) { mlog('[autostart] 已配置为不自动启动，跳过'); return; }
     const order = ['napcat-local', 'dsh-isolated', 'bridge-local'];
     /* 【2026-09-14 主人要求】实例级开关 `instances.<key>.autoStartOnBoot: false`：

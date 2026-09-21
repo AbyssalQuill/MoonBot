@@ -243,6 +243,90 @@ export function looksLikeImageBuffer(buf) {
   return false;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-21 新增：图片字节完整性校验 —— 修「半幅纯 #808080 的图被当成合法图片发出去」】
+ *
+ * 现场（主人报的）：qq_send_pixiv 发到 QQ 的那张 pixiv 图，**下面 60~70% 是纯 #808080 平色、边界干净、
+ * 没有 JPEG 块状噪声**。这个形状不是画的内容，是**渐进式 JPEG 被截断**的教科书特征：
+ * 解码器对"从没收到的系数"只能填 DC 均值，于是整片区域变成一片平色。
+ *
+ * 「截断发生在哪」的取证（不是猜）：
+ *   · **不是** MAX_IMAGE_FETCH_BYTES 造成的：超限那条路（requestOnceBuffer 里 `size > maxBytes`）是
+ *     `settled=true; res.destroy(); reject(...)` —— 是**拒绝**，不是"截一半留下"。上限不会产生半截图。
+ *   · **不是**我们的传输层"静默收半截"：本地实测（node v24.13.0，探针：服务端声明 Content-Length=1000
+ *     只发 400 字节后 destroy socket；以及 chunked 发 400 字节后 destroy）两种形状**都**触发
+ *     `res.on('error') → "aborted"`，也就是走到 reject。真·断链不会静默变成"完整响应"。
+ *   · **是**"没有校验就收下"：`res.on('end')`（requestOnceBuffer 末尾）把收到的 chunk 直接 concat 就 resolve，
+ *     而唯一的体检是 `looksLikeImageBuffer`（上面这个函数）——**只认开头 3 个字节**。
+ *     于是只要**上游自己给的字节就是残的**（第三方代理把"没拉完就被掐断的原图"缓存下来、再带正确的
+ *     Content-Length 完整吐给我们；这正是镜像站常见形态，也是我们唯一会拿到 720 档 + 半幅灰的来源），
+ *     我们就会**原样写盘、原样发给 NapCat**，文件看着是合法 JPEG、尺寸也对，用户看到半张灰。
+ *   · 对照口径：`content-length` 这个头**在改动前一次都没被读过**（全文件 grep 无命中），
+ *     JPEG 的 EOI（FFD9）也从没检查过。
+ *
+ * 修法：把"完整性"变成一道独立闸门，任何调用方（qq_send_pixiv / 联网找图 / 卡片封面 …）取图都过它：
+ *   ① 字节尾标记：JPEG 必须以 FFD9 收尾、PNG 必须以 IEND 块收尾、GIF 必须以 0x3B 收尾、
+ *      WebP 的 RIFF 长度字段必须与实际字节数一致；
+ *   ② 有 content-length 且没被编码压缩时，实际字节数必须与之相等；
+ *   ③ 不通过 → 抛「图片字节不完整」→ 调用方**换下一个候选**或如实报错，绝不发半截图。
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** JPEG 的 EOI（End Of Image）标记：截断的 JPEG 一定缺它。 */
+const JPEG_EOI = Buffer.from([0xff, 0xd9]);
+/** PNG 的 IEND 块尾部（长度 0 + 类型 'IEND' + 固定 CRC）。 */
+const PNG_IEND_TAIL = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+
+/**
+ * 校验"这份字节是**完整**的一张图"。**纯函数，离线可测**。
+ * @param {Buffer} buf 图片字节
+ * @param {number|string|null} [contentLength] 响应的 content-length（没有就传 null）
+ * @param {string|null} [contentEncoding] 响应的 content-encoding（有压缩时长度对不上属正常，跳过长度比对）
+ * @returns {{ok:boolean, format:string, reason:string, declaredBytes:number, actualBytes:number, endMarker:string, lengthChecked:boolean}}
+ */
+export function verifyImageComplete(buf, contentLength = null, contentEncoding = null) {
+  const actualBytes = Buffer.isBuffer(buf) ? buf.length : 0;
+  const declaredNum = Number(contentLength);
+  const declaredBytes = Number.isFinite(declaredNum) && declaredNum > 0 ? declaredNum : 0;
+  const encoded = Boolean(contentEncoding) && !/^identity$/i.test(String(contentEncoding).trim());
+  const base = { format: '', declaredBytes, actualBytes, endMarker: '', lengthChecked: false };
+  if (!actualBytes) return { ...base, ok: false, reason: '字节为空' };
+
+  let format = 'unknown';
+  let endMarker = '';
+  let complete = null;   // null = 这种格式没法判定尾标记（不拦）
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    format = 'jpeg';
+    const tail = buf.subarray(Math.max(0, actualBytes - 64));
+    const idx = tail.lastIndexOf(JPEG_EOI);
+    endMarker = idx >= 0 ? 'ffd9' : 'none';
+    complete = idx >= 0;
+  } else if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    format = 'png';
+    const tail = buf.subarray(Math.max(0, actualBytes - 16));
+    complete = tail.includes(PNG_IEND_TAIL);
+    endMarker = complete ? 'IEND' : 'none';
+  } else if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') {
+    format = 'gif';
+    complete = buf.subarray(Math.max(0, actualBytes - 8)).includes(0x3b);
+    endMarker = complete ? '3b' : 'none';
+  } else if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 && buf.toString('ascii', 8, 12) === 'WEBP') {
+    format = 'webp';
+    // RIFF 头里的长度字段 = 文件应有长度 - 8：这是 WebP 自带的"我该有多长"。
+    // 只在"声明的比实际的还多"时才算截断（声明得更少 = 尾部有额外填充，图本身是完整的，别误杀）。
+    const riffBytes = buf.readUInt32LE(4) + 8;
+    complete = riffBytes <= actualBytes;
+    endMarker = `riff=${riffBytes}`;
+  }
+  const info = { ...base, format, endMarker };
+  if (!encoded && declaredBytes && declaredBytes !== actualBytes) {
+    return { ...info, ok: false, lengthChecked: true, reason: `字节数与 content-length 不符（声明 ${declaredBytes}B，实际 ${actualBytes}B，差 ${declaredBytes - actualBytes}B）` };
+  }
+  if (complete === false) {
+    return { ...info, lengthChecked: !encoded && declaredBytes > 0, ok: false, reason: `${format} 字节不完整（缺结束标记：${format === 'jpeg' ? 'FFD9' : format === 'png' ? 'IEND' : format === 'gif' ? '0x3B' : 'RIFF 长度'}）` };
+  }
+  return { ...info, ok: true, lengthChecked: !encoded && declaredBytes > 0, reason: '' };
+}
+
 /**
  * 读图（下载图片字节）的默认字节上限 = 15MB。
  *
@@ -292,7 +376,14 @@ export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTE
     if (!looksLikeImageBuffer(result.buffer)) {
       throw new Error(`抓取内容不是有效图片（PNG/JPEG/GIF/WebP）`);
     }
-    return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer };
+    /* 【2026-09-21】完整性强校验：只看开头 3 个字节是不够的 —— 被截断的 JPEG 同样是合法开头，
+     * 解码出来就是那半幅 #808080（线上现场，见 verifyImageComplete 上方那段取证）。
+     * 这里抛错而不是返回，是为了让调用方（qq_send_pixiv）**换下一个候选**或如实报错，绝不发半截图。 */
+    const complete = verifyImageComplete(result.buffer, result.contentLength, result.contentEncoding);
+    if (!complete.ok) {
+      throw new Error(`图片字节不完整（${complete.format || '未知格式'}，实际 ${complete.actualBytes}B${complete.declaredBytes ? `／声明 ${complete.declaredBytes}B` : ''}）：${complete.reason}`);
+    }
+    return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer, contentLength: result.contentLength ?? null, complete };
   }
   throw new Error('重定向次数过多，已停止');
 }
@@ -327,6 +418,9 @@ function requestOnceBuffer(url, ip, maxBytes, extraHeaders = null) {
         resolve({ statusCode, redirect: String(res.headers.location || '') });
         return;
       }
+      // content-length / content-encoding 一并带出去：完整性校验要拿它们对账（见 verifyImageComplete）
+      const contentLength = res.headers['content-length'] ?? null;
+      const contentEncoding = res.headers['content-encoding'] ?? null;
       const chunks = [];
       let size = 0;
       let settled = false;
@@ -344,7 +438,7 @@ function requestOnceBuffer(url, ip, maxBytes, extraHeaders = null) {
       res.on('end', () => {
         if (settled) return;
         settled = true;
-        resolve({ statusCode, buffer: Buffer.concat(chunks) });
+        resolve({ statusCode, buffer: Buffer.concat(chunks), contentLength, contentEncoding });
       });
       res.on('error', (err) => {
         if (settled) return;

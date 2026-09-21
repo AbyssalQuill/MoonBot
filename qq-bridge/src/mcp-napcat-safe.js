@@ -23,8 +23,11 @@ import {
   pixivSearch, parsePixivId,
   pixivIllustDetail, pixivIllustOriginals, pixivImageSources, pixivUserWorkIds,
   resolvePixivAuthor, pixivLoggedIn,
+  planPixivSend, pixivTierSizeVerdict,
 } from './lib/pixiv.js';
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
+// 发送前要拿"实际拿到的像素"跟档位对账（见 qq_send_pixiv 的档位闸门）：只用它的头部嗅探，纯函数、无副作用。
+import { sniffImageInfo } from './lib/image-compress.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 import { resolveToolTier, toolAllowedByTier, measureSchemaShare, TOOL_TIERS } from './lib/tool-tiers.js';
 // 【2026-09-21】工具 schema 的「描述压缩档」：照搬 mcp-compressor 的档位语义（medium=只留第一句 / high=不发描述）
@@ -3161,7 +3164,7 @@ if (cfg.social?.tools?.pixiv !== false) {
     'qq_send_pixiv',
     'Find a Pixiv illustration and SEND it to a QQ session as a real picture. Give illustId (a Pixiv work id / pixiv.net link you already know), authorId (an artist user id or an artist name - the bridge looks the id up itself), or query (the bridge searches Pixiv and sends the best hit). index picks which hit / which work of that artist (0 = first). size defaults to **original** on all three paths (the untouched original file); pass size=master for the 1200px jpg. Prefer ONE image per request. The bridge skips R-18/R-18G works.'
       + '\n\n[WORKS BY ONE SPECIFIC ARTIST] A keyword search matches titles/tags that contain the word (searching an artist name usually returns works other people tagged with that name). ① You have a work id -> illustId; ② you have an artist id (pixiv.net/users/<digits>) -> authorId, newest first, index picks which work; ③ you only have an artist **name** -> pass it as authorId anyway: the bridge resolves ids by name itself (official user search; ambiguous names come back as candidates for you to choose from) - **never ask the user for an artist id**; ④ neither -> send any one of their works first, the returned authorId is the artist id. Never pass an artist id as illustId.'
-      + '\n\n[LOSSLESS ORIGINAL] size=original sends the Pixiv original file itself (per-page urls from the official API when available, downloaded from pximg, stored byte-for-byte, no scaling, no re-encode, no second compression; the returned sha256/bytes are exactly the bytes that were sent). master is the 1200px jpg. An original over 15MB is refused (the result says so) - use size=master.'
+      + '\n\n[LOSSLESS ORIGINAL] size=original sends the Pixiv original file itself (per-page urls from the official API when available, downloaded from pximg, stored byte-for-byte, no scaling, no re-encode, no second compression; the returned sha256/bytes are exactly the bytes that were sent). master is the 1200px jpg. An original over 15MB is refused (the result says so) - use size=master. Every candidate is checked twice before sending: its tier (a 720px/master/thumbnail URL is never sent as if it were the original) and its bytes (a truncated or non-decodable file is discarded and another source is tried). If the original really cannot be obtained, the result says so honestly via tierServed + tierFallback instead of claiming lossless.'
       + '\n\n[SOURCES] The bridge queries the **official Pixiv API first** (app-api, then pixiv.net ajax) and only falls back to a third-party mirror when both fail; the result reports pixivSource (which API gave the metadata) and fetchedVia (pximg-direct or mirror-proxy).'
       + '\n\n[LOCAL FILTERING AND PAGING] tags / author / orientation / minWidth / minHeight / multiPage / excludeAi / illustType / sort / scanPages are filtered **locally** on the fetched rows; one page is 60 works (30 via app-api), at most scanPages pages (default 3, cap 10), and index picks from the **filtered** list. To inspect the filtering first (how many dropped, pages scanned, candidates) use qq_pixiv_search. Sorting supports upload time only (date_desc/date_asc/random), **not popularity/bookmarks**. This tool **always excludes R-18/R-18G** (it deliberately has no r18 parameter, so unsuitable content cannot be posted into QQ); use qq_pixiv_search if you need to see R-18.',
     {
@@ -3296,28 +3299,79 @@ if (cfg.social?.tools?.pixiv !== false) {
          * ① i.pximg.net 直联（带 Referer，实测 60~400ms，字节与源文件逐字节一致）→
          * ② 镜像站同名图代理（同字节，但慢，实测 2.7~5.7s，偶发超时）→
          * ③ 老候选（从缩略图推日期路径，搜索路径一直在用）。
-         * 逐个试而不是只试一个：原图扩展名不定（jpg/png）、大图可能超体积上限、兜底链路可能同时抖动。 */
+         * 逐个试而不是只试一个：原图扩展名不定（jpg/png）、大图可能超体积上限、兜底链路可能同时抖动。
+         *
+         * 【2026-09-21 档位闸门 —— 修「用户要原图，收到的附件却叫 <md5>_720.jpg，且下半幅是灰的」】
+         *   现场：主人要的是原图，QQ 里收到的文件是 `3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
+         *   —— (a) 720 档不是原图、(b) 下半幅 60~70% 纯 #808080（截断的渐进 JPEG）。
+         *   根因：候选数组里**混着三种档位**（原图 / `_master1200` / 250×250 的 `_square1200`，
+         *   甚至上游（镜像站）给回来的"原图地址"本身就是 720 档），而旧代码**谁先成功就发谁**，
+         *   发完还在结果里写 `size:'original', lossless:true, contentKind:'pixiv-original'` —— 谎报无损。
+         *   现在：① 用 planPixivSend 按档位分桶 —— 缩略档一律不发（发了就是缩略图）；
+         *        ② size=original 时 1200 档**只能当显式降级**：原图档全失败才允许，并且打日志 + 结果里写明；
+         *        ③ 每次都拿"实际像素"跟该档应有的像素对一遍（第三方代理可能拿着原图地址给你一张缩过的图，
+         *           光看地址认不出来）；④ 字节完整性由 safeFetchBuffer 保证（截断的图直接抛错换下一个候选）。 */
         const sources = pixivImageSources(work, { page: pageIdx, size: sizeEff, originals });
+        const plan = planPixivSend(sources, { size: sizeEff });
         let got = null;
         let gotFrom = '';
         let gotVia = '';          // pximg-direct / mirror-proxy（2026-09-20：如实告诉模型字节是谁给的）
+        let gotTier = '';         // original / master / thumb / unknown：真正发出去的是哪一档
+        let tierFallback = null;  // 非 null = 发生了降级（原图档全失败），要把原因如实写进结果
+        let gotPixels = '';
         const tried = [];
-        for (const s of sources) {
-          try {
-            got = await safeFetchBuffer(s.url, MAX_IMAGE_FETCH_BYTES, s.referer ? { referer: s.referer } : null);
-            gotFrom = s.url;
-            gotVia = s.referer ? 'pximg-direct' : 'mirror-proxy';
-            break;
-          } catch (e) {
-            tried.push(`${s.referer ? '[直联] ' : '[代理]'}${s.url.slice(0, 96)} → ${e?.message ?? e}`);
+        const tryList = async (list, isFallback) => {
+          for (const s of list) {
+            try {
+              const r = await safeFetchBuffer(s.url, MAX_IMAGE_FETCH_BYTES, s.referer ? { referer: s.referer } : null);
+              const meta = sniffImageInfo(r.buffer) || {};
+              // page=0 才有权威原图尺寸（详情里的 width/height 就是第 0 页的），别的页不瞎比。
+              const verdict = pixivTierSizeVerdict(s.tier, {
+                originalWidth: pageIdx === 0 ? Number(work.width) || 0 : 0,
+                originalHeight: pageIdx === 0 ? Number(work.height) || 0 : 0,
+                imageWidth: meta.width,
+                imageHeight: meta.height,
+                page: pageIdx,
+              });
+              if (!verdict.ok) {
+                tried.push(`${s.referer ? '[直联] ' : '[代理]'}${s.url.slice(0, 96)} → ${verdict.reason}`);
+                console.error(`[napcat-safe] qq_send_pixiv ${work.id} p${pageIdx}：候选（${s.tier} 档）像素不符，已弃用 —— ${verdict.reason}`);
+                continue;
+              }
+              got = r;
+              gotFrom = s.url;
+              gotVia = s.referer ? 'pximg-direct' : 'mirror-proxy';
+              gotTier = s.tier;
+              gotPixels = meta.width && meta.height ? `${meta.width}x${meta.height}` : '';
+              if (isFallback) {
+                tierFallback = { to: s.tier, reason: String(s.fallbackReason ?? ''), originalTried: plan.primary.length, failures: tried.slice(0, 3) };
+              }
+              return true;
+            } catch (e) {
+              tried.push(`${s.referer ? '[直联] ' : '[代理]'}${s.url.slice(0, 96)} → ${e?.message ?? e}`);
+            }
           }
+          return false;
+        };
+        if (plan.skipped.length) {
+          for (const s of plan.skipped) {
+            console.error(`[napcat-safe] qq_send_pixiv ${work.id} p${pageIdx}：跳过一个不该发的档（${s.tier}）${s.url.slice(0, 96)} —— ${s.reason}`);
+          }
+        }
+        await tryList(plan.primary, false);
+        if (!got && plan.fallback.length) {
+          /* 降级必须显式（主人的要求：原图是默认，缩小只能因为"原图真的拿不到"这个具体原因）。
+           * 打两处：stderr 一行（运维能 grep），以及结果里的 tierFallback（模型/用户看得到真话）。 */
+          console.error(`[napcat-safe] qq_send_pixiv ${work.id} p${pageIdx}：原图档 ${plan.primary.length} 个候选全部失败 → 显式降级到 ${plan.fallback.map((s) => s.tier).join('/')} 档；失败原因：${tried.slice(0, 3).join(' | ') || '(无)'}`);
+          await tryList(plan.fallback, true);
         }
         if (!got) {
           const overSize = /超过大小限制/.test(tried.join(' '));
+          const skippedNote = plan.skipped.length ? `\n（另有 ${plan.skipped.length} 个缩略档候选按规矩没试：发了就是缩略图）` : '';
           return {
             content: [{
               type: 'text',
-              text: `Pixiv 图片下载失败（试了 ${sources.length} 个地址）：\n${tried.join('\n')}`
+              text: `Pixiv 图片下载失败（试了 ${sources.length} 个地址）：\n${tried.join('\n')}${skippedNote}`
                 + (overSize ? `\n提示：这张图超过本桥单张 ${Math.round(MAX_IMAGE_FETCH_BYTES / 1024 / 1024)}MB 的下载上限，改用 size=master 才能发。` : ''),
             }],
             isError: true,
@@ -3364,16 +3418,26 @@ if (cfg.social?.tools?.pixiv !== false) {
               tags: work.tags?.length ? work.tags : undefined,
               pageUrl: work.pageUrl,
               size: sizeEff,
-              // 无损保证：size=original 时发出去的就是 Pixiv 原图文件本身（字节与 sha256 一致，不缩放不转码）
-              lossless: sizeEff === 'original',
+              /* 无损保证（2026-09-21 改成"按实际发出去的档位"来说，而不是"按调用方想要的"）：
+               * 旧写法是 `lossless: sizeEff === 'original'` —— 于是**降级发了 720/1200 档、甚至缩略图，
+               * 结果里照样写 lossless:true**（线上现场：附件名 <md5>_720.jpg，返回却说自己无损）。
+               * 现在只有在"要的就是原图 且 真正发出去的是原图档 且 没发生降级"时才敢说 true。 */
+              lossless: sizeEff === 'original' && gotTier === 'original' && !tierFallback,
               bytes: buf.length,
               sha256,
               format: ext,
+              pixels: gotPixels || undefined,
               fetchedFrom: gotFrom,
               // 元数据是谁给的（app-api / web-ajax / mirror）+ 字节是谁给的（直联 i.pximg / 镜像代理）
               pixivSource: work.source || undefined,
               fetchedVia: gotVia || undefined,
-              contentKind: sizeEff === 'original' ? 'pixiv-original' : 'pixiv-master',
+              // 真正发出去的是哪一档（original / master / thumb / unknown）：地址档位 + 实际像素双重判定过
+              tierServed: gotTier || undefined,
+              contentKind: gotTier === 'original' ? 'pixiv-original'
+                : gotTier === 'master' ? 'pixiv-master'
+                  : gotTier === 'thumb' ? 'pixiv-thumb' : undefined,
+              // 非空 = 发生了显式降级：把"为什么没发原图"和试过哪些原图候选如实带出去
+              tierFallback: tierFallback || undefined,
               originalsNote: originalsNote || undefined,
               sent: data?.sent ?? null,
               quoted: data?.quoted ?? null,

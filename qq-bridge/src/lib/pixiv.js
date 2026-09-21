@@ -17,7 +17,12 @@
 //   master https://i.pximg.net/img-master/img/2026/09/18/01/37/08/149787938_p0_master1200.jpg   ← 实测直连 200 / 227KB
 //   原图   https://i.pximg.net/img-original/img/2026/09/18/01/37/08/149787938_p0.jpg            ← VPS 直连 404，走站内代理 200
 //
-// 所以默认发 **master1200**（够清晰、体积可控），要原图传 size='original'。
+// 档位与默认值（2026-09-21 更正，原文写着"默认发 master1200"，与实际行为不符）：
+//   `qq_send_pixiv` 的 `size` **默认 original**（2026-09-20 主人定调"发图默认原图，不要缩略图"，
+//   工具层实现见 mcp-napcat-safe.js 的 sizeEff）；master1200 只在"调用方显式要"或"原图确实拿不到"时用，
+//   而且**必须显式降级并如实回报**（见下面 pixivImageTier / planPixivSend）。
+//   本文件里 pixivImageCandidates / pixivImageSources 的 `size ?? 'master'` 只是给老调用方的兼容默认，
+//   工具层永远显式传 size —— 别把这两个默认值当成"产品行为"。
 // 注意 `custom-thumb` 那种缩略图（作者自定义封面）路径里同样有 `img/<日期>/<id>_pN_`，同一个正则能吃。
 //
 // ⚠️ 两条纪律（与 image-search.js 一致）：
@@ -151,6 +156,153 @@ export function pixivBase() {
 /** 把任意图片 URL 包成站内代理地址（绕开 i.pximg.net 的 Referer 防盗链）。 */
 export function pixivProxyUrl(imageUrl) {
   return `${pixivBase()}/api/image.php?url=${encodeURIComponent(String(imageUrl ?? '').trim())}`;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 【2026-09-21 新增：档位识别 + 候选分档 —— 修「用户要原图，收到的却是 720 档 + 半幅灰」】
+ *
+ * 现场（主人报的，证据是发到 QQ 的那个附件名）：`3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
+ *   · (a) 分辨率不是原图：pixiv 的档位命名是确定性的 —— `<id>_pN.jpg/_pN.png` = **原图**、
+ *     `<id>_pN_master1200.jpg` = 1200 档、`<id>_pN_square1200.jpg` = 250/540 缩略档，
+ *     而 `_720` 是 720 档。用户没要过 720 档，代码里也没有任何一处会**拼**出 720 档地址
+ *     （`pixivMasterUrl` 只会拼 `_master1200.jpg`）⇒ 这个地址只能来自**上游给的原图地址**，
+ *     而此前全链路**没有任何一处校验"你给我的这个地址到底是不是原图档"**：
+ *       · `normalizePixivIllustDetail`（本文件 1236 行）把镜像站 `urls.original` 原样收下；
+ *       · `pixivIllustOriginals` 的 ③④ 兜底会拿这条地址去推别的页，并把它当"原图地址"回报；
+ *       · `pixivImageSources` 1502 行 `upstream = ... : work.urls.original` 更是**直接用这条地址**，
+ *         而且排在候选第一位 —— 于是 `size=original` 请求会**首选**一个 720 档地址发出去，
+ *         结果里还写着 `lossless: true / contentKind: 'pixiv-original'`（谎报无损）。
+ *   · (b) 字节被截断：见 safe-fetch.js 的 verifyImageComplete。
+ *   两道闸门一起补：这里管"地址属于哪一档"，safe-fetch 管"字节是不是完整"。
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** 缩略/中图路径里的 `/c/<W>x<H>` 边长前缀（W ≤ 600 一律算缩略档：c/250x250、c/360x360、c/540x540）。 */
+const PIXIV_THUMB_SIDE_RE = /\/c\/(\d{3,4})x(\d{3,4})/;
+/** 文件名上的"档位后缀"：`_master1200` / `_square1200` / `_custom1200` / `_720` / `_1080` 这类。 */
+const PIXIV_RENDITION_NAME_RE = /_p\d+_(?:master1200|square1200|custom1200|\d{3,4})\./i;
+/** 原图文件名：`<id>_pN.jpg`（`/img-original/img/` 下、且没有档位后缀）。 */
+const PIXIV_ORIGINAL_NAME_RE = /\/\d+_p\d+\.(?:jpe?g|png|webp|gif)$/i;
+
+/** 把"镜像站代理地址"还原成它包着的 i.pximg 地址（档位要看**里层**那个地址才准）。 */
+export function pixivImageInnerUrl(rawUrl) {
+  const s = String(rawUrl ?? '').trim();
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    if (/\/api\/image\.php$/.test(u.pathname)) {
+      const inner = String(u.searchParams.get('url') ?? '').trim();
+      if (inner) return inner;
+    }
+    return s;
+  } catch { return s; }
+}
+
+/**
+ * 这个地址是**哪一档**图。**纯函数，离线可测**（自测见 tools/test-pixiv-tier-truncation.mjs）。
+ *   · `original` —— `img-original/img/<日期>/<id>_pN.<ext>`，文件名上没有任何档位后缀；
+ *   · `master`   —— 1200 档，或 `_720`/`_1080` 这类按边长命名的档（≥601 边长的显式降级档）；
+ *   · `thumb`    —— 缩略/中图档（`_square1200` / `_custom1200` / `c/250x250` / `c/540x540`）：**永远不许当原图发**；
+ *   · `unknown`  —— 认不出（第三方 CDN/新形状）：不拦，但下游不许据此谎称无损。
+ */
+export function pixivImageTier(rawUrl) {
+  const u = pixivImageInnerUrl(rawUrl);
+  if (!u) return 'unknown';
+  let pathOnly = u;
+  try { pathOnly = new URL(u).pathname; } catch { /* 不是标准 URL：按原字符串判 */ }
+  const side = PIXIV_THUMB_SIDE_RE.exec(pathOnly);
+  if (/_p\d+_(?:square1200|custom1200)\./i.test(pathOnly)) return 'thumb';
+  if (side && Number(side[1]) <= 600) return 'thumb';
+  if (PIXIV_ORIGINAL_NAME_RE.test(pathOnly) && !PIXIV_RENDITION_NAME_RE.test(pathOnly) && !side) return 'original';
+  if (/_p\d+_master1200\./i.test(pathOnly)) return 'master';
+  if (/_p\d+_\d{3,4}\./i.test(pathOnly)) return 'master';
+  if (/\/img-master\//.test(pathOnly) || side) return 'master';
+  return 'unknown';
+}
+
+/**
+ * 候选分档：把 `pixivImageSources` 给的候选拆成"可以首选发的"和"只能显式降级发的"。
+ * **纯函数，离线可测**（自测同上）。规矩：
+ *   · 缩略档任何情况下都不发（发出去就是用户看到的那张 250×250）；
+ *   · `size=original` 时 1200 档**只能当 fallback**：只有真原图档的候选全部失败（体积超限 / 404 / 超时 /
+ *     档位像素不符）才允许走到它，而且调用方必须**显式打日志 + 在结果里如实说明**；
+ *   · `size=master` 时 1200 档就是正常首选（用户明确要的就是它）。
+ * 返回顺序与传入顺序一致（不重排候选，只分桶），老行为因此不变。
+ * @returns {{primary:object[], fallback:object[], skipped:object[]}}
+ */
+export function planPixivSend(sources, opts = {}) {
+  const wantOriginal = String(opts.size ?? 'original').toLowerCase() !== 'master';
+  const primary = [];
+  const fallback = [];
+  const skipped = [];
+  for (const s of Array.isArray(sources) ? sources : []) {
+    const url = String(s?.url ?? '').trim();
+    if (!url) continue;
+    const tier = s?.tier || pixivImageTier(url);
+    const entry = { ...s, url, tier };
+    // 桶归属由本函数重算，先把上游带的标记清掉，免得"primary 里却挂着 fallback:true"这种自相矛盾
+    delete entry.fallback;
+    delete entry.fallbackReason;
+    if (tier === 'thumb') {
+      skipped.push({ ...entry, fallback: true, reason: '缩略档（250/540 的 square1200/custom1200）：不是能当原图/大图发出去的档位' });
+      continue;
+    }
+    if (wantOriginal && tier === 'master') {
+      fallback.push({ ...entry, fallback: true, fallbackReason: '原图档候选全部失败后的显式降级（体积超限/404/超时/像素不符才可能走到）' });
+      continue;
+    }
+    primary.push(entry);
+  }
+  return { primary, fallback, skipped };
+}
+
+/**
+ * 档位 × 实际像素 的一致性判定。**纯函数，离线可测**。
+ *
+ * 为什么光校验"地址像不像原图"不够：镜像站（第三方代理）完全可能**拿着原图地址却给你一张缩过的图**
+ * （它的缓存/<md5>_720.jpg 就是这种产物），地址看着是原图、字节却是 720 档 —— 这次线上现场正是这样。
+ * 所以再拿"作品的原图像素"（pixiv 详情里的 width/height，就是原图的尺寸）跟**实际拿到的像素**对一遍：
+ * 只有 `page=0` 才比（详情里的宽高就是第 0 页的；其它页拿不到权威尺寸，不瞎比）。
+ * @param {'original'|'master'|'thumb'|'unknown'} tier
+ * @param {{originalWidth?:number, originalHeight?:number, imageWidth?:number, imageHeight?:number, page?:number}} info
+ * @returns {{ok:boolean, reason:string, expectedLongSide:number, actualLongSide:number}}
+ */
+export function pixivTierSizeVerdict(tier, info = {}) {
+  const ow = Math.max(0, Number(info.originalWidth) || 0);
+  const oh = Math.max(0, Number(info.originalHeight) || 0);
+  const iw = Math.max(0, Number(info.imageWidth) || 0);
+  const ih = Math.max(0, Number(info.imageHeight) || 0);
+  const page = Math.max(0, Number(info.page) || 0);
+  const actualLongSide = Math.max(iw, ih);
+  if (page !== 0) return { ok: true, reason: '', expectedLongSide: 0, actualLongSide };
+  if (!iw || !ih) return { ok: true, reason: '', expectedLongSide: 0, actualLongSide };   // 认不出像素：只靠档位/尾标记判
+  if (tier === 'original') {
+    const expected = Math.max(ow, oh);
+    if (!expected) return { ok: true, reason: '', expectedLongSide: 0, actualLongSide };
+    if (actualLongSide < expected) {
+      return {
+        ok: false,
+        expectedLongSide: expected,
+        actualLongSide,
+        reason: `档位不符：要的是原图（${ow}×${oh}），拿到的却是 ${iw}×${ih} —— 被上游缩过的档（线上现场就是这样拿到 720 档的）`,
+      };
+    }
+    return { ok: true, reason: '', expectedLongSide: expected, actualLongSide };
+  }
+  if (tier === 'master') {
+    const expected = Math.min(1200, Math.max(ow, oh));
+    if (!expected) return { ok: true, reason: '', expectedLongSide: 0, actualLongSide };
+    // 容 5%：pixiv 的 master1200 是按长边缩到 ≤1200，四舍五入会有 1~2px 误差
+    if (actualLongSide < Math.floor(expected * 0.95)) {
+      return {
+        ok: false,
+        expectedLongSide: expected,
+        actualLongSide,
+        reason: `档位不符：要的是 1200 档（长边应 ≈${expected}），拿到的长边只有 ${actualLongSide} —— 又被缩了一档`,
+      };
+    }
+    return { ok: true, reason: '', expectedLongSide: expected, actualLongSide };
+  }
+  return { ok: true, reason: '', expectedLongSide: 0, actualLongSide };
 }
 
 /** 作品页地址（给模型/用户点开用）。 */
@@ -1316,14 +1468,20 @@ export function isAdultWork(item) {
 /**
  * 拼出"这张图的字节从哪几个地址能拿到"，**按可靠性排序**（工具层逐个试）。
  *
- * 每条是 `{url, referer?}`：带 referer 的走**直联**（要传给 safeFetchBuffer 的第三个参数），
+ * 每条是 `{url, referer?, tier}`：带 referer 的走**直联**（要传给 safeFetchBuffer 的第三个参数），
  * 不带的走镜像站代理。直联在前是因为实测它快一个数量级（60~400ms vs 2.7~5.7s）且字节完全一致；
  * 镜像代理想吐超时时直联早就成功了。
  * 最后仍会追加 `pixivImageCandidates` 的老候选（从缩略图推的日期路径），保证"搜索路径"行为不变。
  *
+ * ⚠️ `tier`（2026-09-21 补）是**如实标注每条候选属于哪一档**（见 pixivImageTier）：老候选里既有原图猜测、
+ *   也有 `_master1200` 和 250×250 的 `_square1200` 缩略图，而 `upstream` 还可能是**上游给的 720 档地址**。
+ *   以前这三类混在一个数组里且没有任何标注，调用方（qq_send_pixiv）逐个试、谁先成功就发谁，
+ *   于是"默认原图"实际上经常发的是 720/1200/缩略档，结果里却写着 lossless:true（现场见文件头）。
+ *   现在标注齐全，发什么档由 `planPixivSend` 按 tier 决定，降级必须显式。
+ *
  * @param {object} work 作品对象（搜索结果或 `pixivIllustDetail` 的结果）
  * @param {{page?:number, size?:'master'|'original', originals?:string[]}} opts
- * @returns {{url:string, referer?:string}[]}
+ * @returns {{url:string, referer?:string, tier:string, fallback?:boolean, fallbackReason?:string}[]}
  */
 export function pixivImageSources(work, opts = {}) {
   const page = Math.max(0, Number(opts.page) || 0);
@@ -1332,7 +1490,18 @@ export function pixivImageSources(work, opts = {}) {
   const push = (url, referer) => {
     const u = String(url ?? '').trim();
     if (!u || out.some((x) => x.url === u)) return;
-    out.push(referer ? { url: u, referer } : { url: u });
+    const tier = pixivImageTier(u);
+    // size=original 时，非原图档（上游给的 720/1200 档、老候选里的 master/缩略图）一律标成"降级候选"：
+    // 调用方只允许在真原图档全失败之后才用它们，并且必须把降级写进日志与结果。
+    // `unknown`（认不出的第三方形状）不标 —— 不按档位拦，但要靠像素对账把关（见 pixivTierSizeVerdict）。
+    const downgraded = size === 'original' && (tier === 'master' || tier === 'thumb');
+    out.push({
+      ...(referer ? { url: u, referer } : { url: u }),
+      tier,
+      ...(downgraded
+        ? { fallback: true, fallbackReason: tier === 'thumb' ? '缩略档，不是能当原图发的档位' : `上游/老候选给的地址其实是 ${tier} 档，不是原图档` }
+        : {}),
+    });
   };
   const originals = Array.isArray(opts.originals) ? opts.originals.map((u) => String(u ?? '').trim()).filter(Boolean) : [];
   const upstream = originals.length ? originals[Math.min(page, originals.length - 1)] : String(work?.urls?.original ?? '').trim();
