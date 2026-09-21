@@ -8,6 +8,8 @@ import path from 'node:path';
 import { STATE_DIR } from '../lib/paths.js';
 import { atomicWriteJson } from '../lib/json-fs.js';
 import { makeDocx } from '../make-docx.js';
+// 【2026-09-21】文档上传要和图片走同一套「宿主路径 → NapCat 能认的 file 参数」转换（见 uploadFileToQQ）
+import { napcatImageFileArg } from '../lib/napcat-file.js';
 import { beijingDateKey } from '../lib/time.js';
 import { ROOT } from '../lib/paths.js';
 import { getSocialState, saveSocialState } from './social-state.js';
@@ -90,9 +92,19 @@ export function writeDocxToMount(title, content, extraName = '') {
 export async function uploadFileToQQ(key, napcatPath, fileName, options = {}) {
   const [kind, id] = key.split(':');
   const action = kind === 'private' ? 'upload_private_file' : 'upload_group_file';
+  /* 【2026-09-21 修「发文档失败：识别URL失败, uri= /root/qq-bridge/state/doc-tmp/xxx.docx」】
+   * 现场：NapCat 跑在 Docker 里，桥把**宿主路径**原样交给 upload_private_file，
+   * 容器里根本没有这个路径，于是它按 URL 解析、报「识别URL失败」。
+   * 图片/表情那条路早就修过这件事（lib/napcat-file.js 的 napcatImageFileArg：按 dockerPathMap 换容器路径，
+   * 换不了再退 base64），**文档这条支线当时漏了** —— 于是「图片发得出去、文档一张都发不出去」。
+   * 现在两处走同一个 helper，语义完全一致（mode=path 时行为不变，等于零风险）。 */
+  const fileArg = (() => {
+    try { return napcatImageFileArg(napcatPath, cfgRef, { log }); }
+    catch (e) { log(`[docx] 文件参数转换失败（按原路径发）: ${e?.message ?? e}`); return napcatPath; }
+  })();
   const params = kind === 'private'
-    ? { user_id: Number(id), file: napcatPath, name: String(fileName) }
-    : { group_id: Number(id), file: napcatPath, name: String(fileName) };
+    ? { user_id: Number(id), file: fileArg, name: String(fileName) }
+    : { group_id: Number(id), file: fileArg, name: String(fileName) };
   const httpUrl = String(cfgRef?.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
   const res = await fetch(`${httpUrl}/${action}`, {
     method: 'POST',
