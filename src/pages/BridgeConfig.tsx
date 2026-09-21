@@ -2878,33 +2878,8 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         )}
       </div>
 
-      {/* ── 描述压缩档（2026-09-21，主人要求"照 mcp 开源压缩工具那一套"）────────────────
-          与上面的"名单档位"是**两个正交的旋钮**：上面决定"注册哪些工具"，这里决定
-          "注册了的那份 schema 写多长"。压的是**描述文字**，工具一个不少、参数一个不少
-          （名字/类型/枚举/必填照旧）—— 也就是"压缩本身，不是精简功能"。
-          档位语义照搬 atlassian-labs/mcp-compressor（它自己的档位是 low/medium/high/max），
-          在**我们真实的 JSON Schema 格式**上实测：中度 71.4%、高度 31.1%。 */}
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>描述文字档位</span>
-        <select className="input" style={{ maxWidth: 300 }}
-          value={String(get(cfg, 'social.slimTools.schemaLevel') ?? stats?.schemaLevel ?? 'off')}
-          onChange={(e) => ch('social.slimTools.schemaLevel')(e.target.value)}>
-          {(stats?.schemaLevelInfo ? Object.keys(stats.schemaLevelInfo) : ['off', 'medium', 'high']).map((id) => {
-            const info = stats?.schemaLevelInfo?.[id];
-            return <option key={id} value={id}>{info ? `${id}｜${info.label}` : id}</option>;
-          })}
-        </select>
-        {(() => {
-          const cur = String(get(cfg, 'social.slimTools.schemaLevel') ?? stats?.schemaLevel ?? 'off');
-          const note = stats?.schemaLevelInfo?.[cur]?.note;
-          return note ? <span style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>{note}</span> : null;
-        })()}
-      </div>
-      <div style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)', marginBottom: 10, lineHeight: 1.7 }}>
-        实测（本机出厂 90 个工具）：不压 <b>100%</b> · 中度 <b>71.4%</b>（每条描述只留第一句）·
-        高度 <b>31.1%</b>（完全不发描述，但<b>工具与参数一个不少</b>）。
-        复算：<code>node tools/schema-level-meter.mjs</code>。改完同样要重启隔离 DSH 才会重新注册。
-      </div>
+      {/* 描述文字档位已按主人要求移除（代理恒开时它多余）：见 lib/tool-schema-compress.js */}
+
 
       {stats ? (
         <div style={{ fontSize: 12.5, marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--nc-background-100, #f6f7f9)', lineHeight: 1.7 }}>

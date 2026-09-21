@@ -255,7 +255,10 @@ function mcpBlock() {
   };
   // 压缩代理只挂在 napcat 这一路上（工具最多、体积最大）；另两个保持直连。
   const tc = sideCfg?.social?.toolCompressor ?? {};
-  const wantProxy = tc.enabled === true;
+  /* 【2026-09-21 主人定稿】压缩代理**默认恒开** —— 只有显式写 `enabled: false` 才关。
+   * 语义从"必须显式打开"改成"除非显式关掉"：老配置里没有这个键 → 自动走代理（这才是主人要的"默认就用它"）。
+   * 仍然保留关闭开关：代理是 Python 进程，出问题时要能一键回到直连。 */
+  const wantProxy = tc.enabled !== false;
   const probe = wantProxy ? resolveToolCompressor({ log }) : { ok: false, reason: '未启用' };
   const useProxy = wantProxy && probe.ok;
   if (wantProxy && !probe.ok) log(`[dsh-side] 工具压缩代理已勾选但不可用，回退直连：${probe.reason}`);

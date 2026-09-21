@@ -286,8 +286,8 @@
       "breakProbability": 0.15
     },
     "toolCompressor": {
-      "_note": "MCP 工具压缩代理（开源 mcp-compressor，2026-09-21 主人要求接上）：打开后 DSH 不再直连 napcat MCP，而是连代理，代理把 90 个工具压成 2 个包装工具（napcat_get_tool_schema / napcat_invoke_tool），工具清单塞进包装工具的描述里。实测相对完整工具表：low 38.8% / medium 14.0% / high 6.2% / max 3.6%。代价是遇到不熟的工具要\"先查 schema 再调用\"= 一步变两步；桥侧已按真实工具名解包，发送判定/幂等账本不受影响。⚠ 压缩机没装（pip3 install mcp-compressor）时**自动回退直连**，不会把工具表搞没。改完必须重启隔离 DSH。",
-      "enabled": false,
+      "_note": "MCP 工具压缩代理（开源 mcp-compressor，2026-09-21 主人要求接上）：打开后 DSH 不再直连 napcat MCP，而是连代理，代理把 90 个工具压成 2 个包装工具（napcat_get_tool_schema / napcat_invoke_tool），工具清单塞进包装工具的描述里。实测相对完整工具表：low 38.8% / medium 14.0% / high 6.2% / max 3.6%。代价是遇到不熟的工具要\"先查 schema 再调用\"= 一步变两步；桥侧已按真实工具名解包，发送判定/幂等账本不受影响。⚠ 压缩机没装（pip3 install mcp-compressor）时**自动回退直连**，不会把工具表搞没。改完必须重启隔离 DSH。 【默认恒开】只有显式写 enabled:false 才关（老配置没有这个键也走代理）。",
+      "enabled": true,
       "level": "medium",
       "excludeTools": [],
       "toonify": false
