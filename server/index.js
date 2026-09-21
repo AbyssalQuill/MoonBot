@@ -3322,7 +3322,7 @@ export function readDshProviderModels() {
 app.get('/api/bridge/tool-schema-stats', (_req, res) => {
   try {
     const dir = findBridgeDir();
-    const file = path.join(dir, 'state', 'tool-schema-stats.json');
+    const file = join(dir, 'state', 'tool-schema-stats.json');
     if (!existsSync(file)) {
       res.json({ ok: false, message: '还没有实测数据：隔离 DSH 启动并加载 MCP 工具表之后才会有（重启一次隔离 DSH 即可生成）' });
       return;

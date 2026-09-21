@@ -2737,7 +2737,7 @@ function ToolCompressorCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => 
   };
   return (
     <div className="card">
-      <div className="card-title">工具压缩代理（开源 mcp-compressor）</div>
+      <div className="card-title">① 工具压缩代理（开源 mcp-compressor）— 决定「模型看到几个工具」</div>
       <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 12, lineHeight: 1.7 }}>
         打开后隔离 DSH <b>不再直连 napcat MCP</b>，而是连代理：代理只把 <b>2 个</b> 工具
         （<code>napcat_get_tool_schema</code> / <code>napcat_invoke_tool</code>）发给模型，
@@ -2746,13 +2746,15 @@ function ToolCompressorCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => 
         <br />
         代价：模型遇到<b>本轮没用过</b>的工具要先查 schema 再调用（一步变两步）；
         桥已按真实工具名解包，发送判定/幂等账本不受影响。<b>压缩机没装会自动回退直连</b>。
+        <br />
+        <b style={{ color: "var(--nc-foreground-400)" }}>这三处旋钮谁管什么：</b><br />· <b>本卡的「代理档位」</b> = 工具表以什么形态发给模型（模型看到的永远是 2 个包装工具，差别在清单压多狠）；<br />· 下面那张卡的「<b>工具名单</b>档位」= <b>后端</b>注册哪些工具（开着代理时它只让清单变短，不影响"模型看到几个"）；<br />· 下面那张卡的「<b>描述文字</b>档位」= 描述压多短 —— <b>开着代理时这一项是多余的</b>（代理会把整份表再压一遍）。<br />想让模型看到真实的 90 个工具 → 把本卡关掉，用下面那张卡。
       </div>
       <label className="switch-row" style={{ marginBottom: 10 }}>
         <input type="checkbox" checked={enabled} onChange={(e) => ch('social.toolCompressor.enabled')(e.target.checked)} />
         <span>启用压缩代理（关掉 = 直连，回到默认）</span>
       </label>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>压缩档位</span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>代理档位</span>
         <select className="input" style={{ maxWidth: 260 }} value={level} onChange={(e) => ch('social.toolCompressor.level')(e.target.value)}>
           {['low', 'medium', 'high', 'max'].map((id) => (
             <option key={id} value={id}>{id}｜约保留 {ratio[id]}</option>
@@ -2835,12 +2837,13 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
 
   return (
     <div className="card">
-      <div className="card-title">工具 schema 精简（真省额度）</div>
+      <div className="card-title">② 桥侧工具裁剪（不换拓扑的做法）— 决定「后端注册哪些工具」</div>
       <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 12, lineHeight: 1.7 }}>
         每次请求里 <b>约 87% 的 token 是工具描述（JSON schema）</b>，而且<b>每一步都会重发一遍</b>——
         少注册一个用不到的工具，比把提示词写短几个字划算得多。<br />
         打勾 = <b>这个工具干脆不注册给模型</b>（它的 schema 从每一次请求里彻底消失）；
         不打勾 = 正常注册。<b>改完必须重启隔离 DSH</b>（工具表只在 DSH 启动时取一次）。
+        <br /><b>和上面那张卡的关系</b>：这张卡是"不换拓扑"的做法 —— 模型仍然直接看到每个工具，靠删工具/压描述省。上面那张「工具压缩代理」开着时，模型看到的是 2 个包装工具，本卡的<b>描述文字档位</b>就多余了（代理会再压一遍），<b>工具名单档位</b>仍然有意义：它决定后端注册哪些，从而决定代理那份清单有多长。
       </div>
 
       <label className="switch-row" style={{ marginBottom: 10 }}>
@@ -2853,7 +2856,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
           每档后面那个百分比是**桥实测**的（state/tool-schema-stats.json，
           由 mcp-napcat-safe.js 注册工具时逐个量出来的），不是界面上写死的数字。 */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>压缩档位</span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>工具名单档位</span>
         <select className="input" style={{ maxWidth: 320 }} value={level}
           onChange={(e) => {
             const v = e.target.value;
@@ -2882,7 +2885,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
           档位语义照搬 atlassian-labs/mcp-compressor（它自己的档位是 low/medium/high/max），
           在**我们真实的 JSON Schema 格式**上实测：中度 71.4%、高度 31.1%。 */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>描述压缩档</span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>描述文字档位</span>
         <select className="input" style={{ maxWidth: 300 }}
           value={String(get(cfg, 'social.slimTools.schemaLevel') ?? stats?.schemaLevel ?? 'off')}
           onChange={(e) => ch('social.slimTools.schemaLevel')(e.target.value)}>
@@ -2926,7 +2929,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'baseline', marginBottom: 10 }}>
         <span style={{ fontSize: 13 }}>
-          当前生效：<b>{effectiveKept}</b> 个工具 · 约 <b>{effectiveChars.toLocaleString()}</b> 字符 ≈{' '}
+          后端注册：<b>{effectiveKept}</b> 个工具 · 约 <b>{effectiveChars.toLocaleString()}</b> 字符 ≈{' '}
           <b>{charsToTokens(effectiveChars).toLocaleString()}</b> tokens/步
         </span>
         <span style={{ fontSize: 13, color: 'var(--nc-foreground-400)' }}>
