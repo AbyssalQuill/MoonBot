@@ -144,10 +144,10 @@
       "characterCards": true
     },
     "wake": {
-      "defaultMode": "diving",
+      "defaultMode": "active",
       "preSleepWaitEnabled": true,
       "preSleepWaitMs": 300000,
-      "recommendedDefaultInfinite": true,
+      "recommendedDefaultInfinite": false,
       "sleepMinMs": 60000,
       "sleepMaxMs": 0,
       "recommendedSleepMinMs": 300000,

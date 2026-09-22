@@ -163,10 +163,16 @@ export function loadConfig() {
         getSelfImage: true
       },
       wake: {
-        defaultMode: 'diving',
+        /* 【2026-09-22 主人要求】默认就是**活跃**（每条消息都唤醒），不再默认潜水 ——
+         * "切活跃就活跃"：软重置/兜底路径（softResetWakeConfig）本来就会保留 active，这里把**缺省**也对齐，
+         * 于是新会话、被兜底重置过的会话都不会突然退回潜水。 */
+        defaultMode: 'active',
         preSleepWaitEnabled: true,      // 沉睡前强制观察窗口开关：防止 AI 聊两句就潜水
         preSleepWaitMs: 30000,           // 默认沉睡前观察窗口：只等 30 秒，不傻等 5 分钟（后台可调）
-        recommendedDefaultInfinite: true, // 默认下一次唤醒是否无限期（true=永久潜水等条件；false=有限时长）
+        /* 【2026-09-22 主人要求】不再默认「无限期潜水」：那是「等条件再醒」的永久潜水，观感等于失联。
+         * 现在默认 false = 想潜水时给一个有限时长（见 recommendedSleepMinMs/MaxMs），到点自然醒。
+         * 管理端已把这一项从界面上撤掉（不再是旋钮），键保留只为兼容老配置与模型侧语义。 */
+        recommendedDefaultInfinite: false,
         sleepMinMs: 60000,
         sleepMaxMs: 0,
         recommendedSleepMinMs: 300000,

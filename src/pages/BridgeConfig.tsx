@@ -1869,7 +1869,10 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
           desc="永远不搭理的私聊/群，优先于允许名单。" />
       </div>
       <GroupCard title="唤醒 · 潜水 / 活跃" path="social.wake" cfg={cfg} ch={ch} onHelp={onHelp}
-        desc="机器人平时爱潜水，遇到这些词/被 @/被提问时才会醒过来。" />
+        /* 【2026-09-22 主人要求】"去掉默认无限潜水这个勾"：这一项不再作为旋钮暴露（键仍兼容老配置，
+         * 缺省已改成"潜水给有限时长"）。要调潜水时长用下面的推荐潜水上/下限。 */
+        filter={(k: string) => k !== 'recommendedDefaultInfinite'}
+        desc="默认就是**活跃**（每条消息都唤醒、切过去就一直活跃）；想让它安静时可以设成潜水，但不再有「无限期潜水」这个勾 —— 潜水会给一个有限时长（用下面推荐潜水上/下限调），到点自然醒。" />
 
       <GroupCard title="发送节奏与间隔" path="social.send" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="连发/停顿/字数上限——控制发消息像不像真人打字。" />
