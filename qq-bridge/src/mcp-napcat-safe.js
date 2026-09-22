@@ -3130,7 +3130,7 @@ if (cfg.social?.tools?.imageSearch !== false) {
 
   registerTool(
     'qq_send_image',
-    'Find an image online and SEND it to a QQ session as a real picture. Pass EITHER query (the bridge searches for it and sends the best hit - the normal case: someone asks 来张XX的图) OR imageUrl (a URL you already got from qq_image_search). index picks which search hit to send (0 = first, default). The image is downloaded with SSRF protection, size-capped and verified to be a real image; nothing is written outside the NapCat temp dir. Prefer ONE image per request - do not spam several pictures in a row unless asked.',
+    'Find an image online and SEND it to a QQ session as a real picture. Three sources, in precedence order: file (absolute path ON THE BRIDGE HOST of a picture that already exists - use this to FORWARD a picture you were given, e.g. the DSH attachment path of an image the other person just sent you, or a downloaded file), imageUrl (a URL you already got from qq_image_search), query (the bridge searches the web and sends the best hit - the normal case: someone asks 来张XX的图). index picks which search hit to send (0 = first, default). The bytes are read/verified as a real picture before sending; nothing is written outside the NapCat temp dir. Cross-session: set crossSession true when you deliberately post into another session than the one you are answering (private chat -> group). Prefer ONE image per request - do not spam several pictures in a row unless asked.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
@@ -3139,8 +3139,9 @@ if (cfg.social?.tools?.imageSearch !== false) {
       imageUrl: z.string().optional().describe('Direct image URL (from qq_image_search). Takes precedence over query.'),
       index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
+      crossSession: z.boolean().optional().describe('ONLY when deliberately sending a picture into a DIFFERENT session than the one you are answering (e.g. the owner asks you in private to post it in a group): set true to confirm. key MUST be that other session\'s own key - a mismatched key is refused instead of silently sent elsewhere.'),
     },
-    async ({ key, token, file, query, imageUrl, index, replyToMessageId }) => {
+    async ({ key, token, file, query, imageUrl, index, replyToMessageId, crossSession }) => {
       try {
         /* 【2026-09-22 修「不能转发图片」】qimage 这条工具原来只有 query / imageUrl 两条路 ——
          * 模型手上有"别人发来的那张图"（DSH 把它存成附件对象 /root/.dsh/attachments/v1/objects/…）时
@@ -3163,9 +3164,26 @@ if (cfg.social?.tools?.imageSearch !== false) {
           if (!check.ok) {
             return { content: [{ type: 'text', text: `这张图字节不完整（${check.reason}），没有发出去。` }], isError: true };
           }
+          /* 【2026-09-22 二次修】上一版把宿主路径丢给 napcatImageFileArg 映射就发 —— 生产上仍旧发不出去：
+           * NapCat 跑在容器里，DSH 附件目录 /root/.dsh/attachments/… 不在 dockerPathMap 的挂载里，
+           * 宿主路径它读不到（用户端什么都没收到，模型只能回"接不了你上传的图"）。
+           * 现在走**和「联网搜图」完全同一条已跑通的路**：字节 → 同一道完整性闸门 → 落到
+           * cfg.napcat.tmpDir（这个目录就是挂进容器的那份）→ 把该目录里的路径交给发送端点。
+           * 顺带把 crossSession 接上：本工具原来没声明它，跨会话发图会被闸门永久拒绝（现场：
+           * 模型带 crossSession:true 连试四次都被要求"把 crossSession 设为 true 再发一次"）。 */
           const cfgFile = getConfig();
-          const napcatArg = napcatImageFileArg(localFile, cfgFile, { log: (m) => console.error(`[napcat-safe] ${m}`) });
+          const tmpRootF = String(cfgFile?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
+          fs.mkdirSync(tmpRootF, { recursive: true });
+          const extF = buf[0] === 0x89 ? 'png'
+            : buf[0] === 0xff ? 'jpg'
+              : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
+                : buf.toString('ascii', 0, 4) === 'RIFF' ? 'webp'
+                  : (path.extname(localFile).replace(/^\./, '').toLowerCase() || 'jpg');
+          const staged = path.join(tmpRootF, `${Date.now()}-fwd-${Math.random().toString(36).slice(2, 8)}.${extF}`);
+          fs.writeFileSync(staged, buf);
+          const napcatArg = napcatImageFileArg(staged, cfgFile, { log: (m) => console.error(`[napcat-safe] ${m}`) });
           const bodyF = { key, messages: [], images: [napcatArg] };
+          if (crossSession === true) bodyF.crossSession = true;
           const ridF = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
           if (ridF) bodyF.replyToMessageId = ridF;
           const dataF = await agentApi('/api/social/send-message', {
@@ -3181,10 +3199,12 @@ if (cfg.social?.tools?.imageSearch !== false) {
                 ok: true,
                 from: 'file',
                 file: localFile,
+                staged,
                 bytes: buf.length,
+                format: extF,
                 sent: dataF?.sent ?? null,
                 quoted: dataF?.quoted ?? null,
-                note: '本地文件已按 NapCat 路径映射发出（容器部署会自动换成容器内路径）',
+                note: '本地图片已按字节转发（先完整性校验，再落到 NapCat 挂载目录，容器里读得到）',
               }, null, 2),
             }],
           };
@@ -3214,6 +3234,10 @@ if (cfg.social?.tools?.imageSearch !== false) {
         fs.writeFileSync(tmpPath, buf);
 
         const body = { key, messages: [], images: [tmpPath] };
+        /* 跨会话闸门（见 console-server 的 crossSessionRefusal）：私聊里要求"把这张网图转进群"
+         * 必须把这个标志塞进 body —— 少这一句的话，闸门每次都回"把 crossSession 设为 true 再发一次"，
+         * 而模型照做之后仍旧被拒，提示就成了死循环（生产日志现场）。 */
+        if (crossSession === true) body.crossSession = true;
         const rid = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
         if (rid) body.replyToMessageId = rid;
         const data = await agentApi('/api/social/send-message', {

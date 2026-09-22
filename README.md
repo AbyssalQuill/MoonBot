@@ -191,8 +191,10 @@ node src/bridge.js
 
 - **能力定义**：入站图片要作为**真附件**进模型（而不是占位文本）；出站则由模型联网找图并发送。
 - **实现路径（入站）**：两条路共用同一套 —— 挑选规则 `core/social-state.js` 的 `pickAttachableMedia`（`social-state.js:1153`），取图闸门 `core/media-pipe.js` 的 `resolveMediaList`（`media-pipe.js:218`，由 `bridge.js:478` 注入）。唤醒路在 `wake-send.js:1104`，在途注入路在 `steerIntoRunningTurn` 里；另有 `qq_get_message_images`（`mcp-napcat-safe.js:1688`）供模型主动取某一批消息的图。
-- **实现路径（出站）**：`qq_image_search`（`mcp-napcat-safe.js:3112`，只查不发）与 `qq_send_image`（`mcp-napcat-safe.js:3132`，找图并真发），搜图实现在 `lib/image-search.js`（Bing / 百度，**只返回 URL，不下载不落盘**）。
+- **实现路径（出站）**：`qq_image_search`（`mcp-napcat-safe.js:3112`，只查不发）与 `qq_send_image`（`mcp-napcat-safe.js:3132`，找图并真发），搜图实现在 `lib/image-search.js`（Bing / 百度，**只返回 URL，不下载不落盘**）。三个来源按 `file > imageUrl > query` 取值：`file` 是**转发**（把模型手上已经存在的图发出去，例如对方刚发来的那张在 DSH 侧的附件对象路径），`imageUrl` 是 `qq_image_search` 给的直链，`query` 才是联网现搜。
 - **关键约束**：`qq_send_image` 下载走 `safe-fetch.js` 的 `safeFetchBuffer`（SSRF 防护 + 体积上限 + "确实是图片"校验），**除 NapCat 临时目录外什么都不写盘**；一次一张，不刷屏；`qq_image_search` 只给候选，模型不得编造图片 URL。入站侧带图被拒时自动**回退纯文本重投**，且附图水位只在图片真投出去之后才推进。
+- **转发与跨会话（2026-09-22 补）**：`file` 那条路**先读字节再落盘**：读宿主文件 → `verifyImageComplete` 完整性闸门 → 写进 `napcat.tmpDir`（这个目录就是挂进 NapCat 容器的那份）→ 把该目录里的路径交给 `/api/social/send-message`。不直接把原路径丢给 NapCat，是因为 DSH 附件目录 `/root/.dsh/attachments/v1/objects/…` 不在 `napcat.dockerPathMap` 的挂载里，容器化的 NapCat 读不到（实测表现：接口返回 `ok`、用户端什么都没收到）。跨会话发图（私聊里把图转进群）与正文同构，靠 `crossSession: true` 过 `console-server` 的跨会话闸门。
+- **生产上的坑（两个都在同一天踩到，表现都是"图就是发不出去"）**：① 工具注册的 `inputSchema` 里**没声明的参数会被 zod 入参校验剥掉**——`qq_send_image` 原先既没有 `file` 也没有 `crossSession`，模型按提示补上 `crossSession: true` 后参数在入参校验处就被丢了，闸门于是每次都回"把参数 crossSession 设为 true 再发一次"，提示成了死循环；补声明后同样要记得**往请求 body 里塞**（file 分支与 imageUrl 分支是两份 body）。② 工具的 schema 是**代理进程启动时**取的快照（`mcp-compressor` 包装 `napcat_get_tool_schema`），改完 `mcp-napcat-safe.js` 必须让代理链重建，否则模型看到的还是旧参数表。回归验证：`node --check` + 直连内层与代理两层各拉一次 `tools/list` 比字段。
 - **生产上的坑**：图片附件原来只挂在"唤醒"那条路上，而"忙时把消息塞进在跑的回合"（主路径）直接调 `sessions.prompt`、正文里只有一个文本块 —— 于是模型只看到 `[图片] [image]` 占位文本，会话日志里 `mediaType` 出现 0 次。现在两条路共用 `pickAttachableMedia` + `resolveMediaList`（回归测试 `qq-bridge/tests/steer-media.test.js`）。
 
 ### Pixiv 搜图与发图
