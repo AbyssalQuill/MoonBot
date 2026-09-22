@@ -16,7 +16,7 @@
 
 ## 这套文档怎么读
 
-这份 README 是**索引**：能跑起来的最短路径 + 能力清单 + 往哪儿深挖。深入内容全部在 `docs/` 下，四份文档各自成篇：
+这份 README 是**索引加能力实现细节**：能跑起来的最短路径 + 能力清单 + 各组能力的实现路径与闸门 + 往哪儿深挖。能力实现细节就在本文的「能力实现细节」一节（在「快速开始」与「它现在能做什么」之间）；更完整的推导、实测数据与逐条旁证在 `docs/` 下，四份文档各自成篇：
 
 | 文档 | 回答什么问题 | 适合谁 |
 | --- | --- | --- |
@@ -161,9 +161,154 @@ node src/bridge.js
 
 ---
 
+## 能力实现细节
+
+本节按能力分组给出**实现细节**：能力定义（做什么、由模型在什么场景调用）、实现路径（`文件:函数`，行号为撰写时的近似位置，重构后会平移）、关键约束与闸门、以及生产上真实踩过的坑。工具注册点在 `qq-bridge/src/mcp-napcat-safe.js`（QQ 主体）、`qq-bridge/src/mcp-host-server.js`（宿主与学习）、`qq-bridge/src/mcp-web-search-safe.js`（联网）。本节只收录已对着仓库代码核对过的条目。
+
+### 语音：TTS 与 ASR
+
+- **能力定义**：模型需要"用说的"回答时调 `qq_send_voice` 把文本合成语音发出；收到对方的 `record` 段时调 `qq_transcribe_voice` 转写后再理解，绝不猜测语音内容。
+- **实现路径**：`core/voice.js`（`synthesize()`、`voiceTurnHint()`、`allVoicePlan()`、`allVoiceEnabled()`）、`core/send-dice.js`（`dice('voice', …)`）。工具：`qq_send_voice`（`mcp-napcat-safe.js:2211`）、`qq_transcribe_voice`（`mcp-napcat-safe.js:2239`）。三种音色来源见下表（`core/voice.js:11-13`）。
+
+| 模式 | 模型 | 要点 |
+| --- | --- | --- |
+| `tts` | `mimo-v2.5-tts` | `audio.voice` 传官方音色 id；内置名单是 `BUILTIN_VOICES`，仓库里 0 个音频文件 |
+| `design` | `mimo-v2.5-tts-voicedesign` | 用文字描述造音色，**不能**传 `voice` |
+| `clone` | `mimo-v2.5-tts-voiceclone` | `audio.voice` 必须是样本的 **DataURL**，裸 base64 会被 400 拒 |
+
+- **关键约束**：没有本地模型，合成与识别都走小米 MiMo 的 OpenAI 兼容端点；鉴权同时发 `api-key` 与 `Authorization: Bearer`，要念的文本放 `assistant` 消息、风格描述放 `user`。额度 `maxChars` / `dailyChars`，缓存 `state/voice-cache/*.mp3`（上限 `maxCacheFiles`）。是否主动发语音由**桥侧掷骰**决定（`core/send-dice.js` 的 `dice('voice', …)`），概率与冷却读 `state/voice-config.json` 的 `send.probability` / `send.cooldownMs`，命中才往唤醒正文插 `[Voice] dice HIT`；概率 0 = 只在被明确要求时发。`send.allVoice=true` 时回复一律转语音，任一前置不成立即**自动退回文字并在日志留一行原因**。
+- **生产上的坑**：**引用会被桥丢掉** —— QQ 把"回复 + 语音"渲染成只有引用框的空气泡，要引用请用 `qq_reply` 发文字；语音文件必须落在 NapCat 读得到的目录（`napcat.tmpDir` + `dockerPathMap` 换成容器内路径），读不回来时自动退 base64 重发；`send.allVoice` 缺失或非布尔一律按关闭处理（`qq-bridge/tests/all-voice-mode.test.js`）。
+
+### 发送链与正文格式治理
+
+- **能力定义**：模型的全部对外正文经统一出口发出：分气泡、引用回复、连发、以及"读了不回"时的标读收尾，都由这条链完成。
+- **实现路径**：`core/send-chain.js`（`enqueueSend`）、`core/qq-send.js`（`onebotSend`，`qq-send.js:168`，**所有模型正文的唯一出口**）、`core/send-idempotency.js`（幂等闸门）、`lib/onebot-delivery.js`（分段与节奏）、`lib/send-gaps.js`（`computeGaps`）、`core/config.js`（`clampSendPace`，`config.js:410`）。工具：`qq_send_message`（`:1295`）、`qq_reply`（`:909`）、`qq_send_burst`（`:1253`）、`qq_mark_read`（`:1188`）。
+- **关键约束**：节奏只有"按字数"一种 —— 批内首条秒回，第 2 条起 = 本条字数 × `linearPerCharMs`（默认 150），±`linearJitterRatio` 抖动，夹在 `[linearMinMs, linearCapMs]`；`linearEnabled=false` 即完全不延迟。**钳制**：`linearPerCharMs ∈ [60,320]`、`linearCapMs ∈ [800,6000]`、`linearMinMs` 不得高过 `linearCapMs`（`clampSendPace`）。发送侧还有 `maxSendPerMinute` / `maxSendPerHour` / `maxMessageChars` 上限，以及 `core/audit.js` 的敏感内容拦截。
+- **格式治理**："不许显式换行""颜文字要有出处""代码类不分段"三条由**提示词**（preset 的 `[TOOLS] 2b~2e`）约束，桥侧**不做正则清洗**；桥真正拦的是"工具参数数组被当成正文"—— 切不出正文就 **400 硬失败、一条都不发**（`lib/text-safe.js` + 发送端点 + `onebotSend`）。
+- **生产上的坑**：线上那份 `config.json` 的 `social.send` 被调成 `linearPerCharMs: 650` / `linearCapMs: 15000`，17 个字等 11 秒，同一窗口 118 次发送累计执行 990 秒 —— 主人感觉到的"唤醒后要响应一段时间"就是它。这些键**模型自己在私聊里就能改**，只改配置文件挡不住下一次自调，所以才加了钳制（`qq-bridge/tests/send-pace-clamp.test.js`）。
+
+### 收发图片
+
+- **能力定义**：入站图片要作为**真附件**进模型（而不是占位文本）；出站则由模型联网找图并发送。
+- **实现路径（入站）**：两条路共用同一套 —— 挑选规则 `core/social-state.js` 的 `pickAttachableMedia`（`social-state.js:1153`），取图闸门 `core/media-pipe.js` 的 `resolveMediaList`（`media-pipe.js:218`，由 `bridge.js:478` 注入）。唤醒路在 `wake-send.js:1104`，在途注入路在 `steerIntoRunningTurn` 里；另有 `qq_get_message_images`（`mcp-napcat-safe.js:1688`）供模型主动取某一批消息的图。
+- **实现路径（出站）**：`qq_image_search`（`mcp-napcat-safe.js:3112`，只查不发）与 `qq_send_image`（`mcp-napcat-safe.js:3132`，找图并真发），搜图实现在 `lib/image-search.js`（Bing / 百度，**只返回 URL，不下载不落盘**）。
+- **关键约束**：`qq_send_image` 下载走 `safe-fetch.js` 的 `safeFetchBuffer`（SSRF 防护 + 体积上限 + "确实是图片"校验），**除 NapCat 临时目录外什么都不写盘**；一次一张，不刷屏；`qq_image_search` 只给候选，模型不得编造图片 URL。入站侧带图被拒时自动**回退纯文本重投**，且附图水位只在图片真投出去之后才推进。
+- **生产上的坑**：图片附件原来只挂在"唤醒"那条路上，而"忙时把消息塞进在跑的回合"（主路径）直接调 `sessions.prompt`、正文里只有一个文本块 —— 于是模型只看到 `[图片] [image]` 占位文本，会话日志里 `mediaType` 出现 0 次。现在两条路共用 `pickAttachableMedia` + `resolveMediaList`（回归测试 `qq-bridge/tests/steer-media.test.js`）。
+
+### Pixiv 搜图与发图
+
+- **能力定义**：`qq_pixiv_search` 只查不发（返回候选与筛选明细），`qq_send_pixiv` 找图并真发。模型在"来张 XX 的图 / 发个 pixiv 原图"这类场景调用。
+- **实现路径**：`lib/pixiv.js`（`pixivImageTier:207`、`planPixivSend:232`、`normalizePixivFilters:351`、`filterPixivItems:479`、`pixivImageSources`）、`safe-fetch.js` 的 `verifyImageComplete`（`safe-fetch.js:286`）。工具：`mcp-napcat-safe.js:3215` / `:3250`。
+- **关键约束**：三道闸门 —— **档位分桶**（缩略档永不发，降级必须显式并写进结果 `tierFallback`）、**像素对账**（用作品详情的宽高与实际像素比对）、**字节完整性**（JPEG 的 FFD9 / PNG 的 IEND / GIF 的 0x3B / RIFF 长度 + `content-length`），任一不过就换下一个候选。`qq_send_pixiv` **永远排除 R-18/R-18G**（刻意不给 `r18` 参数）；筛选条件全部在本地对已抓回的数据做（镜像站只认 `keyword` 与 `page`），排序只支持投稿时间。
+- **生产上的坑**：`looksLikeImageBuffer` 只认开头 3 个字节，上半张正常、下半幅灰的图会全链路通过 —— 这是"半幅灰图"的根因；镜像站单张 2.7~5.7 秒、出现过 25 秒超时，所以它只垫底；cookie 与 Bearer **只发给 pixiv 自己的域名**（`pixivRequestHeaders`），镜像站永远看不到凭证。
+
+### QQ 空间
+
+- **能力定义**：看空间动态、评论、楼中楼回复、点赞、发说说（可带一张配图）。
+- **实现路径**：工具 `qq_qzone_view`（`mcp-napcat-safe.js:2500`）、`qq_qzone_comment`（`:2542`）、`qq_qzone_reply_comment`（`:2581`）、`qq_qzone_like`（`:2626`）、`qq_send_qzone`（`:2666`）；业务在 `core/qzone.js`，配图在 `lib/qzone-image.js`。
+- **关键约束**：配图**零落盘优先** —— 字节 ≤ `DEFAULT_BASE64_MAX_BYTES`（10MB，`lib/napcat-file.js:27`）时直接把 `base64://` 交给 NapCat，超限才写进 `napcat.tmpDir` 并在 `try/finally` 里成败都删（`qzone-image.js:101-131`）。空间是公开可见的，所以配图一律排除 R-18，与 `qq_send_pixiv` 同一规矩；`qq_send_qzone` / `qq_qzone_like` 受总开关 `QZONE_TOOL_DISABLED` 管。
+- **生产上的坑**：旧代码传给 `send_qzone_msg` 的参数名是 `file`，而 NapCat **只读 `images`** —— 那个参数一直被静默忽略（配了图也发不出来、还不报错）；点赞已改走 QZone 现役接口 `internal_dolike_app`（老的 `emotion_cgi_do_like_v6` 已 HTTP 500）；成功后 `tid` 在 `data.tid`，旧写法只读 `data.data.tid`（多套一层）导致 `tid` 恒为 null。
+
+### 撤回与历史
+
+- **能力定义**：模型说错话或发错对象时撤回自己刚发的消息；看不懂被引用的内容时展开转发消息、读群文件；需要旧信息时检索历史记录。
+- **实现路径**：`qq_withdraw_message`（`mcp-napcat-safe.js:1170`）、`qq_get_message_detail`（`:1488`）、`qq_get_my_recent_messages`（`:1470`）、`qq_get_forward_msg`（`:1923`，合并转发展开）、`qq_get_file_content`（`:1506`）、`qq_get_group_history`（`:862`）。检索在 `core/memory.js` 的 FTS5（`memory.js:172`），工具 `qq_memory_search`（`:2788`）。
+- **关键约束**：**只能撤自己发的**，`messageId` 来自唤醒正文的 `(id:xxx)` 或 `qq_get_my_recent_messages`；撤回事件由桥落库并标 `[已撤回]` + 写 `chat_messages.recalled_at`（`bridge.js:589-614`）。
+- **生产上的坑**：旧检索是 `content LIKE '%词%'` 全表扫，查不着时模型会说"我看不到更早的消息" —— 最贵的一种失败；现在是 FTS5 **trigram** 外部内容表 + 触发器同步 + BM25 排序，结构一变就把 `FTS_SCHEMA_VERSION` +1（`memory.js:120`、当前 `'2'`）自动重建。另有一个三角限制：trigram 要求每个 token 至少 3 个字符，**不足 3 字的关键词会被 FTS5 直接拒绝**（`memory.js:243`）。
+
+### 在途注入与回合保持
+
+- **能力定义**：模型正在跑某一步时到达的消息**不另起一轮**，直接 steer 进当前回合；回合保持（turn-hold）把首次唤醒开起来的回合继续吊住，让后续消息都落在同一个回合里。
+- **实现路径**：`core/wake-send.js` 的 `steerIntoRunningTurn`（`wake-send.js:800`）、`core/turn-hold.js`（`holdLoop:131`、`flushStepBatch`）、插件 `qq-bridge/plugins/dsh-qq-hold/`（`agent/turn-stopping` 钩子，路由 `core/console-server.js:1667`）；另一个发车点是 `core/mux.js` 收到 `step/end` 时调的 `flushStepBatch`。
+- **关键约束**：单个 HTTP 请求只持有 `requestBudgetMs`（默认 55 秒，夹在 `[3000, 120000]`，`turn-hold.js:137`），这一段没等来消息就返回 `{ close: false, again: true }`，插件收到后**立刻再发一次**（`again` 分片协议），于是对 DSH 而言钩子一直在等、对 HTTP 而言每个请求都很短。其余旋钮：`maxExchanges` 24、`idleCloseMs` 30 分钟、`maxWaitMs` 60 分钟、轮询 200ms、看门狗续期 5 秒。硬不变量：默认关闭（`social.turnHold.enabled !== true` 立即放行）、同一会话单飞（`activeHolds`）、**绝不在这里标读**、轮换到阈值即放行关回合。
+- **合并注入**：同一个模型步内只产生**一个** `[Mid-turn]` 块（`STEER_COLLECT_MS` 收集窗 + `STEER_CYCLE_MS = 5000` 周期闸），送达时刻与"一到就注入"相同，但模型只看到一个块、只发一条气泡。
+- **生产上的坑**：**一个 boolean 承担不了三种语义** —— `true` 既表示"真投进去了"，也表示"本回合已经给过它"，还表示"被周期闸攒住（其实什么都没投）"；`'typing-defer'` 表示对方在打字、继续攒；`false` 才是真失败。曾把"已经给过"返回 `false`，调用方读成没送成 → 又投一条完整唤醒进同一个回合 → 模型看到同一批未读两遍 → **QQ 上真的重复回了一次**。另外"被周期闸攒住"这个 `true` 必须验证真的落地（判据是 `collectMidTurnBatch(st)` 返回空），没落地就继续持有加重试，**绝不谎报成功**。
+
+### 表情包两套体系
+
+- **能力定义**：两套东西不要混 —— ① QQ 账号自己的**收藏表情**（官方接口）；② 随包分发的**内置表情包 meme-packs**（一份包 = 一个目录，`manifest.json` + `index.db` + `memes/<tag>/<文件名>`）。
+- **实现路径**：收藏侧 `qq_list_stickers`（`:1730`）、`qq_get_sticker_image`（`:1756`）、`qq_send_sticker`（`:1784`）、`qq_collect_sticker`（`:1811`）、`qq_sticker_note`（`:1866`）、`qq_set_sticker_remark`（`:1897`），实现在 `core/sticker.js`；内置侧 `qq_meme_search`（`:2047`）、`qq_send_meme`（`:2097`）；QQ 原生表情 `qq_face_list`（`:2736`）、`qq_send_qq_face`（`:2756`）。
+- **关键约束**：**一条消息就是一张贴纸或表情，不能同气泡带文字** —— 先发文字再发表情；`qq_set_sticker_remark` 默认关（`social.tools.setStickerRemark=false`），一般用 `qq_sticker_note` 就够。包目录三处：`<runtime>/meme/<packId>`（出厂）、`<runtime>/meme-packs/<packId>`（后装/上传）、`<角色库根>/<角色slug>/meme-packs/<packId>`（**角色专属**，跟着当前角色走，`mcp-napcat-safe.js:216-228`）；找不到包时 `qq_meme_search` / `qq_send_meme` **直接不注册**（`:251` 会打印尝试过的全部路径）。
+- **发布节奏**：发不发由桥掷骰（`core/send-dice.js` 的 `memeTurnHint`），概率 `social.sticker.sendProbability`（默认 0.3）、冷却 `sendCooldownMs`（默认 3 分钟），命中才插 `[Meme] dice HIT`；0 = 不主动发，只有被明确要求才发。
+- **生产上的坑**：NapCat 不暴露 `add_custom_face` 时收藏会**降级为本地图库**（`core/sticker.js:546-549`）；工具返回"这个 NapCat 版本不支持自动收藏"时就要停手、告诉对方暂时不行、**绝不重试**。GIF 不许当本地路径发（QQ 只显示闪烁的静态预览），必须走 `qq_send_meme`。
+
+### 联网搜索与解析
+
+- **能力定义**：`web_search` 联网搜索、`web_fetch` 抓网页正文；`qq_video_parse` 解析一个视频链接（只读）、`qq_video_search` 按关键词搜视频；位置信息走 `qq_send_rich` 的 `location` 卡片。
+- **实现路径**：`mcp-web-search-safe.js`（`web_search:944`、`web_fetch:980`，SSRF 防护走 `safe-fetch.js` 的 `validateFetchUrl` / `safeFetchBuffer`）；`qq_video_parse`（`mcp-napcat-safe.js:3064`）、`qq_video_search`（`:3083`）、`core/video.js`；位置卡在 `core/console-server.js:3302-3403`。
+- **关键约束**：视频解析拿不到元数据时会返回 `degraded:true` —— 就老实说看不到，别编。位置卡三种形态（`social.send.locationMode`）：`tuwen`（默认，高德图文卡）、`map`（静态地图图 + 地点文字 + 地图链接）、`native`（QQ 原生位置气泡）；配了高德 key 时用官方静态图，没配用实测可用的一张。
+- **生产上的坑**：原生 `location` 段用 `get_friend_msg_history` 回读时**段列表是空的**（`console-server.js:3306-3317` 的线上取证），所以默认不发它；真机那张腾讯地图卡是微信小程序卡、构造不出来，做的是"看起来就是腾讯地图那张卡"的图文卡（`appid=100571486` 是高德在 QQ 里的应用号，`social.send.locationApp='amap'` 可切回高德身份）。
+
+### 记忆与画像
+
+- **能力定义**：长期记忆的写入与检索、群友结构化档案、黑话库、人格与画像学习，共同支撑"记得住"。
+- **实现路径**：`core/memory.js`（分层 `MEMORY_TIERS:117`、FTS5 `:172`）、`core/persona-learn.js`、`core/portrait-learn.js`、`core/slang.js`、`core/persona-text.js`、`core/learning-token.js`。工具：`qq_memory_remember`（`:2826`）、`qq_memory_search`（`:2788`）、会话级记忆 `qq_memory_query` / `_append` / `_remove` / `_clear`（`:1578`/`:1548`/`:1598`/`:1622`）、档案 `qq_profile_get` / `qq_profile_set`（`:2262`/`:2280`）、学习 `qq_persona_learn_start` / `_stop` / `_status`（`:3578`/`:3598`/`:3616`）。
+- **关键约束**：三层记忆 `permanent`（0 = 永不过期，`pinned=1` 或 `category ∈ {rule, owner, identity}`）/ `durable`（90 天不活跃淡出，默认层）/ `working`（7 天淡出）；检索是 FTS5 `tokenize='trigram'` 外部内容表 + BM25。学习会话只加载 host 组 MCP，提交工具全名固定为 `mcp__napcat-host__qq_learning_submit` / `mcp__napcat-host__qq_learning_corpus`，写成 `mcp__napcat__` 那组会直接 unknown tool。
+- **`[Recall]` 注入位置是有讲究的**：永久层与高重要度记忆的短摘要走**唤醒正文**（`wake-send.js:451`，`limit: 14, maxChars: 700`），**不放进系统提示词** —— 系统提示词一变整段前缀缓存失效（那一步全价重读几万 token），摘要放在"每轮本来就新"的位置只花它自己那几百字符。
+- **学习触发方式四类**：立即 / 间隔 / 每日定时 / 文本指令；画像学习复用人格学习这套触发方式（`core/portrait-learn.js:1-3`），只是目标来源不同（前者手填 `persona.targetQQ`，后者从聊天记录里自动筛活跃群成员）。
+- **生产上的坑**：人格档案曾被一轮"只交了 nickname"的学习覆盖成两个词（旧的长文被整条覆盖），现在新文本明显更短且旧文够长时**保留旧文**（`mergePersonaProfileText`，`persona-learn.js:492`）；已确认的黑话词条不再常驻上下文，模型需要时自己查。
+
+### 卡片与富媒体
+
+- **能力定义**：音乐点歌卡、视频卡（原生小程序 Ark 优先）、联系人卡、位置卡、骰子/猜拳、合并转发、Word 文档。
+- **实现路径**：`qq_send_rich`（`:2980`）与 `core/media.js`（`createMediaDomain`）、`qq_music_search`（`:3039`）、`qq_send_forward`（`:2947`）、`qq_send_docx`（`:2917`）与 `core/docx.js`；签名服务是独立进程 `qq-bridge/music-sign-proxy.py`。
+- **封面三条硬规矩**：① 封面**只做 URL 归一化**（`normalizeCoverUrl()`：http 升 https、限定尺寸、补 `type=jpg`），**绝不过第三方图片代理**（`media.js:337-387`）；② 版式分两种 —— `share`（默认）照抄真机分享的图文卡，手机端会画封面，`music` 是旧的 `music.lua` 版式（手机端不画封面，还会被"将要访问"中转页拦一层，用 `social.send.musicCardStyle='music'` 可回退）；③ 视频卡**优先要原生 Ark**（B 站/微博走 NapCat 的 `com.tencent.miniapp_01`，`console-server.js:3273`），只有失败才回落"封面图 + 分享文本"。
+- **关键约束**：**绝不手写卡片字段** —— 模型只传 `type=music` + `musicType` + `musicId`，桥自己解析标题/歌手/封面/音频，失败自动回落成官方歌曲链接并在结果里写 `music.card=link`。`qq_send_docx` 有每日额度（`state/docx-quota.json`，`core/docx.js:27`）；NapCat 在容器里时宿主路径读不到，这正是 `lib/napcat-file.js` 存在的原因。超单条上限（`social.send.maxMessageChars`）时用 `qq_send_forward` 或 `qq_send_docx`，**不是**拆气泡。
+- **生产上的坑**：手写封面正是"手机端白卡"的元凶；封面加过一版 wsrv 代理，而代理会让签名服务把图转存成手机不渲染的 `qq.ugcimg.cn` 链接 —— 那一版已回退；网易云的封面 URL 写着 `.jpg`、`content-type` 也报 `image/jpg`，**字节却是 PNG**（magic `89504e`），光看扩展名分不出来，只能按首字节判；`y.gtimg.cn` 在本机客户端上时好时坏，统一改写成 `y.qq.com`。
+
+### 权限与安全
+
+- **能力定义**：决定"谁能跟机器人说话"（白名单/黑名单）与"谁能指挥它改配置"（主人/管理员），以及跨会话发送的授权。
+- **实现路径**：`core/config.js:77-90`（`allow` / `deny` / `allowAllWhenEmpty` / `allowAllPrivate` / `allowAllGroups`）、`lib/config.js` 的 `isAllowed`、`core/console-server.js` 的 `crossSessionRefusal`（`:550`）。工具：`qq_whitelist`（`:2344`）、`qq_blacklist`（`:2306`）、`qq_admin_set`（`:2325`）、`qq_remove_friend`（`:2363`）、`qq_set_system_config`（`:1152`）。
+- **关键约束**：白名单两边都空且 `allowAllWhenEmpty=true` 时放行所有，**启动会打警告**；`allowAllPrivate` / `allowAllGroups` 是分侧放行（"群严、私聊松"），这两个键恒为布尔（界面按"配置里存在的键"渲染）。`qq_whitelist` / `qq_admin_set` / `qq_set_system_config` 仅管理员私聊可用；**黑名单与删好友都不能作用于管理员**，主人不可删；发到非当前会话必须显式带 `crossSession=true`，否则拒绝。
+- **缺 key 直接拒绝**：工具层**永不猜会话** —— 缺 `key` 时报错并指回唤醒正文的 `[Session] group:<群号>` / `[Session] private:<QQ>` 那一行（`mcp-napcat-safe.js:566-575`）。因为旧实现会去猜"当前在途会话"（多会话在途时挑最近活跃的那个），**结果把图片发到过别的群**。发送类工具还额外走 `/api/social/check-send`，跨会话闸门装在那里才关得上。
+- **敏感内容兜底**：agent 回复命中本机路径/凭据特征（`qq-bridge/src/sensitive.js` 的 `SENSITIVE_RE`）时，`core/audit.js` 的 `handleSensitiveIntercept` **硬性拦截不发送**，宁可误拦不可泄露；`lib/text-safe.js` 提供 `redactSensitiveText` 供日志写入前脱敏。
+
+### 唤醒与调度
+
+- **能力定义**：一条群聊/私聊消息要不要唤醒模型、以什么理由唤醒；以及定时消息、主动搭话与活跃时段。
+- **实现路径**：`core/wake-send.js` 的 `evaluateWakeTrigger`（`wake-send.js:179`）与 `buildWakePrompt`；调度统一入口 `core/social-state.js` 的 `scheduleWake`；定时 `core/scheduler.js` + `qq_schedule_message`（`:1040`）/ `qq_schedule_list`（`:1067`）/ `qq_schedule_cancel`（`:1081`）；主动 `qq_proactive_send`（`:2020`）；活跃时段 `core/activity.js`（`startActivityTick:100`）+ `qq_get_activity_hours`（`:1106`）/ `qq_set_activity_hours`（`:1120`）。
+- **判定顺序即设计**：私聊 → 睡眠窗口（群聊窗口内只放行 @ 或引用）→ **@/引用优先于 `anyMessage`** → `anyMessage` → 点名 → 关键词（不超过 4 位的纯英文/数字关键词用词边界匹配，避免 `ADS`/`BDSM` 误触发）→ 提问（`isDirectedAtAi`）→ AI/技术话题（`TOPIC_WAKE_RE`）→ 指定发言人 → 概率。
+- **关键约束**：默认 `social.wake.defaultMode = 'active'`（**默认活跃**，每条消息都唤醒，`core/config.js:166-169`）；不再默认"无限期潜水"，想潜水时给一个有限时长（`recommendedSleepMinMs` / `recommendedSleepMaxMs`，默认 5~120 分钟），到点自然醒；沉睡前有强制观察窗口（`preSleepWaitMs` 默认 30 秒）。限流：`maxWakePerMinute` 1、`maxWakePerHour` 12；连续 `noActionLimit`（默认 3）次唤醒既没发消息也没 `mark_read` / `set_wake_config` 就软重置唤醒配置。
+- **生产上的坑**：`anyMessage` 分支曾排在 @ 前面，于是"@"被标成 `anyMessage`，而免打扰时段只放行"真实触发"→ 群里 @ 它却毫无反应（2026-09-19 修复，`wake-send.js:188-193`）。另外 `qq_wait_for_messages` 挂着时消息是作为**工具结果**回到模型手里的、根本不走投递路径，所以它配了 11 分钟的长等待超时，而不是默认的 180 秒静默判卡死。
+
+### 跨会话投递
+
+- **能力定义**：一个会话里的模型给**另一个会话**留言，或读取别的会话留给它的留言。
+- **实现路径**：`qq_crosschat_send`（`mcp-napcat-safe.js:1376`）、`qq_crosschat_inbox`（`:1398`），落库 `state/crosschat.json`，实现在 `core/crosschat.js`。
+- **关键约束**：工具必须显式带 `crossSession: true` 才允许发到非当前会话（`core/console-server.js` 的 `crossSessionRefusal`，`:550`）；"受信任的跨会话代发"名单 = 主人 `ownerQQ` 加上 `social.trustedCrossSessionUids`（`console-server.js:503`、`mux.js:314` 的 `isTrusted` 判定），名单外的来源不享受代发语义。
+- **闸门性质**：它属于"调用期"约束（拒绝调用，但不减少请求体积），与 `social.slimTools.*` 的**注册期**裁剪是两套机制，排查时别混。
+
+### 角色库与 persona 合成
+
+- **能力定义**：角色包（一个子目录 = 一个包）的只读检索；以及 `persona.md` + `speech-rules.md` 如何与 agent preset 合成后进入系统提示词。
+- **实现路径**：工具 `qq_character_list`（`:4405`）、`qq_character_read`（`:4421`）、`qq_character_pack`（`:4438`）、`qq_character_search`（`:4454`）；合成 `lib/preset-compose.js`（`composePresetText`、`readOverrideFiles`、`overrideStampOf`、`syncPresetOverrides`、`watchOverrideFiles`），装配在 `bridge.js:274-309`；是否需要补注入的判据在 `wake-send.js` 的 `shouldInjectPersonaBlock`（`:303`）。
+- **关键约束**：四个角色工具都是**只读**的，不改动人设文件；**只有导入 `persona.md` 的那一张卡会自动进提示词**，其余角色包不会。字节上限：`qq_character_read` 默认 32KB（硬上限 131,072）、`qq_character_pack` 默认 24KB（可放宽到 128KB），截断会如实说明砍了哪个文件的哪部分。文件上限：`persona.md` 16000 字符、`speech-rules.md` 12000 字符。
+- **生产上的坑**：旧实现超限只保头、整段丢尾 —— "**往文件末尾追加规则 = 大概率白写**"（线上 `speech-rules.md` 已到 6683 字符，从第 30 条后半句起一个字都没进模型）。现在改成**保头 + 保尾**（尾部 2500 字符必留），并把"砍掉了第几到第几个字符"写进日志（`wake-send.js:260-271`）。另外 `agentPreset` 只在**建会话时**绑定，改 preset 后老会话仍用旧提示词，要等轮换或归档重建。
+
+### 管理端与部署
+
+- **能力定义**：管理端是**编排者**（拉起进程、写配置、看日志、SSH 部署），不在 QQ 数据链上；桥侧则负责配置热加载与隔离 DSH 的装配。
+- **实现路径**：`server/index.js`（HTTP API、实例编排与探活、前端静态托管；`RUNTIME_ROOT` 见 `server/index.js:25-31`）、`server/deploy.js`（一键克隆与 `buildDeployKeepScript()`，`deploy.js:350`）、`server/napcat-guardian.mjs`（关窗守卫，独立进程）；桥侧 `core/config.js` 的 `watchConfigFile` + `applyConfigInPlace`、`lib/dsh-side.js`（`installToIsolatedDsh:590`、`patchProfileCordis`、`mcpBlock`）、`lib/dsh-compaction.js`、`lib/tool-tiers.js`、`lib/tool-schema-compress.js`。
+- **配置热加载**：`applyConfigInPlace` 是**原地合并**（不换对象引用，十几个模块持有的旧引用继续有效）；监听用**目录监听 + 2 秒轮询**双保险。生效期不同：`social.slimTools.*` 在**注册期**生效（改完要重启隔离 DSH），`social.tools.*` 只在**调用期**拒绝（不减少请求体积，不必重启）。
+- **隔离 DSH 装配**：桥启动时幂等地刷新 preset、装配三个内置插件、把三组 MCP server 写进 profile 的 `cordis.patch.yml`，**默认绝不碰桌面端那份 DSH**。MCP 压缩代理（`social.toolCompressor`，默认 `enabled !== false` 恒开）只挂 `mcp-napcat` 这一路，把工具压成 `<server>_invoke_tool` / `<server>_get_tool_schema` 两个包装工具；探不到压缩机就**回落直连并把原因写进日志 —— 绝不把工具表搞没**。桥侧由 `core/mux.js` 的 `unwrapCompressedToolName` 把包装名还原成真实工具名。
+- **部署保能力**：解包前把目标机原有的 `config.json` / `persona.md` / `state/` 存到 `/root/qqbridge-keep-<TS>/`，解包后逐键合并再恢复核对；旧行为把它们备份到 `/root/qqbridge-prev-<TS>/` 就删库重解包，**从来没放回去**过。
+- **生产上的坑**：只监听文件会在管理端"临时文件 → 备份 → mv"原子替换后盯住已被 unlink 的旧 inode，此后**任何改动都不再触发**（线上实测 07:39:54 覆盖之后，桥日志里一条"已热加载"都没有）；桥自己还有 10 处会把内存里的旧 cfg 写回 `config.json`，没做热加载时管理端的改动不但不生效，还会被**回滚**掉。
+
+### 成本与计量
+
+- **能力定义**：每次请求记账、用量对账、QQ 里打 `/token` 直接看用量与花费。
+- **实现路径**：`core/token-meter.js`（`meterTokenFrame:514`、`startTokenReconcile:990`）、`core/token-report.js`（`/token`）、`core/context-savings.js`（`initContextSavings:198`）、管理端 `src/pages/Learning.tsx`。
+- **关键约束**：真实 `usage` 帧优先，没有就按帧内文本估算（估算行打 `est: true`）；对账把 DSH 自己 projcache 里的权威累计差额补成 `reconciled: true` 的行，找不到 DSH home 时静默跳过。计价参数在 `tokenCost`（`core/config.js:108-115`，单位 ¥/百万 token，`peakHours` 为北京时间高峰小时）；改它会同时改变 `/token` 的口径，管理端面板仍读自己的 `localStorage`。
+- **两个日界口径别混**（`core/token-report.js:99-113`）：**计费日** = 北京 08:00 换日（提供方控制台口径，面板顶部"今日已用"）；**北京自然日** = 00:00 起（分时桶，面板"实测计量"里的"今日 token 合计"）。线上实测同一天两者分别是 592,685 与 12,182,789。现在**逐行标注口径**，`/token N` 按 `dates`（计费日逐日）求和。
+- **压缩阈值数学**（阈值 0.16 怎么算出来的、为什么永久会话比轮换便宜）见 [docs/COMPACTION-MATH.md](docs/COMPACTION-MATH.md)，本节不复述；复算脚本 `node qq-bridge/tools/compaction-threshold.mjs`。
+- **生产上的坑**：旧版 `/token` 把两个口径**挨着印**（第一行取计费日，第二行的分量与金额却来自自然日），读起来像算错了；`/token 7` 还曾把"只算今天"的 `billedTotal` 印成"近 7 天"—— 现在按计费日逐日合计。
+
+---
+
 ## 它现在能做什么
 
-按能力分组，**每条都能在 [docs/CAPABILITIES.md](docs/CAPABILITIES.md) 里找到实现工具、代码位置与踩过的坑**。
+按能力分组的能力清单。**实现工具、代码位置、关键闸门与踩过的坑见上文「能力实现细节」**；更细的旁证（含未逐行核实的条目标注）在 [docs/CAPABILITIES.md](docs/CAPABILITIES.md)。
 
 ### 会话与唤醒
 
