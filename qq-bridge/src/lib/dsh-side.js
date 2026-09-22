@@ -144,7 +144,12 @@ function yamlQuoteForPath(p) {
 /** 拷贝两套 agent preset 到 <home>/.agent-presets/ */
 export function installPresets(target) {
   if (isDesktopDshHome(target.home)) throw new Error(`refuse: desktop home ${target.home}`);
-  for (const name of ['default', 'liangshen']) {
+  /* 【2026-09-22 修一处会静默失效的名单】这里原来写的是 `['default', 'liangshen']`，
+   * 而仓库里实际只有 `dsh/agent-presets/{default, qq-chat}` —— `liangshen` 源不存在，只打一行 skip，
+   * 于是 `qq-chat` 这套 preset **永远不会被装进隔离 DSH**；一旦有人把 `agentPreset` 改成 `qq-chat`，
+   * `core/dsh-session.js` 会传一个 home 里根本不存在的 preset 名（建会话时才绑 preset）。
+   * 现在按仓库真实存在的目录来装：default 必装，另一套若在就一起装（找不到只 skip，不报错）。 */
+  for (const name of ['default', 'qq-chat']) {
     const src = path.join(REPO_ROOT, 'dsh', 'agent-presets', name);
     if (!fs.existsSync(src)) { log(`preset source missing, skip: ${src}`); continue; }
     const dest = path.join(target.home, '.agent-presets', name);
