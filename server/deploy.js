@@ -327,7 +327,84 @@ export async function ensureTargetEnv(conn, task) {
 }
 
 /* ---------------- 需要从源机带走的目录清单 ---------------- */
-// stage 文件相对源机 /root/.qqbridge-clone/
+/**
+ * 部署到目标机时**保住目标机自己那份能力**的收尾脚本（2026-09-22 主人要求"确保 SSH 部署可以完美保能力"）。
+ *
+ * 为什么要它：bridge 那个包是"整套"打的（代码 + config.json + state/），解包前只把目标机的
+ * config.json / voice-config.json **备份**到 /root/qqbridge-prev-<TS>/，**从来没有放回去** ——
+ * 于是"更新一次代码"会顺带把目标机上配好的东西整片覆盖：
+ *   · config.json：pixiv 登录 cookie、语音 TTS key、白名单/拉黑、主人 QQ、napcat 路径与容器映射、
+ *     工具档位 / 打字节拍 / 压缩阈值这些**主人调过的旋钮**（本机 150ms/字 vs 服务器 650ms/字 就是这么来的）；
+ *   · state/：memory.db（记住的东西）、social-state.json、stickers/slang/画像、token 用量账本；
+ *   · persona.md：当前角色。
+ * 现在的语义是 **"部署 = 换代码，不换身份与记忆"**：
+ *   ① 解包前把目标机的 config.json / persona.md / state/ 存到 /root/qqbridge-keep-<TS>/；
+ *   ② 解包（代码换成新的）；
+ *   ③ 收尾脚本做三件事：
+ *      - config.json **逐键合并**：目标机有的键一律以目标机为准（新版本新增的键才用包里的默认值）→
+ *        既不吃掉主人调过的旋钮，也不会因为配置缺新键而少能力；
+ *      - state/ 与 persona.md 用目标机的覆盖回来（记忆/画像/贴纸库/角色不丢）；
+ *      - 打印"保留了哪些键、补了哪些新键"，让这一步可见。
+ * 想回到老的"整套复刻"语义（把源机的配置和记忆一起推过去）→ 目标机上 `QQB_DEPLOY_WHOLE_CLONE=1` 时跳过这套保护。
+ */
+export function buildDeployKeepScript() {
+  const js = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const BR = '/root/qq-bridge';",
+    "const KEEP = process.argv[2];",
+    "if (!KEEP || !fs.existsSync(KEEP)) { console.log('（目标机没有旧版本，跳过保护：这是一次全新部署）'); process.exit(0); }",
+    "if (process.env.QQB_DEPLOY_WHOLE_CLONE === '1') { console.log('QQB_DEPLOY_WHOLE_CLONE=1 → 按「整套复刻」处理，不做保护'); process.exit(0); }",
+    "const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };",
+    "// —— ① config.json：逐键合并，目标机优先；只补新版本新增的键 ——",
+    "const oldCfg = readJson(path.join(KEEP, 'config.json'));",
+    "const newCfg = readJson(path.join(BR, 'config.json'));",
+    "if (oldCfg && newCfg) {",
+    "  const kept = []; const added = [];",
+    "  const merge = (o, n, prefix) => {",
+    "    for (const k of Object.keys(o)) {",
+    "      const p = prefix ? prefix + '.' + k : k;",
+    "      const ov = o[k]; const nv = n[k];",
+    "      if (ov && typeof ov === 'object' && !Array.isArray(ov) && nv && typeof nv === 'object' && !Array.isArray(nv)) { merge(ov, nv, p); continue; }",
+    "      if (JSON.stringify(ov) !== JSON.stringify(nv)) kept.push(p);",
+    "      n[k] = ov;",
+    "    }",
+    "    for (const k of Object.keys(n)) if (!(k in o)) added.push(prefix ? prefix + '.' + k : k);",
+    "  };",
+    "  merge(oldCfg, newCfg, '');",
+    "  fs.writeFileSync(path.join(BR, 'config.json'), JSON.stringify(newCfg, null, 2) + String.fromCharCode(10), 'utf8');",
+    "  console.log('config.json：按目标机为准保留 ' + kept.length + ' 个键' + (kept.length ? '（' + kept.slice(0, 8).join(', ') + (kept.length > 8 ? ' …' : '') + '）' : '')",
+    "    + '；新版本新增 ' + added.length + ' 个键' + (added.length ? '（' + added.slice(0, 8).join(', ') + (added.length > 8 ? ' …' : '') + '）' : ''));",
+    "} else if (!oldCfg) console.log('config.json：目标机原本没有这份配置，直接用包里的');",
+    "// —— ② state/ 与 persona.md：目标机的覆盖回来（记忆/画像/贴纸/角色不丢） ——",
+    "const copyTree = (from, to) => {",
+    "  let n = 0;",
+    "  for (const e of fs.readdirSync(from, { withFileTypes: true })) {",
+    "    const s = path.join(from, e.name); const d = path.join(to, e.name);",
+    "    if (e.isDirectory()) { fs.mkdirSync(d, { recursive: true }); n += copyTree(s, d); }",
+    "    else { fs.copyFileSync(s, d); n += 1; }",
+    "  }",
+    "  return n;",
+    "};",
+    "const oldState = path.join(KEEP, 'state');",
+    "if (fs.existsSync(oldState)) {",
+    "  fs.mkdirSync(path.join(BR, 'state'), { recursive: true });",
+    "  const n = copyTree(oldState, path.join(BR, 'state'));",
+    "  console.log('state/：恢复了目标机 ' + n + ' 个文件（记忆库/会话状态/用量账本/贴纸与画像都在这里）');",
+    "}",
+    "const oldPersona = path.join(KEEP, 'persona.md');",
+    "if (fs.existsSync(oldPersona)) { fs.copyFileSync(oldPersona, path.join(BR, 'persona.md')); console.log('persona.md：保留了目标机的角色文件'); }",
+    "console.log('能力保护完成（备份留在 ' + KEEP + '，要整片回滚直接拿它覆盖 /root/qq-bridge）');",
+  ].join('\n');
+  return [
+    "cat > /tmp/qbm-deploy-keep.js <<'KEEPEOF'",
+    js,
+    'KEEPEOF',
+    'KEEP_DIR=$(ls -d /root/qqbridge-keep-* 2>/dev/null | tail -1 || true)',
+    'node /tmp/qbm-deploy-keep.js "$KEEP_DIR"; rm -f /tmp/qbm-deploy-keep.js',
+  ].join('\n');
+}
+
 function buildStagePlan(task, src, opts) {
   const plan = [];
   // 1. 桥(代码+config+state 记忆/画像数据; 排除 .git 与锁/日志/node_modules——原生模块 sharp 需目标机重新 npm install)
@@ -335,9 +412,14 @@ function buildStagePlan(task, src, opts) {
     name: 'bridge',
     stage: 'qq-bridge.tar.gz',
     pack: `tar czf /root/.qqbridge-clone/qq-bridge.tar.gz -C /root --exclude='qq-bridge/.git' --exclude='qq-bridge/node_modules' --exclude='qq-bridge/state/bridge.lock' --exclude='qq-bridge/state/bridge*.log' qq-bridge`,
-    // 【2026-09-19】与"本机复刻"那条一样：解包前先备份目标机原有的 config.json 与语音配置，
-    // 免得"整套复刻"把服务端那侧配好的东西（pixiv 登录 cookie、语音 key、白名单）覆盖没了。
-    dst: `set -e; TS=$(date +%Y%m%d-%H%M%S); if [ -d /root/qq-bridge ]; then mkdir -p /root/qqbridge-prev-$TS; cp -a /root/qq-bridge/config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; cp -a /root/qq-bridge/state/voice-config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; echo "目标机原配置已备份: /root/qqbridge-prev-$TS"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf - -C /root`,
+    /* 【2026-09-22 主人要求"确保 SSH 部署可以完美保能力"】
+     * 老行为：只把目标机的 config.json / voice-config.json **备份**到 /root/qqbridge-prev-<TS>/ 就删库重解包，
+     * **从不放回去** → "更新一次代码"会把目标机配好的东西整片覆盖（pixiv cookie、语音 key、白名单、
+     * 主人调过的工具档位/节拍/阈值，以及 state/ 里的记忆库与画像）。
+     * 新行为：解包前把 config.json / persona.md / state/ 存到 /root/qqbridge-keep-<TS>/，
+     * 解包后由 buildDeployKeepScript() 做"逐键合并 + state 覆盖回来"，语义变成**部署=换代码，不换身份与记忆**。
+     * 要老的"整套复刻"就在目标机设 QQB_DEPLOY_WHOLE_CLONE=1。 */
+    dst: `set -e; TS=$(date +%Y%m%d-%H%M%S); KEEP=/root/qqbridge-keep-$TS; if [ -d /root/qq-bridge ]; then mkdir -p $KEEP; cp -a /root/qq-bridge/config.json $KEEP/ 2>/dev/null || true; cp -a /root/qq-bridge/persona.md $KEEP/ 2>/dev/null || true; cp -a /root/qq-bridge/state $KEEP/state 2>/dev/null || true; echo "目标机的 config.json / persona.md / state 已存到 $KEEP（解包后会以目标机为准恢复）"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf - -C /root; ${buildDeployKeepScript().replace(/\n/g, '; ')}`,
     restart: '', // bridge 单独管理
   });
   // 2. DSH 主目录(DSH_HOME 全部: settings/credentials/agent-presets/profiles/sessions/storages/meme-packs)
