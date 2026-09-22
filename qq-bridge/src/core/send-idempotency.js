@@ -71,8 +71,15 @@ export function noteBatchOutcome(key, { attempted = [], delivered = [], failed =
   }
   const failedCount = Array.isArray(failed) ? failed.length : Number(failed) || 0;
   if (failedCount > 0) {
-    // 只登记"真的发出去了"的那几条：重发时它们要被挡下，没发出去的照发。
-    pendingPartial.set(k, { at: now, delivered: new Set(deliveredNorms), failedCount });
+    /* 只登记"真的发出去了"的那几条：重发时它们要被挡下，没发出去的照发。
+     * 【2026-09-22 修 M17·"账本被整批覆盖"】旧写法是**直接 set 一个全新的 Set**：第一批发了 A、失败 B
+     * （账本 {A}）；模型重发时发出 B、又失败 C → 账本被覆盖成 {B}，**A 的记录丢了**；
+     * 第三次它把 [A,B] 又发一遍时只挡得住 B → A 被**真的重复发出去**。
+     * 现在改成在重发窗口内**并集合并**：窗口内的历史已发条目一律保留。 */
+    const prev = pendingPartial.get(k);
+    const merged = new Set((prev && (now - Number(prev.at || 0)) <= REPLAY_WINDOW_MS) ? prev.delivered : []);
+    for (const t of deliveredNorms) merged.add(t);
+    pendingPartial.set(k, { at: now, delivered: merged, failedCount });
     return { pending: true, delivered: deliveredNorms.length, failed: failedCount, attempted: norm(attempted).length };
   }
   pendingPartial.delete(k);

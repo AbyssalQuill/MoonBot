@@ -101,6 +101,13 @@ export const flushQueue = async () => {
     }
   } finally {
     flushingQueue = false;
+    /* 【2026-09-22 修 M17】这一轮跑完后队列里又有了东西（可能是本轮补投失败放回的，
+     * 也可能是**补投期间**新排进来的）→ 必须再排一次 flush。旧写法什么都不做，而排队的
+     * `setTimeout(flushQueue, 3000)` 若恰好在本轮进行中触发，会命中开头的 `if (flushingQueue) return`
+     * **直接丢掉**，队列就静静躺在那里等到下一次入队才动（表现：消息卡着不补投）。 */
+    if (queued.size > 0) {
+      setTimeout(() => { flushQueue(); }, 500);
+    }
   }
 };
 

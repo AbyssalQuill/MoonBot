@@ -88,7 +88,17 @@ export async function ensureSession(key) {
     } else {
       try {
         await ensureVisionModel(existing);
-        return existing;
+        /* 【2026-09-22 修 M17·"代际守卫恒 false"】上面那个 await 期间可能发生过 /workspace/reset
+         * （sessionEpoch 会变）：旧映射指向的会话正在被归档，直接 `return existing` 等于把消息投进一个
+         * 已作废的会话。而原来那个 `epoch !== sessionEpoch` 判断的两个读点之间**没有 await**，恒为 false，
+         * 等于根本没有守卫。现在在 await **之后**复核一次：代际变了就丢掉映射，往下走去重建新会话。 */
+        if (epoch !== sessionEpoch) {
+          delete state.sessions[key];
+          if (reverse.get(existing) === key) reverse.delete(existing);
+          log(`会话 ${existing} 在设置视觉模型期间被重置（代际 ${epoch} → ${sessionEpoch}），丢弃旧映射并重建`);
+        } else {
+          return existing;
+        }
       } catch (vErr) {
         if (/session.not.found/i.test(String(vErr?.message ?? vErr))) {
           log(`会话 ${existing} 不存在（DSH 可能已重启），清除映射并重建`);
