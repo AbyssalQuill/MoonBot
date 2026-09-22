@@ -74,11 +74,59 @@ await check('① 有数据时正文包含总量与钱数，且估算行不并进
     const r = buildTokenReportText({ days: 1 });
     const billed = Number(rep.today.billedTotal);
     assert.ok(billed > 0, `billedTotal=${billed}`);
-    assert.ok(r.text.includes(fmtTok(billed)), r.text);
+    // 【2026-09-22】第一行是"平台计费日"口径，数字带千分位（跟面板顶部「今日已用」逐位对得上）
+    assert.ok(r.text.includes(Number(billed).toLocaleString('en-US')), r.text);
+    assert.match(r.text, /平台计费日/);
     assert.match(r.text, /¥\d/);
     assert.match(r.text, /另有估算/);
     // 估算行绝不进 billedTotal
     assert.equal(billed, 4 * (1000 + 50 + 200000));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+await check('① 两个日界口径必须分行标注（计费日 vs 北京自然日），不许混在一行里', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v13-tok2-'));
+  try {
+    // 造"跨换日"的数据：今天（计费日）只有一点点，而北京自然日 00:00 起有一大堆
+    // —— 线上现场就是 592,685（计费日）vs 12,182,789（自然日），旧版把两者挨着印，看着像算错。
+    const now = Date.now();
+    const rows = [];
+    rows.push({ tsMs: now - 60_000, sessionId: 's', convKey: 'private:1', prompt: 2000, completion: 600, total: 592685, est: false, cacheRead: 589824, cacheWrite: 0 });
+    // 自然日更早时段（仍在同一个"北京自然日"里，但属于上一个计费日）
+    rows.push({ tsMs: now - 3 * 3600_000, sessionId: 's', convKey: 'private:1', prompt: 300000, completion: 20000, total: 11800000, est: false, cacheRead: 11500000, cacheWrite: 0 });
+    fs.writeFileSync(path.join(dir, 'token-usage.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    initTokenMeter({ stateDir: dir });
+    initTokenReportCore({ tokenCost: { ...DEFAULT_TOKEN_COST } });
+    const r = buildTokenReportText({ days: 1 });
+    const rep = getTokenReport(1);
+    const natural = (rep.todayHourly || []).reduce((a, h) => a + h.prompt + h.completion + h.cacheRead, 0);
+    assert.ok(natural > Number(rep.today.billedTotal), `自然日 ${natural} 应大于计费日 ${rep.today.billedTotal}`);
+    assert.ok(r.text.includes(Number(rep.today.billedTotal).toLocaleString('en-US')), `缺计费日数字: ${r.text}`);
+    assert.ok(r.text.includes(Number(natural).toLocaleString('en-US')), `缺自然日数字: ${r.text}`);
+    assert.match(r.text, /自然日 00:00 起/);
+    assert.match(r.text, /平台算在昨天/);
+    assert.ok(!/NaN|undefined/.test(r.text), r.text);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+await check('① 近 N 天报的是"整段窗口"的总量，不是只算今天（旧版这里错取 today.billedTotal）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v13-tok3-'));
+  try {
+    const DAY = 86400_000;
+    const now = Date.now();
+    const rows = [];
+    for (let d = 0; d < 4; d++) {
+      rows.push({ tsMs: now - d * DAY, sessionId: 's', convKey: 'private:1', prompt: 1000, completion: 100, total: 1_000_000, est: false, cacheRead: 998900, cacheWrite: 0 });
+    }
+    fs.writeFileSync(path.join(dir, 'token-usage.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    initTokenMeter({ stateDir: dir });
+    initTokenReportCore({ tokenCost: { ...DEFAULT_TOKEN_COST } });
+    const r = buildTokenReportText({ days: 7 });
+    assert.match(r.text, /近 7 天/);
+    const shown = Number((r.text.match(/近 7 天 ([\d,]+) tok/) || [])[1]?.replace(/,/g, '') || 0);
+    assert.ok(shown >= 1_000_000, `近 7 天总量应含窗口内每一天，实际=${shown}`);
+    assert.ok(shown <= 4_000_000, `不应超过窗口内实际用量，实际=${shown}`);
+    assert.ok(!/NaN|undefined/.test(r.text), r.text);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

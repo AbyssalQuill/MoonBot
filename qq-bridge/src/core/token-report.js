@@ -95,6 +95,22 @@ export function summarizeMeasuredCost(hours, price) {
 
 /**
  * 组一条 `/token` 回复（短句、人话；空行分气泡由调用方决定）。
+ *
+ * 【2026-09-22 修「/token 与管理端面板对不上」——是**口径混用**，不是算错】
+ * 线上实测（北京 10:00 那次，数字全部可复算）：
+ *   · 面板顶部「今日已用」            = **592,685**  ← `today.billedTotal`，**计费日**（08:00 换日 = 提供方控制台口径）
+ *   · 面板「实测计量」里的「今日 token 合计」= **12,182,789** ← 分时桶合计，**北京自然日** 00:00 起
+ *   · 面板两处都对，区别只在口径；面板自己也在正文里写了「北京自然日 00:00 起合计 …… 其中
+ *     00:00–08:00 那段平台算在昨天」。
+ * 而旧版 /token 把两个口径**挨着印**：第一行总量取计费日（592.7k），第二行的"新输入/命中/输出"
+ * 与金额却来自自然日分时桶（12.18M 那一套）——读起来就是"592.7k 下面挂着 12.18M 的分量"，
+ * 当然像算错了。现在**逐行标注口径**，并且每个数字都能在面板里指到出处：
+ *   第 1 行 = 面板顶部「今日已用」（计费日，平台口径）
+ *   第 2/3 行 = 面板「实测计量」的命中率与命中/未命中/输出、及其下方「今日 token 合计」（自然日）
+ *   第 4 行 = 面板「今日费用」（实测，按自然日分时，含谷时/高峰拆分）
+ *   最后一行 = 面板「今日预计」
+ * `days>1` 那条路原来还有个真 bug：总量取的是 **today.billedTotal**（只算今天），却印成"近 N 天"。
+ * 现在按 `dates`（计费日逐日）求和。
  * @param {{days?:number}} opts days=取几天（默认 1=今天）
  * @returns {{ok:boolean, text:string, data:object}}
  */
@@ -107,47 +123,68 @@ export function buildTokenReportText(opts = {}) {
   const price = priceCfg();
   const sum = summarizeMeasuredCost(rep?.todayHourly, price);
   const today = rep?.today ?? {};
-  // 计费总量：提供方 total_tokens 口径（未命中 + 命中 + 缓存写 + 输出）。
-  // today.billedTotal 只有真实行；估算行（estTotal）单独列，绝不并进钱里。
-  const billed = Number(today.billedTotal) || 0;
-  const est = Number(today.estTotal) || 0;
-  const scope = days === 1 ? '今日' : `近 ${days} 天`;
-  const lines = [];
-
-  if (billed <= 0 && est <= 0) {
-    lines.push(`${scope}还没有用量记录（一条 usage 帧都还没收到）`);
-    return { ok: true, text: lines.join('\n'), data: { billed, est, cost: 0 } };
-  }
-
-  const money = days === 1
-    ? sum.cost
-    : (() => {   // 多日：逐日按同样口径累加（dates 里没有分时，用整日四项近似并加高峰说明）
-      let c = 0;
-      for (const d of rep?.dates ?? []) {
-        c += ((Number(d.cacheRead) || 0) * price.pHit
-          + (Number(d.prompt) || 0) * price.pMiss
-          + (Number(d.completion) || 0) * price.pOut) / 1e6;
-      }
-      return c;
-    })();
-
-  lines.push(`${scope} ${fmtTok(billed)} tok · ¥${money.toFixed(4)}`);
+  // 计费日（平台口径）：未命中 + 命中 + 缓存写 + 输出，只有真实行
+  const todayBilled = Number(today.billedTotal) || 0;
+  const todayEst = Number(today.estTotal) || 0;
+  // 北京自然日 00:00 起：分时桶合计（面板「今日 token 合计」就是它）
+  const naturalTotal = sum.dayTotal;
+  const naturalSame = naturalTotal > 0 && Math.abs(naturalTotal - todayBilled) < Math.max(1, todayBilled * 0.005);
+  const startBj = Number(rep?.dayWindow?.startBjMinutes);
+  const hasShift = Number.isFinite(startBj) && startBj > 0;
+  const startLabel = hasShift ? `${String(Math.floor(startBj / 60)).padStart(2, '0')}:${String(startBj % 60).padStart(2, '0')}` : '00:00';
+  const dayStartLabel = `北京 ${startLabel} 换日`;
+  const windowDates = Array.isArray(rep?.dates) ? rep.dates : [];
+  const windowTotal = windowDates.reduce((a, d) => a + (Number(d?.total) || 0), 0);
   const rate = sum.measuredRate;
-  const parts = [];
-  if (rate != null) parts.push(`命中 ${(rate * 100).toFixed(1)}%`);
-  parts.push(`新输入 ${fmtTok(sum.dayMiss)} / 命中 ${fmtTok(sum.dayCacheRead)} / 输出 ${fmtTok(sum.dayOut)}`);
-  lines.push(parts.join(' · '));
-  if (days === 1 && sum.peakHours > 0) {
-    lines.push(`谷时 ¥${sum.offCost.toFixed(4)} · 高峰 ¥${sum.peakCost.toFixed(4)}（${sum.peakHours} 个小时 ×${price.peakMult}）`);
-  }
-  if (est > 0) lines.push(`另有估算 ${fmtTok(est)} tok（没拿到真实 usage 的回合，不计钱）`);
+  const ratePart = rate != null ? `命中 ${(rate * 100).toFixed(1)}% · ` : '';
+  const compPart = `未命中 ${fmtNum(sum.mMiss)} / 命中 ${fmtNum(sum.mHit)} / 输出 ${fmtNum(sum.mOut)}`;
+
   if (days === 1) {
+    if (todayBilled <= 0 && todayEst <= 0) {
+      return {
+        ok: true,
+        text: `今日还没有用量记录（一条 usage 帧都还没收到）`,
+        data: { days, billed: todayBilled, naturalTotal, est: todayEst, cost: 0 },
+      };
+    }
+    const lines = [];
+    lines.push(`今日 ${fmtNum(todayBilled)} tok —— 平台计费日（${dayStartLabel}，与提供方控制台对得上）`);
+    if (!naturalSame) {
+      lines.push(`自然日 00:00 起 ${fmtNum(naturalTotal)} tok（含 00:00–${startLabel} 那段，平台算在昨天）`);
+    }
+    lines.push(`${ratePart}${compPart}`);
+    // 金额口径 = 面板「今日费用」：按自然日分时、只算带缓存字段的请求、高峰小时整体乘倍率
+    const money = sum.cost;
+    lines.push(sum.peakHours > 0
+      ? `费用 ¥${money.toFixed(4)}（谷时 ¥${sum.offCost.toFixed(4)} · 高峰 ¥${sum.peakCost.toFixed(4)}，${sum.peakHours} 个小时 ×${price.peakMult}）`
+      : `费用 ¥${money.toFixed(4)}`);
+    if (todayEst > 0) lines.push(`另有估算 ${fmtTok(todayEst)} tok（没拿到真实 usage 的回合，不计钱）`);
     const proj = Number(rep?.todayEstimatedTotal) || 0;
-    if (proj > billed) lines.push(`按今天的节奏，全天大概 ${fmtTok(proj)} tok`);
+    if (proj > todayBilled) lines.push(`按今天的节奏，全天大概 ${fmtNum(proj)} tok`);
+    return {
+      ok: true,
+      text: lines.join('\n'),
+      data: {
+        days, billed: todayBilled, naturalTotal, naturalSame, est: todayEst, cost: money,
+        rate, peakCost: sum.peakCost, offCost: sum.offCost, projected: proj,
+      },
+    };
   }
+
+  // 近 N 天：总量按 `dates`（计费日逐日）求和 —— 旧版这里错取了"只算今天"的 billedTotal
+  const lines = [];
+  lines.push(`近 ${days} 天 ${fmtNum(windowTotal)} tok（计费日逐日合计，含今日）`);
+  let c = 0;
+  for (const d of windowDates) {
+    c += ((Number(d?.cacheRead) || 0) * price.pHit
+      + (Number(d?.prompt) || 0) * price.pMiss
+      + (Number(d?.completion) || 0) * price.pOut) / 1e6;
+  }
+  lines.push(`费用约 ¥${c.toFixed(4)}（逐日按谷时价算，未含高峰倍率）`);
+  if (todayBilled > 0) lines.push(`其中今日 ${fmtNum(todayBilled)} tok · ¥${sum.cost.toFixed(4)}（自然日分时实测）`);
   return {
     ok: true,
     text: lines.join('\n'),
-    data: { billed, est, cost: money, rate, peakCost: sum.peakCost, offCost: sum.offCost, days },
+    data: { days, windowTotal, cost: c, billed: todayBilled, naturalTotal, todayCost: sum.cost, rate },
   };
 }
