@@ -25,7 +25,7 @@ import {
   resolvePixivAuthor, pixivLoggedIn,
   planPixivSend, pixivTierSizeVerdict,
 } from './lib/pixiv.js';
-import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES } from './safe-fetch.js';
+import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES, verifyImageComplete } from './safe-fetch.js';
 // 发送前要拿"实际拿到的像素"跟档位对账（见 qq_send_pixiv 的档位闸门）：只用它的头部嗅探，纯函数、无副作用。
 import { sniffImageInfo } from './lib/image-compress.js';
 // 【2026-09-21】说说配图：取图 + 体检 + 变成 NapCat `images` 收得下的参数（零落盘优先）。
@@ -3134,18 +3134,66 @@ if (cfg.social?.tools?.imageSearch !== false) {
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
+      file: z.string().optional().describe('Absolute path of a picture that already exists ON THE BRIDGE HOST - use this to FORWARD an image you were given (e.g. the DSH attachment path of a picture the other person sent you) or any local image. Takes precedence over imageUrl/query.'),
       query: z.string().optional().describe('Search keyword (used when imageUrl is not given)'),
       imageUrl: z.string().optional().describe('Direct image URL (from qq_image_search). Takes precedence over query.'),
       index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
     },
-    async ({ key, token, query, imageUrl, index, replyToMessageId }) => {
+    async ({ key, token, file, query, imageUrl, index, replyToMessageId }) => {
       try {
+        /* 【2026-09-22 修「不能转发图片」】qimage 这条工具原来只有 query / imageUrl 两条路 ——
+         * 模型手上有"别人发来的那张图"（DSH 把它存成附件对象 /root/.dsh/attachments/v1/objects/…）时
+         * 无路可走：它只能把那个**本地路径**当参数传进来，而 schema 里没有 file 这个字段
+         * （日志现场：`qq_send_image {file: /root/.dsh/attachments/v1/objects/73/7359…}`，用户端什么都没收到）。
+         * 现在补上 file：直接读宿主机上的字节 → 同一道完整性闸门 → 交给 NapCat 前先过路径映射
+         * （napcatImageFileArg：容器部署时把宿主路径换成容器内路径）。 */
+        const localFile = String(file ?? '').trim();
+        if (localFile) {
+          let buf;
+          try {
+            const st = fs.statSync(localFile);
+            if (!st.isFile()) throw new Error('不是文件');
+            if (st.size > MAX_IMAGE_FETCH_BYTES) throw new Error(`超过 ${Math.round(MAX_IMAGE_FETCH_BYTES / 1024 / 1024)}MB 上限`);
+            buf = fs.readFileSync(localFile);
+          } catch (e) {
+            return { content: [{ type: 'text', text: `读不到这张图（${localFile}）：${e?.message ?? e}。若这是聊天里那张图，用 qq_get_message_images 取回内容再发。` }], isError: true };
+          }
+          const check = verifyImageComplete(buf, buf.length, null);
+          if (!check.ok) {
+            return { content: [{ type: 'text', text: `这张图字节不完整（${check.reason}），没有发出去。` }], isError: true };
+          }
+          const cfgFile = getConfig();
+          const napcatArg = napcatImageFileArg(localFile, cfgFile, { log: (m) => console.error(`[napcat-safe] ${m}`) });
+          const bodyF = { key, messages: [], images: [napcatArg] };
+          const ridF = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
+          if (ridF) bodyF.replyToMessageId = ridF;
+          const dataF = await agentApi('/api/social/send-message', {
+            method: 'POST',
+            body: JSON.stringify(bodyF),
+            headers: { 'x-agent-token': token },
+            timeoutMs: 120000,
+          });
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                ok: true,
+                from: 'file',
+                file: localFile,
+                bytes: buf.length,
+                sent: dataF?.sent ?? null,
+                quoted: dataF?.quoted ?? null,
+                note: '本地文件已按 NapCat 路径映射发出（容器部署会自动换成容器内路径）',
+              }, null, 2),
+            }],
+          };
+        }
         let url = String(imageUrl ?? '').trim();
         let picked = null;
         if (!url) {
           const q = String(query ?? '').trim();
-          if (!q) return { content: [{ type: 'text', text: '要么给 query（关键词），要么给 imageUrl（图片直链）' }], isError: true };
+          if (!q) return { content: [{ type: 'text', text: '要么给 file（本地图片路径，用来转发你手上那张图）、要么给 query（关键词）、要么给 imageUrl（图片直链）' }], isError: true };
           const r = await searchImages(q, { limit: 10 });
           picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
           if (!picked) return { content: [{ type: 'text', text: `没搜到「${q}」的图片（失败源：${JSON.stringify(r.failures)}）。换个更具体的说法再试。` }] };
