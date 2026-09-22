@@ -308,6 +308,35 @@ function queryMemePath(db, fileName) {
   } catch { return null; }
 }
 
+/**
+ * 按"情绪/内容描述"在一批包里挑第一张表情（qq_meme_search 同一套 SQL，只是只取第一条）。
+ * 【2026-09-22】给 `qq_send_meme` 在没有 `file` 时兜底：主人看到的报错是
+ * `-32602: missing required tool_input fields: file` —— 模型只给了描述没给文件名，参数校验层就把整次
+ * 调用打回来了。现在 `file` 变成可选，给了 query/tag 就自己挑一张，并把挑中的名字回报给它。
+ * @returns {{file:string, tag:string, caption:string, packId:string}|null}
+ */
+async function firstMemeByQuery(packs, query, tag, onlyPack) {
+  const q = String(query ?? '').trim();
+  const tg = String(tag ?? '').trim().toLowerCase();
+  if (!q && !tg) return null;
+  const { DatabaseSync } = await import('node:sqlite');
+  for (const p of packs) {
+    if (onlyPack && p.id !== onlyPack) continue;
+    let db;
+    try { db = new DatabaseSync(path.join(p.dir, 'index.db'), { readOnly: true }); } catch { continue; }
+    try {
+      let sql = 'SELECT file_name, tag, caption FROM memes WHERE 1=1';
+      const params = [];
+      if (tg) { sql += ' AND tag = ?'; params.push(tg); }
+      if (q) { sql += ' AND (caption LIKE ? OR keywords LIKE ?)'; params.push('%' + q + '%', '%' + q + '%'); }
+      sql += ' LIMIT 1';
+      const r = db.prepare(sql).get(...params);
+      if (r?.file_name) return { file: String(r.file_name), tag: String(r.tag ?? ''), caption: String(r.caption ?? ''), packId: p.id };
+    } catch { /* 坏包跳过 */ } finally { try { db.close(); } catch { /* 只读句柄 */ } }
+  }
+  return null;
+}
+
 function loadConfig() {
   try {
     let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
@@ -2095,26 +2124,43 @@ if (cfg.social?.meme?.enabled !== false) {
 if (cfg.social?.meme?.enabled !== false) {
   registerTool(
     'qq_send_meme',
-    'Send one meme from the bundled meme packs to a QQ session. file = the file_name returned by qq_meme_search (a meme file name is its description note); pass pack as well when two packs contain the same file_name. Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
+    'Send one meme from the bundled meme packs to a QQ session. Pass file = the file_name returned by qq_meme_search (a meme file name is its description note); pass pack as well when two packs contain the same file_name. If you do not have a file name yet, pass query (an emotion/content description, e.g., 生气、睡觉) instead and the best-matching meme is picked for you (tag optionally narrows the category). Send the image directly with no preceding text; replyToMessageId optionally makes it a quoted reply.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      file: z.string().describe('Meme file name from qq_meme_search, e.g., 蓝发女仆生气.webp; "<packId>/<file_name>" also works'),
+      file: z.string().optional().describe('Meme file name from qq_meme_search, e.g., 蓝发女仆生气.webp; "<packId>/<file_name>" also works. Omit only when you pass query instead'),
+      fileName: z.string().optional().describe('Alias of file (same meaning); use file unless a client renames it'),
+      query: z.string().optional().describe('Used when file is omitted: emotion/content description (e.g., 生气、哭、睡觉、开心); the first match of qq_meme_search is sent'),
+      tag: z.string().optional().describe('Optional category filter for query: happy/angry/sad/shy/confused/surprised/sigh/sleep/daily/love/work'),
       pack: z.string().optional().describe('Pack id shown in qq_meme_search results; only needed when several packs contain the same file_name'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
       crossSession: z.boolean().optional().describe('ONLY when deliberately posting into a different session than the one you are answering; a key that is not this session\'s is refused otherwise')
     },
-    async ({ key, token, file, pack, replyToMessageId, crossSession }) => {
+    async ({ key, token, file, fileName, query, tag, pack, replyToMessageId, crossSession }) => {
       try {
         const packs = orderedMemePacks(getConfig());
         if (!packs.length) return { content: [{ type: 'text', text: memeMissingHint }] };
         // file 允许写成 "<packId>/<文件名>"（搜索结果里的 [packId] 就是它）
         let wantPack = String(pack ?? '').trim();
-        let wantFile = String(file ?? '').trim();
+        let wantFile = String(file ?? fileName ?? '').trim();
         const slashAt = wantFile.indexOf('/');
         if (!wantPack && slashAt > 0) {
           const maybePack = wantFile.slice(0, slashAt);
           if (packs.some((p) => p.id === maybePack)) { wantPack = maybePack; wantFile = wantFile.slice(slashAt + 1); }
+        }
+        // 只给了描述没给文件名（曾经的 `-32602 missing required tool_input fields: file`）：自己搜一张，
+        // 并把挑中的名字回报给模型，让它下次知道该传什么。
+        let pickedByQuery = null;
+        if (!wantFile) {
+          pickedByQuery = await firstMemeByQuery(packs, query, tag, wantPack || '');
+          if (!pickedByQuery) {
+            const hint = (query || tag)
+              ? `按「${String(query ?? tag).trim()}」没搜到匹配的表情，换个说法（生气/哭/睡觉/开心/疑惑/害羞/干活/日常）或者先用 qq_meme_search 看看有哪些。`
+              : '要发哪一张？file 传 qq_meme_search 结果里的文件名（如 蓝发女仆生气.webp），或者改成传 query（情绪/内容描述，如 生气）让我挑一张。';
+            return { content: [{ type: 'text', text: hint }], isError: true };
+          }
+          wantFile = pickedByQuery.file;
+          if (!wantPack) wantPack = pickedByQuery.packId;
         }
         const { DatabaseSync } = await import('node:sqlite');
         const hits = [];
@@ -2158,7 +2204,7 @@ if (cfg.social?.meme?.enabled !== false) {
             headers: { 'x-agent-token': token },
             timeoutMs: 120000
           });
-          return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), quoted: data?.quoted ?? null, sent: data?.sent ?? null, via: 'bridge' }, null, 2) }] };
+          return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(pickedByQuery ? { pickedByQuery: true, matched: pickedByQuery.caption || pickedByQuery.tag } : {}), ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), quoted: data?.quoted ?? null, sent: data?.sent ?? null, via: 'bridge' }, null, 2) }] };
         }
         const msg = [];
         msg.push({ type: 'image', data: { file: napcatPath } });
@@ -2199,7 +2245,7 @@ if (cfg.social?.meme?.enabled !== false) {
         } catch (regError) {
           // 登记失败不影响发送本身
         }
-        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), messageId }) }] };
+        return { content: [{ type: 'text', text: JSON.stringify({ ok: true, file: wantFile, pack: hit.pack.id, ...(pickedByQuery ? { pickedByQuery: true, matched: pickedByQuery.caption || pickedByQuery.tag } : {}), ...(otherPacks.length ? { sameNameAlsoIn: otherPacks } : {}), messageId }) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `发送失败：${error.message}` }], isError: true };
       }

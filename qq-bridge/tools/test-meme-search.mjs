@@ -188,7 +188,9 @@ if (MULTIPACK) {
 
   const boot = stderrLines.find((l) => l.includes('内置表情包已加载')) ?? '';
   console.log(`stderr：${boot || '(没有!)'}`);
-  check('启动日志认出 3 份包（含软链那份）', /已加载 3 份/.test(boot), boot);
+  /* 只断言"这三份都在"，**不**断言总数：装了出厂包的机器（服务器上就是）会多出一份
+   * whale-fanart-001，写死 "已加载 3 份" 会让本测试在服务器上无端 FAIL（2026-09-22 实测踩到）。 */
+  check('启动日志里三份沙箱包都被认出（含软链那份）', /已加载 \d+ 份/.test(boot) && /pack-b/.test(boot) && /pack-c/.test(boot) && /pack-linked/.test(boot), boot);
   check('三份都被点名（带来源标注）', /pack-b\(global\)/.test(boot) && /pack-c\(global\)/.test(boot) && /pack-linked\(global\)/.test(boot), boot);
 
   let nextId = 20;
@@ -209,7 +211,9 @@ if (MULTIPACK) {
     const t1 = await search({ query: '开心' });
     console.log(`\n--- 跨包搜索 query="开心" ---\n${t1}\n---`);
     const rows1 = parseRows(t1);
-    check('跨包搜索同时命中两份包', new Set(rows1.map((r) => r.pack)).size === 2, [...new Set(rows1.map((r) => r.pack))].join(','));
+    // 只看沙箱里那两份：机器上若还装着出厂包，它也会命中"开心"，不该因此判失败。
+    const sandboxPacks1 = [...new Set(rows1.map((r) => r.pack))].filter((p) => p.startsWith('pack-') && p !== 'pack-linked');
+    check('跨包搜索同时命中两份沙箱包', sandboxPacks1.length === 2, sandboxPacks1.join(','));
 
     const tLink = await search({ query: '软链包' });
     console.log(`\n--- 软链那份包 search query="软链包" ---\n${tLink}\n---`);
@@ -251,17 +255,42 @@ if (MULTIPACK) {
 
     const s6 = await sendMeme({ file: '不存在.webp', pack: '没有这个包' });
     check('pack 不存在时说明现有包', s6.includes('找不到表情'), s6.slice(0, 200));
+
+    /* 【2026-09-22】主人看到的 `-32602: missing required tool_input fields: file` 回归：
+     * 这几条**一个 file 都不传**。`file` 如果还是必填，MCP 的参数校验会先把整次调用打回（没有 result，
+     * 只有 error，这里拿到的就是空文本）；答案在**落盘的临时图**上 —— 选中的那张会被复制到
+     * `<本项目根>/state/sticker-tmp/`（本测试跑在隔离副本里，所以只会落在沙箱内，收尾一起删）。 */
+    const tmpDir = path.join(copyRoot, 'state', 'sticker-tmp');
+    const staged = () => { try { return fs.readdirSync(tmpDir); } catch { return []; } };
+    const s7 = await sendMeme({ query: '开心' });
+    console.log(`\n--- 只给 query="开心"（不带 file） ---\n${s7}\n---`);
+    check('不带 file 也能进到工具里（不再吃 -32602）', !s7.includes('-32602') && (s7.includes('发送失败') || s7.includes('"ok"')), s7.slice(0, 200));
+    check('兜底按描述挑中的是角色绑定的那份包（pack-b）', staged().some((f) => f.includes('角色包开心.webp')), staged().join(','));
+
+    const s8 = await sendMeme({ query: '绝对匹配不上的词zzzq' });
+    check('描述搜不到时提示换说法（而不是裸 -32602）', s8.includes('没搜到匹配的表情'), s8.slice(0, 200));
+
+    const s9 = await sendMeme({});
+    check('file 与 query 都没给时给可操作提示', s9.includes('要发哪一张？') && s9.includes('query'), s9.slice(0, 200));
+
+    const s10 = await sendMeme({ fileName: '全局包开心.webp', pack: 'pack-c' });
+    check('fileName 别名等价于 file（那条腿也真的落了盘）', staged().some((f) => f.includes('全局包开心.webp')), staged().join(','));
   } finally {
     child.kill();
     // 安全闸：只允许删 `.meme-multipack-` 开头的临时目录（绝不能是 node_modules / 真实 pack 目录）
     const base = path.basename(sandbox);
     if (!base.startsWith('.meme-multipack-') || /node_modules/i.test(sandbox)) {
       console.log(`清理已跳过（路径不像自测临时目录）：${sandbox}`);
-    } else {
+    } else if (process.platform === 'win32') {
+      // Windows：fs.rmSync 对**含中文的路径**会静默不生效（实测），所以走 PowerShell。
       const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `Remove-Item -LiteralPath ${JSON.stringify(sandbox)} -Recurse -Force`], { stdio: 'inherit' });
       console.log(`清理多包临时目录 exit=${r.status}；仍存在=${fs.existsSync(sandbox)}`);
-      check('清理没有伤到 node_modules', fs.existsSync(path.join(REPO, 'node_modules')), path.join(REPO, 'node_modules'));
+    } else {
+      // Linux（服务器上会跑这套自测）：没有 powershell.exe，直接删 —— 否则每跑一次就在现场留一份垃圾目录。
+      try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch (e) { console.log(`清理失败：${e.message}`); }
+      console.log(`清理多包临时目录（fs.rmSync）；仍存在=${fs.existsSync(sandbox)}`);
     }
+    check('清理没有伤到 node_modules', fs.existsSync(path.join(REPO, 'node_modules')), path.join(REPO, 'node_modules'));
   }
   console.log(`\n${fails ? `${fails} FAILED` : 'ALL PASS'}（${steps} 项检查）`);
   process.exit(fails ? 1 : 0);

@@ -47,6 +47,7 @@ import {
   SOCIAL_STATE_FILE, STICKER_FILE, FEEDBACK_FILE, TOOL_LOG_FILE, ACTIVITY_LOG, BRIDGE_LOG,
   CROSSCHAT_FILE, LOCK_FILE,
 } from '../lib/paths.js';
+import { isAckOnlyText } from '../lib/ack-text.js';
 import { readJsonSafe, atomicWriteJson, atomicWriteText } from '../lib/json-fs.js';
 import { randInt } from '../lib/rand.js';
 import { BJ_WEEK, bjMinutes, bjMinToText, beijingTs, beijingDateKey, parseClockMin, fmtBeijing } from '../lib/time.js';
@@ -130,7 +131,7 @@ import {
   activeWaits, pendingWakeLeaseTimers, lastWakeRebroadcast, wakeConfigUpdatedKeys,
   markReadCalledKeys, wakeConfigMissCount, reverse,
   queued, queuedHintAt, queueRetries, pending, visionModelAppliedSessions,
-  messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue,
+  messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue, turnHasBubble,
 } from './session-state.js';
 import { handleTurnHold } from './turn-hold.js';
 import {
@@ -5175,6 +5176,19 @@ export function startConsoleServer() {
           sendJson({
             ok: true, key, sent: 0, failed: 0, skipped: idemOne.skipped.length,
             note: '这条上一批已经真的发出去了，本次不再重复发送；请直接收尾，不要重发。'
+          });
+          return;
+        }
+        /* 【2026-09-22 收尾回执闸门】本回合已经真的发过气泡之后，再单独补一条 `OK / 好了 / 已发送` 是纯噪音：
+         * 主人那边看到的是「正经回复」+「一句 OK」两条。prompt 里的 [RULES] 13 是"请它别这样"，这里是不
+         * 依赖模型听话的第二道保证。闸门开得极窄（`lib/ack-text.js`）：整条正文就是一句回执、且本回合已发过
+         * 内容（turnHasBubble）才拦；首条回复、以及"嗯/好/在"这类本身即正常回复的短句一律照发。 */
+        if (isAckOnlyText(message) && turnHasBubble(key, state.sessions?.[key], st)) {
+          log(`[send] 收尾回执已拦下（本回合已发过内容）(${key}): ${message.slice(0, 20)}`);
+          appendActivity(`${key} [send] 收尾回执未发出（本回合已发过内容）：${message.slice(0, 40)}`);
+          sendJson({
+            ok: true, key, sent: 0, failed: 0, skipped: 1, ackSuppressed: true,
+            note: '这条只是收尾回执，本回合的内容已经发出去了，所以没有再发。请直接结束本回合，不用补别的话。'
           });
           return;
         }
