@@ -146,23 +146,28 @@ export function queueArchiveSession(sessionId) {
 }
 
 async function drainArchiveQueue() {
-  let attempt = 0;
+  /* 【2026-09-22 修 M17·"重试计数跨会话共享"】原来 `attempt` 是**整条队列**共用的一个计数器：
+   * 会话 A 连续失败两次后，只要 A 的失败次数没归零，紧接着处理的会话 B 第一次失败就会直接落到
+   * "归档放弃"（B 一次都没重试就被判死），而 A 那边看起来又像是"重试过 2 次"。现在按会话各记各的。 */
+  const attempts = new Map();
   while (archiveQueue.length > 0) {
     const sid = archiveQueue.shift();
     if (!sid) continue;
+    const attempt = Number(attempts.get(sid)) || 0;
     archiveInFlight.add(sid);
     try {
       await apiRef.workspace.archiveSession({ sessionId: sid });
-      attempt = 0;
+      attempts.delete(sid);
     } catch (error) {
-      attempt += 1;
-      if (attempt <= 2) {
+      attempts.set(sid, attempt + 1);
+      if (attempt + 1 <= 2) {
         archiveQueue.push(sid); // 重试（队尾）
-        log(`[archive] 归档失败将重试(${attempt}/2) ${sid}: ${error?.message ?? error}`);
-        await new Promise((r) => setTimeout(r, 3000 * attempt));
+        log(`[archive] 归档失败将重试(${attempt + 1}/2) ${sid}: ${error?.message ?? error}`);
+        await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
         continue;
       }
       log(`[archive] 归档放弃 ${sid}: ${error?.message ?? error}`);
+      attempts.delete(sid);
     } finally {
       archiveInFlight.delete(sid);
     }

@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import { Client } from 'ssh2';
 import { createServer, connect } from 'net';
@@ -39,6 +39,18 @@ const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 const LOG_DIR = join(CONFIG_DIR, 'logs');
 if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+
+/* 【2026-09-22 修 M11·"空 provider"的兜底只能有一处】
+ * 以前三处各写各的：写密钥那处兜底 deepseek-official（密钥进 DEEPSEEK_API_KEY）、
+ * 写隔离 DSH settings.yaml 那处兜底 xiaomi-token-plan-cn + mimo-v2.5（模型被改成小米）、
+ * 回读状态那处又按小米算环境变量名 —— 用户没填服务商时，界面提示"已保存"、密钥卡却显示"尚未配置"，
+ * 模型还被静默切走。现在统一走下面这两个常量（与桥的出厂默认一致：qq-bridge/src/core/config.js 的 dsh 段）。 */
+const DEFAULT_PROVIDER = 'deepseek-official';
+const DEFAULT_MODEL = 'deepseek-v4-flash-vision-exp';
+/** 这次真正生效的服务商（唯一入口；别处不要再写 `|| '某某'` 兜底） */
+const effectiveProvider = (merged) => String(merged?.dsh?.provider || '').trim() || DEFAULT_PROVIDER;
+/** 这次真正生效的模型（同上） */
+const effectiveModel = (merged) => String(merged?.dsh?.model || '').trim() || DEFAULT_MODEL;
 
 /* ------------------------------------------------------------------ */
 /* 配置                                                                */
@@ -3532,7 +3544,7 @@ app.get('/api/bridge/config', (_req, res) => {
      * 界面上那格永远显示空（密钥不落 config.json），靠这条显示"已配置（XIAOMI_TOKEN_PLAN_CN_API_KEY）"。 */
     let apiKeyStatus = null;
     try {
-      const prov = String(cfg?.dsh?.provider || '').trim() || 'xiaomi-token-plan-cn';
+      const prov = String(cfg?.dsh?.provider || '').trim() || DEFAULT_PROVIDER;   // M11：统一兜底（原来是小米）
       apiKeyStatus = isoCredentialStatus(prov);
     } catch { /* 读不到就不显示状态 */ }
     res.json({
@@ -3821,7 +3833,7 @@ app.post('/api/bridge/config', (req, res) => {
     }
     const apiKeyWrite = (incomingApiKey || clearApiKey)
       ? (() => {
-        const prov = String(body?.config?.dsh?.provider || prev?.dsh?.provider || 'deepseek-official').trim();
+        const prov = String(body?.config?.dsh?.provider || prev?.dsh?.provider || '').trim() || effectiveProvider(prev);
         const { env, from } = providerApiKeyEnv(prov);
         const r = writeIsoCredential(isoHomeDir(), env, clearApiKey ? null : incomingApiKey);
         if (r.ok) mlog(`[iso-cred] ${clearApiKey ? '清除' : '写入'} ${env}（服务商 ${prov}，来源 ${from}，备份 ${r.backup || '无'}）`);
@@ -3880,8 +3892,8 @@ app.post('/api/bridge/config', (req, res) => {
     let syncMessage = dshChanged ? '' : '模型段无变化，未触发同步';
     // 期望值一律取**合并后**的 merged.dsh（前端可能只提交 model 一个字段，此时不能拿片段当全量，
     // 否则 provider 会退回默认值并把用户选的厂商覆盖掉）。
-    const wantProv = String(merged?.dsh?.provider || '').trim() || 'xiaomi-token-plan-cn';
-    const wantModel = String(merged?.dsh?.model || '').trim() || 'mimo-v2.5';
+    const wantProv = effectiveProvider(merged);   // M11：唯一兜底入口（原来这里兜底成小米，与写密钥那处不一致）
+    const wantModel = effectiveModel(merged);     // M11：同上
     const wantEff = String(merged?.dsh?.reasoningEffort || '').trim();
     const isoSettingsPath = () => {
       const isoHome = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '') || join(homedir(), '.qq-bridge-manager', 'dsh-isolated-home-official');
@@ -5315,7 +5327,7 @@ async function readRemoteDshModels(server, conn) {
  * @param {{path?:string, text?:string}} dshRead readRemoteDshModels 的结果（复用，省一次 SSH）
  */
 async function remoteCredentialStatus(server, conn, dshRead, providerId) {
-  const pid = String(providerId || '').trim() || 'xiaomi-token-plan-cn';
+  const pid = String(providerId || '').trim() || DEFAULT_PROVIDER;   // M11：统一兜底（原来是小米，本地已改成 deepseek-official，远端状态回读口径必须一致）
   const fromSettings = dshRead?.text ? providerApiKeyEnvFromSettings(dshRead.text, pid) : '';
   const env = fromSettings || API_KEY_ENV_ALIAS[pid]
     || (pid.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '') + '_API_KEY');
@@ -5440,7 +5452,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
    *   注意：密钥**不写进 config.json**（下面 ① 里那份是明文、还会被同步/打包），只留凭据文件这一份（600）。 */
   {
     if (incomingKey || clearKey) {
-      const prov = String(body?.config?.dsh?.provider || out.config?.dsh?.provider || '').trim() || 'xiaomi-token-plan-cn';
+      const prov = String(body?.config?.dsh?.provider || out.config?.dsh?.provider || '').trim() || DEFAULT_PROVIDER;   // M11：统一兜底（原来是小米）
       const s = await remoteReadText(conn, '/root/.dsh/settings.yaml');
       const envFromSettings = s.ok ? providerApiKeyEnvFromSettings(s.text, prov) : '';
       const env = envFromSettings

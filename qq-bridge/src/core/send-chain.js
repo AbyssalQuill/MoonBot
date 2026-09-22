@@ -47,16 +47,23 @@ export function cancelKeyedSends(chainKey) {
 
 /** 取消所有会话的待发任务（工作区级重置用）。 */
 export function cancelAllKeyedSends() {
-  epochs.clear();
+  /* 【2026-09-22 修 M17·"守卫失效"】epoch 守卫的判据是 `epochs.get(key) !== epoch`（enqueue 时抓下的值），
+   * 而这里原来**先** `epochs.clear()`：清空之后两边都是 undefined/0，守卫恒不成立 →
+   * 只有"被单独 cancelKeyedSends 过的会话"才会过期，其余会话**取消后旧气泡照发**。
+   * 正确做法是把每个 key 的 epoch **+1**（让旧快照失效），再清链尾与节拍计数。 */
+  for (const [k, v] of epochs) epochs.set(k, (Number(v) || 0) + 1);
   chains.clear();
   linearCounts.clear();
-  log('[send-chain] 已取消所有会话待发任务');
+  log('[send-chain] 已取消所有会话待发任务（epoch 已递增，旧任务落地即被跳过）');
 }
 
 /** 把一个发送任务追加到对应会话链尾（省略 chainKey 时追加到全局默认链）并返回新链。 */
 export function enqueueSend(task, chainKey) {
   const keyed = chainKey != null && String(chainKey) !== '';
-  const epoch = keyed ? (epochs.get(chainKey) || 0) : 0;
+  /* 保证"入过队的 key 一定有 epoch 条目"：否则 cancelAllKeyedSends 递增时漏掉它，
+   * 而取消前后的两次捕获都是 0 → 守卫失效（旧气泡照发）。 */
+  if (keyed && !epochs.has(chainKey)) epochs.set(chainKey, 0);
+  const epoch = keyed ? epochs.get(chainKey) : 0;
   const tail = keyed ? (chains.get(chainKey) || Promise.resolve()) : defaultChain;
   const run = tail.then(() => {
     if (keyed && (epochs.get(chainKey) || 0) !== epoch) {
