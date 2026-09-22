@@ -5729,8 +5729,55 @@ export function startConsoleServer() {
       //   校验（uid 格式 / 正文非空 / apply 禁中文）统一在 persona-learn.js 里做，
       //   端点只做转发与类型兜底，保证桥内其它调用方拿到同一套规则；
       //   鉴权沿用本段上方的统一 consoleToken 校验（管理端经 /api/learning/persona-apply 代理过来）。
-      if (req.method === 'POST' && url.pathname === '/api/learning/persona-apply') {
+      /* 【2026-09-22 修「不能切换人设」】把角色库里的一张卡写成 persona.md（模型侧工具 qq_character_switch 走这里）。
+       * 为什么需要端点：模型侧原来**没有任何**写人设的路径 —— 四个 qq_character_* 是纯只读，
+       * 旧的 /role 命令读的是 roles/ 老机制而那个目录根本不存在，于是"换成 XX 角色"只能即兴演，
+       * 轮换或压缩之后立刻掉回默认人格。写盘实现只有一份：lib/persona-switch.js（斜杠命令也用它）。
+       * 权限（必须是他本人）：① 主人的私聊令牌；或 ② 该会话**最近一条别人发来的消息**是主人（10 分钟内）
+       * —— 群里换人设正是这个场景，群友插一句话就会把这条授权挡掉。 */
+      if (req.method === 'POST' && url.pathname === '/api/persona/switch') {
         const body = await readBody();
+        const key = String(body?.key ?? '').trim();
+        const token = String(body?.token ?? '').trim();
+        const character = String(body?.character ?? '').trim();
+        const clear = body?.clear === true || /^(clear|off|none|default|默认|清除|关闭)$/i.test(character);
+        if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+        if (!token || !agentTokenOk(key, token)) { sendJson({ ok: false, error: '需要有效的会话令牌' }, 403); return; }
+        const ownerKey = 'private:' + String(cfgRef.ownerQQ ?? '');
+        const ownerPrivate = key === ownerKey && social.conversations.get(ownerKey)?.agentToken === token;
+        let ownerHere = false;
+        if (!ownerPrivate) {
+          const st = social.conversations.get(key);
+          const list = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+          for (let i = list.length - 1; i >= 0; i--) {
+            const m = list[i];
+            if (!m || m.isSelf) continue;                                  // 只看别人发来的
+            ownerHere = !!(m.isOwner && (Date.now() - Number(m.time || 0) < 10 * 60e3));
+            break;                                                          // 最近一条人话是谁，就以谁为准
+          }
+        }
+        if (!ownerPrivate && !ownerHere) {
+          sendJson({ ok: false, error: '这个只有主人能换（私聊里直接说，或在群里等他亲口说那句）' }, 403);
+          return;
+        }
+        try {
+          const mod = await import('../lib/persona-switch.js');
+          const r = mod.switchPersona({ cfg: cfgRef, character, clear });
+          log(`控制台：人设切换 ${key} → ${JSON.stringify({ ok: r.ok, action: r.action, pack: r.pack, bytes: r.bytes, error: r.error })}`);
+          sendJson(r.ok
+            ? {
+              ok: true, action: r.action, pack: r.pack ?? null, files: r.files ?? [], bytes: r.bytes,
+              truncated: !!r.truncated, backup: r.backup || null,
+              via: ownerPrivate ? 'owner-private' : 'owner-in-this-session',
+            }
+            : { ok: false, error: r.error ?? '切换失败' }, r.ok ? 200 : 400);
+        } catch (error) {
+          sendJson({ ok: false, error: `人设切换失败：${error?.message ?? error}` }, 500);
+        }
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/learning/persona-apply') {        const body = await readBody();
         const uid = String(body?.uid ?? '').trim();
         const mode = String(body?.mode ?? '').trim();
         if (!/^\d{1,11}$/.test(uid)) { sendJson({ ok: false, error: 'uid 必须是 1~11 位数字 QQ 号' }, 400); return; }

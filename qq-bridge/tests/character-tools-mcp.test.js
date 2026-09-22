@@ -12,7 +12,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const WANTED = ['qq_character_list', 'qq_character_read', 'qq_character_pack', 'qq_character_search'];
+/* 【2026-09-22】多了 qq_character_switch（唯一的**写入者**：把角色库里的一张卡合成成 persona.md，
+ * 见 lib/persona-switch.js）；它和四个只读工具同属 characterCards 这一组开关，所以一起断言注册/不注册。 */
+const WANTED = ['qq_character_list', 'qq_character_read', 'qq_character_pack', 'qq_character_search', 'qq_character_switch'];
 const failures = [];
 const check = async (name, fn) => {
   try {
@@ -85,8 +87,15 @@ try {
       // 描述主体必须是英文；中文只允许出现在引号里的"主人原话"举例（主人明确要求举例贴合中文说法）
       const outsideQuotes = String(t.description).replace(/"[^"]*"/g, '""');
       assert.ok(!/[\u4e00-\u9fff]/.test(outsideQuotes), `${name} 描述除引号内的中文举例外必须全英文`);
-      assert.ok(/read-only/i.test(t.description), `${name} 描述没说清是只读`);
       assert.ok(/Use (when|this)/i.test(t.description), `${name} 描述没写"什么时候用它"`);
+      /* 【2026-09-22】"只读"这条只对四个读取工具成立：新增的 qq_character_switch 是唯一的写入者
+       * （把角色卡合成 persona.md），它当然不是 read-only，而且必须带 key/token 做主人校验。 */
+      if (name !== 'qq_character_switch') {
+        assert.ok(/read-only/i.test(t.description), `${name} 描述没说清是只读`);
+      } else {
+        assert.ok(/persona\.md/i.test(t.description), 'qq_character_switch 描述要说清它写的是 persona.md');
+        assert.match(String(t.description), /Owner only/i, 'qq_character_switch 描述要写明只有主人能用');
+      }
     }
     const byName = Object.fromEntries(WANTED.map((n) => [n, tools.find((t) => t.name === n)]));
     assert.ok(/换成 XX 角色/.test(byName.qq_character_read.description), 'read 描述要贴合主人说法（换成 XX 角色）');

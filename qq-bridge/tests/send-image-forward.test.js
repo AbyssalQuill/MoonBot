@@ -5,11 +5,14 @@
 //   · 参数必须真的声明在 qq_send_image 的 schema 里，且两个 body 分支都塞 crossSession
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SRC = path.join(process.cwd(), 'src');
-const sandbox = path.join(process.cwd(), 'tests', `.tmp-send-image-forward-${process.pid}`);
+/* 沙箱放系统临时目录，不放仓库里：Windows 上 sqlite 句柄没释放时目录删不掉，
+ * 放在 tests/ 下就会堆出一串 .tmp-send-image-forward-* 残留（实测堆了 8 个，已清）。 */
+const sandbox = path.join(os.tmpdir(), `.tmp-send-image-forward-${process.pid}`);
 fs.rmSync(sandbox, { recursive: true, force: true });
 fs.mkdirSync(path.join(sandbox, 'state'), { recursive: true });
 fs.cpSync(SRC, path.join(sandbox, 'src'), { recursive: true });

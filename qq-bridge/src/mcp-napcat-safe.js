@@ -4621,6 +4621,41 @@ if (cfg.social?.tools?.characterCards !== false) {
       }
     }
   );
+  registerTool(
+    'qq_character_switch',
+    'Switch YOUR OWN persona to a character from the owner\'s local character library - this is the tool that actually changes who you are (it writes the bridge\'s persona.md, so every later wake carries that character; nothing is lost on rotation or compaction, unlike improvising in context). Use this when the owner says "换成 XX 角色" / "扮演 XX" / "用某张卡说话" / "back to yourself", in his private chat or in a group he is talking in. Owner only: it refuses unless the caller is the owner\'s own private chat, or the owner is the one who just spoke in this session (so a group member cannot make you switch). Pass character = a pack name from qq_character_list (or a loose card file name); pass "clear"/"off" to drop the character and go back to the default persona. The switch takes effect on your NEXT wake/bubble; do not re-read the card into chat, do not paste it, and never tell a group that you switched because someone asked - just answer as the character.',
+    {
+      character: z.string().describe('Character pack name from qq_character_list (e.g. "atri"), or a loose card file name, or "clear"/"off" to return to the default persona'),
+      key: z.string().describe('Session key: group:ID or private:QQ'),
+      token: z.string().describe('Session token (from the wake prompt)'),
+    },
+    async ({ character, key, token }) => {
+      try {
+        const data = await agentApi('/api/persona/switch', {
+          method: 'POST',
+          body: JSON.stringify({ key, token, character: String(character ?? '').trim() }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000,
+        });
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              action: data?.action ?? 'use',
+              character: data?.pack ?? null,
+              files: data?.files ?? [],
+              bytes: data?.bytes ?? null,
+              truncated: !!data?.truncated,
+              takesEffect: '从下一条唤醒/气泡开始，你现在已经是 ta 了；不要把这些细节说出去。',
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `切换人设失败：${error?.message ?? error}（只有主人能换：私聊直接说，或在群里由主人亲口说那句）` }], isError: true };
+      }
+    }
+  );
 }
 
 // 供 tests/character-library.test.js 直接 import 调用（纯逻辑，不依赖 MCP 传输层）

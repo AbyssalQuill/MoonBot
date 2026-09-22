@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import cors from 'cors';
 import { Client } from 'ssh2';
 import { createServer, connect } from 'net';
@@ -5926,6 +5926,49 @@ app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, 
  * 重启容器要等它起来（约 30~60 秒），加上写盘后的复验，超时给到 4 分钟。 */
 app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
 app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
+
+/* 【2026-09-22 主人报「NapCat 界面点进去第一次总是鉴权失败，要刷一次；不要每次都重新弄」】
+ * 给界面一个**当下就能问的判据**：WebUI 起了没有？这个 token 现在能不能登录进去？
+ * 为什么要服务端判：NapCat WebUI 的首屏只是拿 `?token=` 换一次 Credential 写进 localStorage、自己不会再进入应用
+ * （所以"进去→F5 一次"就好），而前端隔着跨域看不见 iframe 里到底是什么状态，只能盲刷固定秒数。
+ * 这里做的是和 NapCat 前端**同一个调用**（`POST /api/auth/login {hash}`，见 napcatWebuiTokenWorks），
+ * 于是界面可以"等它起来 → 再重载一次"，而不是每次点开都瞎猜。
+ *
+ * 注意：这里**不走** verifyNapcatWebuiToken 的 60 秒失败冷却（那是给状态探测用的省事闸门），
+ * 而是直接打一次登录接口 —— 界面问的就是"现在行不行"。
+ * 本机/服务端两条路都覆盖：连上服务器时看服务端（经隧道），否则看本机。 */
+app.get('/api/napcat/webui-ready', async (req, res) => {
+  try {
+    const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
+    const sshMode = !!(connected && sshConnections.has(connected.id));
+    let scope; let port; let token; let serverName = null; let localOff = '';
+    if (sshMode) {
+      scope = connected.id;
+      serverName = connected.name || connected.host || 'server';
+      port = tunnelLocalPort(connected.id, 'NapCat WebUI', 13000);
+      const status = await getRemoteServerStatus(connected, sshConnections.get(connected.id)).catch(() => null);
+      token = String(status?.napcat?.webuiToken || '').trim() || cachedNapcatWebuiToken(scope, port);
+    } else {
+      scope = 'local';
+      const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
+      port = napLocal.webuiPort || 6099;
+      localOff = localNapcatOffReason() || '';
+      token = String(localNapcatWebuiTokenFromFile() || napLocal.webuiToken || cachedNapcatWebuiToken(scope, port) || NAPCAT_WEBUI_TOKEN_FALLBACK).trim();
+    }
+    const up = await probe(`http://127.0.0.1:${port}/webui/`, 1200);
+    const serviceUp = !!up.reachable;
+    const tokenOk = !serviceUp ? false : (token ? await napcatWebuiTokenWorks(port, token, 5000) : false);
+    let note;
+    if (localOff) note = '当前目标是服务器，本机 NapCat 不探测（' + localOff + '）';
+    else if (!serviceUp) note = 'NapCat WebUI 还没起来（127.0.0.1:' + port + ' 不通）—— 等它起来会自动重载一次';
+    else if (!token) note = '拿不到 WebUI 令牌（读不到 webui.json / 探测失败）—— 去「NapCat 鉴权令牌」卡核对';
+    else if (!tokenOk) note = '端口通了，但这个令牌没通过（NapCat 还在启动中，或令牌与它自己 webui.json 不一致）';
+    else note = 'NapCat 已就绪，令牌可用';
+    res.json({ ok: tokenOk, scope, port, server: serverName, serviceUp, tokenPresent: !!token, off: localOff, note });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+  }
+});
 
 /* NapCat 会话守护（探针 + 假死自愈）。
  * 为什么要有它：QQ 服务端把登录态作废时，客户端可能一条错都不报（WebUI 上 isLogin/online 还是 true），

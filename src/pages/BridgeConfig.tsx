@@ -2672,10 +2672,10 @@ const SLIM_RECOMMENDED = [
   'mcp__napcat__qq_memory_append',
   'mcp__napcat__qq_deepsleep',
   'mcp__napcat__qq_get_sticker_image',
-  'mcp__napcat__qq_profile_get',
-  'mcp__napcat__qq_get_group_history',
   'mcp__napcat__qq_get_self_image',
-  'mcp__napcat__qq_get_active_members',
+  /* 【2026-09-22 主人报「不能群聊里认识人」】这三条从推荐名单里撤掉：
+   * qq_get_active_members（群里谁在说话）/ qq_profile_get（某人的档案）/ qq_get_group_history（群聊历史）。
+   * 它们原来既在配置 deny 里、也在 low 档 drop 里 → 群里谁都不认识、也不记得群里聊过什么。 */
 ];
 
 /** 不归这张卡管的固定开销（另外几个 MCP server + DSH 自带的工具）。 */

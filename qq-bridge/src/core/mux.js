@@ -58,6 +58,8 @@ import { isSafeLocalMediaPath, isProbablySafeImageFileRef } from '../lib/media-g
 import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, extractToolTargetKey, escapeCqText, unquoteJsonString } from '../lib/text-safe.js';
 import { normalizeOwnerQQ, normalizeIdList, allowed } from '../lib/config.js';
 import { readRoleState, writeRoleState, sanitizeRoleName, listRoles } from '../lib/role-access.js';
+// 【2026-09-22】人设切换：从角色库合成 → 原子写 persona.md（斜杠命令 /role 与模型侧工具共用这一份实现）
+import { switchPersona, listCharacterPacks } from '../lib/persona-switch.js';
 import { sleep, withTimeout } from '../lib/async.js';
 import { convKey, canonicalKey } from '../lib/keys.js';
 import { log, appendActivity, readActivityTail } from '../lib/log.js';
@@ -523,19 +525,29 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       return;
     }
     if (plainContent === '/role' || plainContent.startsWith('/role ')) {
-      const name = sanitizeRoleName(plainContent.slice(5).trim());
-      if (!name || name === 'off' || name === 'clear') {
-        writeRoleState(null, roleState.mode);
-        await sendToQQ(key, '已清除角色，恢复正常人格。');
-      } else {
-        const roleFile = path.join(ROOT, 'roles', name + '.md');
-        if (!fs.existsSync(roleFile)) {
-          await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
-        } else {
-          writeRoleState(name, roleState.mode);
-          await sendToQQ(key, `已切换角色：${name}。`);
-        }
+      /* 【2026-09-22 修「不能切换人设 / skill」】原来这条命令走的是旧机制：读 <bridge>/roles/<名字>.md
+       * 再写 current-role.json —— 而项目里 `roles/` 目录根本不存在，主人说"换成 XX 角色 / /role atri"
+       * 永远只听到"角色不存在"，而且即使写成功那套也不再进提示词。
+       * 现在直接接**角色库**（characters/，与 qq_character_list 同一套解析）：合成整张卡 → 原子写 persona.md
+       * （带备份）→ 下一条唤醒就重注入，不需要重启、不打断在跑回合。斜杠命令本来就不分群/私聊
+       * （上面的 isOwner 闸门是唯一权限判据），所以主人在群里也能切。 */
+      const want = plainContent.slice(5).trim();
+      const isClear = /^(clear|off|none|default|默认|清除|关闭)$/i.test(want);
+      if (!want || want === '?') {
+        const { root, packs, loose } = listCharacterPacks(cfgRef);
+        const names = [...packs, ...loose].slice(0, 40);
+        await sendToQQ(key, names.length
+          ? `角色库（${root}）里有：\n${names.join('、')}\n\n用法：/role 包名 切换，/role clear 回到默认人格。`
+          : `角色库是空的（${root}）。把角色卡目录放进去，或在管理端「角色库」里导入一张。`);
+        return;
       }
+      const switched = switchPersona({ cfg: cfgRef, character: isClear ? '' : want, clear: isClear });
+      log(`[command] ${key} /role ${want} → ${JSON.stringify(switched)}`);
+      await sendToQQ(key, switched.ok
+        ? (switched.action === 'clear'
+          ? '好，角色收起来了，回到我自己说话。'
+          : `已换成「${switched.pack}」（读进 ${switched.files.length} 个文件${switched.truncated ? '；卡片超长，按顺序截断了一部分' : ''}）。下一句开始就是 ta 了。`)
+        : `换不了：${switched.error}`);
       return;
     }
     if (plainContent === '/silent' || plainContent === '/quiet') {
