@@ -707,7 +707,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
     // 让 AI 无需额外调用 qq_get_forward_msg 就能看到“对方转发里到底说了什么”，
     // 避免消息里只有 [转发消息 id=…] 占位符时 AI 因为读不到内容而整条忽略。
     const storeText = await expandIncomingForwardPreview(key, event.message ?? [], textContent);
-    appendSocialMessage(key, sender, storeText, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? '')), fileList);
+    appendSocialMessage(key, sender, storeText, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? '')), fileList, Array.isArray(event.message) ? (event.message.find((seg) => seg?.type === 'reply' && seg.data?.id != null)?.data?.id ?? null) : null);
     // default同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
     if (kind === 'group') {
       feedSlangWindow(key, sender, plainContent);

@@ -5085,14 +5085,20 @@ export function startConsoleServer() {
           sendJson({ ok: false, error: '工具未启用：qq_get_message_images' }, 403);
           return;
         }
-        const media = findMessageMedia(key, messageId);
+        const found = findMessageMedia(key, messageId, { info: true });
+        const media = Array.isArray(found?.media) ? found.media : [];
         if (!media.length) {
-          sendJson({ ok: true, messageId, media: [], images: [], note: '该消息没有可读取的图片/表情元数据' });
+          sendJson({ ok: true, messageId, media: [], images: [], note: '该消息没有可读取的图片/表情元数据（也没有引用到带图的消息）' });
           return;
         }
         try {
-          const images = await fetchMediaData(media);
-          sendJson({ ok: true, messageId, media, images });
+          /* raw=1：**转发用**，要原图字节（不做压缩/降采样）。默认（喂给视觉模型那条路）照旧压缩，
+           * 因为那条路受 DSH 附件层的单边上限约束、也直接吃 token。 */
+          const raw = url.searchParams.get('raw') === '1';
+          const images = await fetchMediaData(media, { raw });
+          /* viaQuote：这张图其实是**被引用的那条消息**里的（主人引用着自己的图让你转发就是这种）。
+           * foundIn：跨会话时图往往在**发起会话**里而 key 是目的地，如实报出到底在哪个会话找到的。 */
+          sendJson({ ok: true, messageId, media, images, raw, viaQuote: !!found?.viaQuote, quoteMessageId: found?.quoteMessageId || '', foundIn: found?.foundIn || key });
         } catch (error) {
           log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
           sendJson({ ok: false, error: `图片查询失败：${error?.message ?? error}` }, 500);

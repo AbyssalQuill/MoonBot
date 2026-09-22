@@ -2,11 +2,14 @@
 // 私聊里引用一条消息，机器人答"查不到 / 拿不到引用内容"——落库是对的，最后一跳丢了）。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SRC = path.join(process.cwd(), 'src');
-const sandbox = path.join(process.cwd(), 'tests', `.tmp-quote-context-${process.pid}`);
+/* 【2026-09-22】沙箱原来建在仓库里（tests/.tmp-quote-context-<pid>）：Windows 上 sqlite 句柄没释放时删不掉，
+ * 于是仓库里堆了 42 个 .tmp-quote-context-* 残留目录（审计项之一）。改到系统临时目录，删不掉也不脏仓库。 */
+const sandbox = path.join(os.tmpdir(), `.tmp-quote-context-${process.pid}`);
 fs.rmSync(sandbox, { recursive: true, force: true });
 fs.mkdirSync(path.join(sandbox, 'state'), { recursive: true });
 fs.cpSync(SRC, path.join(sandbox, 'src'), { recursive: true });

@@ -1,6 +1,7 @@
 // 媒体管道：OneBot 图片/表情抓取、压缩、多图解析
 // cfg 注入（initMediaPipeCore），bot 注入（setMediaPipeBot）。
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { log } from '../lib/log.js';
 import { MAX_MEDIA_COUNT } from './session-state.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from '../safe-fetch.js';
@@ -68,7 +69,13 @@ export function getImageDimensions(buf) {
   return null;
 }
 
-export async function fetchOneBotImage(media) {
+export async function fetchOneBotImage(media, opts = {}) {
+  /* 【2026-09-22 主人要求「默认转发原图，别压缩」】raw=true 时**原样返回抓到的字节**：
+   * 喂给视觉模型那条路必须压缩（缩到 1280px 内、40KB 以上就重编码，为的是 token 与被 DSH 附件层
+   * 拒收的风险），但「把这张图转出去」要的是**原图** —— 压缩过的副本转出去，对方拿到的就是
+   * 二次编码的糊图。安全闸门照旧（字节上限、像素上限、魔术字校验），只是不做重编码。 */
+  const raw = opts.raw === true;
+  const asIs = (buf, mime) => (raw ? { buffer: buf, mimeType: mime, compressed: false } : finalizeImageBuffer(buf, mime));
   // 优先使用 OneBot get_image 获取网关侧信息；只有 file 是安全缓存文件名时才允许交给网关。
   if (media.kind === 'image' && media.file && isProbablySafeImageFileRef(media.file)) {
     try {
@@ -88,7 +95,7 @@ export async function fetchOneBotImage(media) {
             if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) {
               log(`get_image 返回的图片像素超限，已跳过（${dims.width}x${dims.height}）`);
             } else {
-              return await finalizeImageBuffer(buf, mimeFromBuffer(buf));
+              return await asIs(buf, mimeFromBuffer(buf));
             }
           }
         } else {
@@ -101,7 +108,7 @@ export async function fetchOneBotImage(media) {
         if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) {
           log(`get_image URL 图片像素超限，已跳过（${dims.width}x${dims.height}）`);
         } else {
-          return await finalizeImageBuffer(fetched.buffer, mimeFromBuffer(fetched.buffer) || mimeFromUrl(obj.url));
+          return await asIs(fetched.buffer, mimeFromBuffer(fetched.buffer) || mimeFromUrl(obj.url));
         }
       }
       if (typeof obj.file === 'string' && !obj.file.startsWith('base64://') && fs.existsSync(obj.file) && isSafeLocalMediaPath(obj.file, cfgRef.napcat?.homeDir)) {
@@ -119,9 +126,9 @@ export async function fetchOneBotImage(media) {
             // 触发 INVALID_IMAGE 把**整条 prompt**（含文字）拒收。
             log(`本地缓存文件不是可识别的图片格式，已跳过（${Math.round(buf.length / 1024)}KB）`);
           } else {
-            // 本机缓存文件同样必须过压缩/降采样：此前这条分支直接返回原图，
-            // 长截图等单边 > DSH per-side 上限的图会被整条 prompt 拒收。
-            return await finalizeImageBuffer(buf, mimeFromBuffer(buf));
+            // 本机缓存文件同样必须过压缩/降采样（**投递给模型**那条路）：此前这条分支直接返回原图，
+            // 长截图等单边 > DSH per-side 上限的图会被整条 prompt 拒收。转发（raw）时按字节原样给。
+            return await asIs(buf, mimeFromBuffer(buf));
           }
         }
       }
@@ -137,7 +144,7 @@ export async function fetchOneBotImage(media) {
       if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) {
         log(`图片 URL 像素超限，已跳过（${dims.width}x${dims.height}）`);
       } else {
-        return await finalizeImageBuffer(fetched.buffer, mimeFromBuffer(fetched.buffer) || mimeFromUrl(media.url));
+        return await asIs(fetched.buffer, mimeFromBuffer(fetched.buffer) || mimeFromUrl(media.url));
       }
     } catch (error) {
       log(`图片 URL 抓取失败: ${error?.message ?? error}`);
@@ -146,7 +153,8 @@ export async function fetchOneBotImage(media) {
   return null;
 }
 
-export async function fetchFaceMedia(media) {
+export async function fetchFaceMedia(media, opts = {}) {
+  const raw = opts.raw === true;
   const faceId = Number(media.faceId);
   /* 【2026-09-21 表情包理解】本地表兜底：拿不到 NapCat 的在线描述时，
    * 也要把 `[表情#123]`（一个数字，模型只能猜）降级成 `[表情:偷笑]`（一句情绪）。 */
@@ -164,7 +172,9 @@ export async function fetchFaceMedia(media) {
           if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) {
             log(`表情图片像素超限，已跳过（${dims.width}x${dims.height}）`);
           } else {
-            const fim = await finalizeImageBuffer(fetched.buffer, mimeFromBuffer(fetched.buffer) || mimeFromUrl(face.url));
+            const faceMime = mimeFromBuffer(fetched.buffer) || mimeFromUrl(face.url);
+            // 转发（raw）要原图：表情也一样，别把对方的动图压成一张静图
+            const fim = raw ? { buffer: fetched.buffer, mimeType: faceMime } : await finalizeImageBuffer(fetched.buffer, faceMime);
           return { buffer: fim.buffer, mimeType: fim.mimeType, text: desc ? `[表情:${desc}]` : '' };
           }
         } catch (error) {
@@ -195,19 +205,23 @@ async function gateImage(buffer, mimeType, label) {
  * 以前只写 `[图片（获取失败）]`，模型容易顺着上下文"脑补"图里有什么（主人报的"看图乱猜"）。
  * 现在占位文案直接把规则写进去：看不到就如实说、不要猜内容、也不要描述样子。 */
 const MEDIA_PLACEHOLDER_HINT = '—— 这张图没能投递给你，看不到就如实说"图没加载出来"，不要猜内容';
-export async function resolveOneMedia(media) {
+export async function resolveOneMedia(media, opts = {}) {
+  const raw = opts.raw === true;
   if (!media || typeof media !== 'object') return { ok: false, fallbackText: '' };
   if (media.kind === 'face') {
-    const face = await fetchFaceMedia(media);
+    const face = await fetchFaceMedia(media, opts);
     if (face.buffer) {
+      if (raw) return { ok: true, face: true, buffer: face.buffer, mimeType: face.mimeType || 'image/png', faceText: face.text || '', raw: true };
       const g = await gateImage(face.buffer, face.mimeType || 'image/png', `表情#${media.faceId ?? ''}`);
       if (g.ok) return { ok: true, face: true, buffer: g.buffer, mimeType: g.mimeType, faceText: face.text || '' };
       return { ok: false, fallbackText: `${face.text || `[表情#${media.faceId}]`}（尺寸过大，已跳过${MEDIA_PLACEHOLDER_HINT}）` };
     }
     return { ok: false, fallbackText: face.text || `[表情#${media.faceId}]` };
   }
-  const img = await fetchOneBotImage(media);
+  const img = await fetchOneBotImage(media, opts);
   if (img?.buffer) {
+    // 转发（raw）：只做安全校验，不做压缩/降采样 —— 这一步正是"默认转发原图"的实现点
+    if (raw) return { ok: true, face: false, buffer: img.buffer, mimeType: img.mimeType || 'image/jpeg', raw: true };
     const g = await gateImage(img.buffer, img.mimeType || 'image/jpeg', '图片');
     if (g.ok) return { ok: true, face: false, buffer: g.buffer, mimeType: g.mimeType };
     return { ok: false, fallbackText: `[图片（尺寸过大已跳过：${g.reason}）${MEDIA_PLACEHOLDER_HINT}]` };
@@ -270,7 +284,8 @@ export async function resolveMediaList(mediaList) {
   return parts;
 }
 
-export async function fetchMediaData(mediaList) {
+export async function fetchMediaData(mediaList, opts = {}) {
+  const raw = opts.raw === true;
   const list = Array.isArray(mediaList) ? mediaList : [];
   const limited = [];
   let index = 0;
@@ -285,7 +300,7 @@ export async function fetchMediaData(mediaList) {
   }
   const results = await Promise.all(limited.map(async ({ media, index, overLimit }) => {
     if (overLimit) return { index, kind: 'image', text: `（超过单条上限 ${MAX_MEDIA_COUNT}，已跳过）` };
-    const r = await resolveOneMedia(media);
+    const r = await resolveOneMedia(media, opts);
     if (!r.ok) {
       return {
         index,
@@ -299,8 +314,14 @@ export async function fetchMediaData(mediaList) {
       kind: r.face ? 'face' : 'image',
       mimeType: r.mimeType,
       data: r.buffer.toString('base64'),
+      bytes: r.buffer.length,
       text: r.face ? (r.faceText || '') : ''
     };
+    // raw=1（转发用）：如实标出这是**未经压缩的原图字节**
+    if (raw) {
+      out.raw = true;
+      out.sha256 = createHash('sha256').update(r.buffer).digest('hex');
+    }
     if (r.face) {
       if (media.faceId != null) out.faceId = String(media.faceId);
     } else {

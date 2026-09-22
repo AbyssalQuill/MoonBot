@@ -1686,7 +1686,7 @@ registerTool(
 if (cfg.social?.tools?.getImages !== false) {
   registerTool(
     'qq_get_message_images',
-    'Fetch the images/stickers in a QQ message as actual image content the vision model can see. Call when text contains [图片], [表情], or hasMedia=true. Supports multiple images; needs the session token in default mode.',
+    'Fetch the images/stickers in a QQ message as actual image content the vision model can see. Call when text contains [图片], [表情], or hasMedia=true. Supports multiple images; needs the session token in default mode. This only LOOKS at them - to re-send (forward) one of those pictures, call qq_send_image with the same messageId instead of describing it or searching a look-alike.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       messageId: z.union([z.number(), z.string()]).describe('Message id to view (QQ id may be negative; 2nd-gen also accepts local seq)'),
@@ -3128,20 +3128,38 @@ if (cfg.social?.tools?.imageSearch !== false) {
     }
   );
 
+/* 把**已经过完整性闸门**的图片字节落成 NapCat 容器读得到的文件：写进 `cfg.napcat.tmpDir`
+ * （这个目录就是挂进容器的那份），返回文件路径。`qq_send_image` 的三条来源
+ * （file / messageId / imageUrl|query）共用它，避免各写一遍"推断扩展名 + 落盘"的逻辑。 */
+function stageImageBytes(buf, cfg, tag) {
+  const root = String(cfg?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
+  fs.mkdirSync(root, { recursive: true });
+  const ext = buf[0] === 0x89 ? 'png'
+    : buf[0] === 0xff ? 'jpg'
+      : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
+        : buf.toString('ascii', 0, 4) === 'RIFF' ? 'webp'
+          : 'jpg';
+  const staged = path.join(root, `${Date.now()}-${tag}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
+  fs.writeFileSync(staged, buf);
+  return { staged, ext };
+}
+
   registerTool(
     'qq_send_image',
-    'Find an image online and SEND it to a QQ session as a real picture. Three sources, in precedence order: file (absolute path ON THE BRIDGE HOST of a picture that already exists - use this to FORWARD a picture you were given, e.g. the DSH attachment path of an image the other person just sent you, or a downloaded file), imageUrl (a URL you already got from qq_image_search), query (the bridge searches the web and sends the best hit - the normal case: someone asks 来张XX的图). index picks which search hit to send (0 = first, default). The bytes are read/verified as a real picture before sending; nothing is written outside the NapCat temp dir. Cross-session: set crossSession true when you deliberately post into another session than the one you are answering (private chat -> group). Prefer ONE image per request - do not spam several pictures in a row unless asked.',
+    'Find an image online and SEND it to a QQ session as a real picture. Four sources, in precedence order: file (absolute path ON THE BRIDGE HOST of a picture that already exists - use this to FORWARD a picture you were given, e.g. the DSH attachment path of an image the other person just sent you, or a downloaded file), messageId (FORWARD the picture out of a message you can see in the chat log - the right choice when the picture arrived through QQ and you only have its message id: the bridge fetches that image back and re-sends it), imageUrl (a URL you already got from qq_image_search), query (the bridge searches the web and sends the best hit - the normal case: someone asks 来张XX的图). index picks which search hit to send (0 = first, default); imageIndex picks which picture of a message. The bytes are read/verified as a real picture before sending; nothing is written outside the NapCat temp dir. Cross-session: set crossSession true when you deliberately post into another session than the one you are answering (private chat -> group). Prefer ONE image per request - do not spam several pictures in a row unless asked.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
-      file: z.string().optional().describe('Absolute path of a picture that already exists ON THE BRIDGE HOST - use this to FORWARD an image you were given (e.g. the DSH attachment path of a picture the other person sent you) or any local image. Takes precedence over imageUrl/query.'),
+      file: z.string().optional().describe('Absolute path of a picture that already exists ON THE BRIDGE HOST - use this to FORWARD an image you were given (e.g. the DSH attachment path of a picture the other person sent you) or any local image. Takes precedence over messageId/imageUrl/query.'),
+      messageId: z.union([z.number(), z.string()]).optional().describe('FORWARD the image out of that message id (from the chat log / message list of this session): the bridge fetches the picture back with the same endpoint qq_get_message_images uses and re-sends it. Use this when the picture came in through QQ and you have no local path - do not fall back to searching a look-alike.'),
+      imageIndex: z.number().optional().describe('Which picture of that message to forward when it has several, 0-based, default 0'),
       query: z.string().optional().describe('Search keyword (used when imageUrl is not given)'),
       imageUrl: z.string().optional().describe('Direct image URL (from qq_image_search). Takes precedence over query.'),
       index: z.number().optional().describe('Which search hit to send when using query, 0-based, default 0'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Optional: message id to quote/reply to'),
       crossSession: z.boolean().optional().describe('ONLY when deliberately sending a picture into a DIFFERENT session than the one you are answering (e.g. the owner asks you in private to post it in a group): set true to confirm. key MUST be that other session\'s own key - a mismatched key is refused instead of silently sent elsewhere.'),
     },
-    async ({ key, token, file, query, imageUrl, index, replyToMessageId, crossSession }) => {
+    async ({ key, token, file, messageId, imageIndex, query, imageUrl, index, replyToMessageId, crossSession }) => {
       try {
         /* 【2026-09-22 修「不能转发图片」】qimage 这条工具原来只有 query / imageUrl 两条路 ——
          * 模型手上有"别人发来的那张图"（DSH 把它存成附件对象 /root/.dsh/attachments/v1/objects/…）时
@@ -3172,15 +3190,7 @@ if (cfg.social?.tools?.imageSearch !== false) {
            * 顺带把 crossSession 接上：本工具原来没声明它，跨会话发图会被闸门永久拒绝（现场：
            * 模型带 crossSession:true 连试四次都被要求"把 crossSession 设为 true 再发一次"）。 */
           const cfgFile = getConfig();
-          const tmpRootF = String(cfgFile?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
-          fs.mkdirSync(tmpRootF, { recursive: true });
-          const extF = buf[0] === 0x89 ? 'png'
-            : buf[0] === 0xff ? 'jpg'
-              : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
-                : buf.toString('ascii', 0, 4) === 'RIFF' ? 'webp'
-                  : (path.extname(localFile).replace(/^\./, '').toLowerCase() || 'jpg');
-          const staged = path.join(tmpRootF, `${Date.now()}-fwd-${Math.random().toString(36).slice(2, 8)}.${extF}`);
-          fs.writeFileSync(staged, buf);
+          const { staged, ext: extF } = stageImageBytes(buf, cfgFile, 'fwd');
           const napcatArg = napcatImageFileArg(staged, cfgFile, { log: (m) => console.error(`[napcat-safe] ${m}`) });
           const bodyF = { key, messages: [], images: [napcatArg] };
           if (crossSession === true) bodyF.crossSession = true;
@@ -3201,6 +3211,8 @@ if (cfg.social?.tools?.imageSearch !== false) {
                 file: localFile,
                 staged,
                 bytes: buf.length,
+                original: true,
+                sha256: crypto.createHash('sha256').update(buf).digest('hex'),
                 format: extF,
                 sent: dataF?.sent ?? null,
                 quoted: dataF?.quoted ?? null,
@@ -3209,11 +3221,90 @@ if (cfg.social?.tools?.imageSearch !== false) {
             }],
           };
         }
+        /* 【2026-09-22 第三轮修】"我自己发的那张图"还有第二个来路：图是**走 QQ 进来的**（不是 DSH 附件），
+         * 模型手上只有消息 id，没有任何本地路径 —— 于是它一律退化成"联网搜一张差不多的"，
+         * 主人看到的就是"我要的代码图，群里来了一张鲸鱼图"。现在给 messageId：
+         * 按 id 把那图取回来（同一个 /api/images/message 端点，qq_get_message_images 用的就是它）
+         * → 同一道完整性闸门 → 落盘 → 发送（照样支持 crossSession）。 */
+        const fromMsg = String(messageId ?? '').trim();
+        if (fromMsg) {
+          let pics = [];
+          let viaQuote = false;
+          let quoteMessageId = '';
+          try {
+            /* raw=1：主人要求「默认转发原图，别压缩」—— 取图这条腿必须走原图模式。
+             * 不带这个参数时端点会把图缩到 1280px 内并重编码（那是喂模型用的副本），
+             * 转发出去就成了二次压缩的糊图。 */
+            const qm = new URLSearchParams({ key, messageId: fromMsg, raw: '1' });
+            const dataM = await agentApi(`/api/images/message?${qm.toString()}`, {
+              headers: { 'x-agent-token': token },
+              timeoutMs: 180000,
+            });
+            viaQuote = dataM?.viaQuote === true;
+            quoteMessageId = String(dataM?.quoteMessageId ?? '');
+            const all = (Array.isArray(dataM?.images) ? dataM.images : []).filter((i) => i?.data && i?.mimeType);
+            const rest = all.filter((i) => i?.kind !== 'face');
+            pics = rest.length ? rest : all;
+            if (!pics.length) {
+              return { content: [{ type: 'text', text: `消息 ${fromMsg} 里没有可取回的图片（${dataM?.note || '未找到'}）。可以先用 qq_get_message_images 确认那条消息带不带图，或改用 file / imageUrl / query。` }], isError: true };
+            }
+          } catch (e) {
+            return { content: [{ type: 'text', text: `按 messageId 取图失败（${fromMsg}）：${e?.message ?? e}` }], isError: true };
+          }
+          const pickIdx = Math.max(0, Number(imageIndex) || 0);
+          const pick = pics[pickIdx] || pics[0];
+          let bufM;
+          try {
+            bufM = Buffer.from(String(pick.data), 'base64');
+          } catch (e) {
+            return { content: [{ type: 'text', text: `消息 ${fromMsg} 里那张图解码失败：${e?.message ?? e}` }], isError: true };
+          }
+          const checkM = verifyImageComplete(bufM, bufM.length, null);
+          if (!checkM.ok) {
+            return { content: [{ type: 'text', text: `消息 ${fromMsg} 里那张图字节不完整（${checkM.reason}），没有发出去。` }], isError: true };
+          }
+          const { staged: stagedM, ext: extM } = stageImageBytes(bufM, getConfig(), 'msg');
+          const bodyM = { key, messages: [], images: [stagedM] };
+          if (crossSession === true) bodyM.crossSession = true;
+          const ridM = replyToMessageId !== undefined && replyToMessageId !== null ? String(replyToMessageId).trim() : '';
+          if (ridM) bodyM.replyToMessageId = ridM;
+          const sentM = await agentApi('/api/social/send-message', {
+            method: 'POST',
+            body: JSON.stringify(bodyM),
+            headers: { 'x-agent-token': token },
+            timeoutMs: 120000,
+          });
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                ok: true,
+                from: 'messageId',
+                messageId: fromMsg,
+                viaQuote,
+                quoteMessageId: viaQuote ? quoteMessageId : undefined,
+                imageIndex: pickIdx,
+                ofTotal: pics.length,
+                kind: pick.kind ?? 'image',
+                staged: stagedM,
+                bytes: bufM.length,
+                original: true,
+                sha256: crypto.createHash('sha256').update(bufM).digest('hex'),
+                format: extM,
+                sent: sentM?.sent ?? null,
+                quoted: sentM?.quoted ?? null,
+                note: viaQuote
+                  ? `这张图在被引用的那条消息（${quoteMessageId}）里，已按引用取回并重发（先完整性校验，再落到 NapCat 挂载目录）`
+                  : '按消息 id 把那张图取回来重发了（先完整性校验，再落到 NapCat 挂载目录）',
+              }, null, 2),
+            }],
+          };
+        }
         let url = String(imageUrl ?? '').trim();
         let picked = null;
         if (!url) {
           const q = String(query ?? '').trim();
-          if (!q) return { content: [{ type: 'text', text: '要么给 file（本地图片路径，用来转发你手上那张图）、要么给 query（关键词）、要么给 imageUrl（图片直链）' }], isError: true };
+          if (!q) return { content: [{ type: 'text', text: '要么给 file（本地图片路径）、要么给 messageId（聊天里的哪条消息带的图，用来转发你自己/别人发的那张）、要么给 query（关键词）、要么给 imageUrl（图片直链）' }], isError: true };
           const r = await searchImages(q, { limit: 10 });
           picked = r.results[Math.max(0, Number(index) || 0)] || r.results[0];
           if (!picked) return { content: [{ type: 'text', text: `没搜到「${q}」的图片（失败源：${JSON.stringify(r.failures)}）。换个更具体的说法再试。` }] };
@@ -3222,16 +3313,9 @@ if (cfg.social?.tools?.imageSearch !== false) {
 
         const got = await safeFetchBuffer(url, MAX_IMAGE_FETCH_BYTES);
         const buf = got.buffer;
-        const ext = buf[0] === 0x89 ? 'png'
-          : buf[0] === 0xff ? 'jpg'
-            : buf.toString('ascii', 0, 3) === 'GIF' ? 'gif'
-              : 'webp';
 
-        const cfgImg = getConfig();
-        const tmpRoot = String(cfgImg?.napcat?.tmpDir ?? '').trim() || path.join(ROOT, 'state', 'image-tmp');
-        fs.mkdirSync(tmpRoot, { recursive: true });
-        const tmpPath = path.join(tmpRoot, `${Date.now()}-webimg-${Math.random().toString(36).slice(2, 8)}.${ext}`);
-        fs.writeFileSync(tmpPath, buf);
+        const tmpPath = stageImageBytes(buf, getConfig(), 'webimg').staged;
+        const ext = path.extname(tmpPath).replace(/^\./, '');
 
         const body = { key, messages: [], images: [tmpPath] };
         /* 跨会话闸门（见 console-server 的 crossSessionRefusal）：私聊里要求"把这张网图转进群"

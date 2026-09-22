@@ -52,7 +52,12 @@ export async function segmentsToText(segments, options = {}) {
             const info = await resolveReply(String(d.id));
             if (info?.sender || info?.text) {
               const parts = [];
-              if (info.sender) parts.push(info.sender);
+              /* 【2026-09-22】被引用的内容里带图片/表情时，把**被引用那条的 message id 一并报出来**
+               * （`[引用 某某#123456：[图片]]`）：主人"引用着自己的图 + 让我转进群"的场景里，
+               * 图在被引用那条里，模型只有当前这条的 id —— 没有这个 id 就只能联网搜一张差不多的。
+               * 普通引用（纯文字）格式一字不变，避免影响既有判据与用例。 */
+              const quotedHasMedia = /\[(图片|表情|视频|语音|文件)/.test(String(info.text ?? ''));
+              if (info.sender) parts.push(quotedHasMedia && d.id != null ? `${info.sender}#${String(d.id)}` : info.sender);
               if (info.text) parts.push(info.text);
               replyText = `[引用 ${parts.join('：')}]`;
             }

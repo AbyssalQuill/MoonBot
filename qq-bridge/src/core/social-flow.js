@@ -11,7 +11,7 @@ import { resolveReplyInfo } from './message-cache.js';
 let cfgRef = null;
 export function initSocialFlowCore(cfg) { cfgRef = cfg; }
 
-export function appendSocialMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, files = []) {
+export function appendSocialMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, files = [], quoteTargetId = null) {
   const st = getSocialState(key);
   const recentLimit = Number(cfgRef.social?.context?.recentLimit) || 100;
   const unreadLimit = Number(cfgRef.social?.context?.unreadLimit) || 30;
@@ -46,6 +46,10 @@ export function appendSocialMessage(key, sender, textContent, plainContent, quot
     plain: String(plainContent ?? textContent).slice(0, 200),
     tail: String(plainContent ?? textContent).slice(-200),
     quoteTargetIsSelf: !!quoteTargetIsSelf,
+    /* 【2026-09-22】把被引用那条消息的 id 一并记住：主人"引用着自己的图 + 让我转进群"时，
+     * 图在**被引用的那条**里，而模型手上只有当前这条的 id —— 找不到 id 就只能联网搜一张差不多的。
+     * findMessageMedia 会沿这个 id 往下找一层（见该函数注释）。 */
+    quoteTarget: quoteTargetId != null && String(quoteTargetId).trim() !== '' ? String(quoteTargetId) : '',
     atSelf: !!atSelf,
     isOwner: !!isOwner,
     ownerLabel: isOwner ? `管理员（ownerQQ ${cfgRef.ownerQQ ?? ''}）` : '',
@@ -284,30 +288,74 @@ export function recordSentMessages(key, messages) {
 
 // P5-11 追加
 
-export function findMessageMedia(key, ref) {
+export function findMessageMedia(key, ref, opts = {}) {
+  const wantInfo = opts.info === true;
   const refStr = String(ref ?? '').trim();
-  if (!refStr) return [];
-  // default：消息对象上直接带 media（仅在确实存在default会话状态时读取，避免为 gen1 创建影子状态）
-  if (currentMode === 'default' || social.conversations.has(key)) {
-    try {
-      const st = getSocialState(key);
-      if (st && Array.isArray(st.recentMessages)) {
-        const found = st.recentMessages.find((m) => m && (String(m.messageId || '') === refStr || String(m.seq || '') === refStr));
-        if (found && Array.isArray(found.media)) return found.media;
+  const miss = () => (wantInfo ? { media: [], viaQuote: false, quoteMessageId: '', ref: refStr, foundIn: '' } : []);
+  if (!refStr) return miss();
+
+  /* 在某个会话的内存窗口（或媒体登记表）里按 messageId / seq 找一条消息对象 */
+  const lookupIn = (sKey, r) => {
+    if (currentMode === 'default' || social.conversations.has(sKey)) {
+      try {
+        const st = getSocialState(sKey);
+        if (st && Array.isArray(st.recentMessages)) {
+          const found = st.recentMessages.find((m) => m && (String(m.messageId || '') === r || String(m.seq || '') === r));
+          if (found) return found;
+        }
+      } catch {}
+    }
+    const byRef = messageMediaStore.get(sKey);
+    if (byRef) {
+      for (const [storedRef, media] of byRef) {
+        if (String(storedRef) === r && Array.isArray(media)) return { media };
       }
+    }
+    return null;
+  };
+
+  /* 【2026-09-22 第三轮修 · 之二】跨会话转发时传进来的 `key` 是**目的地**（例如 group:1072393236），
+   * 而那张图明明躺在**发起会话**（private:…）的记忆窗口里 —— 只按 key 找必然找不到，
+   * 模型于是又退回"联网搜一张差不多的"。QQ 的 message_id 是全局唯一的，所以这里按序找：
+   * 先目的地、再**所有已存在的会话**，并回报到底在哪个会话里找到的。 */
+  const lookupEntry = (r) => {
+    const hit = lookupIn(key, r);
+    if (hit) return { entry: hit, foundIn: key };
+    if (opts.anywhere === false) return null;
+    const keys = [];
+    try {
+      for (const k of social.conversations.keys()) if (k !== key) keys.push(k);
     } catch {}
+    try {
+      for (const k of messageMediaStore.keys()) if (k !== key && !keys.includes(k)) keys.push(k);
+    } catch {}
+    for (const k of keys) {
+      const h = lookupIn(k, r);
+      if (h) return { entry: h, foundIn: k };
+    }
+    return null;
+  };
+
+  const hit0 = lookupEntry(refStr);
+  const media = Array.isArray(hit0?.entry?.media) ? hit0.entry.media : [];
+  if (media.length) {
+    return wantInfo ? { media, viaQuote: false, quoteMessageId: '', ref: refStr, foundIn: hit0.foundIn } : media;
   }
-  // 一代/普通模式：messageMediaStore
-  const byRef = messageMediaStore.get(key);
-  if (byRef) {
-    const hit = byRef.get(refStr);
-    if (Array.isArray(hit)) return hit;
-    // 兼容按 seq 查找（messageMediaStore 只存 messageId 时，尝试遍历所有值）
-    for (const [storedRef, media] of byRef) {
-      if (String(storedRef) === refStr && Array.isArray(media)) return media;
+
+  /* 本身没图 → 沿"被引用的那条"往下找一层。
+   * 现场：主人在私聊里**引用着自己刚发的那张图**说"现在把我这张图转发到实验群"，
+   * 图在被引用的那条消息里；模型只拿得到当前这条的 id，于是只能联网搜一张差不多的
+   * （主人看到的就是"我要代码图，群里来了张鲸鱼图"）。 */
+  const quoteRef = String(hit0?.entry?.quoteTarget ?? '').trim();
+  if (quoteRef && quoteRef !== refStr) {
+    const qHit = lookupEntry(quoteRef);
+    const qMedia = Array.isArray(qHit?.entry?.media) ? qHit.entry.media : [];
+    if (qMedia.length) {
+      if (wantInfo) return { media: qMedia, viaQuote: true, quoteMessageId: quoteRef, ref: refStr, foundIn: qHit.foundIn };
+      return qMedia;
     }
   }
-  return [];
+  return miss();
 }
 
 
