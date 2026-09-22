@@ -218,6 +218,7 @@ node src/bridge.js
 
 - **能力定义**：模型说错话或发错对象时撤回自己刚发的消息；看不懂被引用的内容时展开转发消息、读群文件；需要旧信息时检索历史记录。
 - **实现路径**：`qq_withdraw_message`（`mcp-napcat-safe.js:1170`）、`qq_get_message_detail`（`:1488`）、`qq_get_my_recent_messages`（`:1470`）、`qq_get_forward_msg`（`:1923`，合并转发展开）、`qq_get_file_content`（`:1506`）、`qq_get_group_history`（`:862`）。检索在 `core/memory.js` 的 FTS5（`memory.js:172`），工具 `qq_memory_search`（`:2788`）。
+- **文件不是图片（2026-09-22 主人要求「`[文件] [file]` 这种文件类型也标出来，别让模型以为发的是图片」）**：文件段原来渲染成 `[文件名字]`，没有名字就只剩一个 `[文件]`，唤醒正文另加一个 ` [file]` —— 模型读不出"这是什么东西"，会把对方发来的一个 PDF 当图片去调识图工具。现在统一成 `[文件:报告.pdf · PDF · 1.2 MB]`（名字 · 类型 · 大小），`[Unread]` 行上的标记是 ` [file:PDF]`；名字缺省也写"未命名文件"，**绝不退化成裸 `[文件]`**。类型映射与渲染只有一份实现：`lib/message-parse.js` 的 `fileKindLabel` / `formatBytesShort` / `fileMarker`，三个调用点（`segmentsToText`、`forward.js` 的合并转发展开、`wake-send.js` 的 `[Unread]` 行）全部 import 它；`extractFilesFromSegments` 顺带把 `ext` / `kind` / `marker` 记进消息对象。preset 里补了一条：`[图片]/[image]` 是图片（用识图工具），`[文件:…]/[file:…]` 是文档，**永远不是图片**，要读就用 `qq_get_file_content`，不许直接描述内容。回归测试 `qq-bridge/tests/file-marker.test.js`（20 项）。
 - **关键约束**：**只能撤自己发的**，`messageId` 来自唤醒正文的 `(id:xxx)` 或 `qq_get_my_recent_messages`；撤回事件由桥落库并标 `[已撤回]` + 写 `chat_messages.recalled_at`（`bridge.js:589-614`）。
 - **生产上的坑**：旧检索是 `content LIKE '%词%'` 全表扫，查不着时模型会说"我看不到更早的消息" —— 最贵的一种失败；现在是 FTS5 **trigram** 外部内容表 + 触发器同步 + BM25 排序，结构一变就把 `FTS_SCHEMA_VERSION` +1（`memory.js:120`、当前 `'2'`）自动重建。另有一个三角限制：trigram 要求每个 token 至少 3 个字符，**不足 3 字的关键词会被 FTS5 直接拒绝**（`memory.js:243`）。
 
@@ -298,6 +299,7 @@ node src/bridge.js
 - **配置热加载**：`applyConfigInPlace` 是**原地合并**（不换对象引用，十几个模块持有的旧引用继续有效）；监听用**目录监听 + 2 秒轮询**双保险。生效期不同：`social.slimTools.*` 在**注册期**生效（改完要重启隔离 DSH），`social.tools.*` 只在**调用期**拒绝（不减少请求体积，不必重启）。
 - **隔离 DSH 装配**：桥启动时幂等地刷新 preset、装配三个内置插件、把三组 MCP server 写进 profile 的 `cordis.patch.yml`，**默认绝不碰桌面端那份 DSH**。MCP 压缩代理（`social.toolCompressor`，默认 `enabled !== false` 恒开）只挂 `mcp-napcat` 这一路，把工具压成 `<server>_invoke_tool` / `<server>_get_tool_schema` 两个包装工具；探不到压缩机就**回落直连并把原因写进日志 —— 绝不把工具表搞没**。桥侧由 `core/mux.js` 的 `unwrapCompressedToolName` 把包装名还原成真实工具名。
 - **部署保能力**：解包前把目标机原有的 `config.json` / `persona.md` / `state/` 存到 `/root/qqbridge-keep-<TS>/`，解包后逐键合并再恢复核对；旧行为把它们备份到 `/root/qqbridge-prev-<TS>/` 就删库重解包，**从来没放回去**过。
+- **NapCat 界面"进去即鉴权"（2026-09-22 主人报「点进去首次鉴权失败，刷新一次才好」）**：入口地址本来就是带令牌的 `http://…/webui/?token=<webuiToken>`（`server/index.js:573-587`，令牌按"NapCat 自己的 webui.json → 管理器配置 → 最近一次验证可用 → 出厂值"取），但 NapCat WebUI 的**首屏**只是拿 `?token=` 换了一次 Credential 写进 localStorage，**自己不会再进入应用**，页面停在"未登录 / Unauthorized"——手工按一次 F5 立即正常，说明缺的就是"用同一个地址再载入一次"。而应用内 WebView 的令牌轮询只在 **URL 变化**时重挂 iframe（`src/pages/WebView.tsx`），地址没变就永远不重载。现在对 NapCat WebUI（pathname 以 `/webui` 开头）做一次**进来自动重新鉴权**：首屏落定 1.6 秒后把 iframe 重挂一次（同一个带 token 的 URL，只发生一次），状态栏写"已自动重新鉴权一次"；用户不需要自己刷新。
 - **生产上的坑**：只监听文件会在管理端"临时文件 → 备份 → mv"原子替换后盯住已被 unlink 的旧 inode，此后**任何改动都不再触发**（线上实测 07:39:54 覆盖之后，桥日志里一条"已热加载"都没有）；桥自己还有 10 处会把内存里的旧 cfg 写回 `config.json`，没做热加载时管理端的改动不但不生效，还会被**回滚**掉。
 
 ### 成本与计量

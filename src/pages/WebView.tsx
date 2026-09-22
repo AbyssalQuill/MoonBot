@@ -28,6 +28,7 @@ export default function WebView({ url, title, onBack }: Props) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
   const autoDone = useRef(false);
+  const napcatAuthed = useRef(false);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onBack(); };
@@ -55,9 +56,27 @@ export default function WebView({ url, title, onBack }: Props) {
     // src 变化会重建 effect，正好让比对基准跟上下一次
   }, [src, url]);
 
+  /* 【2026-09-22 主人报「NapCat 界面点进去首次鉴权失败，刷新一次才好」】
+   * 机制：NapCat WebUI 认 URL 上的 `?token=`，首屏会拿它换一次 Credential 写进 localStorage ——
+   * 但**首屏自己不会再进入应用**，停在"未登录 / Unauthorized"那一屏；手工按一次 F5 立即正常，
+   * 说明缺的只是"用同一个地址再载入一次"。而地址没变，上面那个令牌轮询不会重挂 iframe
+   * （它只在 URL 变化时 setNonce），于是首次进去必然要人手刷一次。
+   * 这里对 NapCat WebUI 做一次**进来自动重新鉴权**：首屏落定后把 iframe 重挂一次，
+   * 用户不需要自己刷新；重载用的还是带 token 的同一个 URL（不是别的路径），只发生一次。 */
+  useEffect(() => {
+    let isNapcat = false;
+    try { isNapcat = /^\/webui(\/|$)/.test(new URL(url, window.location.href).pathname); } catch { isNapcat = false; }
+    if (!isNapcat || napcatAuthed.current) return;
+    const t = window.setTimeout(() => {
+      napcatAuthed.current = true;
+      setNonce((n) => n + 1);
+      setNote('已自动重新鉴权一次（NapCat 首屏鉴权后需要再载入一次）');
+    }, 1600);
+    return () => window.clearTimeout(t);
+  }, [url]);
+
   /** 手动兜底：即便轮询还没跑到，也能立刻换最新令牌重开 */
-  const reauth = async () => {
-    if (busy) return;
+  const reauth = async () => {    if (busy) return;
     setBusy(true); setNote('');
     try {
       const next = await freshestUrl(src, url);

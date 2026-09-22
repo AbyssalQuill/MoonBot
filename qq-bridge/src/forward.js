@@ -6,6 +6,7 @@
 // 安全原则：
 // - forward id 只允许安全字符，长度受限，避免把任意内容当参数传给 OneBot/日志
 // - 只格式化，不访问网络；调用方负责“id 必须来自当前会话已见消息”的校验
+import { fileMarker } from './lib/message-parse.js';
 
 export function sanitizeForwardId(value) {
   const s = String(value ?? '').trim();
@@ -43,7 +44,7 @@ function segmentText(seg) {
     case 'image': return '[图片]';
     case 'record': return '[语音]';
     case 'video': return '[视频]';
-    case 'file': return `[文件${d.name ?? ''}]`;
+    case 'file': return fileMarker(d.name, d.size);   // 类型也标出来：`[文件:报告.pdf · PDF · 1.2 MB]`（别让模型当成图片）
     case 'reply': return '[引用]';
     case 'forward': return '[转发]';
     case 'json': return '[卡片消息]';

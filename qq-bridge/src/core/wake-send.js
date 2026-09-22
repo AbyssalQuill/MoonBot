@@ -34,6 +34,8 @@ import { activityStatusLine } from './activity.js';
 import { armPendingWakeLease, disarmPendingWakeLease } from './turn-guard.js';
 import { wakeConfigMissCount, reverse, pendingWakeKeys, TurnStartAt, collectors, agentRunningSessions, holdActiveKeys, turnHasBubble } from './session-state.js';
 import { noteInboxDelivery } from './inbox-marks.js';
+// 文件类型标签（`[file:PDF]` 标记用）：与正文里的 `[文件:…]` 标记共用同一份映射，避免两处漂移
+import { fileKindLabel } from '../lib/message-parse.js';
 import { KNOWN_AGENT_TOKENS } from '../lib/text-safe.js';
 import { sanitizeForwardId } from '../forward.js';
 import fs from 'node:fs';
@@ -1654,7 +1656,12 @@ export async function sendWakePrompt(key, reason) {
         const who = m.isOwner ? 'owner' : (m.sender || (m.userId ? `uid:${m.userId}` : '?'));
         const id = m.messageId ? `(id:${m.messageId})` : '';
         const body = unreadBody(m, UNC_TEXT);
-        const extra = m.hasMedia ? ' [image]' : (m.hasFile ? ' [file]' : '');
+        /* 【2026-09-22 主人要求】文件标记原来只写 ` [file]`，模型读不出"这是什么东西"，
+         * 会把对方发来的一个文档当成图片去调识图工具。现在带上类型（` [file:PDF]`），
+         * 和正文里的 `[文件:报告.pdf · PDF · 1.2 MB]` 一起，明确"这是文件，不是图片"。 */
+        const f0 = Array.isArray(m.files) ? m.files[0] : null;
+        const fileTag = f0 ? ` [file:${f0.kind || fileKindLabel(f0.name)}]` : (m.hasFile ? ' [file]' : '');
+        const extra = m.hasMedia ? ' [image]' : fileTag;
         const at = m.atSelf ? ' @me' : '';
         return `${who}${id}${at}: ${body}${extra}`;
       });

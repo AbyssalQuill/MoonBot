@@ -1504,7 +1504,7 @@ registerTool(
 
 registerTool(
   'qq_get_file_content',
-  'Read a file message content in a session (read-only). Supports .md / .txt / .json / .log / .csv / .js / .py / .html and .docx (Word). Call when the text shows a file marker like [文件xxx], or when a message carries files / hasFile:true; messageId = that message messageId or seq. Returns the content, truncated at 20000 characters.',
+  'Read a file message content in a session (read-only). Supports .md / .txt / .json / .log / .csv / .js / .py / .html and .docx (Word). Call when the text shows a file marker like [文件:报告.pdf · PDF · 1.2 MB] (or the short [file:PDF] tag on an [Unread] line), or when a message carries files / hasFile:true; messageId = that message messageId or seq. A file is NEVER a picture: do not use the image tools on it and never describe its contents before reading it. Returns the content, truncated at 20000 characters.',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token (from the wake prompt)'),

@@ -41,7 +41,7 @@ export async function segmentsToText(segments, options = {}) {
       case 'image': out.push('[图片]'); break;
       case 'record': out.push('[语音]'); break;
       case 'video': out.push('[视频]'); break;
-      case 'file': out.push(`[文件${d.name ?? ''}]`); break;
+      case 'file': out.push(fileMarker(d.name, d.size)); break;
       case 'reply': {
         // 引用/回复段：默认解析成「被引用人 + 原文」，让 AI 能判断这句话是对谁说的；
         // includeReply=false 时跳过该段，得到“当前消息自己的文字”（用于指令/指向性判断）。
@@ -359,6 +359,54 @@ export function extractMediaFromSegments(segments) {
   return media;
 }
 
+/* ── 文件段渲染（2026-09-22 主人要求：「[文件] [file] 这种文件类型也标出来吧，要模型不知道发的是图片」）──
+ * 以前文件段只渲染成 `[文件名字]`，没有名字时就是光秃秃的 `[文件]`；唤醒正文里另加一个 ` [file]` 标记。
+ * 模型看到"文件 + file"时读不出**这是什么类型的东西**，容易当成图片去调识图工具（现场就是这种误判）。
+ * 现在统一成 `[文件:报告.pdf · PDF · 1.2 MB]`：名字、类型、大小都在，且**永远不是 `[图片]`**。
+ * 三个调用点共用这里的实现（segmentsToText / forward.js / wake-send 的 [Unread] 行），避免各写一份漂移。 */
+const FILE_KIND_BY_EXT = {
+  pdf: 'PDF',
+  doc: 'Word', docx: 'Word', rtf: 'Word', odt: 'Word',
+  xls: 'Excel', xlsx: 'Excel', csv: '表格', ods: '表格',
+  ppt: 'PPT', pptx: 'PPT', odp: 'PPT',
+  txt: '文本', md: '文本', log: '日志', json: 'JSON', xml: 'XML', yml: 'YAML', yaml: 'YAML', ini: '配置', conf: '配置',
+  zip: '压缩包', rar: '压缩包', '7z': '压缩包', tar: '压缩包', gz: '压缩包', bz2: '压缩包', xz: '压缩包',
+  jpg: '图片文件', jpeg: '图片文件', png: '图片文件', gif: '图片文件', webp: '图片文件', bmp: '图片文件', svg: '图片文件', ico: '图片文件',
+  mp4: '视频文件', mov: '视频文件', mkv: '视频文件', avi: '视频文件', webm: '视频文件',
+  mp3: '音频文件', wav: '音频文件', flac: '音频文件', m4a: '音频文件', ogg: '音频文件', aac: '音频文件',
+  apk: '安卓安装包', exe: '安装程序', msi: '安装程序', deb: '安装包', rpm: '安装包', dmg: '安装包',
+  js: '代码', mjs: '代码', cjs: '代码', ts: '代码', tsx: '代码', jsx: '代码', py: '代码', java: '代码', c: '代码', h: '代码',
+  cpp: '代码', cs: '代码', go: '代码', rs: '代码', rb: '代码', php: '代码', sh: '脚本', bat: '脚本', ps1: '脚本',
+  html: '网页', htm: '网页', css: '样式', sql: 'SQL', db: '数据库', sqlite: '数据库', epub: '电子书', mobi: '电子书'
+};
+
+/** 文件名 → 类型标签（PDF / Word / 压缩包 / 代码 …）；认不出就回扩展名大写，没有扩展名回"未知类型"。 */
+export function fileKindLabel(name) {
+  const nm = String(name ?? '').trim();
+  const m = /\.([A-Za-z0-9]{1,8})$/.exec(nm);
+  if (!m) return '未知类型';
+  const ext = m[1].toLowerCase();
+  return FILE_KIND_BY_EXT[ext] || ext.toUpperCase();
+}
+
+/** 字节数 → 人能读的短写法（1.2 MB / 384 KB / 512 B）；没有大小就回空串。 */
+export function formatBytesShort(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '';
+  if (v < 1024) return `${Math.round(v)} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(v < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(v / 1024 / 1024).toFixed(v < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+/** 文件段的统一标记：`[文件:报告.pdf · PDF · 1.2 MB]`（无名字时写"未命名文件"，绝不留 `[文件]`）。 */
+export function fileMarker(name, size) {
+  const nm = String(name ?? '').trim() || '未命名文件';
+  const parts = [nm, fileKindLabel(nm)];
+  const sz = formatBytesShort(size);
+  if (sz) parts.push(sz);
+  return `[文件:${parts.join(' · ')}]`;
+}
+
 // 从 OneBot 消息段中提取文件段元数据（md/txt/word 等），供“读取文件内容”能力使用。
 // 不下载字节，只记录定位信息：file=OneBot 文件标识（用于 get_file）、url=直链、name=文件名。
 export function extractFilesFromSegments(segments) {
@@ -367,11 +415,17 @@ export function extractFilesFromSegments(segments) {
     if (!seg || typeof seg !== 'object') continue;
     if (seg.type !== 'file') continue;
     const d = seg.data ?? {};
+    const name = String(d.name ?? d.file ?? '');
     files.push({
-      name: String(d.name ?? d.file ?? ''),
+      name,
       fileId: String(d.file ?? ''),
       url: String(d.url ?? ''),
-      size: d.size != null ? Number(d.size) : null
+      size: d.size != null ? Number(d.size) : null,
+      /* 【2026-09-22】类型也随消息一起记下来：唤醒正文的 `[file:…]` 标记要用它，
+       * 免得模型把"发过来的一个 PDF"当成图片（kind/ext 都在这里，老状态里没有时按名字现算）。 */
+      ext: (/\.([A-Za-z0-9]{1,8})$/.exec(name)?.[1] || '').toLowerCase(),
+      kind: fileKindLabel(name),
+      marker: fileMarker(name, d.size)
     });
   }
   return files;
