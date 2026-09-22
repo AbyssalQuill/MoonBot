@@ -302,7 +302,12 @@ export function loadConfig() {
         permanent: true
       },
       ...(file.social ?? {})
-    }
+    },
+    /* 【2026-09-22 修 BL2·整段顶层配置被丢弃】loadConfig 返回的是**显式键字面量**，以前只透了 file.social，
+     * 于是 config.json / config.example.json 里的顶层 guard 段**从来没进过 cfg** —— 而消费端
+     * core/napcat-guard.js 的 guardCfg() 读的就是 cfgRef?.guard，于是改 guard.* 完全无效、守护照旧按默认值跑，
+     * napcat-guard.js 里 verdict='disabled' 那条分支也不可达。这里把 guard 段透传进来（出厂默认见 config.example.json）。 */
+    guard: { ...(file.guard ?? {}) },
   };
 
   // social.tools 需要与默认值深度合并：旧 config.json 若缺少新增工具开关，

@@ -555,7 +555,13 @@ export function searchChatMessages(opts = {}) {
   const ftsQ = opts.query ? ftsQueryOf(opts.query) : '';
   const useFts = !!ftsQ && ftsUsable(db, 'chat_fts');
   if (opts.query && useFts) {
-    joinSql = ' JOIN chat_fts f ON f.rowid = chat_messages.id';
+    /* 【2026-09-22 修「带 query 的历史检索 100% 失败」】FTS5 的 MATCH **不认表别名**：
+     * 原来 JOIN 写成 `chat_fts f`（起了别名），WHERE / ORDER BY 写 `chat_fts` → 报 "no such column: chat_fts"；
+     * 反过来把三处都改成别名 `f` 也不行 → 报 "no such column: f"（实测两种写法都试过）。
+     * 正确写法是**不给 FTS 表起别名**、三处一律用真名 —— 也就是下面这样。整条语句一报错就被 catch 吞掉、
+     * 静默退回 LIKE，所以症状是"搜历史搜不到/不按相关度排"，而且没有任何报错。
+     * 回归测试：tests/memory-fts.test.js（六项，含单字退 LIKE 与 convKey 过滤）。 */
+    joinSql = ' JOIN chat_fts ON chat_fts.rowid = chat_messages.id';
     where.push('chat_fts MATCH ?');
     params.push(ftsQ);
     orderSql = 'bm25(chat_fts) ASC';

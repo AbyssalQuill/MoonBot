@@ -383,7 +383,10 @@ export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTE
     if (!complete.ok) {
       throw new Error(`图片字节不完整（${complete.format || '未知格式'}，实际 ${complete.actualBytes}B${complete.declaredBytes ? `／声明 ${complete.declaredBytes}B` : ''}）：${complete.reason}`);
     }
-    return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer, contentLength: result.contentLength ?? null, complete };
+    /* 【2026-09-22 修 M4】以前这里漏了 contentEncoding，而 qzone-image.js 明确要它：
+     * 缺了就会把「带 gzip/br 的图片响应」按压缩前的字节长度去比解压后的字节数 → 好图被判不完整、
+     * 说说降级成纯文字还写个误导原因。第一道闸门 (verifyImageComplete) 用的是正确值，两道结论会相反。 */
+    return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer, contentLength: result.contentLength ?? null, contentEncoding: result.contentEncoding ?? null, complete };
   }
   throw new Error('重定向次数过多，已停止');
 }

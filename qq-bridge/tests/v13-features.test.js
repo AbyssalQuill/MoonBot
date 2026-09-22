@@ -175,7 +175,14 @@ await check('② extreme 档：只留八件套，且明确是"会丢功能"的�
 
 await check('② low 档走"不要"名单：名单外一律保留（新增工具默认可见）', () => {
   const r = resolveToolTier({ enabled: true, level: 'low' });
-  assert.equal(toolAllowedByTier('qq_send_pixiv', r), false);
+  /* 【2026-09-22 改口径】low 的 drop 名单按**真实调用日志**复核过：
+   * pixiv / 富卡片 / 点歌 / 定时 / QQ 空间五条 当时判"零调用"，后来主人在用 → 全部撤出名单。
+   * 所以这条断言改成：**在用的不砍**、**零调用的大块头照砍**。 */
+  assert.equal(toolAllowedByTier('qq_send_pixiv', r), true, 'pixiv 主人在用（画画），不能再砍');
+  assert.equal(toolAllowedByTier('qq_send_rich', r), true, '富卡片主人在用');
+  assert.equal(toolAllowedByTier('qq_send_qzone', r), true, '发说说主人在用');
+  assert.equal(toolAllowedByTier('qq_character_list', r), false, '角色卡四件是实测零调用的大块头，仍然砍');
+  assert.equal(toolAllowedByTier('qq_deepsleep', r), false);
   assert.equal(toolAllowedByTier('qq_send_message', r), true);
   assert.equal(toolAllowedByTier('qq_某个将来才会有的工具', r), true, '黑名单语义：不在名单里就该保留');
 });
@@ -220,9 +227,15 @@ await check('② 实测占比：按字符加权算（不是按工具个数），
   const all = measureSchemaShare(tools, null);
   assert.equal(all.keptChars, total);
   assert.equal(all.share, 1);
-  // low 用 drop 名单：砍掉两个大块头、其余保留
-  const low = measureSchemaShare(tools, null, new Set(TOOL_TIERS.low.drop));
-  assert.equal(low.totalChars - low.keptChars, 6277 + 4866);
+  // low 用 drop 名单：这一档只砍"实测零调用"的大块头 —— 上面这份样本里 pixiv/富卡片都在用，
+  // 所以一个都不该被砍（省 0 字符）；把角色卡加进样本，才应该被砍掉并计入节省。
+  const lowSame = measureSchemaShare(tools, null, new Set(TOOL_TIERS.low.drop));
+  assert.equal(lowSame.totalChars - lowSame.keptChars, 0, '样本里的工具都在用，low 档不该砍任何一个');
+  const withChars = [...tools, { name: 'qq_character_list', cost: 1329 }];
+  const low2 = measureSchemaShare(withChars, null, new Set(TOOL_TIERS.low.drop));
+  assert.equal(low2.totalChars - low2.keptChars, 1329, '角色卡是实测零调用的大块头，应该被砍');
+  assert.equal(low2.droppedCount, 1);
+  assert.equal(low2.dropped[0].name, 'qq_character_list');
 });
 
 // ── ③ 记忆检索的查询串 ────────────────────────────────────────────────────────

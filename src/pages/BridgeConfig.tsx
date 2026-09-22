@@ -964,7 +964,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       /* 【2026-09-21 修】这里原来回填 0.12/0.03，而桥侧默认（qq-bridge/src/core/config.js）是 0.08/0.02 ——
        * 老配置打开这张卡再点保存，就等于把"上下文治理"悄悄放宽回 0.12：上下文长期停在 ~11.7 万 token，
        * 实测"一句话 1 分钱"。回填值必须与服务端默认逐字一致，否则界面本身就是个改错值的陷阱。 */
-      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.08;
+      if (dc.thresholdRatio === undefined) dc.thresholdRatio = 0.16;   // 【2026-09-22】与桥缺省对齐（原来回填 0.08，一保存就把实测最省值改回更贵的旧值）
       if (dc.retainRatio === undefined) dc.retainRatio = 0.02;
       if (dc.toolResultMaxChars === undefined) dc.toolResultMaxChars = 8192;
       if (dc.summarizationProvider === undefined) dc.summarizationProvider = '';
@@ -983,7 +983,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
       if (tc.peakHours === undefined) tc.peakHours = [9, 10, 11, 14, 15, 16, 17];
       if (!c.social) c.social = {};
       if (!c.social.autoReset || typeof c.social.autoReset !== 'object') c.social.autoReset = {};
-      if (c.social.autoReset.permanent === undefined) c.social.autoReset.permanent = false;
+      if (c.social.autoReset.permanent === undefined) c.social.autoReset.permanent = true;   // 【2026-09-22】与桥缺省对齐（实测最省 = 永久会话）
       // 「语言模型密钥」的真实状态（在隔离 DSH 的凭据文件里，不在 config.json 里）
       setApiKeyStatus((r as any).apiKeyStatus || null);
       // 出厂 ownerQQ=null（未设置/无主人）→ 显示为空串，便于输入真实 QQ
