@@ -679,6 +679,27 @@ export interface ToolSchemaStats {
   top?: Array<{ name: string; cost: number }>;
 }
 export const getToolSchemaStats = () => api<ToolSchemaStats>('/bridge/tool-schema-stats');
+/* 「上下文治理」智能推荐要用的**固定开销**实测（system 提示词 + 工具 schema 的 token）。
+ * 来源：隔离 DSH 自己的 token-meter 把最后一次 `request/header` price 出来的
+ * `contextBreakdown`（含 systemTokens / toolsTokens / messageTokens）与 `contextPressure`
+ * （含 contextWindow），落在 <隔离 DSH home>/storages/session_projcache/sessions/session-*.json。
+ * 服务端接口：server/index.js 的 GET /api/bridge/context-overhead（只读、缓存 30 秒）。 */
+export interface ContextOverhead {
+  ok: boolean; message?: string;
+  file?: string; sessionId?: string; at?: number;
+  /** system 提示词的实测 token */
+  systemTokens?: number;
+  /** 工具 schema 的实测 token */
+  toolsTokens?: number;
+  /** 固定开销 = systemTokens + toolsTokens（每一步都要重发的那部分） */
+  fixedTokens?: number;
+  /** 会话正文（聊天历史）的 token，随对话增长 */
+  messageTokens?: number;
+  /** 这次会话用的模型窗口（token），推荐公式要用它 */
+  contextWindow?: number;
+  surfaceTokens?: number;
+}
+export const getContextOverhead = () => api<ContextOverhead>('/bridge/context-overhead');
 /* 记忆架构（v1.3.0）总览：分层 + 全文索引（只读 memory.db） */
 export interface MemoryStats {
   ok: boolean; message?: string;

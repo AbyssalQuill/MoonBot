@@ -3387,6 +3387,95 @@ app.get('/api/bridge/tool-schema-stats', (_req, res) => {
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
+/* ── 固定开销（system 提示词 + 工具 schema）实测：给「上下文治理」卡的智能推荐用（2026-09-22）──
+ * 数字从哪来：隔离 DSH 自己的 token-meter（@deepseek-ai/dsh-token-meter）会把**最后一次
+ * `request/header`**（canonical request envelope = system 提示词 + tools 工具表）price 成 token，
+ * 按会话落进隔离 home 的
+ *   <isolatedHome>/storages/session_projcache/sessions/session-*.json
+ * 里的 `record.rows.contextBreakdown.val`（{ systemTokens, toolsTokens, messageTokens }）；
+ * 同一份记录里的 `record.rows.contextPressure.val.contextWindow` 就是这次会话用的模型窗口。
+ *
+ * 为什么不自己数：管理端拿不到 DSH 真正发出去的那份 system 文本与工具表。这份是 DSH
+ * **自己记的账**，与 /api/bridge/tool-schema-stats（桥在注册期逐个量 schema 的实测）互为印证 ——
+ * "阈值该多大"必须建立在实测上，不能又是一个拍脑袋的比例。
+ *
+ * 成本：一次 readdir + 读一个几十 KB 的 JSON；结果缓存 30 秒、文件名清单缓存 60 秒。
+ * 只读，不落任何配置；任何一步失败都回 ok:false + 人话原因，绝不让页面报错。 */
+const CONTEXT_OVERHEAD_TTL_MS = 30000;
+let contextOverheadCache = { at: 0, value: null };
+let contextOverheadFileCache = { at: 0, file: '' };
+
+/** 会话账本目录里 mtime 最新的那份（文件名清单缓存 60 秒，避免每次请求都 stat 一遍整个目录） */
+function newestProjCacheFile(dir) {
+  const now = Date.now();
+  if (contextOverheadFileCache.file && now - contextOverheadFileCache.at < 60000
+    && existsSync(contextOverheadFileCache.file)) return contextOverheadFileCache.file;
+  let best = ''; let bestAt = -1;
+  let names = [];
+  try { names = readdirSync(dir); } catch { names = []; }
+  for (const f of names) {
+    if (!/^session-.*\.json$/.test(f)) continue;
+    try {
+      const ms = statSync(join(dir, f)).mtimeMs;
+      if (ms > bestAt) { bestAt = ms; best = join(dir, f); }
+    } catch { /* 单个文件读不到就跳过，不影响其余 */ }
+  }
+  contextOverheadFileCache = { at: now, file: best };
+  return best;
+}
+
+/** 读最近一次实测的固定开销（system + tools 的 token）与它所属的模型窗口 */
+function readContextOverhead() {
+  const now = Date.now();
+  if (contextOverheadCache.value && now - contextOverheadCache.at < CONTEXT_OVERHEAD_TTL_MS) return contextOverheadCache.value;
+  let out;
+  try {
+    const home = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '') || DEFAULT_ISOLATED_HOME;
+    const dir = join(home, 'storages', 'session_projcache', 'sessions');
+    if (!existsSync(dir)) {
+      out = { ok: false, message: `还没有隔离 DSH 的会话账本（${dir} 不存在）：隔离 DSH 跑起来、发过一次模型请求之后才会有` };
+    } else {
+      const file = newestProjCacheFile(dir);
+      if (!file) {
+        out = { ok: false, message: `隔离 DSH 的会话账本还是空的（${dir}）：发过一次模型请求之后才会有` };
+      } else {
+        const rows = JSON.parse(readTextStripBom(file))?.record?.rows ?? {};
+        const bd = rows?.contextBreakdown?.val ?? null;
+        const pr = rows?.contextPressure?.val ?? null;
+        const sys = Number(bd?.systemTokens);
+        const tools = Number(bd?.toolsTokens);
+        if (!Number.isFinite(sys) || !Number.isFinite(tools)) {
+          out = { ok: false, message: '这份会话账本里还没有 request/header 的 token 分解（隔离 DSH 还没发过模型请求）', file };
+        } else {
+          const win = Number(pr?.contextWindow);
+          const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : 0);
+          out = {
+            ok: true,
+            file,
+            sessionId: basename(file).replace(/\.json$/, ''),
+            at: Math.round(statSync(file).mtimeMs),
+            systemTokens: num(sys),
+            toolsTokens: num(tools),
+            fixedTokens: num(sys + tools),
+            messageTokens: num(bd?.messageTokens),
+            contextWindow: win > 0 ? Math.round(win) : 0,
+            surfaceTokens: num(pr?.surfaceTokens),
+          };
+        }
+      }
+    }
+  } catch (e) {
+    out = { ok: false, message: `读隔离 DSH 的会话账本失败：${e?.message ?? e}` };
+  }
+  contextOverheadCache = { at: now, value: out };
+  return out;
+}
+
+app.get('/api/bridge/context-overhead', (_req, res) => {
+  try { res.json(readContextOverhead()); }
+  catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
 /* ── 记忆架构（v1.3.0）总览：分层记忆 + 全文索引的实际情况（2026-09-21）──────────────
  * 主人要求"升级记忆架构、档案架构"，那就得看得见：永久层有多少条、索引建好没有、检索能不能用。
  * 只读打开 memory.db（与「群友档案」页同一个只读句柄），任何一步失败都回 ok:false + 人话原因，
