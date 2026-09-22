@@ -116,8 +116,11 @@ export function summarizeMeasuredCost(hours, price) {
  */
 export function buildTokenReportText(opts = {}) {
   const days = Math.max(1, Math.min(60, Math.round(Number(opts.days) || 1)));
+  // opts.nowMs：只给测试用（"日界口径"这类断言必须能在固定时刻复现，不能跟着挂钟走 —— 实测：
+  // 同一份测试在北京 11:00 之后会因为"3 小时前那一行也落在计费日里"而失败）
+  const nowMs = Number(opts.nowMs);
   let rep = null;
-  try { rep = getTokenReport(days); } catch (e) {
+  try { rep = getTokenReport(days, Number.isFinite(nowMs) ? { nowMs } : undefined); } catch (e) {
     return { ok: false, text: `用量库读不出来：${e?.message ?? e}`, data: {} };
   }
   const price = priceCfg();

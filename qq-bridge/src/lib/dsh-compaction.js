@@ -36,11 +36,22 @@ const MIN_TOOL_RESULT_CHARS = 300;
  * ② 2026-09-20 上午：阈值 0.06，可**固定开销就有 2.75 万 token**（system 5.36 万字符 + 78 个工具
  *    8.11 万字符），加上历史，62.9k 的阈值被顶穿 → 114 个模型步触发 46 次摘要，每步之间多花 15~20 秒；
  * ③ 2026-09-20 晚：阈值抬到 0.12 后不再每步压缩，但上下文长期停在 ~11.7 万 token，主人实测
- *    **"一句话 1 分钱，不划算"** —— 逐条算 token 用量：花费几乎正比于上下文大小
- *    （0~40k ≈ 0.41 分/条，40~70k ≈ 0.56，70~90k ≈ 0.79，110~140k ≈ 1.04 分/条）。
- * 结论：下限 = 0.08（1M 窗口 ≈ 8.4 万 token，既高于固定开销、又让单条停在 0.7 分上下），
- * 缺省值也用 0.08。判据很直白：`thresholdRatio × 模型窗口` 要明显大于「system + 工具表」的固定开销。 */
+ *    **"一句话 1 分钱，不划算"** —— 于是收到 0.08。
+ * ④ **2026-09-22 第四次重算（新提示词下）：按上下文区间分桶才发现，③ 那次把"冷启动/压缩后重建"
+ *    和"上下文大"混在了一个桶里。** 实测（主聊天 4,659 次请求 / 11.2 天）：
+ *      上下文 0~30k   → 每次 ¥0.0382，其中 49.8% 是大未命中（= 刚重建完的那些请求）
+ *      上下文 50~70k  → 每次 ¥0.0033；70~90k → ¥0.0043；90~120k → ¥0.0040；120~160k → ¥0.0051
+ *    50k 以上回归出：**每次 = ¥0.0020 + 0.022 ¥/M × 上下文** —— 上下文本身几乎只按缓存命中价计费，
+ *    真正的开销是"压缩后第一次请求要整段重读"（实测 ≈ ¥0.036/次，频率 ∝ 1/阈值）。
+ *    ⇒ 最省的是**少压缩**：0.08 → ¥3.34/天、0.12 → ¥2.67、**0.16 → ¥2.53**、0.18 → ¥2.53、0.25 → ¥2.66
+ *    （模型在 0.08 处 vs 实测只差 −4%，可作标定）。因此缺省值改成 0.16，稳健区间 0.14~0.20。
+ * 结论：**下限仍是 0.08**（低于它会被固定开销顶穿 → 每一步都压缩，见 ② 的 114 步 46 次），
+ *       缺省值取 0.16。判据：`thresholdRatio × 模型窗口` 要明显大于固定开销，同时大于
+ *       `固定开销 + 保留量`，否则会"压完立刻又压"。复算脚本 tools/compaction-threshold.mjs。 */
 const MIN_THRESHOLD_RATIO = 0.08;
+
+/** 缺省阈值比例（2026-09-22 第四次重算的最省值，见上面 ④）。 */
+const DEFAULT_THRESHOLD_RATIO = 0.16;
 
 /** 把任意配置值夹成合法的压缩策略（纯函数；返回值即可直接生成 YAML 的那组数字） */
 export function normalizeCompaction(raw) {
@@ -50,9 +61,9 @@ export function normalizeCompaction(raw) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
   };
-  // 阈值比例：0.08 ~ 0.5（>0.5 等于没治理；<0.08 会被固定开销顶穿 → 每一步都压缩，见上面的三次实测）
-  let thresholdRatio = Math.min(0.5, Math.max(MIN_THRESHOLD_RATIO, num(src.thresholdRatio, 0.08)));
-  if (thresholdRatio !== num(src.thresholdRatio, 0.08)) {
+  // 阈值比例：0.08 ~ 0.5（>0.5 等于没治理；<0.08 会被固定开销顶穿 → 每一步都压缩，见上面的四次实测）
+  let thresholdRatio = Math.min(0.5, Math.max(MIN_THRESHOLD_RATIO, num(src.thresholdRatio, DEFAULT_THRESHOLD_RATIO)));
+  if (thresholdRatio !== num(src.thresholdRatio, DEFAULT_THRESHOLD_RATIO)) {
     notes.push(`thresholdRatio 被夹到 ${thresholdRatio}（低于 ${MIN_THRESHOLD_RATIO} 会被固定开销顶穿 → 每一步都压缩，只会更慢更贵）`);
   }
   // 逐字保留比例：必须在 (0, thresholdRatio) 开区间内 —— DSH 加载期会校验 retainRatio < thresholdRatio

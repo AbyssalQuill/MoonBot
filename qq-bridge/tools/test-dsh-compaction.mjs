@@ -60,24 +60,27 @@ console.log('== ① 归一化：永远守住 DSH 的硬约束 ==');
     assert.equal(normalizeCompaction({}).enabled, true);
     assert.equal(normalizeCompaction({ enabled: false }).enabled, false);
   });
-  /* 【2026-09-20 线上两次实测定的门禁】
-   * 第一次（0.06）：阈值被"固定开销"顶穿 → 每一步都压缩一次（114 步触发 46 次摘要、每步多 15~20 秒）。
-   * 第二次（0.12）：不再每步压缩，但上下文长期停在 ~11.7 万 token，主人实测"一句话 1 分钱，不划算" ——
-   *   逐条算 token 用量发现花费几乎正比于上下文大小：0~40k ≈ 0.41 分/条、40~70k ≈ 0.56、
-   *   70~90k ≈ 0.79、90~110k ≈ 0.82、110~140k ≈ 1.04 分/条。
-   * 所以缺省值要同时满足两头：**下限**高于固定开销（否则每步压缩），**上限**别让上下文停在十几万（否则每条 1 分）。
-   * 固定开销常量取实测值：system 5.36 万字符 + 78 个工具 8.11 万字符 ≈ 2.75 万 token。 */
+  /* 【2026-09-22 第四次重算：门禁改成"实测口径"】
+   * 前三次（0.06 / 0.12 / 0.08）都在看"每次请求平均花费 vs 上下文大小"这个粗口径，把两类请求混在一桶：
+   *   ① 常规步（前缀命中缓存，只按缓存价 ≈ 0.022 ¥/M 计费）；② 重建步（压缩/轮换/长时间空闲之后，
+   *   整段上下文按未命中重读 ≈ ¥0.036 一次）。分开量之后结论反过来了：
+   *     上下文 50~70k → ¥0.0033/次；70~90k → ¥0.0043；90~120k → ¥0.0040；120~160k → ¥0.0051
+   *   —— 上下文本体几乎不花钱，钱花在"重建次数 × 上下文"上，所以**少压缩才省钱**。
+   *   模型（步数×(0.0020+0.022/M×平均上下文) + 每天重建次数×重建单价）：0.08 → ¥3.34/天、
+   *   0.12 → ¥2.67、**0.16 → ¥2.53**、0.18 → ¥2.53、0.25 → ¥2.66；稳健区间 0.14~0.20。
+   * 门禁因此改成：**下限**仍高于固定开销（否则每步压缩），**上限** 0.35（再高就等于不治理，
+   * 一旦上下文真的顶到 1M 会直接溢出），并要求缺省值落在实测最省区间内。复算：tools/compaction-threshold.mjs。 */
   const WINDOW = 1048576;
-  const FIXED_OVERHEAD = 27500;    // system + 78 个工具，实测（见 src/core/config.js 注释）
-  const COST_TARGET_MAX = 100000;  // 上限：上下文超过 10 万 token 时单条 ≈ 1 分钱
-  check(`① 缺省阈值 × 1M 落在 [8 万, 10 万] token（高于固定开销 ${FIXED_OVERHEAD}、又不至于"一句话 1 分钱"）`, () => {
+  const FIXED_OVERHEAD = 27500;    // system + 工具表，实测（旧值；压缩后实际更小，用它当保守下限）
+  const OPT_BAND = [0.12, 0.20];   // 实测最省的稳健区间（差 ≤2%）
+  check(`① 缺省阈值落在实测最省区间 [${OPT_BAND[0] * 100}%, ${OPT_BAND[1] * 100}%] 且高于固定开销 ${FIXED_OVERHEAD}`, () => {
     const p = normalizeCompaction({});
     const t = p.thresholdRatio * WINDOW;
-    assert.ok(t >= 78000, `阈值太低：${Math.round(t)} token（会被固定开销顶穿 → 每步压缩）`);
-    assert.ok(t <= COST_TARGET_MAX, `阈值太高：${Math.round(t)} token（单条会到 1 分钱）`);
+    assert.ok(t >= FIXED_OVERHEAD * 1.5, `阈值太低：${Math.round(t)} token（会被固定开销顶穿 → 每步压缩）`);
+    assert.ok(p.thresholdRatio >= OPT_BAND[0] && p.thresholdRatio <= OPT_BAND[1], `缺省 ${p.thresholdRatio} 不在实测最省区间 ${OPT_BAND} 内`);
   });
-  check('② 事故值 0.12 不再是缺省；低于下限的 0.06 / 0.02 / 0.005 都被夹回', () => {
-    assert.notEqual(normalizeCompaction({}).thresholdRatio, 0.12, '0.12 已被实测证明"一句话 1 分钱"');
+  check('② 低于下限的值一律被夹回；缺省不再是 0.08（实测证明它比 0.16 贵 20%+）', () => {
+    assert.ok(normalizeCompaction({}).thresholdRatio > 0.08, '缺省仍是 0.08 → 没有吃上第四次重算的结论');
     for (const v of [0.06, 0.02, 0.005]) {
       const p = normalizeCompaction({ thresholdRatio: v, retainRatio: 0.01 });
       assert.ok(p.thresholdRatio * WINDOW >= 78000, `阈值 ${v} 没被夹够：${Math.round(p.thresholdRatio * WINDOW)} token`);

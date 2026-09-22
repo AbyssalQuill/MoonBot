@@ -87,18 +87,22 @@ await check('① 有数据时正文包含总量与钱数，且估算行不并进
 await check('① 两个日界口径必须分行标注（计费日 vs 北京自然日），不许混在一行里', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v13-tok2-'));
   try {
-    // 造"跨换日"的数据：今天（计费日）只有一点点，而北京自然日 00:00 起有一大堆
+    // 造"跨换日"的数据：今天（计费日，北京 08:00 起）只有一点点，而北京自然日 00:00 起有一大堆
     // —— 线上现场就是 592,685（计费日）vs 12,182,789（自然日），旧版把两者挨着印，看着像算错。
-    const now = Date.now();
-    const rows = [];
-    rows.push({ tsMs: now - 60_000, sessionId: 's', convKey: 'private:1', prompt: 2000, completion: 600, total: 592685, est: false, cacheRead: 589824, cacheWrite: 0 });
-    // 自然日更早时段（仍在同一个"北京自然日"里，但属于上一个计费日）
-    rows.push({ tsMs: now - 3 * 3600_000, sessionId: 's', convKey: 'private:1', prompt: 300000, completion: 20000, total: 11800000, est: false, cacheRead: 11500000, cacheWrite: 0 });
+    // ⚠ 时刻必须**钉死**（opts.nowMs）：这个断言跟挂钟有关 —— 北京时间 11:00 以后"now−3h"也落在
+    //   计费日里，两边数字就会相等，测试会假失败（2026-09-22 实际踩到）。所以固定成北京 11:00。
+    const NOW = Date.parse('2026-09-22T11:00:00+08:00');
+    const rows = [
+      // 北京 10:00 —— 在计费日里（08:00 换日之后）
+      { tsMs: NOW - 3600_000, sessionId: 's', convKey: 'private:1', prompt: 2000, completion: 600, total: 592685, est: false, cacheRead: 589824, cacheWrite: 0 },
+      // 北京 03:00 —— 同一自然日、但属于上一个计费日（平台算在昨天）
+      { tsMs: NOW - 8 * 3600_000, sessionId: 's', convKey: 'private:1', prompt: 300000, completion: 20000, total: 11800000, est: false, cacheRead: 11500000, cacheWrite: 0 },
+    ];
     fs.writeFileSync(path.join(dir, 'token-usage.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
     initTokenMeter({ stateDir: dir });
     initTokenReportCore({ tokenCost: { ...DEFAULT_TOKEN_COST } });
-    const r = buildTokenReportText({ days: 1 });
-    const rep = getTokenReport(1);
+    const r = buildTokenReportText({ days: 1, nowMs: NOW });
+    const rep = getTokenReport(1, { nowMs: NOW });
     const natural = (rep.todayHourly || []).reduce((a, h) => a + h.prompt + h.completion + h.cacheRead, 0);
     assert.ok(natural > Number(rep.today.billedTotal), `自然日 ${natural} 应大于计费日 ${rep.today.billedTotal}`);
     assert.ok(r.text.includes(Number(rep.today.billedTotal).toLocaleString('en-US')), `缺计费日数字: ${r.text}`);
