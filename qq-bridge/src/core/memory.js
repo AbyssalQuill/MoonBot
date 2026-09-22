@@ -862,7 +862,11 @@ function rowToMemoryEntry(r) {
     content: r.content || '',
     createdAt: Number(r.created_at) || 0,
     updatedAt: Number(r.updated_at) || Number(r.created_at) || 0,
-    tier: r.tier || 'durable',
+    /* 【2026-09-22 修 M14】有的写入路径是**裸 INSERT**（qzone.js / persona-learn.js 直接往表里插行），
+     * 那些行 tier 是空串；以前 `r.tier || 'durable'` 会在读出时**谎报**成 durable，而 listMemoryEntries 的
+     * `tier=?` 过滤又不归一化 → 同一批数据两处口径不一致。现在读出即归一（空串/未知值一律当 durable），
+     * 与 server/index.js 的 COALESCE(NULLIF(tier,''),'durable') 对齐。 */
+    tier: (() => { const s = String(r.tier ?? '').trim(); return MEMORY_TIERS[s] !== undefined ? s : 'durable'; })(),
     pinned: !!r.pinned,
     importance: Number(r.importance) || 0,
     hits: Number(r.hits) || 0,
@@ -903,9 +907,20 @@ export function rememberEntry(o = {}) {
     const hit = db.prepare('SELECT id, hits FROM memory_entries WHERE uid = ? AND category = ? AND content = ? LIMIT 1')
       .get(row.uid, row.category, row.content);
     if (hit) {
+      /* 【2026-09-22 修 M12】去重时**不能拿本次调用的值覆盖更强的旧值**：旧写法直接把 tier/pinned/
+       * expires_at 写成这次归一化的结果，于是"把同一句话再记一遍"会把一条 permanent（永不过期、每轮
+       * 都进 [Recall]）**降级成 durable（90 天）**。现在三个字段都取"更强的那一边"：
+       *   tier：任一边 permanent 就是 permanent；pinned 取 MAX；
+       *   expires_at：0 = 永不过期 → 任一边为 0 就是 0，否则取更晚的那个（绝不缩短寿命）。 */
       db.prepare(`UPDATE memory_entries SET hits = hits + 1, updated_at = ?, last_used_at = ?,
-        tier = ?, pinned = ?, importance = MAX(importance, ?), expires_at = ? WHERE id = ?`)
-        .run(now, now, row.tier, row.pinned, row.importance, row.expiresAt, Number(hit.id));
+        tier = CASE WHEN tier = 'permanent' OR ? = 'permanent' THEN 'permanent' ELSE ? END,
+        pinned = MAX(pinned, ?),
+        importance = MAX(importance, ?),
+        expires_at = CASE WHEN tier = 'permanent' OR ? = 'permanent' THEN 0
+                          WHEN expires_at = 0 OR ? = 0 THEN 0
+                          ELSE MAX(expires_at, ?) END
+        WHERE id = ?`)
+        .run(now, now, row.tier, row.tier, row.pinned, row.importance, row.tier, row.expiresAt, row.expiresAt, Number(hit.id));
       return { ok: true, id: Number(hit.id), deduped: true, tier: row.tier };
     }
     const info = db.prepare(`INSERT INTO memory_entries
@@ -924,8 +939,15 @@ export function setMemoryPinned(id, pinned = true) {
   const db = initMemoryDb();
   if (!db) return { ok: false, error: '记忆库不可用' };
   try {
-    const info = db.prepare("UPDATE memory_entries SET pinned = ?, tier = CASE WHEN ? = 1 THEN 'permanent' ELSE tier END, expires_at = CASE WHEN ? = 1 THEN 0 ELSE expires_at END, updated_at = ? WHERE id = ?")
-      .run(pinned ? 1 : 0, pinned ? 1 : 0, pinned ? 1 : 0, Date.now(), Number(id));
+    /* 【2026-09-22 修 M13】取消置顶时必须**把 tier 也降回来**：旧写法 `ELSE tier` 会把 permanent 层留着，
+     * 于是"取消置顶"之后这条记忆仍然每轮进 [Recall] 摘要，而且 pruneExpiredMemory 明确排除
+     * tier='permanent' → 永远清不掉（界面动作与库内语义不一致）。现在取消置顶 = 回到 durable 层，
+     * 并给它一个正常的过期时间（TTL 取 durable 档）。 */
+    const info = db.prepare("UPDATE memory_entries SET pinned = ?, "
+      + "tier = CASE WHEN ? = 1 THEN 'permanent' ELSE 'durable' END, "
+      + "expires_at = CASE WHEN ? = 1 THEN 0 ELSE ? END, updated_at = ? WHERE id = ?")
+      .run(pinned ? 1 : 0, pinned ? 1 : 0, pinned ? 1 : 0,
+        Date.now() + (Number(MEMORY_TIERS.durable) || 0), Date.now(), Number(id));
     return { ok: true, updated: Number(info.changes) || 0 };
   } catch (error) {
     return { ok: false, error: error?.message ?? String(error) };
@@ -1007,6 +1029,16 @@ export function pruneExpiredMemory() {
 export function memoryDigest(o = {}) {
   const db = initMemoryDb();
   if (!db) return '';
+  /* 【2026-09-22 修 M15】过期行以前**永远不会被删**：pruneExpiredMemory 全仓只有 import、没有调用点。
+   * 这里顺手清一次就够（摘要本来就每轮唤醒都会跑），但按小时节流，别每次唤醒都扫一遍表。 */
+  try {
+    const last = Number(memoryDigest._lastPruneAt) || 0;
+    if (Date.now() - last > 3600_000) {
+      memoryDigest._lastPruneAt = Date.now();
+      const pr = pruneExpiredMemory();
+      if (pr?.ok && pr.removed > 0) log(`[memory] 清理过期记忆 ${pr.removed} 条`);
+    }
+  } catch { /* 清理失败不影响摘要 */ }
   const limit = Math.max(1, Math.min(30, Number(o.limit) || 12));
   const maxChars = Math.max(120, Math.min(4000, Number(o.maxChars) || 700));
   const now = Date.now();

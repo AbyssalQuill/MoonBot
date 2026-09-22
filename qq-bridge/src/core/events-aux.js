@@ -84,6 +84,13 @@ export async function handlePendingAnswer(p, answerText, key, isOwner = false) {
         rpcId: p.rpcId,
         result: { ok: true, value: { sessionId: p.sessionId, approvalId: p.approvalId, outcome } }
       });
+      /* 【2026-09-22 修 M7·注释说的是"只有回执成功才移除挂起"，代码却在无异常时无条件删 —— 因为
+       * dsh-client.respondProxy 缺上下文时**伪造成功**返回 {ok:true}，这里就把它当成真的成功了。
+       * 现在两侧都改：respondProxy 如实抛错；这里也就必须真的检查回执（ok === false 视为失败，
+       * 交给下面的 catch 保留挂起项并提示重试）。 */
+      if (receipt && receipt.ok === false) {
+        throw new Error(receipt?.error?.message || receipt?.error?.code || '审批回执被拒');
+      }
       log(`已处理审批 (${key}): ${outcome}`, receipt);
       await sendToQQ(key, outcome === 'allowed-once' ? '✅ 已通过审批' : '❌ 已拒绝审批');
       // 只有回执成功才移除挂起，且必须仍是同一个挂起（防止期间被新请求覆盖）

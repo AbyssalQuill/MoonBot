@@ -324,9 +324,13 @@ export class NodeApiClient {
   async respondProxy(req) {
     const eventId = req?.rpcId;
     const clientId = this._eventsClientId;
+    /* 【2026-09-22 修 M7·"伪造成功"】以前缺上下文时 `return { result: { ok: true, value: {} } }` 等于**谎报成功**：
+     * 调用方（console-server 的审批路由）会照常回"✅ 已通过审批"并**删掉挂起项**，而 DSH 侧那次 approval/question
+     * 永远等不到应答，且再也无法重试（挂起项已删）。现在如实报错，让调用方如实提示、并且不要清挂起项。 */
     if (!eventId || !clientId) {
-      // 无 $events 上下文(旧直连/纯学习会话)时静默成功
-      return { result: { ok: true, value: {} } };
+      /* 如实抛错（不返回伪成功）：调用方 events-aux.js 的 catch 会保留挂起项并提示"请再回复一次"，
+       * 用户重试才有意义；返回 {ok:true} 会让调用方删掉挂起项、DSH 那边却永远等不到应答。 */
+      throw new Error('没有 $events 上下文（缺 eventId/clientId）—— 无法应答这次审批/提问，挂起项已保留，可重试');
     }
     const value = req?.result?.value ?? {};
     let outcomeValue;
@@ -337,7 +341,9 @@ export class NodeApiClient {
     const res = await this._call('$events/result', {
       args: { clientId, eventId, outcome: { kind: 'result', value: outcomeValue } },
     }, 10000);
-    return res;
+    // 【2026-09-22 修 M7】必须和本文件其它调用一样走 unwrap（它在本文件顶层定义，不是方法）：
+    // 以前直接 return res（多包一层），调用方读 res.result.ok 得到 undefined → 把"没成功"当成"成功"。
+    return unwrap(res, '$events/result');
   }
 
   /* ---------- WS remote.mux 多路事件泵 ---------- */
