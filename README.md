@@ -185,7 +185,7 @@ node src/bridge.js
 - **实现路径**：`core/send-chain.js`（`enqueueSend`）、`core/qq-send.js`（`onebotSend`，`qq-send.js:168`，**所有模型正文的唯一出口**）、`core/send-idempotency.js`（幂等闸门）、`lib/onebot-delivery.js`（分段与节奏）、`lib/send-gaps.js`（`computeGaps`）、`core/config.js`（`clampSendPace`，`config.js:410`）。工具：`qq_send_message`（`:1323`）、`qq_reply`（`:937`）、`qq_send_burst`（`:1281`）、`qq_mark_read`（`:1216`）。
 - **关键约束**：节奏只有"按字数"一种 —— 批内首条秒回，第 2 条起 = 本条字数 × `linearPerCharMs`（默认 150），±`linearJitterRatio` 抖动，夹在 `[linearMinMs, linearCapMs]`；`linearEnabled=false` 即完全不延迟。**钳制**：`linearPerCharMs ∈ [60,320]`、`linearCapMs ∈ [800,6000]`、`linearMinMs` 不得高过 `linearCapMs`（`clampSendPace`）。发送侧还有 `maxSendPerMinute` / `maxSendPerHour` / `maxMessageChars` 上限，以及 `core/audit.js` 的敏感内容拦截。
 - **格式治理**："不许显式换行""颜文字要有出处""代码类不分段"三条由**提示词**（preset 的 `[TOOLS] 2b~2e`）约束，桥侧**不做正则清洗**；桥真正拦的是"工具参数数组被当成正文"—— 切不出正文就 **400 硬失败、一条都不发**（`lib/text-safe.js` + 发送端点 + `onebotSend`）。
-- **收尾那句 OK 由桥挡下（2026-09-22 主人报「模型不是每次都是 OK」）**：模型用发送工具把话发完之后，收尾又单独发一条 `OK` / `好了` / `已发送`，主人那边看到的就是「正经回复」+「一句回执」两条。提示词侧只有 `[RULES] 13 NO_TRAILING_REPORT`（"请它别这样"），这一条是**不依赖模型听话**的那一半：判定器 `lib/ack-text.js`（`isAckOnlyText`）+ 发送端点（`/api/send/group|private|reply`）在真正发出去之前先问一句"本回合已经发过气泡了吗"（`session-state.js` 的 `turnHasBubble`），已发过 + 整条正文就是回执 → 不发，回给模型 `{ok:true, sent:0, ackSuppressed:true, note:'…请直接结束本回合，不用补别的话'}`（**用 ok 回而不是报错**：报错的话它会当成失败去重试，或者换一句话再发一次）。闸门刻意开得极窄：整条正文必须本身就是回执（`ok/okay/done/got it/finished` 与 好的/好嘞/好滴/好啦/好了/已发送/已发出/发送成功/发送完毕/发送完成/已经发送/已回复/已处理/已完成/完成），长度上限 12 字，`**OK**`、`` `OK` `` 这类 Markdown 包裹照认、句末标点不影响，而 **"嗯 / 好 / 在 / 收到 / 行"这种本身就是正常回复的短句、以及任何首条回复一律不拦**（首条回复时 `turnHasBubble` 为假，闸门根本不打开）。回归 `qq-bridge/tests/ack-suppress.test.js`（39 项，含"正常回复绝不能被误伤"一整组）。
+- **收尾那句 OK 是"回合结束令牌"，只由提示词约定（2026-09-22 主人两次表态后的最终做法）**：主人先说"模型不是每次都是 OK…可以强化"，在我把桥侧闸门做出来（本回合已发过气泡就不再发 `OK`/`好了`/`已发送`）之后又明确"**我意思就是要它每次只发 OK 的，不用强迫，无伤大雅**"。所以最终只有提示词那一半：preset `[RULES] 13 CLOSING_OK` —— 发送工具成功后，正文以**单独一个 `OK`** 收尾；那一行是回合结束令牌，桥会丢弃、**永远不进 QQ**（`core/mux.js`：`sendToolSucceeded` 为真时正文按思考忽略；没调发送工具时的裸 `OK` 按"本轮不说话"处理，还顺手免掉了"写了正文没调工具"的未交付草稿暂存）。**桥侧的闸门与判定器已删除**（`src/lib/ack-text.js`、`tests/ack-suppress.test.js`、发送端点里的那段拦截），发送端点回到单一语义：模型让发什么就发什么（幂等闸门仍然照旧拦重复）。顺带把 preset 里编号撞车的 MUSIC 从 13 改成 14。
 - **生产上的坑**：线上那份 `config.json` 的 `social.send` 被调成 `linearPerCharMs: 650` / `linearCapMs: 15000`，17 个字等 11 秒，同一窗口 118 次发送累计执行 990 秒 —— 主人感觉到的"唤醒后要响应一段时间"就是它。这些键**模型自己在私聊里就能改**，只改配置文件挡不住下一次自调，所以才加了钳制（`qq-bridge/tests/send-pace-clamp.test.js`）。
 
 ### 收发图片
@@ -302,7 +302,8 @@ node src/bridge.js
 - **配置热加载**：`applyConfigInPlace` 是**原地合并**（不换对象引用，十几个模块持有的旧引用继续有效）；监听用**目录监听 + 2 秒轮询**双保险。生效期不同：`social.slimTools.*` 在**注册期**生效（改完要重启隔离 DSH），`social.tools.*` 只在**调用期**拒绝（不减少请求体积，不必重启）。
 - **隔离 DSH 装配**：桥启动时幂等地刷新 preset、装配三个内置插件、把三组 MCP server 写进 profile 的 `cordis.patch.yml`，**默认绝不碰桌面端那份 DSH**。MCP 压缩代理（`social.toolCompressor`，默认 `enabled !== false` 恒开）只挂 `mcp-napcat` 这一路，把工具压成 `<server>_invoke_tool` / `<server>_get_tool_schema` 两个包装工具；探不到压缩机就**回落直连并把原因写进日志 —— 绝不把工具表搞没**。桥侧由 `core/mux.js` 的 `unwrapCompressedToolName` 把包装名还原成真实工具名。
 - **部署保能力**：解包前把目标机原有的 `config.json` / `persona.md` / `state/` 存到 `/root/qqbridge-keep-<TS>/`，解包后逐键合并再恢复核对；旧行为把它们备份到 `/root/qqbridge-prev-<TS>/` 就删库重解包，**从来没放回去**过。
-- **NapCat 界面"进去即鉴权"（2026-09-22 主人报「点进去首次鉴权失败，刷新一次才好」）**：入口地址本来就是带令牌的 `http://…/webui/?token=<webuiToken>`（`server/index.js:573-587`，令牌按"NapCat 自己的 webui.json → 管理器配置 → 最近一次验证可用 → 出厂值"取），但 NapCat WebUI 的**首屏**只是拿 `?token=` 换了一次 Credential 写进 localStorage，**自己不会再进入应用**，页面停在"未登录 / Unauthorized"——手工按一次 F5 立即正常，说明缺的就是"用同一个地址再载入一次"。而应用内 WebView 的令牌轮询只在 **URL 变化**时重挂 iframe（`src/pages/WebView.tsx`），地址没变就永远不重载。现在对 NapCat WebUI（pathname 以 `/webui` 开头）做一次**进来自动重新鉴权**：首屏落定 1.6 秒后把 iframe 重挂一次（同一个带 token 的 URL，只发生一次），状态栏写"已自动重新鉴权一次"；用户不需要自己刷新。
+- **NapCat 界面"进去即鉴权"与**登录额度**（2026-09-22 两轮：先"首次鉴权失败要手刷"，后"HTTP 500 + 还鉴权失败 + 登录还 limit"）**：入口地址本来就带令牌（`server/index.js` 的 `buildRuntimeInfo`/`resolveServices`，令牌按"NapCat 自己的 `webui.json` → 管理器配置 → 最近一次验证可用 → 出厂值"取），但 NapCat WebUI 的**首屏**只拿 `?token=` 换一次 Credential 写进 localStorage、**自己不会再进入应用**，页面停在"未登录 / Unauthorized"；而应用内 WebView 只会在 URL 变化时重挂 iframe，所以缺的正是"用同一个地址再载入一次"。现在的做法：WebView 挂载后问一次 `GET /api/napcat/webui-ready`，**服务通了就重载一次**（只重载一次），没通就每 4 秒看一次、最多 60 秒，起来后照样只重载一次。
+- **登录额度：NapCat 的登录接口是"每 IP 每 60 秒 `loginRate`（出厂 10）次"的限量资源，管理器必须绕着它走（第九轮根治）**：读 NapCat 源码 `/opt/napcat/napcat.mjs` 得到确切语义 —— `checkLoginRate(ip, loginRate)` 每 IP 每 60 秒最多 `loginRate` 次登录尝试（`napcat/config/webui.json` 的 `loginRate: 10`），超了直接回 `login rate limit`，而 **WebUI 页面自己也要从这个桶里登录一次**。管理器的本机入口走 `127.0.0.1`、服务端入口走 SSH 隧道（NapCat 看到的来源**同样是 127.0.0.1**），所以任何"把登录接口当探针"的轮询都在跟页面抢额度 —— 上一版 `/api/napcat/webui-ready` 是每 2 秒一次、每次真登一次（最多 20 次），页面就永远登不进去。根治：新增 `server/napcat-webui-auth.js` 作为**唯一**允许登录的地方，带三件事 —— 结论缓存（同一 token 通过后 30 分钟内不再登，失败结论缓 60 秒）、自建预算（每 `scope:port` 每 60 秒最多 2 次 = NapCat 上限的 1/5）、限流冷却（认得 `login rate limit` 后 65 秒内一次都不补刀）。`/api/napcat/webui-ready` 默认**只探活 + 读缓存结论（零登录）**，`?verify=1`（用户点「重新鉴权」）才真验一次，返回里带账本 `rateLimit: { napcatLimit, budget, attemptsInWindow, limited, retryAfterMs }`；桥侧 `core/napcat-tokens.js` 的 Credential 复用从 10 分钟提到 45 分钟（NapCat 校验 Credential 的口径就是"一小时内有效"）。回归 `qq-bridge/tools/test-napcat-webui-auth.mjs`（26 项，用一个照抄 NapCat 限流语义的假 NapCat 跑）。
 - **生产上的坑**：只监听文件会在管理端"临时文件 → 备份 → mv"原子替换后盯住已被 unlink 的旧 inode，此后**任何改动都不再触发**（线上实测 07:39:54 覆盖之后，桥日志里一条"已热加载"都没有）；桥自己还有 10 处会把内存里的旧 cfg 写回 `config.json`，没做热加载时管理端的改动不但不生效，还会被**回滚**掉。
 
 ### 成本与计量
@@ -375,6 +376,7 @@ MoonBot Public/
 │   ├─ index.js              HTTP API、实例编排与探活、前端静态托管
 │   ├─ deploy.js             SSH 远程部署 / 一键克隆
 │   ├─ iso-credential.js     隔离 DSH 凭据文件读写（本地与服务端共用）
+│   ├─ napcat-webui-auth.js  NapCat 登录自查的唯一入口（预算 + 缓存 + 限流冷却）
 │   └─ napcat-guardian.mjs   关窗守卫（独立进程）
 ├─ qq-bridge/                桥接层
 │   ├─ src/bridge.js         入口
@@ -427,6 +429,15 @@ node tools/align-readme-lines.mjs --write       # 按当前源码把行号引用
 node tools/test-meme-search.mjs                 # 表情包：真 MCP 握手 + 真 SQLite 查询（16 项）
 node tools/test-meme-search.mjs --multipack     # 表情包：多包跨包搜索 / pack 过滤 / 没给文件名时的兜底挑图（25 项）
 node tools/test-meme-search.mjs --negative      # 表情包：无 pack 必须响亮报错（7 项）
+node tools/test-napcat-webui-auth.mjs           # NapCat 登录自查 funnel：零轮询登录 / 预算 / 限流冷却（26 项）
+```
+
+管理端（`MoonBot Public` 根目录）：
+
+```bash
+npm run build                                   # tsc -b + vite build：改过 src/ 或 server/ 之后必须跑
+node qq-bridge/tools/test-napcat-webui-auth.mjs  # 同一个 funnel 的回归（server/ 侧改动，路径在 qq-bridge/tools）
+powershell -File tools\restart-manager.ps1      # 重启管理端后端（只杀 qbm-node 的 server/index.js，不动桥与 DSH）
 ```
 
 ---

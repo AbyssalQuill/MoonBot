@@ -45,6 +45,8 @@
 | 管理端后端 | `server/index.js` | HTTP API、实例编排与探活、前端静态托管、安装位置体检（`RUNTIME_ROOT`，`server/index.js:25-31`） |
 | 远程部署 | `server/deploy.js` | SSH 一键克隆：打包 → 流式转发 → 目标机解包 → systemd / NapCat 容器 → 启动自检 |
 | 关窗守卫 | `server/napcat-guardian.mjs` | 独立进程，壳退出后兜底停 NapCat / 桥 / 隔离 DSH |
+| NapCat 登录自查 | `server/napcat-webui-auth.js` | **唯一**允许调用 `POST /api/auth/login` 的地方：结论缓存 30 分钟 + 自限 2 次/分钟（NapCat 出厂 `loginRate` 10 的 1/5）+ 撞限流冷却 65 秒；面板与轮询路径只能读缓存（`peek`，零网络），额度留给 WebUI 页面自己 |
+| 隔离凭据 | `server/iso-credential.js` | 隔离 DSH 的 `.credentials.yaml` 读写（本地直写与服务端 HTTP 写盘共用，可单测） |
 | QQ 桥入口 | `qq-bridge/src/bridge.js` | 载入配置、连接 OneBot 反向 WS、装载事件泵与各子系统 |
 | 桥业务层 | `qq-bridge/src/core/*.js` | 唤醒投递、提示词组装、会话映射、社交状态、发送链、媒体与卡片、语音、学习、用量 |
 | 桥基础库 | `qq-bridge/src/lib/*.js` | OneBot 客户端、消息解析、图片体检、Pixiv、路径、文本处理等 |

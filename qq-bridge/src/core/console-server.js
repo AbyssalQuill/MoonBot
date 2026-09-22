@@ -47,7 +47,6 @@ import {
   SOCIAL_STATE_FILE, STICKER_FILE, FEEDBACK_FILE, TOOL_LOG_FILE, ACTIVITY_LOG, BRIDGE_LOG,
   CROSSCHAT_FILE, LOCK_FILE,
 } from '../lib/paths.js';
-import { isAckOnlyText } from '../lib/ack-text.js';
 import { readJsonSafe, atomicWriteJson, atomicWriteText } from '../lib/json-fs.js';
 import { randInt } from '../lib/rand.js';
 import { BJ_WEEK, bjMinutes, bjMinToText, beijingTs, beijingDateKey, parseClockMin, fmtBeijing } from '../lib/time.js';
@@ -131,7 +130,7 @@ import {
   activeWaits, pendingWakeLeaseTimers, lastWakeRebroadcast, wakeConfigUpdatedKeys,
   markReadCalledKeys, wakeConfigMissCount, reverse,
   queued, queuedHintAt, queueRetries, pending, visionModelAppliedSessions,
-  messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue, turnHasBubble,
+  messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue,
 } from './session-state.js';
 import { handleTurnHold } from './turn-hold.js';
 import {
@@ -5179,19 +5178,11 @@ export function startConsoleServer() {
           });
           return;
         }
-        /* 【2026-09-22 收尾回执闸门】本回合已经真的发过气泡之后，再单独补一条 `OK / 好了 / 已发送` 是纯噪音：
-         * 主人那边看到的是「正经回复」+「一句 OK」两条。prompt 里的 [RULES] 13 是"请它别这样"，这里是不
-         * 依赖模型听话的第二道保证。闸门开得极窄（`lib/ack-text.js`）：整条正文就是一句回执、且本回合已发过
-         * 内容（turnHasBubble）才拦；首条回复、以及"嗯/好/在"这类本身即正常回复的短句一律照发。 */
-        if (isAckOnlyText(message) && turnHasBubble(key, state.sessions?.[key], st)) {
-          log(`[send] 收尾回执已拦下（本回合已发过内容）(${key}): ${message.slice(0, 20)}`);
-          appendActivity(`${key} [send] 收尾回执未发出（本回合已发过内容）：${message.slice(0, 40)}`);
-          sendJson({
-            ok: true, key, sent: 0, failed: 0, skipped: 1, ackSuppressed: true,
-            note: '这条只是收尾回执，本回合的内容已经发出去了，所以没有再发。请直接结束本回合，不用补别的话。'
-          });
-          return;
-        }
+        /* 【2026-09-22 撤掉收尾回执闸门】上一轮在这里加过一道"本回合已发过内容就不再发 `OK/好了/已发送`"的桥侧
+         * 闸门（`lib/ack-text.js` + turnHasBubble）。主人看到后的意见是：**不用强迫，无伤大雅** —— 收尾那句
+         * 交给提示词说清楚就够了（preset `[RULES] 13 CLOSING_OK`：说完用工具之后，正文以单独一个 `OK` 收尾），
+         * 桥不再替模型决定该不该说这一句。删掉闸门同时也删掉了它对发送链的一次隐式改写：
+         * 发送端点回到"模型让发什么就发什么"的单一语义（幂等闸门仍然照旧拦重复）。 */
         // 【2026-09-16 触发源拦截】同批量端点：atUserId 像是 messageId → 降级为不带 @ 发送（不报错、不整批失败）
         const atJudgeOne = judgeAtUserId(atUserId, collectAtUserIdEvidence(st));
         let atUserOne = atUserId;

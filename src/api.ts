@@ -132,11 +132,28 @@ export const applyNapcatTokens = (patch: { webuiToken?: string; httpToken?: stri
 
 /* ================= NapCat WebUI「现在能不能进去」 =================
  * 【2026-09-22】NapCat 界面首次点开总是鉴权失败、要手刷一次：WebUI 首屏只拿 ?token= 换一次 Credential
- * 写进 localStorage、自己不会再进入应用。界面隔着跨域看不见 iframe 内部状态，所以由服务端**当场**打一次
- * NapCat 自己的登录接口（POST /api/auth/login），返回 { ok, serviceUp, tokenPresent, note }：
- *   ok=true  → 现在重载一次就进去了（WebView 据此自动重载，不再让人手刷）
- *   serviceUp=false → 它还没起来，界面显示"等它起来会自动重载"，到点再问。 */
-export const getNapcatWebuiReady = () => api<{ ok: boolean; scope: string; port: number; server?: string | null; serviceUp: boolean; tokenPresent: boolean; off?: string; note: string }>('/napcat/webui-ready');
+ * 写进 localStorage、自己不会再进入应用。界面隔着跨域看不见 iframe 内部状态，所以由服务端告诉它两件事：
+ *   · serviceUp —— 端口通不通（**不花 NapCat 的登录额度**）；
+ *   · ok        —— 服务通了、且此刻没被限流 → 现在重载一次就进去了。
+ * 【同日第二修，主人报「HTTP 500 + 还鉴权失败 + 登录还 limit」】这条端点**默认不再自查令牌**：
+ * NapCat 的登录接口是每 IP 每 60 秒 loginLimit（出厂 10）次的限量资源，WebUI 页面自己也要用一次，
+ * 轮询它等于把页面的额度打光。只有用户点「重新鉴权」时传 `{ verify: true }` 才真验一次，
+ * 且服务端有预算（≤2 次/分钟）与限流冷却（65 秒），并把账本一起回给界面显示。 */
+export interface NapcatWebuiReady {
+  ok: boolean;
+  scope: string;
+  port: number;
+  server?: string | null;
+  serviceUp: boolean;
+  tokenPresent: boolean;
+  off?: string;
+  note: string;
+  error?: string;
+  verify?: { attempted: boolean; status: string; note: string; verifiedAt: number; retryAfterMs: number };
+  rateLimit?: { napcatLimit: number; budget: number; windowMs: number; attemptsInWindow: number; limited: boolean; retryAfterMs: number };
+}
+export const getNapcatWebuiReady = (opts?: { verify?: boolean }) =>
+  api<NapcatWebuiReady>('/napcat/webui-ready' + (opts?.verify ? '?verify=1' : ''));
 
 /* ================= NapCat 会话守护（探针 + 假死自愈） =================
  * 【2026-09-16】QQ 服务端把登录态作废时客户端可能**一条错都不报**（WebUI 上还是 isLogin/online=true），

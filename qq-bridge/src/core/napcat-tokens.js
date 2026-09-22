@@ -254,7 +254,11 @@ function restartContainer() {
  * 撞限流则进入**退避期**，退避期内直接放弃本次探测。登录接口本来只是为了拿这个 Credential，
  * 没有任何理由每次重登一次。
  */
-const WEBUI_CRED_TTL_MS = 10 * 60 * 1000;   // Credential 复用 10 分钟
+/* 【2026-09-22】Credential 复用时长 10 分钟 → **45 分钟**：NapCat 自己校验 Credential 的口径是
+ * "签名对 + 一小时内 + 没被吊销"（`validateCredentialWithinOneHour`），所以 45 分钟内复用完全安全，
+ * 而每少登一次就少花一次它按 IP 计的登录额度（那份额度 WebUI 页面自己也要用，见
+ * server/napcat-webui-auth.js 的说明）。Credential 万一失效，下面的 401 分支会丢缓存重登一次。 */
+const WEBUI_CRED_TTL_MS = 45 * 60 * 1000;   // Credential 复用 45 分钟
 const WEBUI_RL_BACKOFF_MS = 60 * 1000;      // 撞限流后退避 1 分钟
 let webuiCred = { token: '', value: '', at: 0 };
 let webuiBackoffUntil = 0;

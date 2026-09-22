@@ -55,66 +55,82 @@ export default function WebView({ url, title, onBack }: Props) {
     // src 变化会重建 effect，正好让比对基准跟上下一次
   }, [src, url]);
 
-  /* 【2026-09-22 主人报「NapCat 界面点进去首次鉴权失败，刷新一次才好；不要每次点都重新弄一遍」】
-   * 机制：NapCat WebUI 认 URL 上的 `?token=`，首屏会拿它换一次 Credential 写进 localStorage ——
-   * 但**首屏自己不会再进入应用**，停在"未登录 / Unauthorized"那一屏；手工按一次 F5 立即正常，
-   * 缺的就是"用同一个地址再载入一次"。
-   * 只靠固定秒数盲刷解决不了 "它还没起来"（那时刷几次都没用），所以改成**问服务端要判据**：
-   *   GET /api/napcat/webui-ready 会当场打一次 NapCat 的登录接口，返回
-   *   { ok, serviceUp, tokenPresent, note } —— ok 才重载；没就绪就继续等（每 2 秒问一次，最多约 40 秒）。
-   * 重载次数有上限（就绪后 2 次、等待期 2 次），不会无限刷屏；状态栏一直说明当前卡在哪一步。 */
+  /* 【2026-09-22 第二次修（主人报「还鉴权失败，登录还 limit」）：别再把登录接口当轮询探针】
+   * 上一版这里每 2 秒问一次 /api/napcat/webui-ready，而那个端点当时**每次都会真打一次** NapCat 的登录
+   * 接口（最多 20 次）。NapCat 的登录是按 IP 限量的（每 60 秒 loginRate 次，出厂 10），页面自己那一次
+   * 就被挤掉了 —— 表现就是"进去还是鉴权失败 / login rate limit"。现在：
+   *   · 只问"端口通不通"（服务端不再自查令牌，零登录）；
+   *   · 通了就**重载一次**（NapCat 首屏只拿 ?token= 换 Credential、自己不进入应用，所以需要这一次重载）；
+   *   · 没通就每 4 秒看一次、最多 60 秒，起来后照样只重载一次；
+   *   · 限流期间**不重载**（重载会让页面再登一次、白花额度），状态栏写明还有多少秒。
+   * 轮询次数也砍到 15 次 × 4 秒（原来 20 次 × 2 秒），因为这里问的东西不再有"多问几次就能变好"的性质。 */
   useEffect(() => {
     let isNapcat = false;
     try { isNapcat = /^\/webui(\/|$)/.test(new URL(url, window.location.href).pathname); } catch { isNapcat = false; }
     if (!isNapcat) return;
     let alive = true;
-    let blindReloads = 0;
-    let readyReloads = 0;
-    const bump = () => setNonce((n) => n + 1);
-    const loop = async () => {
-      for (let i = 0; i < 20 && alive; i++) {
-        let r: Awaited<ReturnType<typeof getNapcatWebuiReady>> | null = null;
-        try {
-          r = await getNapcatWebuiReady();
-        } catch (e: any) {
-          if (alive) setNote('问不到 NapCat 状态：' + String(e?.message ?? e));
-        }
-        if (!alive) return;
-        if (r) {
-          if (r.ok) {
-            /* 就绪了：用同一个带 token 的地址再载入一次就进去了。第一次重载后隔 3 秒再补一次 ——
-             * 首屏那次登录 POST 可能刚好和重载撞上，补第二下能盖住这个竞态（实测常见）。 */
-            if (readyReloads === 0) {
-              readyReloads = 1; bump(); setNote('NapCat 已就绪：自动完成鉴权中…');
-            } else if (readyReloads === 1) {
-              readyReloads = 2; bump(); setNote('已自动完成鉴权（仍提示未登录就点右侧「重新鉴权」）'); return;
-            }
-          } else {
-            if (r.note) setNote(r.note);
-            // 还没起来：先把首屏刷掉（最多 2 次），等它起来那次由上面的分支接管
-            if (!r.serviceUp && blindReloads < 2) { blindReloads += 1; bump(); }
-            else if (!r.serviceUp && blindReloads >= 2) return;   // 一直起不来就别再刷了，状态栏已写明原因
-          }
-        }
-        await new Promise((res) => setTimeout(res, 2000));
-      }
+    let reloaded = false;
+    /** 只重载一次：首屏那次登录 POST 已经发生过，再刷只会多花一次额度。 */
+    const reloadOnce = () => {
+      if (reloaded || !alive) return false;
+      reloaded = true;
+      setNonce((n) => n + 1);
+      return true;
     };
-    void loop();
+    /** @returns true = 还要继续等 */
+    const tick = async (): Promise<boolean> => {
+      let r: Awaited<ReturnType<typeof getNapcatWebuiReady>> | null = null;
+      try {
+        r = await getNapcatWebuiReady();
+      } catch (e: any) {
+        if (alive) setNote('问不到 NapCat 状态：' + String(e?.message ?? e));
+        return true;
+      }
+      if (!alive || !r) return false;
+      if (r.rateLimit?.limited) {
+        setNote('NapCat 登录接口被限流中（还有 ' + Math.ceil((r.rateLimit.retryAfterMs || 0) / 1000) + ' 秒）：先不重载，免得把页面自己的登录额度也花掉');
+        return false;
+      }
+      if (!r.serviceUp) {
+        setNote(r.note || 'NapCat 还没起来：等它起来会自动重载一次');
+        return true;
+      }
+      reloadOnce();
+      setNote('NapCat 已就绪：正在自动完成鉴权…');
+      return false;
+    };
+    void (async () => {
+      if (!(await tick())) return;
+      for (let i = 0; i < 15 && alive; i++) {
+        await new Promise((res) => setTimeout(res, 4000));
+        if (!alive) return;
+        if (!(await tick())) return;
+      }
+      if (alive) setNote('NapCat 还没起来：起来后点右侧「重新鉴权」即可');
+    })();
     return () => { alive = false; };
   }, [url]);
 
-  /** 手动兜底：立刻问一次服务端 + 取最新令牌重开（两个动作都给结果反馈） */
+  /** 手动兜底：**显式**让服务端真验一次令牌（会花 NapCat 一次登录额度，所以只在用户点的时候做），
+   *  同时取最新地址重开一次。服务端那边有预算与限流冷却，这里把它的账本如实显示出来。 */
   const reauth = async () => {
     if (busy) return;
     setBusy(true); setNote('');
     try {
-      const ready = await getNapcatWebuiReady().catch(() => null);
+      const ready = await getNapcatWebuiReady({ verify: true }).catch(() => null);
       const next = await freshestUrl(src, url);
       setSrc(next);
       setNonce((n) => n + 1);
-      setNote(ready
-        ? (ready.ok ? '已重新鉴权：' + ready.note : '还没就绪：' + ready.note)
-        : (next === src ? '令牌已是最新' : '已换用最新令牌'));
+      if (!ready) { setNote('取新令牌失败：管理器没响应'); return; }
+      if (ready.rateLimit?.limited) {
+        setNote('NapCat 登录接口被限流中（还有 ' + Math.ceil((ready.rateLimit.retryAfterMs || 0) / 1000) + ' 秒）—— 稍后再点；这不代表 QQ 掉线');
+      } else if (!ready.serviceUp) {
+        setNote('NapCat WebUI 还没起来：' + (ready.note || ''));
+      } else if (ready.verify?.status === 'ok' || ready.verify?.status === 'cached') {
+        setNote('令牌已验证通过：已用最新地址重载一次');
+      } else {
+        setNote('已重载一次；服务端自查结果：' + (ready.verify?.note || ready.note || '未知'));
+      }
     } catch (e: any) {
       setNote('取新令牌失败：' + String(e?.message ?? e));
     } finally {

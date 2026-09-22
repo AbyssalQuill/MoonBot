@@ -14,6 +14,9 @@ import { deployApi } from './deploy.js';
 import { mergeCredentialText, credentialStatusFromText, validateCredentialDocument } from './iso-credential.js';
 // NapCat 运行时完整性自检/自修（payload 分片不同源、杀软误删、更新复制不完整都会启动即崩）
 import { ensureNapcatApps } from './napcat-repair.js';
+// NapCat WebUI 登录自查的**唯一入口**（预算 + 缓存 + 限流冷却）。为什么必须收口见该文件头注释：
+// 把登录接口当状态探针会跟 WebUI 页面自己抢 NapCat 的按 IP 限流额度，页面就永远登不进去。
+import { createNapcatWebuiAuth } from './napcat-webui-auth.js';
 const deploy = deployApi();
 
 /* 【2026-09-12 主人要求："确保这个应用安装在哪个盘都可以找到"】
@@ -923,6 +926,16 @@ const NAPCAT_WEBUI_TOKEN_FALLBACK = 'truefriend';
 /** `${scope}:${port}` → { token, at, verified }；scope 是 'local' 或 server.id */
 const napcatWebuiTokenCache = new Map();
 
+/* 【2026-09-22 根治「登录还 limit」】NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的**限量资源**，
+ * 而 WebUI 页面自己也要用它登录一次。管理器以前有 3 条路径各自打它（/api/state 的令牌验证、本机/远端入口
+ * 拼接、以及新增的 /api/napcat/webui-ready 每 2 秒一次），全走同一个 IP —— 探针一多，页面就登不进去。
+ * 现在全部收口到这一个 funnel：缓存结论 30 分钟、自限 2 次/分钟、撞限流冷却 65 秒，
+ * 并且**只有显式要求（?verify=1）或结论过期时**才真的登一次。 */
+const napcatAuth = createNapcatWebuiAuth({
+  log: (m) => mlog(m),
+  hashOf: (t) => sha256Hex(t),
+});
+
 function sha256Hex(s) {
   return crypto.createHash('sha256').update(String(s ?? '')).digest('hex');
 }
@@ -958,22 +971,14 @@ function localNapcatWebuiTokenFromFile(shellDir = null) {
  * 这个 token 现在真的能被这个 NapCat 接受吗？
  * 判据就是它自己的登录接口：`POST /api/auth/login {hash: sha256(token + ".napcat")}` → `code === 0`。
  * （这条形状是从 NapCat 前端 bundle 的 `loginWithToken()` 里读出来的，不是猜的。）
+ *
+ * 【2026-09-22 收口】真正的调用只在 `server/napcat-webui-auth.js` 里发生一次；这里只是把它包成
+ * "行/不行"，并**带上 scope**（预算与缓存按 scope:port 记账）。以前这个函数是各调用点直接 fetch 的，
+ * 于是每条路径都能独立把 NapCat 的登录额度打光。返回 `{ ok, status, note }` 的版本见 verifyNapcatWebuiToken。
  */
-async function napcatWebuiTokenWorks(port, token, timeoutMs = 6000) {
-  const t = String(token ?? '').trim();
-  if (!t) return false;
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hash: sha256Hex(`${t}.napcat`) }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const j = await res.json().catch(() => null);
-    return !!j && Number(j.code) === 0;
-  } catch {
-    return false;   // 端口不通/超时都当作"验不了"，不当作"对不对"
-  }
+async function napcatWebuiTokenWorks(port, token, timeoutMs = 6000, scope = 'local', reason = 'probe') {
+  const r = await napcatAuth.verify({ scope, port, token, timeoutMs, reason });
+  return r.ok === true;
 }
 
 /** 记下"最近一次确认可用"的 token（状态探测、令牌卡片写回、验证成功时都调这个）。 */
@@ -1039,11 +1044,19 @@ async function verifyNapcatWebuiToken(scope, port, candidates = [], { factoryFal
   if (Date.now() - failedAt < NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS) return list[0] || '';   // 刚验过且全失败：冷却期内直接用首选，不重复试
   for (const cand of list.slice(0, 3)) {
     if (cand === cached && napcatWebuiTokenCache.get(cacheKey)?.verified) return cand;   // 验过的直接用
-    if (await napcatWebuiTokenWorks(port, cand, 2500)) {
+    /* 【2026-09-22】这次验证走 funnel：预算用完 / 撞限流冷却期内它**不会**发请求，返回 status='budget'|'limited'。
+     * 那种情况下**立刻 break**：继续试下一个候选只会把 NapCat 的登录额度继续烧掉（页面的那份）。 */
+    const r = await napcatAuth.verify({ scope, port, token: cand, timeoutMs: 2500, reason: 'state' });
+    if (r.ok) {
       napcatWebuiVerifyFailAt.delete(cacheKey);
       rememberNapcatWebuiToken(scope, port, cand, true);
       if (list[0] && cand !== list[0]) mlog(`[napcat] WebUI 令牌修正：${cacheKey} 首选候选进不去，改用验证通过的候选（点开就是对的）`);
       return cand;
+    }
+    if (r.status === 'limited' || r.status === 'budget') {
+      mlog(`[napcat] WebUI 令牌验证让路：${cacheKey} ${r.note}`);
+      napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
+      break;
     }
   }
   napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
@@ -5927,19 +5940,26 @@ app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, 
 app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
 app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
 
-/* 【2026-09-22 主人报「NapCat 界面点进去第一次总是鉴权失败，要刷一次；不要每次都重新弄」】
- * 给界面一个**当下就能问的判据**：WebUI 起了没有？这个 token 现在能不能登录进去？
- * 为什么要服务端判：NapCat WebUI 的首屏只是拿 `?token=` 换一次 Credential 写进 localStorage、自己不会再进入应用
- * （所以"进去→F5 一次"就好），而前端隔着跨域看不见 iframe 里到底是什么状态，只能盲刷固定秒数。
- * 这里做的是和 NapCat 前端**同一个调用**（`POST /api/auth/login {hash}`，见 napcatWebuiTokenWorks），
- * 于是界面可以"等它起来 → 再重载一次"，而不是每次点开都瞎猜。
+/* 【2026-09-22 主人报「NapCat 界面点进去第一次总是鉴权失败，要刷一次」；随后又报
+ * 「/api/napcat/webui-ready → HTTP 500，而且还鉴权失败，登录还 limit」】
  *
- * 注意：这里**不走** verifyNapcatWebuiToken 的 60 秒失败冷却（那是给状态探测用的省事闸门），
- * 而是直接打一次登录接口 —— 界面问的就是"现在行不行"。
- * 本机/服务端两条路都覆盖：连上服务器时看服务端（经隧道），否则看本机。 */
+ * 这条端点的职责被收窄成**一件事**：告诉界面"现在重载一次能不能进去"。判据只有"端口通不通"这一项，
+ * 而且**默认一次登录都不打** —— 因为 NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的限量资源，
+ * WebUI 页面自己就要用掉其中一次；管理器把它当轮询探针（上一版每 2 秒一次、最多 20 次 = 20 次登录尝试）
+ * 会直接把额度打光，页面随后必然"鉴权失败 / login rate limit"（两边还是同一个 IP：本机 127.0.0.1，
+ * 服务端经 SSH 隧道同样是 127.0.0.1）。
+ *
+ * 现在的语义：
+ *   · 默认（界面挂载时的轮询）：只探活 + 读 funnel 里的**缓存结论**（`peek`，零网络），funnel 从没验过就是 'unknown'；
+ *   · `?verify=1`（用户点「重新鉴权」）：才真的验一次，且受 funnel 预算/冷却约束（≤2 次/分钟，撞限流冷却 65 秒）；
+ *   · `ok` = "服务通了、且此刻没有被限流" → 界面据此重载一次；
+ *   · 任何异常都不再抛成 500（上一版的 500 是 handler 里用了没定义的 `cfg`，ReferenceError，
+ *     第一句就死、永远 500），一律回 200 + `ok:false` + 一句人话，让界面能显示"卡在哪一步"。 */
 app.get('/api/napcat/webui-ready', async (req, res) => {
+  const wantVerify = String(req.query?.verify ?? '') === '1';
   try {
-    const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
+    const cfgNow = loadConfig();
+    const connected = cfgNow.activeServerId ? cfgNow.servers.find((s) => s.id === cfgNow.activeServerId) || null : null;
     const sshMode = !!(connected && sshConnections.has(connected.id));
     let scope; let port; let token; let serverName = null; let localOff = '';
     if (sshMode) {
@@ -5950,23 +5970,54 @@ app.get('/api/napcat/webui-ready', async (req, res) => {
       token = String(status?.napcat?.webuiToken || '').trim() || cachedNapcatWebuiToken(scope, port);
     } else {
       scope = 'local';
-      const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
+      const napLocal = cfgNow.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
       port = napLocal.webuiPort || 6099;
       localOff = localNapcatOffReason() || '';
       token = String(localNapcatWebuiTokenFromFile() || napLocal.webuiToken || cachedNapcatWebuiToken(scope, port) || NAPCAT_WEBUI_TOKEN_FALLBACK).trim();
     }
     const up = await probe(`http://127.0.0.1:${port}/webui/`, 1200);
     const serviceUp = !!up.reachable;
-    const tokenOk = !serviceUp ? false : (token ? await napcatWebuiTokenWorks(port, token, 5000) : false);
+    const ledger = napcatAuth.state(scope, port);
+    let verify = { attempted: false, status: 'unknown', note: '', verifiedAt: 0, retryAfterMs: 0 };
+    if (wantVerify && !localOff) {
+      const r = await napcatAuth.verify({ scope, port, token, timeoutMs: 5000, reason: 'manual', force: true });
+      verify = { attempted: true, status: r.status, note: r.note, verifiedAt: r.verifiedAt, retryAfterMs: r.retryAfterMs };
+    } else {
+      const p = napcatAuth.peek(scope, port);
+      verify = {
+        attempted: false,
+        status: p.verdict ? (p.verdict.ok ? 'cached' : (p.limited ? 'limited' : 'invalid')) : (p.limited ? 'limited' : 'unknown'),
+        note: p.limited
+          ? `NapCat 登录接口被限流中，${Math.ceil(p.retryAfterMs / 1000)} 秒内管理器不再自查（这只影响自查，不影响你自己打开界面）`
+          : (p.verdict ? (p.verdict.ok ? '令牌此前已验证通过' : (p.verdict.message || '令牌没通过')) : '本次没有自查（不占用 NapCat 的登录额度）—— 点「重新鉴权」才真验一次'),
+        verifiedAt: p.verdict?.at ?? 0,
+        retryAfterMs: p.retryAfterMs,
+      };
+    }
+    const limited = ledger.limited;
+    const ok = serviceUp && !limited;
     let note;
     if (localOff) note = '当前目标是服务器，本机 NapCat 不探测（' + localOff + '）';
     else if (!serviceUp) note = 'NapCat WebUI 还没起来（127.0.0.1:' + port + ' 不通）—— 等它起来会自动重载一次';
+    else if (limited) note = verify.note;
+    else if (verify.status === 'invalid') note = verify.note;
     else if (!token) note = '拿不到 WebUI 令牌（读不到 webui.json / 探测失败）—— 去「NapCat 鉴权令牌」卡核对';
-    else if (!tokenOk) note = '端口通了，但这个令牌没通过（NapCat 还在启动中，或令牌与它自己 webui.json 不一致）';
-    else note = 'NapCat 已就绪，令牌可用';
-    res.json({ ok: tokenOk, scope, port, server: serverName, serviceUp, tokenPresent: !!token, off: localOff, note });
+    else note = 'NapCat 已就绪：界面会自动重载一次完成鉴权' + (verify.status === 'cached' ? '（令牌此前已验证通过）' : '');
+    res.json({
+      ok, scope, port, server: serverName, serviceUp, tokenPresent: !!token, off: localOff, note,
+      verify,
+      rateLimit: {
+        napcatLimit: ledger.napcatLimit,
+        budget: ledger.budget,
+        windowMs: ledger.windowMs,
+        attemptsInWindow: ledger.attemptsInWindow,
+        limited, retryAfterMs: ledger.retryAfterMs,
+      },
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+    /* 绝不 500：界面要的是"卡在哪一步"，不是一句 HTTP 500。 */
+    mlog(`[napcat] webui-ready 失败：${String(e?.message ?? e)}`);
+    res.json({ ok: false, error: String(e?.message ?? e), note: '管理器自查这一步出错了：' + String(e?.message ?? e), serviceUp: false, tokenPresent: false, verify: { attempted: wantVerify, status: 'error', note: String(e?.message ?? e), verifiedAt: 0, retryAfterMs: 0 } });
   }
 });
 
