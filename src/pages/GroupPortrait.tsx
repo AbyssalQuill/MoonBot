@@ -290,12 +290,19 @@ function ForceCanvas({ nodes, links, vw = 1500, vh = 680, gid, interactive = tru
     try { svgRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
   };
 
-  const linkColor = (l: VLink): string => {
-    const a = nodeById.get(l.from), b = nodeById.get(l.to);
-    if (a?.kind === 'owner' || b?.kind === 'owner') return C.lineStrong;
-    if (a?.kind === 'friend' || b?.kind === 'friend') return 'rgba(111,123,216,0.7)';
-    return C.lineWeak;
+  /* 【2026-09-22 主人要求"点击线就不用再加深蓝色了，应该是互动强度越高颜色越深"】
+   * 原来：线色按"有没有主人/好友"分三类，hover/选中时统一加深变蓝 —— 于是"深浅"表达的是
+   * "被选中"，跟互动强弱无关，看图的人容易误读（点一下就像关系变强了）。
+   * 现在：**一条色带，深浅只由 l.strength 决定**（越强越深、越饱和）；
+   * hover/选中**不再改颜色**，只用"加宽 + 底下垫一条浅色光晕 + 其余变淡"标出当前这条。
+   * 强度是 0~1（两个人的互动占比，服务端算好的）。 */
+  const strengthColor = (s: number, alpha = 1): string => {
+    const t = Math.max(0, Math.min(1, Number(s) || 0));
+    const light = Math.round(74 - 48 * t);   // 74% → 26%：浅灰蓝 → 深蓝
+    const sat = Math.round(34 + 42 * t);     // 34% → 76%：弱线偏灰，强线更饱和
+    return alpha >= 1 ? `hsl(214 ${sat}% ${light}%)` : `hsl(214 ${sat}% ${light}% / ${alpha})`;
   };
+  const strengthWidth = (s: number) => 0.6 + Math.max(0, Math.min(1, Number(s) || 0)) * 2.6;
   const nodeRadius = (n: VNode) => (n.kind === 'owner' ? 19 : n.kind === 'friend' ? 14 : 13);
   const isNear = (n: VNode) => {
     if (!hover) return false;
@@ -308,7 +315,7 @@ function ForceCanvas({ nodes, links, vw = 1500, vh = 680, gid, interactive = tru
         {linkList.map((l, i) => {
           const a = posRef.current.get(l.from), b = posRef.current.get(l.to);
           if (!a || !b) return null;
-          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={linkColor(l)} strokeWidth={0.7 + l.strength * 1.3} strokeOpacity={0.4 + 0.35 * l.strength} strokeLinecap="round" />;
+          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={strengthColor(l.strength)} strokeWidth={0.7 + Math.max(0, Math.min(1, Number(l.strength) || 0)) * 1.6} strokeOpacity={0.45 + 0.45 * Math.max(0, Math.min(1, Number(l.strength) || 0))} strokeLinecap="round" />;
         })}
         {nodes.map((n) => {
           const p = posRef.current.get(n.uid); if (!p) return null;
@@ -342,12 +349,21 @@ function ForceCanvas({ nodes, links, vw = 1500, vh = 680, gid, interactive = tru
           const near = hover && ((na && isNear(na)) || (nb && isNear(nb)));
           const hl = hover && (l.from === hover || l.to === hover);
           const dim = hover && !near && !hl;
+          const col = strengthColor(l.strength);
+          const w = strengthWidth(l.strength);
           return (
-            <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-              stroke={linkColor(l)}
-              strokeWidth={hl ? 1.5 + l.strength * 2.6 : 0.6 + l.strength * 2.2}
-              strokeOpacity={dim ? 0.05 : hl ? 0.6 : 0.26 + 0.42 * l.strength}
-              strokeLinecap="round" />
+            <g key={i}>
+              {/* 悬停/选中：垫一条浅色光晕把这条"抬"出来 —— 深浅只表达互动强度，不再用加深蓝色表示选中 */}
+              {hl && (
+                <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                  stroke="#ffffff" strokeWidth={w + 4.5} strokeOpacity={0.85} strokeLinecap="round" />
+              )}
+              <line x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                stroke={col}
+                strokeWidth={hl ? w + 1.5 : w}
+                strokeOpacity={dim ? 0.06 : (0.3 + 0.5 * Math.max(0, Math.min(1, Number(l.strength) || 0)))}
+                strokeLinecap="round" />
+            </g>
           );
         })}
         {nodes.map((n) => {
@@ -636,12 +652,34 @@ export default function GroupPortrait({ onBack }: Props) {
     for (const t of splitTags(o?.likes)) addProfileTag(t);
     for (const t of splitTags(o?.personality)) addProfileTag(t);
     if (profileTags.length < TAG_BY_PROFILE) {
+      /* 【2026-09-22 主人报"技术/术问/问题/发起/分享/活跃/角洲"这种碎片标签】
+       * 记忆高频词是按**二字窗口**切出来的，没有词典，于是"技术问题"会同时产出 技术 / 术问 / 问题，
+       * "三角洲"会产出 三角 / 角洲 —— 中间那个是**缝合词**，看着像乱码。
+       * 两道过滤（都不需要词典）：
+       *   ① substring：是已采纳标签的子串 → 丢（角洲 ⊂ 三角洲）；
+       *   ② stitch  ：两个字分别出现在两个**计数更高**的已采纳标签里 → 丢（术问：术∈技术、问∈问题）。
+       * 只作用于**记忆高频词**这一段（前面从档案字段切出来的标签不受影响）。 */
+      const accepted: Array<{ w: string; c: number }> = profileTags.map((w) => ({ w, c: Number.MAX_SAFE_INTEGER }));
+      const isJunkWord = (w: string, c: number) => {
+        if (w.length !== 2) return false;
+        for (const a of accepted) if (a.w.length > w.length && a.w.includes(w)) return true;
+        if (c > 0) {
+          const [x, y] = [w[0], w[1]];
+          const hasX = accepted.some((a) => a.w.includes(x) && a.c > c);
+          const hasY = accepted.some((a) => a.w.includes(y) && a.c > c);
+          if (hasX && hasY) return true;
+        }
+        return false;
+      };
       for (const m of (owner?.memoryTop ?? [])) {
         if (profileTags.length >= TAG_BY_PROFILE) break;
         const w = String(m?.w ?? '').trim();
+        const c = Number(m?.c) || 0;
         if (!w || w.length > 12 || INSTR_RE.test(w) || profileTags.includes(w)) continue;
+        if (isJunkWord(w, c)) continue;
         profileTags.push(w);
-        memTags.push({ w, c: Number(m?.c) || 0 });
+        memTags.push({ w, c });
+        accepted.push({ w, c });
       }
     }
 
@@ -960,18 +998,21 @@ export default function GroupPortrait({ onBack }: Props) {
             </span>
           </div>
           {err && <div style={{ color: '#c0504d', fontSize: 12.5, marginBottom: 8 }}>{err}<button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={loadAll}>重试</button></div>}
-          {/* 线色图例：主人要求"大图上显示对应线的颜色"，但页面上原来没有图例，标过色的线看起来只是"随机彩色" */}
+          {/* 线色图例。2026-09-22 改口径：**线的深浅 = 互动强度**（主人要求），
+              于是这里先讲深浅，再讲"标过关系类别的线"（那是人工标注，用固定色）。 */}
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', fontSize: 11.5, color: C.textMuted, marginBottom: 8 }}>
-            <span>关系线：</span>
+            <span>互动强度：</span>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <i style={{ width: 46, height: 2.5, borderRadius: 2, background: 'linear-gradient(90deg,#cfd8e3,#1f4e79)', display: 'inline-block' }} />
+              浅 = 偶尔说话 · 深 = 常在一起（线越粗也越强）
+            </span>
+            <span style={{ marginLeft: 6 }}>已标注的关系：</span>
             {(['guimi', 'jiaren', 'qinglv', 'chouren', 'qunyou'] as const).map((c) => (
               <span key={c} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 <i style={{ width: 15, height: 2.5, borderRadius: 2, background: REL_CAT_COLOR[c], display: 'inline-block' }} />{REL_CAT_LABEL[c]}
               </span>
             ))}
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <i style={{ width: 15, height: 2.5, borderRadius: 2, background: 'linear-gradient(90deg,#c9d2dd,#7a8ba0)', display: 'inline-block' }} />未标注
-            </span>
-            <span>（点一条连线即可标注/清除）</span>
+            <span>（点一条连线即可标注/清除；点线不会改线色）</span>
           </div>
           <div ref={mainBoxRef} style={{ height: 600, position: 'relative', border: '1px solid rgba(0,0,0,0.07)', borderRadius: 16, background: 'rgba(255,255,255,0.6)', overflow: 'hidden' }}>
             {loading && !graph ? (

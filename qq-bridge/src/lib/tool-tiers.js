@@ -77,20 +77,23 @@ export const TOOL_TIERS = {
   off: { label: '不裁剪', note: '全部工具都注册（默认；与改动之前行为一致）', keep: null },
   low: {
     label: '低',
-    note: '只砍掉"实测零调用且体积最大"的那批：pixiv 两个（1.1 万字符）、富卡片、角色卡四件、点歌、定时三条、QQ 空间五条、视频两条、联网找图、群文件、跨会话、学习指令等',
+    note: '只砍"实测零调用且体积最大"的那批（角色卡四件、视频两条、历史/清理/潜水、管理类…）。**最近真的被调用过的工具一律不砍** —— 这一档的 drop 名单已按 2026-09-22 的调用日志复核过：pixiv / 点歌 / 富卡片 / 定时 / QQ 空间五条 当时看着是零调用，后来主人在用（画画、发说说、点歌），所以全部从名单里撤掉了。',
     // low 用「不要」名单（其余一律保留）→ 将来新增工具默认可见，不会"忘了加白名单"
     drop: [
-      'qq_send_pixiv', 'qq_pixiv_search',                                // 实测 0 次调用，却占 1.1 万字符
-      'qq_send_rich', 'qq_music_search',                                  // 富卡片/点歌：实测 0 次
       'qq_character_list', 'qq_character_read', 'qq_character_pack', 'qq_character_search',
-      'qq_schedule_message', 'qq_schedule_list', 'qq_schedule_cancel',
-      'qq_qzone_view', 'qq_qzone_comment', 'qq_qzone_like', 'qq_qzone_reply_comment', 'qq_send_qzone',
-      'qq_video_search', 'qq_video_parse', 'qq_image_search', 'qq_get_file_content',
-      'qq_crosschat_inbox', 'qq_crosschat_send', 'qq_get_group_history', 'qq_get_active_members',
-      'qq_get_self_image', 'qq_get_sticker_image', 'qq_sticker_note', 'qq_set_sticker_remark',
-      'qq_profile_get', 'qq_history_delete', 'qq_history_clear', 'qq_memory_append',
-      'qq_memory_remove', 'qq_memory_clear', 'qq_deepsleep', 'qq_remove_friend', 'qq_report_feedback',
+      'qq_video_search', 'qq_video_parse',
+      'qq_get_file_content', 'qq_crosschat_inbox', 'qq_crosschat_send',
+      'qq_get_group_history', 'qq_get_active_members', 'qq_get_self_image',
+      'qq_get_sticker_image', 'qq_sticker_note', 'qq_set_sticker_remark',
+      'qq_profile_get', 'qq_history_delete', 'qq_history_clear',
+      'qq_memory_append', 'qq_memory_remove', 'qq_memory_clear',
+      'qq_deepsleep', 'qq_remove_friend', 'qq_report_feedback',
       'qq_persona_learn_start', 'qq_persona_learn_stop', 'qq_persona_learn_status',
+      /* 【2026-09-22 撤出名单（当时判"零调用"，实际在用）】留着它们，否则会静默砍掉主人在用的能力：
+       * qq_send_pixiv / qq_pixiv_search（画画）、qq_music_search（点歌）、qq_send_rich（卡片）、
+       * qq_schedule_message（定时）、qq_send_qzone 与空间四条（发说说 / 互动）、qq_image_search（联网找图）、
+       * qq_send_docx（发文档）、qq_like（点赞）、qq_withdraw_message（撤回）、qq_send_qq_face（QQ 表情）。
+       * 判据不是"我觉得用不到"，而是 state/tool-calls.jsonl 里的真实调用次数（复算：node _usedtools.mjs 同款脚本）。 */
     ],
   },
   medium: {
@@ -164,19 +167,28 @@ export function toolAllowedByTier(name, resolved) {
   return true;
 }
 
-/** 量化：把每个工具的 JSON 尺寸加起来，算出"注册了这么多，占不裁剪时的百分之几"。纯函数，便于测试。 */
+/** 量化：把每个工具的 JSON 尺寸加起来，算出"注册了这么多，占不裁剪时的百分之几"。纯函数，便于测试。
+ *  【2026-09-22】额外返回 `dropped`（这一档砍掉的工具名 + 各自字符数，按体积从大到小）：
+ *  管理端要**把裁剪结果标出来**（主人要求"那个裁剪的也标出来别让别人猜"），不能让用户对着档位名猜。
+ *  界面读的就是这里算的名单 —— 与桥真正注册的那份同源（同一个 schemaMeter 账本），不会各说各话。 */
 export function measureSchemaShare(tools, keptNames, droppedNames) {
   const keep = keptNames ? new Set([...keptNames].map(bareToolName)) : null;
   const drop = droppedNames ? new Set([...droppedNames].map(bareToolName)) : null;
   let total = 0;
   let kept = 0;
   let keptCount = 0;
+  const dropped = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     const c = Number(t?.cost) || 0;
     total += c;
     const bare = bareToolName(t?.name);
     const isKept = keep ? keep.has(bare) : (drop ? !drop.has(bare) : true);
-    if (isKept) { kept += c; keptCount += 1; }
+    if (isKept) { kept += c; keptCount += 1; } else dropped.push({ name: bare, cost: c });
   }
-  return { totalChars: total, keptChars: kept, keptCount, share: total > 0 ? kept / total : 1 };
+  dropped.sort((a, b) => b.cost - a.cost);
+  return {
+    totalChars: total, keptChars: kept, keptCount,
+    share: total > 0 ? kept / total : 1,
+    dropped, droppedCount: dropped.length,
+  };
 }

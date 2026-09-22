@@ -741,11 +741,19 @@ function flushSchemaStats() {
       savedChars: schemaMeter.totalChars - schemaMeter.keptChars,
       approxTokensPerStep: Math.round(schemaMeter.keptChars / 3.2),
       // 各档位若切过去会是多少（同一份尺寸表算出来的，管理端可以并列显示做选择）
+      // 【2026-09-22】带上**被砍掉的具体工具名 + 各自字符数**：主人要求"那个裁剪的也标出来别让别人猜"，
+      // 管理端因此能直接列出这一档砍了哪些、省了多少字符 —— 名单与桥真正注册的那份同源（同一个账本）。
       tiers: Object.fromEntries(Object.entries(TOOL_TIERS).map(([id, def]) => {
         const keep = Array.isArray(def?.keep) ? new Set(def.keep.map(bareToolName)) : null;
         const drop = Array.isArray(def?.drop) ? new Set(def.drop.map(bareToolName)) : null;
         const m = measureSchemaShare(schemaMeter.tools, keep, drop);
-        return [id, { label: def?.label ?? id, note: def?.note ?? '', share: Number(m.share.toFixed(4)), keptChars: m.keptChars, keptCount: m.keptCount }];
+        return [id, {
+          label: def?.label ?? id, note: def?.note ?? '',
+          share: Number(m.share.toFixed(4)), keptChars: m.keptChars, keptCount: m.keptCount,
+          droppedCount: m.droppedCount,
+          droppedChars: m.dropped.reduce((a, x) => a + x.cost, 0),
+          dropped: m.dropped.map((x) => ({ n: x.name, c: x.cost })),
+        }];
       })),
       top: [...schemaMeter.tools].sort((a, b) => b.cost - a.cost).slice(0, 12),
     };

@@ -661,7 +661,13 @@ export const saveBridgeConfig = (body: Record<string, any>) =>
   api<BridgeResp>('/bridge/config', { method: 'POST', body: JSON.stringify(body) });
 export const resetSpeechRules = () => api<BridgeResp>('/bridge/speech-reset', { method: 'POST' });
 /* 工具 schema 压缩档的**实测**统计（桥在注册工具时量的；用来显示"当前档位到底省了多少"） */
-export interface ToolSchemaTierStat { label: string; note: string; share: number; keptChars: number; keptCount: number }
+export interface ToolSchemaTierStat {
+  label: string; note: string; share: number; keptChars: number; keptCount: number;
+  /* 【2026-09-22】这一档砍掉的具体工具（名 + 它占的字符数，按体积从大到小）：
+   * 主人要求"那个裁剪的也标出来别让别人猜"，界面直接列出来，不再只给一个百分比。 */
+  droppedCount?: number; droppedChars?: number;
+  dropped?: Array<{ n: string; c: number }>;
+}
 export interface ToolSchemaStats {
   ok: boolean; message?: string; at?: number; level?: string; enabled?: boolean; source?: string;
   registered?: number; available?: number; totalChars?: number; keptChars?: number; share?: number;

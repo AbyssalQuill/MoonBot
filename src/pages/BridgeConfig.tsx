@@ -2792,20 +2792,22 @@ function ToolCompressorCard({ cfg, ch, onSave, target, remoteServerId }: { cfg: 
     <div className="card">
       <div className="card-title">① 工具压缩代理（开源 mcp-compressor）— 决定「模型看到几个工具」</div>
       <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 12, lineHeight: 1.7 }}>
-        打开后隔离 DSH <b>不再直连 napcat MCP</b>，而是连代理：代理只把 <b>2 个</b> 工具
+        隔离 DSH <b>不再直连 napcat MCP</b>，而是连代理：代理只把 <b>2 个</b> 包装工具
         （<code>napcat_get_tool_schema</code> / <code>napcat_invoke_tool</code>）发给模型，
         把压过的工具清单塞进包装工具的描述里。实测相对完整工具表：
-        <b>低档留 38.8%、中档 14.0%、高档 6.2%、极限档 3.6%</b>（下拉里每项也标了）。
+        <b>低档 38.8% · 中档 14.0% · 高档 6.2% · 极限档 3.6%</b>（下拉里每项也标了）。
+        <br />
+        这一步 <b>恒开</b>——没有开关：直连就等于回到"每一步都把整张工具表重发一遍"的高花费形态，
+        没有理由回去。<b>压缩机没装时自动回退直连</b>，绝不会把工具表搞没。
         <br />
         代价：模型遇到<b>本轮没用过</b>的工具要先查 schema 再调用（一步变两步）；
-        桥已按真实工具名解包，发送判定/幂等账本不受影响。<b>压缩机没装会自动回退直连</b>。
+        桥已按真实工具名解包，发送判定 / 幂等账本 / 回合收尾都不受影响。
         <br />
-        <b style={{ color: "var(--nc-foreground-400)" }}>这三处旋钮谁管什么：</b><br />· <b>本卡的「代理档位」</b> = 工具表以什么形态发给模型（模型看到的永远是 2 个包装工具，差别在清单压多狠）；<br />· 下面那张卡的「<b>工具名单</b>档位」= <b>后端</b>注册哪些工具（开着代理时它只让清单变短，不影响"模型看到几个"）；<br />· 下面那张卡的「<b>描述文字</b>档位」= 描述压多短 —— <b>开着代理时这一项是多余的</b>（代理会把整份表再压一遍）。<br />想让模型看到真实的 90 个工具 → 把本卡关掉，用下面那张卡。
+        <b>两处旋钮谁管什么：</b><br />
+        · <b>本卡的「代理档位」</b> = 工具表以什么形态发给模型（模型看到的永远是那 2 个包装工具，差别只在清单压多狠）；<br />
+        · <b>下面那张卡的「工具名单档位」</b> = <b>后端注册哪些工具</b>——它决定代理那份清单里有多少条；
+        那一档砍掉了哪些工具，下面那张卡会**逐个列出来**，不用猜。
       </div>
-      <label className="switch-row" style={{ marginBottom: 10 }}>
-        <input type="checkbox" checked={enabled} onChange={(e) => ch('social.toolCompressor.enabled')(e.target.checked)} />
-        <span>启用压缩代理（关掉 = 直连，回到默认）</span>
-      </label>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>代理档位</span>
         <select className="input" style={{ maxWidth: 260 }} value={level} onChange={(e) => ch('social.toolCompressor.level')(e.target.value)}>
@@ -2820,7 +2822,7 @@ function ToolCompressorCard({ cfg, ch, onSave, target, remoteServerId }: { cfg: 
       </div>
       <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 12.5, marginBottom: 4 }}>
-          额外排除的后端工具名（每行一个，对应上面那张卡的 <code>qq_xxx</code> 原名；留空 = 不排除）
+          额外排除的后端工具名（每行一个，写 <code>qq_xxx</code> 原名；留空 = 不排除）
         </div>
         <textarea className="textarea" style={{ minHeight: 70, fontFamily: "'Cascadia Code','JetBrains Mono',Consolas,monospace", fontSize: 12 }}
           value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={'qq_send_pixiv\nqq_schedule_message'} />
@@ -2855,6 +2857,11 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState<string | null>(null);
+  /* 【2026-09-22 主人要求"不要暴露整个工具描述"】手动勾选清单默认收起：
+   * 档位已经决定名单了，把全部工具的勾选表摊在页面上既是长列表、又容易误以为"必须手动挑"。
+   * 选了具体档位时手写名单不生效（tool-tiers.js 的 resolveToolTier 只认档位），所以它只在
+   * custom 档、或用户主动点开时才有意义。 */
+  const [manualOpen, setManualOpen] = useState(false);
   // 【2026-09-19 主人改主意】原来这一屏行标题只有中文名、原始工具名默认收起（当时要求「一个别留」），
   // 现在要求**把原工具名加回来** —— 所以 showRaw 默认勾上：中文名 + `qq_xxx` 原名并排显示。
   // 对照 config.json 的 deny 名单时也终于不用再手动勾一次了。
@@ -2892,16 +2899,16 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
     <div className="card">
       <div className="card-title">② 桥侧工具裁剪（不换拓扑的做法）— 决定「后端注册哪些工具」</div>
       <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 12, lineHeight: 1.7 }}>
-        每次请求里 <b>约 87% 的 token 是工具描述（JSON schema）</b>，而且<b>每一步都会重发一遍</b>——
-        少注册一个用不到的工具，比把提示词写短几个字划算得多。<br />
-        打勾 = <b>这个工具干脆不注册给模型</b>（它的 schema 从每一次请求里彻底消失）；
-        不打勾 = 正常注册。<b>改完必须重启隔离 DSH</b>（工具表只在 DSH 启动时取一次）。
-        <br /><b>和上面那张卡的关系</b>：这张卡是"不换拓扑"的做法 —— 模型仍然直接看到每个工具，靠删工具/压描述省。上面那张「工具压缩代理」开着时，模型看到的是 2 个包装工具，本卡的<b>描述文字档位</b>就多余了（代理会再压一遍），<b>工具名单档位</b>仍然有意义：它决定后端注册哪些，从而决定代理那份清单有多长。
+        这一步决定 <b>后端到底注册哪些工具</b>。上面那张卡的代理把关过的清单塞进包装工具的描述里，
+        <b>清单有多长就取决于这里</b>：少注册一个用不到的工具，代理那份清单、以及（万一代理没装时的）
+        真实工具表都会跟着变短。<b>改完要重启隔离 DSH</b>（工具表只在 DSH 启动时取一次）。
+        <br />
+        每一档砍掉了哪些工具，下面<b>逐个列出来</b>——名单是桥注册时实测的那一份，不需要你猜。
       </div>
 
       <label className="switch-row" style={{ marginBottom: 10 }}>
         <input type="checkbox" checked={enabled} onChange={(e) => ch('social.slimTools.enabled')(e.target.checked)} />
-        <span>启用精简名单（关掉 = 所有工具都注册，回到默认）</span>
+        <span>启用名单裁剪（关掉 = 所有工具都注册）</span>
       </label>
 
       {/* ── 档位选择（2026-09-21）─────────────────────────────────────────────
@@ -2910,7 +2917,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
           由 mcp-napcat-safe.js 注册工具时逐个量出来的），不是界面上写死的数字。 */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>工具名单档位</span>
-        <select className="input" style={{ maxWidth: 320 }} value={level}
+        <select className="input" style={{ maxWidth: 340 }} value={level}
           onChange={(e) => {
             const v = e.target.value;
             ch('social.slimTools.level')(v);
@@ -2922,8 +2929,9 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
             .filter((id) => id !== 'off')
             .map((id) => {
               const t = stats?.tiers?.[id];
-              const pct = t ? ` · 实测保留 ${(t.share * 100).toFixed(1)}%` : '';
-              return <option key={id} value={id}>{`${id}${t ? `｜${t.label}` : ''}${pct}`}</option>;
+              const pct = t ? ` · 实测留 ${(t.share * 100).toFixed(1)}%` : '';
+              const cut = t?.droppedCount ? ` · 砍 ${t.droppedCount} 个` : '';
+              return <option key={id} value={id}>{`${id}${t ? `｜${t.label}` : ''}${pct}${cut}`}</option>;
             })}
         </select>
         {stats?.tiers?.[level]?.note && (
@@ -2933,6 +2941,35 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
 
       {/* 描述文字档位已按主人要求移除（代理恒开时它多余）：见 lib/tool-schema-compress.js */}
 
+      {/* ── 裁剪结果可视化（2026-09-22 主人要求"那个裁剪的也标出来别让别人猜"）──────
+          对**当前选中的档位**：列出被砍掉的工具名 + 各自字符数（桥实测），
+          以及保留数与省下的字符/ token。数据同源于 state/tool-schema-stats.json。 */}
+      {stats?.tiers?.[level] && (
+        <div style={{ fontSize: 12.5, marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--nc-background-100, #f6f7f9)', lineHeight: 1.75 }}>
+          <b>这一档（{level}）砍掉 {stats.tiers[level].droppedCount ?? 0} 个工具</b>
+          {' · '}保留 <b>{stats.tiers[level].keptCount}</b> 个
+          {' · '}省 <b>{(stats.tiers[level].droppedChars ?? 0).toLocaleString()}</b> 字符 ≈{' '}
+          <b>{charsToTokens(stats.tiers[level].droppedChars ?? 0).toLocaleString()}</b> tokens/步
+          {Array.isArray(stats.tiers[level].dropped) && stats.tiers[level].dropped.length > 0 ? (
+            <>
+              <br />
+              <span style={{ color: 'var(--nc-foreground-400)' }}>
+                被砍掉的（按体积从大到小，括号里是它占的字符数）：
+              </span>{' '}
+              {stats.tiers[level].dropped.map((d) => `${d.n}(${d.c.toLocaleString()})`).join('、')}
+            </>
+          ) : (
+            <>
+              <br />
+              <span style={{ color: 'var(--nc-foreground-400)' }}>这一档不砍任何工具（全部注册）。</span>
+            </>
+          )}
+          <br />
+          <span style={{ color: 'var(--nc-foreground-400)' }}>
+            名单来自桥注册时的实测账本（{stats.at ? new Date(stats.at).toLocaleString() : '—'}）；换档位后**必须重启隔离 DSH** 才会重新注册并刷新。
+          </span>
+        </div>
+      )}
 
       {stats ? (
         <div style={{ fontSize: 12.5, marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--nc-background-100, #f6f7f9)', lineHeight: 1.7 }}>
@@ -2966,6 +3003,23 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         </span>
       </div>
 
+      {/* ── 手动微调（custom 档专用）──────────────────────────────────────────
+          【2026-09-22 主人要求"不要暴露整个工具描述"】原来这一整块（全部工具的勾选清单）
+          默认摊在页面上，既是长列表、又容易让人以为"必须手动挑"。
+          现在只在 custom 档、或用户主动点开时才出现 —— 档位本身已经决定名单了。 */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
+        <button className="btn btn-soft btn-sm" onClick={() => setManualOpen((v) => !v)}>
+          {manualOpen ? '收起手动名单' : `手动微调名单（当前 ${deny.length} 个被排除）`}
+        </button>
+        {level !== 'custom' && (
+          <span style={{ fontSize: 12.5, color: 'var(--nc-foreground-400)' }}>
+            选了具体档位时，手写名单不参与生效（档位说了算）—— 要手动挑就把档位切到 custom。
+          </span>
+        )}
+      </div>
+
+      {manualOpen && (
+      <>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
         <button className="btn btn-soft btn-sm" onClick={() => setDeny(SLIM_RECOMMENDED)}>出厂默认名单（21 个，从没用过）</button>
         <button className="btn btn-soft btn-sm" onClick={() => setDeny([])}>全部恢复</button>
@@ -3022,6 +3076,8 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
         <button className="btn btn-soft btn-sm" disabled={!!busy} onClick={() => saveAndRestart('bridge')}>只重启桥接</button>
         {msg && <span style={{ fontSize: 13 }}>{msg}</span>}
       </div>
+      </>
+      )}
     </div>
   );
 }
