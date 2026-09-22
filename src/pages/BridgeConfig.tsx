@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { sshServiceAction } from '../api';
-import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, getToolSchemaStats, getMemoryStats, type ToolSchemaStats, type MemoryStats, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
+import { api, getBridgeConfig, saveBridgeConfig, saveActivityHours, getActivityTargets, resetSpeechRules, listCharacters, importCharacter, instanceAction, listProfiles, saveProfile, deleteProfile, getRemoteBridgeConfig, saveRemoteBridgeConfig, memePacks, memePackUpload, memePackDelete, memePackBind, getToolSchemaStats, getMemoryStats, getContextOverhead, type ToolSchemaStats, type MemoryStats, type ContextOverhead, type CharacterEntry, type ConfigProfile, type ActivityTarget, type MemePackEntry, type MemePackUploadReport } from '../api';
 import { TOOL_SCHEMA_CHARS, SLIM_PREFIX, charsToTokens } from '../tool-schema-chars';
-import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Save, Upload, FileText, X, HelpCircle, Loader2, Coffee, Activity, Users, MessagesSquare, RotateCcw, Library, BookOpen, Terminal, Layers, Trash2, Check, Server, AlertTriangle, Mic, FolderOpen, ChevronDown, ChevronRight , Wand2} from 'lucide-react';
 import NapcatTokensCard from '../components/NapcatTokensCard';
 import NumInput from '../components/NumInput';
 
@@ -1896,6 +1896,9 @@ function CommonTab({ cfg, ch, onHelp, uploadStickers, remote, writeConfig, onCfg
       <GroupCard title="上下文治理（工具历史剪枝）" path="dshCompaction" cfg={cfg} ch={ch} onHelp={onHelp}
         only={['enabled', 'thresholdRatio', 'retainRatio', 'toolResultMaxChars']}
         desc="让一个会话能长期用下去又不堆积上下文：上下文用到「触发比例」时，隔离 DSH 先剪掉超大的工具结果（不发模型请求、聊天记录一字不动），剪完仍超阈值才把最老一段摘要成 <compacted-summary>。阈值按模型窗口的比例给，换模型自动缩放。改这里立刻生效（DSH 热加载那份 patch），不用重启 DSH 或桥。摘要是用**主模型**（全局语言模型服务商）写的，没有单独的服务商/模型可配。" />
+      {/* 【2026-09-22 主人要求】"新增智能推荐上下文压缩参数，根据系统提示词总量 token，默认拟人参数更新"
+          —— 推荐值按**实测固定开销**现算（见 CompactionRecommendCard 顶部注释），不写死比例。 */}
+      <CompactionRecommendCard cfg={cfg} ch={ch} />
       <GroupCard title="主动闲聊" path="social.proactive" cfg={cfg} ch={ch} onHelp={onHelp}
         desc="冷场/没人说话时机器人会不会主动找话题、主动私聊。" />
       <MemoryCard />
@@ -2839,6 +2842,88 @@ function ToolCompressorCard({ cfg, ch, onSave, target, remoteServerId }: { cfg: 
           {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存并重启隔离 DSH
         </button>
         {msg && <span style={{ fontSize: 13 }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** 「上下文治理」的**智能推荐**（2026-09-22 主人要求"根据系统提示词总量 token 新增智能推荐，默认拟人参数更新"）。
+ *
+ * 为什么不能写死一个比例：阈值必须**明显大于固定开销**（system 提示词 + 工具 schema，每一步都要重发），
+ * 否则会被顶穿成"每一步压缩一次"（2026-09-20 实测：0.06 时 114 步触发 46 次摘要，每步多花 15~20 秒）。
+ * 而固定开销随提示词压缩/工具裁剪而变，所以推荐值要按**实测的固定开销**现算：
+ *   阈值比例 = clamp((固定开销 + 逐字保留 + 余量 24k) / 模型窗口, 0.10, 0.30)
+ * 实测数据（docs/COMPACTION-MATH.md）：上下文本身几乎只按缓存命中价计费，钱花在"压缩后整段重读"上 ——
+ * 所以阈值偏低反而更贵：0.08 → ¥3.34/天、0.12 → ¥2.67、**0.16 → ¥2.53**、0.25 → ¥2.66。
+ * 固定开销从隔离 DSH 的会话投影缓存里读（server/index.js 的 GET /api/bridge/context-overhead）。 */
+function CompactionRecommendCard({ cfg, ch }: { cfg: any; ch: (p: string) => (v: any) => void }) {
+  const [ov, setOv] = useState<ContextOverhead | null>(null);
+  const [err, setErr] = useState('');
+  const [applied, setApplied] = useState('');
+  useEffect(() => {
+    let alive = true;
+    getContextOverhead()
+      .then((r) => { if (alive) { setOv(r); if (!r?.ok) setErr(r?.message || '没读到实测数据'); } })
+      .catch((e: any) => { if (alive) setErr(String(e?.message ?? e)); });
+    return () => { alive = false; };
+  }, []);
+  const curRatio = Number(get(cfg, 'dshCompaction.thresholdRatio')) || 0.16;
+  const curRetain = Number(get(cfg, 'dshCompaction.retainRatio')) || 0.02;
+  const fixed = Number(ov?.fixedTokens) || 0;
+  const win = Number(ov?.contextWindow) || 1000000;
+  const retain = 0.02 * win;
+  const HEADROOM = 24000;
+  const recRatio = Math.min(0.30, Math.max(0.10, Math.round(((fixed + retain + HEADROOM) / win) * 100) / 100));
+  const recTokens = Math.round(recRatio * win);
+  const curTokens = Math.round(curRatio * win);
+  const ok = fixed > 0;
+  return (
+    <div className="card">
+      <div className="card-title">上下文治理 · 智能推荐（按实测固定开销算，不写死）</div>
+      <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 10, lineHeight: 1.75 }}>
+        {ok ? (
+          <>
+            实测固定开销（<b>每一步都要重发的那部分</b>）：system 提示词 <b>{Number(ov?.systemTokens || 0).toLocaleString()}</b> +
+            工具 schema <b>{Number(ov?.toolsTokens || 0).toLocaleString()}</b> = <b>{fixed.toLocaleString()}</b> token
+            （模型窗口 {win.toLocaleString()}）· 当前会话正文 {Number(ov?.messageTokens || 0).toLocaleString()} token
+            <br />
+            推荐公式：<code>(固定开销 {fixed.toLocaleString()} + 逐字保留 {Math.round(retain).toLocaleString()} + 余量 {HEADROOM.toLocaleString()}) ÷ {win.toLocaleString()}</code>
+            {' '}= <b>{(recRatio * 100).toFixed(0)}%</b>（≈ {recTokens.toLocaleString()} token 触发）
+            {' '}· 当前设置 {(curRatio * 100).toFixed(0)}%（≈ {curTokens.toLocaleString()} token）
+            <br />
+            <span style={{ color: '#b07d2b' }}>
+              余量 24k 是为了"压缩完离阈值还有距离"，不会压完立刻又压；下限 0.10 是防止被固定开销顶穿成"每一步压缩一次"。
+              实测扫描（1M 窗口）：0.08 → ¥3.34/天 · 0.12 → ¥2.67 · 0.16 → ¥2.53 · 0.25 → ¥2.66 → 最省区间 0.14~0.20。
+            </span>
+          </>
+        ) : (
+          <>还没读到固定开销实测（{err || '读的是隔离 DSH 的会话投影缓存，等它跑过一次请求'}）——先把提示词/工具表跑热，或直接按经验值 0.16。</>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button className="btn btn-primary btn-sm" disabled={!ok}
+          onClick={() => {
+            ch('dshCompaction.thresholdRatio')(recRatio);
+            ch('dshCompaction.retainRatio')(0.02);
+            setApplied(`已填入推荐值：触发比例 ${recRatio}，逐字保留 0.02 —— 记得点下面/上面的「保存」`);
+          }}>
+          <Wand2 size={14} /> 应用推荐（{(recRatio * 100).toFixed(0)}% / 保留 2%）
+        </button>
+        <button className="btn btn-soft btn-sm"
+          onClick={() => {
+            ch('social.send.linearEnabled')(true);
+            ch('social.send.linearPerCharMs')(150);
+            ch('social.send.linearMinMs')(250);
+            ch('social.send.linearCapMs')(4000);
+            setApplied('已恢复拟人打字节拍默认：150 ms/字（第 2 条气泡起按字数等），下限 250ms、上限 4000ms');
+          }}>
+          恢复拟人默认（打字节拍 150/250/4000）
+        </button>
+        {applied && <span style={{ fontSize: 12.5, color: '#2f9e44' }}>{applied}</span>}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)', marginTop: 8, lineHeight: 1.7 }}>
+        打字节拍会被桥夹在 perChar ∈ [60, 320] ms、cap ∈ [800, 6000] ms（<code>clampSendPace</code>）——这些键模型自己在私聊里也能改，
+        夹住是为了不再出现"一条气泡等十几秒"。复算脚本 <code>qq-bridge/tools/compaction-threshold.mjs</code>。
       </div>
     </div>
   );
