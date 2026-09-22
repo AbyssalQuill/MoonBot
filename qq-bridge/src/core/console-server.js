@@ -1681,7 +1681,11 @@ export function startConsoleServer() {
           } else if (out.reason !== 'disabled') {
             log(`[hold] turn-hold 路由：close=${out.close} reason=${out.reason} exchanges=${out.exchanges ?? 0}`);
           }
-          sendJson({ ok: true, close: out.close === true, reason: out.reason, exchanges: out.exchanges ?? 0 });
+          /* 【2026-09-22 修 M6】turn-hold 的 holdLoop 返回里带 `again`（"这一段预算用完了、但回合该继续持有"），
+           * 插件（plugins/dsh-qq-hold）读的就是 out.again —— 这里以前没把它透出去，插件拿到 undefined 就 break，
+           * 于是 idleCloseMs=1800s / maxWaitMs=1h 形同虚设：回合每段最多 requestBudgetMs（默认 55s）就结束，
+           * 后续消息只能退回下一次唤醒，插件日志还谎报 steered。现在原样透传。 */
+          sendJson({ ok: true, close: out.close === true, again: out.again === true, reason: out.reason, exchanges: out.exchanges ?? 0 });
         } catch (error) {
           log(`[hold] turn-hold 处理异常：${error?.message ?? error}`);
           try { sendJson({ ok: false, close: true, error: String(error?.message ?? error) }, 500); } catch (_) {}

@@ -1,6 +1,6 @@
 {
   "dsh": {
-    "baseUrl": "http://127.0.0.1:13210",
+    "baseUrl": "http://127.0.0.1:10721",
     "provider": "deepseek-official",
     "model": "deepseek-v4-flash-vision-exp",
     "reasoningEffort": "max",

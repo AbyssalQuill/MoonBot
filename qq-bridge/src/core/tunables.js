@@ -29,9 +29,9 @@ export const TUNABLE_SPECS = [
   // 批内首条秒回；第 2 条起 = 本条字数 × 每字毫秒，±抖动，夹在 [两条气泡最小间隔, 封顶]。
   // 旧的"连发第几条 × 步长"（linearBaseMs/linearStepMs/linearMode）与 gapBaseMs/gapPerCharMs 兜底已删除。
   { key: 'sendLinearEnabled', path: ['social', 'send', 'linearEnabled'], type: 'bool', label: '按字数打字节拍', desc: 'true=第 2 条气泡起按字数等（首条始终秒回）；false=完全不等，多气泡直接连发' },
-  { key: 'sendPerCharMs', path: ['social', 'send', 'linearPerCharMs'], type: 'dur', min: 30, max: 2000, label: '每个字的打字时间', desc: '每个字算多少毫秒（默认 150）。主人说"打字慢点"就调大（250~400），"快点/太慢了"就调小（80~120）' },
+  { key: 'sendPerCharMs', path: ['social', 'send', 'linearPerCharMs'], type: 'dur', min: 60, max: 320, label: '每个字的打字时间', desc: '每个字算多少毫秒（默认 150）。主人说"打字慢点"就调大（250~400），"快点/太慢了"就调小（80~120）' },
   { key: 'sendLinearMin', path: ['social', 'send', 'linearMinMs'], type: 'dur', min: 0, max: 5000, label: '两条气泡最小间隔', desc: '无论气泡多短，两条之间至少间隔这么久（默认 250ms），避免贴脸连发' },
-  { key: 'sendLinearCap', path: ['social', 'send', 'linearCapMs'], type: 'dur', min: 500, max: 10000, label: '两条气泡最大间隔', desc: '打字间隔的上限（默认 4000ms）：超长气泡也不会等到天荒地老' },
+  { key: 'sendLinearCap', path: ['social', 'send', 'linearCapMs'], type: 'dur', min: 800, max: 6000, label: '两条气泡最大间隔', desc: '打字间隔的上限（默认 4000ms）：超长气泡也不会等到天荒地老' },
   { key: 'sendLinearJitter', path: ['social', 'send', 'linearJitterRatio'], type: 'float', min: 0, max: 0.9, label: '打字速度抖动', desc: '每条打字时间的随机浮动比例（默认 0.25=±25%），真人不会每条都一样快' },
   // —— 私聊「不抢话」：等对方打完字再回 + 概率插话（2026-09-15 主人要求，见 core/typing-hold.js）——
   { key: 'typingEnabled', path: ['social', 'typing', 'enabled'], type: 'bool', label: '私聊等对方打完字', desc: 'true=对方正在输入时先等 ta 打完再回（默认开启）；false=不看打字状态，按正常节奏回' },
@@ -48,7 +48,7 @@ export const TUNABLE_SPECS = [
   // —— 上下文治理（2026-09-19 主人要求"一个会话永久用、别让上下文堆积"）——
   { key: 'permanentSession', path: ['social', 'autoReset', 'permanent'], type: 'bool', label: '永久会话（不轮换）', desc: 'true=不再按轮数换会话（上下文交给 DSH 压缩治理，省掉每次换会话的首轮 token）；false=按 wakeThreshold 轮换。开启后改 agentPreset 对老会话不生效（preset 只在建会话时绑定）' },
   { key: 'compactionEnabled', path: ['dshCompaction', 'enabled'], type: 'bool', label: '上下文治理（工具历史剪枝）', desc: 'true=上下文用到窗口阈值时先剪掉超大工具结果（聊天记录不动），仍超阈值才摘要最老一段；false=回到 DSH 默认（窗口 80% 才压缩）' },
-  { key: 'compactionThresholdRatio', path: ['dshCompaction', 'thresholdRatio'], type: 'float', min: 0.08, max: 0.5, label: '压缩触发比例', desc: '上下文用到模型窗口的多少比例开始治理（默认 0.08，1M 窗口 ≈ 8.4 万 token）。花费几乎正比于上下文大小（实测：0~40k ≈ 0.41 分/条，40~70k ≈ 0.56，70~90k ≈ 0.79，110~140k ≈ 1.04 分/条），调大 = 每条更贵、调小 = 每条更便宜；但别低于 0.08：固定开销（system + 78 个工具 ≈ 2.75 万 token）会把阈值顶穿，退回"每一步都压缩一次"（2026-09-20 线上实测：0.06 时 114 步触发了 46 次摘要）' },
+  { key: 'compactionThresholdRatio', path: ['dshCompaction', 'thresholdRatio'], type: 'float', min: 0.08, max: 0.3, label: '压缩触发比例', desc: '上下文用到模型窗口的多少比例开始治理（默认 0.16（2026-09-22 实测重算的最省值；最省区间 0.14~0.20），1M 窗口 ≈ 8.4 万 token）。花费几乎正比于上下文大小（实测：0~40k ≈ 0.41 分/条，40~70k ≈ 0.56，70~90k ≈ 0.79，110~140k ≈ 1.04 分/条），调大 = 每条更贵、调小 = 每条更便宜；但别低于 0.08：固定开销（system + 78 个工具 ≈ 2.75 万 token）会把阈值顶穿，退回"每一步都压缩一次"（2026-09-20 线上实测：0.06 时 114 步触发了 46 次摘要）' },
   { key: 'compactionToolResultChars', path: ['dshCompaction', 'toolResultMaxChars'], type: 'float', min: 300, max: 100000, label: '工具结果保留字数', desc: '单个工具结果超过这么多字符就被剪成「开头 + 剪枝标记 + 结尾」（默认 8192；设小了会把整段唤醒协议/状态快照剪成零头）；原始全文仍留在会话日志里可回放' }
 ];
 

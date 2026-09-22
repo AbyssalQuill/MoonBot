@@ -1053,6 +1053,16 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
     }
   }
   const unreadToSend = unreadFinal;
+  /* 【2026-09-22 修 M2·"同一批被投两次"】in-flight 检查（上面那段 `if (steerInFlight.get(key))`）
+   * 与这里的置位之间**夹着收集窗的 await**（`await sleep(...)`，最多几百毫秒）。两个调用方
+   * （turn-hold 的 force 路 + sendWakePrompt 的 busy 分支）会同时通过那道检查、各读到 false，
+   * 于是同一批 [Mid-turn] 被投两次 —— 而 `turnSteeredSeqs` 要到发送成功之后才写，挡不住这个窗口。
+   * 这里在**任何 await 之后、真正投递之前**再抢占一次：抢不到说明另一路已经在投了，按"已交付"返回 true
+   * （返回 true 的语义见上面那段注释：调用方要的是"别再投一次"，不是"投失败了"）。 */
+  if (steerInFlight.get(key)) {
+    log(`[steer] ${key} 收集窗期间另一条路已开始注入（in-flight 抢占失败）→ 按"已交付"返回，本批不再重复投`);
+    return true;
+  }
   steerInFlight.set(key, true);
   lastSteerAt.set(key, Date.now());
   if (lastSteerAt.size > 200) {
@@ -1779,6 +1789,12 @@ export async function sendWakePrompt(key, reason) {
     // 视觉附件：把最近未处理消息里的图片/表情直接附进唤醒 prompt（绕过 MCP 压缩层，
     // 以图像内容投递给视觉模型，任何尺寸都能看清）。取最近消息里非自己发的、新鲜的
     // 图片/表情，最多 MAX_MEDIA_COUNT 个；没有就不带。
+    /* 【2026-09-22 修 M3·"这张图再也不附了"】collectFreshWakeMedia 会在**投递之前**就把水位
+     * `_mediaAttachedSeq` 推进并落盘（它按"这批图已经处理过"记账）。可是"带图被拒 → 回退纯文本重投成功"
+     * 这条路上，回退后的 result.ok 为真，下面那段 rollback 不会执行 → 水位留着 → 这张图在**两条路**
+     * （唤醒路与 steer 路）都不会再被附上，而且水位是落盘的、跨重启也留着。
+     * 现在把"投递前的水位"记下来：只要图**没真的送出去**（回退分支），就把它恢复回去，图留到下一轮再试。 */
+    const mediaFloorBefore = Number(st._mediaAttachedSeq) || 0;
     const wakeMedia = collectFreshWakeMedia(key, st);
     // 【2026-09-22】附图必须**看得见**：这条路上原来一步日志都没有，"图到底附没附上"只能靠读
     // DSH 会话日志反推（主人报"附图片好像有问题"时就是这么查的）。附了就写一行；
@@ -1794,6 +1810,13 @@ export async function sendWakePrompt(key, reason) {
       // 视觉投递失败（模型/网关不接受图像内容）时回退纯文本，避免丢失这次唤醒
       log(`[default] 带图唤醒投递失败 ${key}（${result.error || '未知'}），回退纯文本重试`);
       result = await deliverRef(key, promptText);
+      /* 【2026-09-22 修 M3】图**没送出去** → 把水位退回去，这张图下一轮还能再试（否则两条路都不再附它，
+       * 而且水位是落盘的、跨重启也留着）。只有"确实发不出去"才回滚，成功路径不动。 */
+      if (Number(st._mediaAttachedSeq) !== mediaFloorBefore) {
+        st._mediaAttachedSeq = mediaFloorBefore;
+        saveSocialState();
+        log(`[default] 带图被拒 → 已把"已附图水位"退回 ${mediaFloorBefore}，这 ${wakeMedia.length} 张图留到下一轮再试`);
+      }
     }
     const restoreFiniteSleep = () => {
       if (hadFiniteSleep) {
