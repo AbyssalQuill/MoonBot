@@ -38,7 +38,7 @@
 import { log } from '../lib/log.js';
 import { inboxDeliveryPending, noteStepEnd, noteInboxDelivery } from './inbox-marks.js';
 import { getSocialState, saveSocialState } from './social-state.js';
-import { reverse, TurnStartAt, collectors, holdActiveKeys } from './session-state.js';
+import { reverse, TurnStartAt, collectors, holdActiveKeys, turnHasBubble } from './session-state.js';
 import { steerIntoRunningTurn, markSteerCycleStart, collectMidTurnBatch, rotationDue, markRotatePending } from './wake-send.js';
 import { touchTurnGuardsByKey } from './turn-guard.js';
 
@@ -133,6 +133,14 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
   const now = () => Date.now();
   const maxExchanges = Math.max(1, Math.round(Number(t.maxExchanges) || 24));
   const idleCloseMs = Math.max(1000, Math.round(Number(t.idleCloseMs) || 1800000));
+  /* 【2026-09-22 主人报「出了 OK 之后界面还挂着『深度求索中…15 分 02 秒』」】
+   * 现场（服务端 bridge.log）：模型发完气泡、mark_read 也做了，回合却一直在保持循环里
+   * 每 55s 回一次 `keep-holding`，`idleCloseMs` 默认 1800s（30 分钟）→ DSH 的 turn-stopping 钩子
+   * 一直没返回，界面就一直显示"思考中"。这不是卡死，是"保持"本身太久了：它的价值只在于
+   * **把主人连发的那几句并在同一个回合里**（他几秒内接着说的下一句），而"已经答过一轮、又静默了两分钟"
+   * 这种状态下继续持有只剩下副作用（界面骗人、白白占着一个在跑的回合）。
+   * 所以加一个更短的判据：**本回合已经说过话（turnHasBubble）+ 静默超过 answeredIdleCloseMs → 收回合**。 */
+  const answeredIdleMs = Math.max(0, Math.round(Number(t.answeredIdleCloseMs) || 90000));
   const maxWaitMs = Math.max(idleCloseMs, Math.round(Number(t.maxWaitMs) || 3600000));
   // 单次 HTTP 请求最多持有多久（必须 < 插件侧 timeoutMs，也必须 < undici 的 300s）。
   const requestBudgetMs = Math.min(120000, Math.max(3000, Math.round(Number(t.requestBudgetMs) || 55000)));
@@ -186,6 +194,18 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
       return finish('rotate-threshold');
     }
     if (1 + exchanges >= maxExchanges) return finish('max-exchanges');
+    /* 已经答过一轮、又没有新消息 → 早点结束这一轮（见 answeredIdleMs 的注释）：
+     * 让界面上的"思考中"在主人停止说话的 ~1.5 分钟内消失，而不是挂满 30 分钟。 */
+    if (answeredIdleMs > 0 && (now() - lastActivity >= answeredIdleMs)) {
+      let answered = false;
+      /* turnHasBubble(key, sessionId, st)：三个判据（本回合发送类工具成功过 / 本回合已有待发正文 /
+       * lastAiReplyAt 晚于本回合开始）任一命中即为"已经说过话"。 */
+      try { answered = turnHasBubble(key, sid, st) === true; } catch { answered = false; }
+      if (answered) {
+        log(`[hold] ${key} 本回合已经答过（${Math.round(answeredIdleMs / 1000)}s 无新消息）→ 收回合，别再让界面挂着"思考中"`);
+        return finish('answered-idle');
+      }
+    }
     if (now() - lastActivity >= idleCloseMs) return finish('idle');
     if (now() - totalStartedAt >= maxWaitMs) return finish('max-wait');
     /* 【2026-09-22 修「私聊 4 分半不回复」】批次可能不是**本循环**投出去的：wake-send 的即时 steer

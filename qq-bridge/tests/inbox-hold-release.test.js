@@ -59,4 +59,19 @@ const budgetBlock = hold.slice(hold.indexOf('if (now() >= budgetEnd)'), hold.ind
 ok('预算到期分支前面有 pending 判据兜着', idxPending < hold.indexOf('if (now() >= budgetEnd)'));
 ok('keep-holding 仍保留 again:true（正常"等更多消息"的场景不变）', /reason: 'keep-holding', again: true/.test(budgetBlock));
 
+console.log('== ④ 答过一轮就早点收回合（主人报：出了 OK 之后界面挂着「思考中 15 分」）==');
+/* 现场（服务端 bridge.log 2026-09-22 14:57~15:02）：模型发完气泡、mark_read 也做了，回合却一直在
+ * 保持循环里每 55s 回一次 keep-holding，idleCloseMs 默认 1800s → DSH 的钩子不返回，界面一直显示
+ * "深度求索中"。修法：本回合**已经说过话**（turnHasBubble）且静默超过 answeredIdleCloseMs（默认 90s）
+ * → 收回合。下面这几条把"判据存在、参数正确、排序正确"都钉住。 */
+ok('保持循环里有 answeredIdleCloseMs 判据', /answeredIdleCloseMs/.test(hold));
+ok('默认 90 秒（配置缺省也能生效）', /\|\|\s*90000\)/.test(hold));
+ok('用 turnHasBubble(key, sid, st) 三参判"本回合说过话"', /turnHasBubble\(key, sid, st\)/.test(hold));
+ok('放行理由叫 answered-idle（日志里一眼能认）', /finish\('answered-idle'\)/.test(hold));
+ok('这条判据排在 30 分钟 idleCloseMs 之前（否则永远走不到它）',
+  hold.indexOf("finish('answered-idle')") > 0 &&
+  hold.indexOf("finish('answered-idle')") < hold.indexOf('if (now() - lastActivity >= idleCloseMs)'));
+ok('turn-hold 从 session-state 引入 turnHasBubble',
+  /import \{[^}]*turnHasBubble[^}]*\} from '\.\/session-state\.js'/.test(hold));
+
 console.log(`\nALL PASS  pass=${pass} fail=${process.exitCode ? 1 : 0}`);
