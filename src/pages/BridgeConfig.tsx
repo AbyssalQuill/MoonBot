@@ -2879,51 +2879,77 @@ function CompactionRecommendCard({ cfg, ch }: { cfg: any; ch: (p: string) => (v:
   const ok = fixed > 0;
   return (
     <div className="card">
-      <div className="card-title">上下文治理 · 智能推荐（按实测固定开销算，不写死）</div>
+      <div className="card-title">拟人默认与安全线（一个按钮恢复全局默认）</div>
       <div style={{ fontSize: 13, color: 'var(--nc-foreground-400)', marginBottom: 10, lineHeight: 1.75 }}>
+        <b>这里给的是"安全线 + 拟人默认"，不是最省钱的解</b>——最省钱的那个值来自数学建模（下面单独一段），两者口径不同、数值也不同，
+        不要拿这个推荐去对标建模收益。
+        <br />
         {ok ? (
           <>
-            实测固定开销（<b>每一步都要重发的那部分</b>）：system 提示词 <b>{Number(ov?.systemTokens || 0).toLocaleString()}</b> +
+            安全线按**实测固定开销**现算：system 提示词 <b>{Number(ov?.systemTokens || 0).toLocaleString()}</b> +
             工具 schema <b>{Number(ov?.toolsTokens || 0).toLocaleString()}</b> = <b>{fixed.toLocaleString()}</b> token
-            （模型窗口 {win.toLocaleString()}）· 当前会话正文 {Number(ov?.messageTokens || 0).toLocaleString()} token
+            （模型窗口 {win.toLocaleString()}）；当前会话正文 {Number(ov?.messageTokens || 0).toLocaleString()} token。
             <br />
-            推荐公式：<code>(固定开销 {fixed.toLocaleString()} + 逐字保留 {Math.round(retain).toLocaleString()} + 余量 {HEADROOM.toLocaleString()}) ÷ {win.toLocaleString()}</code>
+            公式：<code>(固定开销 + 逐字保留 + 余量 {HEADROOM.toLocaleString()}) ÷ {win.toLocaleString()}</code>
             {' '}= <b>{(recRatio * 100).toFixed(0)}%</b>（≈ {recTokens.toLocaleString()} token 触发）
-            {' '}· 当前设置 {(curRatio * 100).toFixed(0)}%（≈ {curTokens.toLocaleString()} token）
-            <br />
+            {' '}· 当前设置 {(curRatio * 100).toFixed(0)}%（≈ {curTokens.toLocaleString()} token）。
             <span style={{ color: '#b07d2b' }}>
-              余量 24k 是为了"压缩完离阈值还有距离"，不会压完立刻又压；下限 0.10 是防止被固定开销顶穿成"每一步压缩一次"。
-              实测扫描（1M 窗口）：0.08 → ¥3.34/天 · 0.12 → ¥2.67 · 0.16 → ¥2.53 · 0.25 → ¥2.66 → 最省区间 0.14~0.20。
+              {' '}它的作用只有一个：**别让阈值被固定开销顶穿**（顶穿就变成每一步压缩一次，更慢更贵），
+              以及压完离阈值还有余量、不会立刻又压。
             </span>
           </>
         ) : (
-          <>还没读到固定开销实测（{err || '读的是隔离 DSH 的会话投影缓存，等它跑过一次请求'}）——先把提示词/工具表跑热，或直接按经验值 0.16。</>
+          <>还没读到固定开销实测（{err || '读的是隔离 DSH 的会话投影缓存，等它跑过一次请求'}）——先把提示词/工具表跑热。</>
         )}
+        <br />
+        <b>数学建模的最省值（另一套口径，不是上面这个）</b>：按线上 4,659 次请求分桶实测算出来的是
+        <b> 阈值 0.16（最省区间 0.14~0.20，1M 窗口 ≈ 16 万 token）</b>，那才是"最省钱"；
+        复算脚本 <code>qq-bridge/tools/compaction-threshold.mjs</code>，推导见 <code>docs/COMPACTION-MATH.md</code>。
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button className="btn btn-primary btn-sm" disabled={!ok}
           onClick={() => {
             ch('dshCompaction.thresholdRatio')(recRatio);
             ch('dshCompaction.retainRatio')(0.02);
-            setApplied(`已填入推荐值：触发比例 ${recRatio}，逐字保留 0.02 —— 记得点下面/上面的「保存」`);
+            setApplied(`已填入安全线 ${recRatio}（逐字保留 0.02）——记得点「保存」`);
           }}>
-          <Wand2 size={14} /> 应用推荐（{(recRatio * 100).toFixed(0)}% / 保留 2%）
+          <Wand2 size={14} /> 用安全线（{(recRatio * 100).toFixed(0)}% / 保留 2%）
         </button>
+        {/* 【2026-09-22 主人要求】"我是让你全局推荐一个拟人默认参数，不是光打字节拍，也不要单独写出来，
+            倒是可以有个恢复默认配置" —— 这里就一个按钮，把全局拟人默认一次性写回去（不是只改节拍）。 */}
         <button className="btn btn-soft btn-sm"
           onClick={() => {
+            // ── 发送节奏：拟人打字 ──
             ch('social.send.linearEnabled')(true);
             ch('social.send.linearPerCharMs')(150);
             ch('social.send.linearMinMs')(250);
             ch('social.send.linearCapMs')(4000);
-            setApplied('已恢复拟人打字节拍默认：150 ms/字（第 2 条气泡起按字数等），下限 250ms、上限 4000ms');
+            ch('social.send.linearJitterRatio')(0.25);
+            ch('social.send.linearResetMs')(20000);
+            // ── 回复前的停顿：像真人想一想 ──
+            ch('social.wait.defaultMs')(30000);
+            ch('social.wait.defaultQuietMs')(8000);
+            ch('social.wait.minQuietAfterNewMs')(10000);
+            // ── 私聊不抢话：看对方打字、等 ta 打完 ──
+            ch('social.typing.enabled')(true);
+            ch('social.typing.holdMaxMs')(12000);
+            ch('social.typing.refreshOnMessageMs')(5000);
+            ch('social.typing.breakProbability')(0.15);
+            // ── 上下文：永久会话 + 建模最省阈值 ──
+            ch('social.autoReset.permanent')(true);
+            ch('dshCompaction.enabled')(true);
+            ch('dshCompaction.thresholdRatio')(0.16);
+            ch('dshCompaction.retainRatio')(0.02);
+            ch('dshCompaction.toolResultMaxChars')(8192);
+            setApplied('已把**全局拟人默认**写回表单：节拍 150/250/4000 + 等待 30s/8s/10s + 私聊打字等待 + 永久会话 + 压缩 0.16/0.02 —— 记得点「保存」');
           }}>
-          恢复拟人默认（打字节拍 150/250/4000）
+          <RotateCcw size={14} /> 恢复默认配置（拟人默认，全局）
         </button>
         {applied && <span style={{ fontSize: 12.5, color: '#2f9e44' }}>{applied}</span>}
       </div>
       <div style={{ fontSize: 12, color: 'var(--nc-foreground-400)', marginTop: 8, lineHeight: 1.7 }}>
         打字节拍会被桥夹在 perChar ∈ [60, 320] ms、cap ∈ [800, 6000] ms（<code>clampSendPace</code>）——这些键模型自己在私聊里也能改，
-        夹住是为了不再出现"一条气泡等十几秒"。复算脚本 <code>qq-bridge/tools/compaction-threshold.mjs</code>。
+        夹住是为了不再出现"一条气泡等十几秒"。
       </div>
     </div>
   );

@@ -490,7 +490,13 @@ async function main() {
   let sessionsPruned = 0;
   try {
     const alive = liveSessionIdsOnDisk();
-    if (alive.size || Object.keys(state.sessions || {}).length) {
+    /* 【2026-09-22 修 M1·"全员失忆"风险】`alive` 为空有两种含义，旧写法把它们混成一种：
+     *   ① 真的所有会话都不存在了 → 该清；
+     *   ② **枚举不到**（归档根路径拿不到 / 候选目录不存在 / 只留本桥 slug 而同名目录缺失）→ 不该清。
+     * 旧写法 `if (alive.size || 映射数)` 在 ② 下恒真 → 每个 sid 都"找不到" → **删光 state.sessions 并落盘**，
+     * 记忆/画像/贴纸的会话身份随之丢失且不可恢复（现场日志：`磁盘上只剩 0 个会话`，全量只剩这一条）。
+     * 现在空集一律跳过清理（与同文件 `:525` 对空集"未知"的语义对齐）。 */
+    if (alive.size > 0 && Object.keys(state.sessions || {}).length) {
       for (const [key, sid] of Object.entries(state.sessions || {})) {
         if (!sid || alive.has(String(sid))) continue;
         delete state.sessions[key];

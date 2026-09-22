@@ -1,4 +1,4 @@
-﻿// DSH 可用性探活 + 桥接模式同步：
+// DSH 可用性探活 + 桥接模式同步：
 // cfg/api/bot 运行期注入；lastMode 模块内聚（writeLastMode 供控制台 sink 写回）。
 import fs from 'node:fs';
 import http from 'node:http';
@@ -269,7 +269,10 @@ const checkDsh = async () => {
         const qp = cfgRef.social?.qzone ?? {};
         const qMin = Math.max(2 * 60 * 60 * 1000, Number(qp.postIntervalMinMs) || 6 * 60 * 60 * 1000);
         const qMax = Math.max(qMin, Number(qp.postIntervalMaxMs) || 12 * 60 * 60 * 1000);
-        const qProb = Math.min(1, Math.max(0, Number(qp.postProbability) ?? 0.6));
+        /* 【2026-09-22 修 M5】`Number(undefined)` 是 NaN，而 `??` 拦不住 NaN（它判的是 null/undefined，
+         * 这里是 Number() 的结果）→ 后面 `Math.random() < NaN` 恒 false：**主动发说说永远不触发**，
+         * 日志却照打"已安排主动发说说"。同类坑 wake-send.js 已踩过一次，统一用 Number.isFinite 判。 */
+        const qProb = (() => { const v = Number(qp.postProbability); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.6; })();
         const qEnabled = qp.enabled !== false;
         const scheduleQzone = () => {
           const delay = Math.floor(qMin + Math.random() * (qMax - qMin));
