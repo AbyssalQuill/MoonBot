@@ -3421,12 +3421,14 @@ function Field({ path, val, label, ch, onHelp, cfg }: {
       return <ModelField path={path} val={val} ch={ch} renderLabel={renderLabel} cfg={cfg} vision={last === 'visionModel'} />;
     }
     if (last === 'agentPreset') {
+      /* 【2026-09-22 主人要求「把那套 preset 从项目里完全去除，管理端也不再有」】
+       * 下拉里原来有第二项（一个仓库里根本不存在的 preset，装了也不会被拷进隔离 DSH）—— 已删掉。
+       * 现在只剩 default：桥侧 installPresets 也只装仓库里真实存在的目录（default + qq-chat）。 */
       return (
         <label className="field-row">
           {renderLabel()}
           <select className="select" value={val} onChange={(e) => ch(path)(e.target.value)}>
             <option value="default">默认（QQ 聊天）</option>
-            <option value="liangshen">梁神模式</option>
           </select>
         </label>
       );
