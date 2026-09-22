@@ -33,6 +33,7 @@ import { buildCrossChatBlock } from './crosschat.js';
 import { activityStatusLine } from './activity.js';
 import { armPendingWakeLease, disarmPendingWakeLease } from './turn-guard.js';
 import { wakeConfigMissCount, reverse, pendingWakeKeys, TurnStartAt, collectors, agentRunningSessions, holdActiveKeys, turnHasBubble } from './session-state.js';
+import { noteInboxDelivery } from './inbox-marks.js';
 import { KNOWN_AGENT_TOKENS } from '../lib/text-safe.js';
 import { sanitizeForwardId } from '../forward.js';
 import fs from 'node:fs';
@@ -1177,6 +1178,10 @@ export async function steerIntoRunningTurn(key, reason, opts = {}) {
         if (left.length !== prevDeferred.length) st._steerDeferredSeqs = left;
       } catch (_) {}
       log(`[steer] ${key} 合并注入：本块 ${unreadToSend.length} 条（这一步攒下的消息全在这一个 [Mid-turn] 里，seq=${unreadToSend.map((m) => Number(m.seq)).join(',')}）`);
+      /* 【2026-09-22 修「私聊 4 分半不回复」】把"这批真的进了 next-step"记一笔：turn-hold 的保持循环
+       * 靠它判断"交了但还没跑过新的模型步" → 立刻放行让 DSH 跑下一步；少了这一笔，那条路会把批次
+       * 当成"已经给过它了"（turnSteeredSeqs 都记上了），而钩子又一直不返回，消息就卡在会话里没人读。 */
+      noteInboxDelivery(sessionId);
       return true;
     }
     log(`[steer] ${key} 被拒：${res?.result?.error?.message ?? res?.result?.error?.code ?? '未知'}（退回排队补发）`);

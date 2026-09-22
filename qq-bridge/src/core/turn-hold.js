@@ -36,6 +36,7 @@
 //   5. 同一会话单飞（activeHolds），防止两处同时 steer → 重复注入。
 //   6. 每个提前返回都留日志 —— 这个功能吃过四次"静默失败"的亏。
 import { log } from '../lib/log.js';
+import { inboxDeliveryPending, noteStepEnd, noteInboxDelivery } from './inbox-marks.js';
 import { getSocialState, saveSocialState } from './social-state.js';
 import { reverse, TurnStartAt, collectors, holdActiveKeys } from './session-state.js';
 import { steerIntoRunningTurn, markSteerCycleStart, collectMidTurnBatch, rotationDue, markRotatePending } from './wake-send.js';
@@ -187,6 +188,17 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
     if (1 + exchanges >= maxExchanges) return finish('max-exchanges');
     if (now() - lastActivity >= idleCloseMs) return finish('idle');
     if (now() - totalStartedAt >= maxWaitMs) return finish('max-wait');
+    /* 【2026-09-22 修「私聊 4 分半不回复」】批次可能不是**本循环**投出去的：wake-send 的即时 steer
+     * 或 mux 的步边界发车都会把消息塞进 next-step，而本循环那几次可能全被"对方还在打字"挡住。
+     * 这种情况下循环看到 `collectMidTurnBatch` 为空，会一直"继续持有"——钩子不返回，
+     * DSH 就走不到"next-step 非空 → 跑下一步"，消息等于交了却没被读（线上卡了 4 分半、
+     * 直到 30 分钟空闲放行）。判据见 inbox-marks.js：交了但还没跑过新的模型步 → 立刻放行。
+     * ⚠️ 只在**没有待交批次**时放行：手头还有没塞出去的消息时，下面那段 steer 逻辑必须照跑
+     * （否则新消息会被这一条判据跳过，等于换了种方式卡住）。 */
+    if (!collectMidTurnBatch(st).length && inboxDeliveryPending(sid)) {
+      log(`[hold] ${key} 这批已经进 next-step 但还没跑过新的模型步 → 立刻放行，让 DSH 去跑下一步（不再空转持有）`);
+      return { close: false, reason: 'steered', exchanges };
+    }
     // 这一段预算用完了但还想继续持有 → 让插件立刻再问一次（保持回合不关，同时不撞 HTTP 超时）
     if (now() >= budgetEnd) {
       saveSocialState();
@@ -297,6 +309,9 @@ export async function flushStepBatch({ key, sid, turn, cfg } = {}) {
   const k = String(key || '');
   const sidText = String(sid || '');
   if (!k || !sidText) return false;
+  /* 每个 step/end 都先记一笔（不管这一步有没有批次要发车）：保持循环用"最近一次交付 vs 最近一次
+   * 模型步结束"判断"交进去的那批到底被读了没有"（见 inbox-marks.js）。必须放在任何提前 return 之前。 */
+  noteStepEnd(sidText);
   const t = cfg?.social?.turnHold ?? {};
   // 只对"保持托管"的会话起作用：非保持会话压根不会攒（wake-send.js 的托管分支只对 holdEligible 生效），
   // 这里再挡一道，避免别处误调把消息投成两个块。
@@ -345,6 +360,7 @@ export async function flushStepBatch({ key, sid, turn, cfg } = {}) {
     return false;
   }
   const exchanges = noteExchange(k, st, turn);
+  noteInboxDelivery(sidText);   // 这一批真的进了 next-step → 保持循环据此立刻放行让 DSH 跑下一步
   log(`[hold] ${k} 步边界合并注入完成：本回合第 ${1 + exchanges}/${Math.max(1, Math.round(Number(t.maxExchanges) || 24))} 次来回，rotateTurns=${st.rotateTurns}`);
   return true;
 }

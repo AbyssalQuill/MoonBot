@@ -252,6 +252,7 @@ export { parseSetModeCommand, parseClockRange, complementWindows, fmtClockMin };
 // mux → turn-hold → wake-send 是单向的（这两个模块都不 import mux），不会形成循环依赖。
 import { markSteerCycleStart, clearSteerPending } from './wake-send.js';
 import { flushStepBatch } from './turn-hold.js';
+import { clearInboxMarks } from './inbox-marks.js';
 
 // 运行期注入：main 持有同一 cfg/api/bot 实例
 let cfgRef = null;
@@ -901,6 +902,9 @@ export async function pumpMux() {
           // 回合结束：攒批记账收尾（消息留在 unread 里，由补发/看门狗接管，绝不在这里吞掉）。
           if (frame.event.type === 'turn/end') {
             clearSteerPending(key, 'turn/end');
+            // 【2026-09-22】"交给 next-step 但还没跑过模型步"的记账也一起清：新回合重新记，
+            // 免得上一回合的残留让下一次保持循环一进来就以为有待消费批次而立刻放行（inbox-marks.js）。
+            clearInboxMarks(frame.sessionId);
           }
           // 任何会话事件都视为“回合还活着”：重置活动感知看门狗（turn/end 会随后清理计时器）
           armTurnWatchdog(frame.sessionId);
