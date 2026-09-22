@@ -134,13 +134,14 @@ await t('schema：qq_send_message 的 required 里不再有 key/token', () => {
 });
 
 const okCall = await call('qq_send_message', { messages: '在的' });
-await t('只传 messages：自动补齐 key/token 并真的发出（不再是 -32602）', () => {
-  assert.ok(!/Invalid input|Invalid arguments|-32602/.test(okCall.text), '仍然报了校验错误：' + okCall.text.slice(0, 200));
-  assert.equal(okCall.isError, false, '不该是错误：' + okCall.text.slice(0, 200));
-  assert.ok(/ok.+true|"ok": true/i.test(okCall.text), '应回成功：' + okCall.text.slice(0, 200));
-  assert.equal(seen.sendMessage.length, 1, '桩桥没收到发送请求');
-  assert.equal(seen.sendMessage[0].key, SESSION_KEY);
-  assert.equal(seen.sendMessage[0].agentToken, AGENT_TOKEN);
+await t('只传 messages：**直接拒绝**（绝不猜会话）—— 契约是"缺 key 就当错"', () => {
+  /* 【2026-09-22 改口径】这条断言原来要求"自动补齐 key/token 并真的发出"，那是**改契约之前**的行为。
+   * 现在（起因：一次 pixiv 发图发错群）缺 key 一律拒绝，绝不替模型猜会话：
+   *   mcp-napcat-safe.js 里 schema 声明了 key → hasKeyField=true → 不传 key 命中 missingKey 分支。 */
+  assert.ok(!/Invalid input|Invalid arguments|-32602/.test(okCall.text), '不该是 schema 校验失败：' + okCall.text.slice(0, 200));
+  assert.equal(okCall.isError, true, '缺 key 必须是错误：' + okCall.text.slice(0, 200));
+  assert.ok(/缺\s*key|缺 key/i.test(okCall.text), '应提示缺 key：' + okCall.text.slice(0, 200));
+  assert.equal(seen.sendMessage.length, 0, '缺 key 时**不该**向桩桥发任何请求（不能猜会话）');
 });
 
 currentTurnMode = 'ambiguous';
@@ -150,10 +151,12 @@ await srv2.rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, 
 srv2.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
 const r2 = await srv2.rpc('tools/call', { name: 'qq_send_message', arguments: { messages: '在的' } });
 const ambiguous = { isError: !!r2.result?.isError, text: String(r2.result?.content?.[0]?.text ?? '') };
-await t('桥无法推断当前会话：回可执行提示（不是 schema 校验失败）', () => {
+await t('缺 key：回可执行提示（指名去哪一行取），且不是 schema 校验失败', () => {
+  /* 【2026-09-22 改口径】缺 key 的提示现在指向**唤醒正文的 [Session] 行**（[Token] 只出现在"缺 token"
+   * 那条分支里，而本用例走的是"缺 key"分支）。断言改成按实际契约来，不再钉死旧文案。 */
   assert.equal(ambiguous.isError, true);
-  assert.ok(ambiguous.text.includes('缺 key/token'), '提示文案不对：' + ambiguous.text.slice(0, 200));
-  assert.ok(/\[Token\]/.test(ambiguous.text), '提示里要指名去 [Token] 行取');
+  assert.ok(/缺\s*key/i.test(ambiguous.text), '提示文案不对：' + ambiguous.text.slice(0, 200));
+  assert.ok(/\[Session\]/.test(ambiguous.text), '提示里要指名去 [Session] 行取 key：' + ambiguous.text.slice(0, 200));
   assert.ok(!/Invalid input|Invalid arguments/.test(ambiguous.text));
 });
 srv2.stop();
