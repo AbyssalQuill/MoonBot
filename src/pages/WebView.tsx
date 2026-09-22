@@ -2,6 +2,23 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ExternalLink, RefreshCw, Loader2 } from 'lucide-react';
 import { getState, getNapcatWebuiReady } from '../api';
 
+/** 从带 token 的 WebUI 地址里取令牌（只用于给 localStorage 记账分桶，不做鉴权）。 */
+function tokenOf(u: string): string {
+  try { return new URL(u, window.location.href).searchParams.get('token') || ''; } catch { return ''; }
+}
+
+/** "这个令牌已经在浏览器里完成过一次鉴权"-的记录；45 分钟过期（NapCat 的 Credential 一小时有效）。 */
+const AUTH_GATE_TTL_MS = 45 * 60 * 1000;
+function readAuthGate(key: string): number {
+  try {
+    const at = Number(localStorage.getItem(key)) || 0;
+    return at && Date.now() - at < AUTH_GATE_TTL_MS ? at : 0;
+  } catch { return 0; }
+}
+function writeAuthGate(key: string) {
+  try { localStorage.setItem(key, String(Date.now())); } catch { /* 隐私模式写不了就每次都重载，功能不受影响 */ }
+}
+
 interface Props {
   url: string;
   title: string;
@@ -55,29 +72,31 @@ export default function WebView({ url, title, onBack }: Props) {
     // src 变化会重建 effect，正好让比对基准跟上下一次
   }, [src, url]);
 
-  /* 【2026-09-22 第二次修（主人报「还鉴权失败，登录还 limit」）：别再把登录接口当轮询探针】
-   * 上一版这里每 2 秒问一次 /api/napcat/webui-ready，而那个端点当时**每次都会真打一次** NapCat 的登录
-   * 接口（最多 20 次）。NapCat 的登录是按 IP 限量的（每 60 秒 loginRate 次，出厂 10），页面自己那一次
-   * 就被挤掉了 —— 表现就是"进去还是鉴权失败 / login rate limit"。现在：
-   *   · 只问"端口通不通"（服务端不再自查令牌，零登录）；
-   *   · 通了就**重载一次**（NapCat 首屏只拿 ?token= 换 Credential、自己不进入应用，所以需要这一次重载）；
-   *   · 没通就每 4 秒看一次、最多 60 秒，起来后照样只重载一次；
-   *   · 限流期间**不重载**（重载会让页面再登一次、白花额度），状态栏写明还有多少秒。
-   * 轮询次数也砍到 15 次 × 4 秒（原来 20 次 × 2 秒），因为这里问的东西不再有"多问几次就能变好"的性质。 */
+  /* 【2026-09-22 第三次修（主人："首次自动鉴权就行了，不要每次点一下就鉴权一次"）】
+   * 分工变了：
+   *   · **后端**负责"鉴权"这件事本身 —— 连接建立、或本机 NapCat 起来时，它已经静默打过一次登录接口
+   *     （见 server/index.js 的 warmNapcatWebuiOnce；同一个令牌一小时只做一次），readiness 会回 warm.done；
+   *   · **界面**只负责"这个浏览器里那个页面还没换到 Credential"这一次性的重载。
+   * NapCat 的首屏只拿 ?token= 换一次 Credential 写进 localStorage、自己不再进入应用，所以**第一次**必须
+   * 用同一个地址再载入一次；之后就靠 localStorage 里的 Credential 直接进应用了。为了不再"点一次刷一次"，
+   * 这里把"我重载过这个令牌"记在**管理器自己的 localStorage** 里（键里带 tokens/端口，45 分钟过期 ——
+   * NapCat 的 Credential 一小时有效）：命中就直接载入，不重载、不鉴权、不花额度。
+   * 手动「重新鉴权」按钮仍然强制走一次（那才是用户明确要的动作）。 */
   useEffect(() => {
     let isNapcat = false;
     try { isNapcat = /^\/webui(\/|$)/.test(new URL(url, window.location.href).pathname); } catch { isNapcat = false; }
     if (!isNapcat) return;
     let alive = true;
-    let reloaded = false;
-    /** 只重载一次：首屏那次登录 POST 已经发生过，再刷只会多花一次额度。 */
-    const reloadOnce = () => {
-      if (reloaded || !alive) return false;
-      reloaded = true;
-      setNonce((n) => n + 1);
-      return true;
-    };
-    /** @returns true = 还要继续等 */
+    const reloadOnce = () => { if (alive) setNonce((n) => n + 1); };
+
+    /* 已经为这个令牌重载过一次（且没过期）→ 直接载入就进去了，别再动它。 */
+    const gateKey = 'qbm.napcatAuth.' + (tokenOf(url) || 'default');
+    const gate = readAuthGate(gateKey);
+    if (gate) {
+      setNote('已登录过（' + Math.max(0, Math.round((Date.now() - gate) / 60000)) + ' 分钟前完成鉴权）—— 需要的话点「重新鉴权」');
+      return;
+    }
+
     const tick = async (): Promise<boolean> => {
       let r: Awaited<ReturnType<typeof getNapcatWebuiReady>> | null = null;
       try {
@@ -95,8 +114,9 @@ export default function WebView({ url, title, onBack }: Props) {
         setNote(r.note || 'NapCat 还没起来：等它起来会自动重载一次');
         return true;
       }
+      writeAuthGate(gateKey);
       reloadOnce();
-      setNote('NapCat 已就绪：正在自动完成鉴权…');
+      setNote(r.warm?.done ? 'NapCat 已就绪（后台已静默鉴权）：载入中…' : 'NapCat 已就绪：正在自动完成鉴权…');
       return false;
     };
     void (async () => {
@@ -111,8 +131,8 @@ export default function WebView({ url, title, onBack }: Props) {
     return () => { alive = false; };
   }, [url]);
 
-  /** 手动兜底：**显式**让服务端真验一次令牌（会花 NapCat 一次登录额度，所以只在用户点的时候做），
-   *  同时取最新地址重开一次。服务端那边有预算与限流冷却，这里把它的账本如实显示出来。 */
+  /** 手动兜底（用户明确点的）：**显式**让服务端真验一次令牌，并强制重载一次。
+   *  服务端有预算与限流冷却，这里把它的账本如实显示出来。 */
   const reauth = async () => {
     if (busy) return;
     setBusy(true); setNote('');
@@ -121,6 +141,7 @@ export default function WebView({ url, title, onBack }: Props) {
       const next = await freshestUrl(src, url);
       setSrc(next);
       setNonce((n) => n + 1);
+      writeAuthGate('qbm.napcatAuth.' + (tokenOf(next) || 'default'));
       if (!ready) { setNote('取新令牌失败：管理器没响应'); return; }
       if (ready.rateLimit?.limited) {
         setNote('NapCat 登录接口被限流中（还有 ' + Math.ceil((ready.rateLimit.retryAfterMs || 0) / 1000) + ' 秒）—— 稍后再点；这不代表 QQ 掉线');

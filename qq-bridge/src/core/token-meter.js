@@ -231,13 +231,19 @@ function realSigSeen(sessionId, tsMs, sig) {
   return false;
 }
 
+/** 计量用的"现在"：默认真实时钟；测试用 initTokenMeter({nowMs}) 钉死（见 nowMsOverride 的注释）。 */
+function nowMsOf() {
+  const o = Number(meter.nowMsOverride);
+  return Number.isFinite(o) ? o : Date.now();
+}
+
 /** 把一行聚合进内存（窗口 today-7..today；YYYY-MM-DD 字典序=时间序）
  *  日维度按「计费日」（默认 UTC 日 / 北京 08:00 换日，与提供方控制台一致）；
  *  小时维度仍按北京自然日（GUI 分时图标题即「今日分时（北京时）」，按 hour 绝对定位）。 */
 function applyToMemory(rec) {
   const key = billingKey(rec.tsMs);
   if (!key) return;
-  const todayKey = billingKey(Date.now());
+  const todayKey = billingKey(nowMsOf());
   if (key < shiftDateKey(todayKey, -7)) return;
   // 真实 usage 签名登记：ensureInit 回填历史行 + 每次落行都登记，使去重在桥重启后依然生效
   // （follow 快照在重启后会整段回放旧事件，仅靠内存 2.5s 窗口会把这批 usage 全部重记一遍）。
@@ -259,7 +265,7 @@ function applyToMemory(rec) {
   else addReal(agg, rec);
   meter.days.set(key, agg);
   const bjK = bjKey(rec.tsMs);
-  if (bjK && bjK === bjKey(Date.now())) {
+  if (bjK && bjK === bjKey(nowMsOf())) {
     if (meter.hoursDate !== bjK) { meter.hoursDate = bjK; meter.hours.clear(); }
     const h = bjHourOf(rec.tsMs);
     const ha = meter.hours.get(h) ?? emptyAgg();
@@ -348,6 +354,12 @@ export function initTokenMeter(cfg) {
   // 计费日偏移：显式 cfg.dayOffsetMinutes 优先，其次环境变量，最后默认 480（UTC 日）
   meter.dayOffsetMin = normalizeDayOffset(opt.dayOffsetMinutes, ENV_DAY_OFFSET_MIN);
   meter.inited = false;
+  /* 【2026-09-22 修测试的"换日假失败"】北京自然日的分时桶（applyToMemory）与计费日窗口都以
+   * "今天"为参照，而它们读的是**真实时钟**（Date.now）—— 于是回归测试里哪怕把 nowMs 钉死，
+   * 只要真的跨过北京 00:00，`todayHourly` 就会落到新的一天、聚合为空，`自然日 > 计费日` 那条断言
+   * 假失败（2026-09-22 深夜实际踩到）。这里给 meter 一个可选的"参照时刻"覆盖：测试传 nowMs 就完全
+   * 确定；线上不传，行为与以前逐字一致（nowMsOf 回落到 Date.now）。 */
+  meter.nowMsOverride = Number.isFinite(Number(opt.nowMs)) ? Number(opt.nowMs) : null;
   if (typeof opt.convKeyResolver === 'function') meter.convKeyResolver = opt.convKeyResolver;
   if (opt.dshHome) meter.dshHome = path.resolve(String(opt.dshHome));
   ensureInit();

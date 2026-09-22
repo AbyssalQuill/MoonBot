@@ -3,7 +3,7 @@ import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { instanceAction, startAllInstances, remoteStackById, sshServiceAction } from '../api';
 import type { ManagerState, LocalInstance } from '../stores/types';
-import { Settings, Loader2, Rocket, BookOpen, X, RotateCw, Square } from 'lucide-react';
+import { Settings, Loader2, Rocket, BookOpen, X, RotateCw, Square, AlertTriangle } from 'lucide-react';
 
 interface HomeProps {
   state: ManagerState | null;
@@ -208,6 +208,39 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
           {(state?.warnings ?? []).map((w, i) => <div key={i}>⚠️ {w}</div>)}
         </div>
       )}
+
+      {/* 【2026-09-22 主人要求】连接服务端的**状态机**：以前这里只有一句"服务端重连中…"，
+          "服务器在起"和"凭据错了永远起不来"长得一模一样。现在按阶段显示（SSH → 隧道 → 服务端组件逐个
+          就绪 → 静默鉴权 → 就绪），并把组件明细摊开写；失败时给出原因与第几次重试。 */}
+      {(() => {
+        const c = state?.connect;
+        if (!c || c.phase === 'ready' || c.phase === 'idle') return null;
+        const label = ({
+          connecting: '正在连接服务器',
+          tunnels: '隧道建立中',
+          'server-starting': '服务端启动中',
+          warming: '正在完成 NapCat 界面鉴权',
+          failed: '连接失败',
+        } as Record<string, string>)[c.phase] || c.phase;
+        const failed = c.phase === 'failed';
+        const secs = Math.max(0, Math.round((c.elapsedMs || 0) / 1000));
+        return (
+          <div className="notice-bar" style={{ maxWidth: 720, margin: '0 auto 12px', textAlign: 'left', borderColor: failed ? '#e5484d' : undefined }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {failed ? <AlertTriangle size={14} /> : <Loader2 size={14} className="spin" />}
+              <b>{label}</b>
+              <span style={{ color: 'var(--nc-foreground-500)' }}>{c.serverName ? `· ${c.serverName}` : ''} · 已用时 {secs}s</span>
+            </div>
+            <div style={{ marginTop: 4 }}>{c.note}</div>
+            {c.components?.length > 0 && (
+              <div style={{ marginTop: 4, fontSize: 12, color: 'var(--nc-foreground-500)' }}>
+                {c.components.map((x) => `${x.name}：${x.state === 'ready' ? '已就绪' : x.state === 'starting' ? '启动中' : '未运行'}`).join(' · ')}
+              </div>
+            )}
+            {failed && <div style={{ marginTop: 4, fontSize: 12 }}>管理器会自动重试（第 {c.attempts} 次已结束）—— 也可以直接点卡片上的「启动服务端」。</div>}
+          </div>
+        );
+      })()}
 
       {/* 【2026-09-14 主人问"连上服务器就算跑起来了吗"】服务器那套是常驻的（systemd/docker），
           连上就能用、不用再点一次启动；只有当服务端整套都没在跑时才提示一句，免得看着三张

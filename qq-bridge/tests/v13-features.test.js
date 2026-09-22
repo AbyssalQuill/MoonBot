@@ -99,7 +99,9 @@ await check('① 两个日界口径必须分行标注（计费日 vs 北京自�
       { tsMs: NOW - 8 * 3600_000, sessionId: 's', convKey: 'private:1', prompt: 300000, completion: 20000, total: 11800000, est: false, cacheRead: 11500000, cacheWrite: 0 },
     ];
     fs.writeFileSync(path.join(dir, 'token-usage.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
-    initTokenMeter({ stateDir: dir });
+    /* 【2026-09-22】meter 也要吃同一个"钉死的现在"：分时桶按**北京自然日**归属，若它读真实时钟，
+     * 那么真跑过北京 00:00 之后 todayHourly 就落到新的一天、聚合为空，这条断言会假失败。 */
+    initTokenMeter({ stateDir: dir, nowMs: NOW });
     initTokenReportCore({ tokenCost: { ...DEFAULT_TOKEN_COST } });
     const r = buildTokenReportText({ days: 1, nowMs: NOW });
     const rep = getTokenReport(1, { nowMs: NOW });

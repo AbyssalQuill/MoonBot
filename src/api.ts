@@ -150,10 +150,32 @@ export interface NapcatWebuiReady {
   note: string;
   error?: string;
   verify?: { attempted: boolean; status: string; note: string; verifiedAt: number; retryAfterMs: number };
+  /* 【2026-09-22】管理器在"连接刚刚建立 / 本地 NapCat 刚起来"时已经**静默预鉴权过一次**；
+   * done=true → 界面**不要再重载**（不重复鉴权），直接载入即可。 */
+  warm?: { done: boolean; at: number };
   rateLimit?: { napcatLimit: number; budget: number; windowMs: number; attemptsInWindow: number; limited: boolean; retryAfterMs: number };
 }
 export const getNapcatWebuiReady = (opts?: { verify?: boolean }) =>
   api<NapcatWebuiReady>('/napcat/webui-ready' + (opts?.verify ? '?verify=1' : ''));
+
+/* ================= 连接服务端的状态机 =================
+ * 【2026-09-22 主人要求】"连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
+ * 「服务端启动中」状态机。" 阶段：idle → connecting(SSH) → tunnels → server-starting(组件逐个就绪)
+ * → warming(静默预鉴权) → ready / failed。轮询这条接口**不产生任何网络动作**。 */
+export interface ConnectPhase {
+  phase: 'idle' | 'connecting' | 'tunnels' | 'server-starting' | 'warming' | 'ready' | 'failed';
+  note: string;
+  serverId: string;
+  serverName: string;
+  components: { id: string; name: string; state: 'ready' | 'starting' | 'down'; detail: string }[];
+  attempts: number;
+  lastError: string;
+  since: number;
+  updatedAt: number;
+  elapsedMs: number;
+  warm: { done: boolean; at: number; note: string };
+}
+export const getConnectState = () => api<{ ok: boolean; connect: ConnectPhase; connected: boolean }>('/connect');
 
 /* ================= NapCat 会话守护（探针 + 假死自愈） =================
  * 【2026-09-16】QQ 服务端把登录态作废时客户端可能**一条错都不报**（WebUI 上还是 isLogin/online=true），

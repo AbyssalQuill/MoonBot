@@ -68,6 +68,24 @@ export interface ManagerState {
   warnings?: string[];
   /** 【2026-09-17】本机与服务端同时有 NapCat 在线（同一个 QQ 号两处登录，会被腾讯互踢）；界面要显著提醒 */
   dualNapcat?: boolean;
+  /** 【2026-09-22 主人要求"下次打开自动连接服务器，这个过程希望能带上「服务端启动中」状态机"】
+   *  连接服务端的状态机：idle → connecting → tunnels → server-starting → warming → ready / failed。
+   *  /api/state 里带一份，也可以单独 GET /api/connect（读它**不产生任何网络动作**）。 */
+  connect?: {
+    phase: 'idle' | 'connecting' | 'tunnels' | 'server-starting' | 'warming' | 'ready' | 'failed';
+    note: string;
+    serverId: string;
+    serverName: string;
+    components: { id: string; name: string; state: 'ready' | 'starting' | 'down'; detail: string }[];
+    attempts: number;
+    lastError: string;
+    since: number;
+    updatedAt: number;
+    elapsedMs: number;
+    warm: { done: boolean; at: number; note: string };
+  };
+  /** 【2026-09-22】启动时自动连接服务器（默认开；SSH 配置页可关） */
+  autoConnectServer?: boolean;
 }
 
 export interface LocalInstance {

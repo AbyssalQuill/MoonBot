@@ -17,6 +17,8 @@ import { ensureNapcatApps } from './napcat-repair.js';
 // NapCat WebUI 登录自查的**唯一入口**（预算 + 缓存 + 限流冷却）。为什么必须收口见该文件头注释：
 // 把登录接口当状态探针会跟 WebUI 页面自己抢 NapCat 的按 IP 限流额度，页面就永远登不进去。
 import { createNapcatWebuiAuth } from './napcat-webui-auth.js';
+// 连接服务端的**状态机**（纯逻辑可单测）：让界面能看到"SSH → 隧道 → 服务端组件逐个就绪 → 预鉴权 → 就绪"
+import { createConnectMachine, describeRemoteStatus } from './connect-machine.js';
 const deploy = deployApi();
 
 /* 【2026-09-12 主人要求："确保这个应用安装在哪个盘都可以找到"】
@@ -337,9 +339,12 @@ function scheduleReconnect(serverId, reason = '') {
   const t = setTimeout(async () => {
     reconnectTimers.delete(serverId);
     try {
-      await establishConnection(server);
+      /* 【2026-09-22】重连也走状态机：先 SSH + 隧道（成功即算连上），再后台等服务端组件就绪 +
+       * 静默预鉴权。以前这里 await establishConnection 就完事，界面上永远看不到"服务端还在起"。 */
+      await connectStep(server, reason || 'reconnect');
       mlog(`[ssh] ${server.name || server.host} 自动重连成功（第 ${attempt} 次）`);
       reconnectState = { serverId: null, attempt: 0, nextAt: 0, reason: '' };
+      void waitServerReady(server, 'reconnect').catch(() => {});
     } catch (e) {
       mlog(`[ssh] ${server.name || server.host} 自动重连失败（第 ${attempt} 次）：${e?.message ?? e}`);
       scheduleReconnect(serverId, reason);
@@ -347,6 +352,68 @@ function scheduleReconnect(serverId, reason = '') {
   }, delay);
   reconnectTimers.set(serverId, t);
 }
+
+/* ── 连接 + 状态机驱动（唯一入口）───────────────────────────────────────────
+ * 主人 2026-09-22 要求："连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
+ * 「服务端启动中」状态机。" —— 以前开机自动连是走 scheduleReconnect 的，第一次要等 5 秒退避，
+ * 而且界面上只有一句"服务端重连中…"：**服务器在起**和**凭据错了永远起不来**长得一模一样。
+ * 现在所有连接入口（开机自动连 / 用户点连接 / 掉线重连）都走这里，边走边把状态机推给界面看。 */
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 第一步：SSH + 隧道（快，几秒；这一步的失败要能立刻回报给点「连接」的人）。
+ *  `debugLines` 要透传下去：认证失败时的"服务器还允许哪些方式"全靠它（见 sshAuthDiagnose）。 */
+async function connectStep(server, reason = 'manual', opts = {}) {
+  connectMachine.begin(server, reason);
+  let created = [];
+  try {
+    created = (await establishConnection(server, { debugLines: opts.debugLines })) || [];
+  } catch (e) {
+    connectMachine.fail(e, reason);
+    throw e;
+  }
+  connectMachine.tunnels(created, reason);
+  return created;
+}
+
+/** 第二步：等服务端那三个组件逐个就绪（边走边更新状态机），就绪后**静默预鉴权一次** NapCat 界面。 */
+async function waitServerReady(server, reason = 'manual', { waitServerMs = 150000, pollMs = 4000 } = {}) {
+  const conn = sshConnections.get(server.id);
+  const napPort = tunnelLocalPort(server.id, 'NapCat WebUI', 13000);
+  const deadline = Date.now() + Math.max(5000, waitServerMs);
+  while (Date.now() < deadline) {
+    let st = null;
+    try {
+      st = await getRemoteServerStatus(server, conn, { force: true });
+    } catch (e) {
+      /* 单次取状态失败不算致命：SSH 通道偶尔抖一下很常见，继续在循环里试 */
+      connectMachine.remote(null, '取状态失败：' + String(e?.message ?? e));
+      await sleepMs(pollMs);
+      continue;
+    }
+    const d = describeRemoteStatus(st);
+    /* 先把组件明细写进状态机（ready 时它自己会切到 warming），这样"已就绪 → 预鉴权 → ready"这段
+     * 也带着明细，界面不会在最后一步把三件套的状态清空。 */
+    connectMachine.remote(st, reason);
+    if (d.ready) {
+      const r = await warmNapcatWebuiOnce({
+        scope: server.id, port: napPort,
+        token: String(st?.napcat?.webuiToken || '').trim() || cachedNapcatWebuiToken(server.id, napPort),
+        reason: 'startup',
+      });
+      connectMachine.warmed(r, reason);
+      return { ok: true, warm: r, remote: st };
+    }
+    /* 整套都没在跑时不用干等：状态机已经写明"点一键启动整套"，这里就到点为止。 */
+    if (d.down) break;
+    await sleepMs(pollMs);
+  }
+  connectMachine.fail(new Error('服务端组件到点还没就绪（看状态机里的组件明细，或点「一键启动整套」）'), reason);
+  return { ok: false, remote: connectMachine.get().components };
+}
+
+/* 说明：连接一共两步（connectStep → waitServerReady）。**故意不提供"两步串起来等到底"的封装**：
+ * 三个入口（开机自动连 / 点连接 / 掉线重连）都需要在第一步失败时各自做不同的事
+ * （排重连、回人话、记失败性质），第二步则一律后台跑，否则界面会卡几十秒。 */
 
 function connectOne(server, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -935,6 +1002,59 @@ const napcatAuth = createNapcatWebuiAuth({
   log: (m) => mlog(m),
   hashOf: (t) => sha256Hex(t),
 });
+
+/* ── 连接服务端的状态机（主人要求：开机自动连 + 能看到"服务端启动中"）───────────────
+ * 阶段：connecting(SSH) → tunnels → server-starting(组件逐个就绪) → warming(静默预鉴权) → ready / failed。
+ * 界面读 `GET /api/connect`（或在 /api/state 的 connect 字段里），不动任何网络、不花 NapCat 的登录额度。 */
+const connectMachine = createConnectMachine({
+  log: (m) => mlog(m),
+});
+/** 已经"静默预鉴权"过的 NapCat 界面：`${scope}:${port}:${token}` → at。同一个 token 只预鉴权一次。 */
+const napcatWarmDone = new Map();
+const NAPCAT_WARM_TTL_MS = 45 * 60 * 1000;   // 与 NapCat Credential 的有效口径对齐（它一小时有效）
+
+/**
+ * 静默预鉴权：**整个应用生命周期里、每个 token 只做一次**（主人 2026-09-22 要求
+ * "第一次启动应用、等服务端连接上之后后台自动静默鉴权一次就够了，不要每次点一下就鉴权一次"）。
+ * 仍然走 funnel（会花 NapCat 一次登录额度，但只在连接刚建立/本地 NapCat 刚起来时发生一次），
+ * 结果记进 napcatWarmDone，`/api/napcat/webui-ready` 会把它回给界面，界面据此**不再重载**。
+ */
+async function warmNapcatWebuiOnce({ scope, port, token, reason = 'startup' }) {
+  const t = String(token ?? '').trim();
+  if (!t) return { ok: false, note: '没有可用的 WebUI 令牌' };
+  const key = `${scope}:${port}:${t}`;
+  const at = Number(napcatWarmDone.get(key)) || 0;
+  if (at && Date.now() - at < NAPCAT_WARM_TTL_MS) return { ok: true, note: '本次启动已经预鉴权过（不再重复登）', cached: true };
+  const r = await napcatAuth.verify({ scope, port, token: t, timeoutMs: 5000, reason: `warm-${reason}` });
+  if (r.ok) napcatWarmDone.set(key, Date.now());
+  return r;
+}
+
+/** 界面问"这个 token 预热过没有"。 */
+function napcatWarmInfo(scope, port, token) {
+  const at = Number(napcatWarmDone.get(`${scope}:${port}:${String(token ?? '').trim()}`)) || 0;
+  return { done: at > 0 && Date.now() - at < NAPCAT_WARM_TTL_MS, at };
+}
+
+/**
+ * 本机 NapCat 起来了吗？起来了就**一次性**静默预鉴权它的 WebUI（同一个 token 一小时只做一次）。
+ * 主人："至于本地端，你自己看着改" —— 本机 NapCat 平时不随应用启动，所以不能只在开机试一次：
+ * 每 60 秒看一眼它起没起，起来了就预热一次（走 funnel 的预算与缓存，绝不会变成轮询登录）。
+ */
+async function warmLocalNapcatIfUp() {
+  const cfg = loadConfig();
+  if (localNapcatOffReason(cfg)) return { skipped: 'off' };
+  const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
+  const port = Number(napLocal.webuiPort) || 6099;
+  const up = await probe(`http://127.0.0.1:${port}/webui/`, 1200);
+  if (!up.reachable) return { skipped: 'down' };
+  const token = String(localNapcatWebuiTokenFromFile() || napLocal.webuiToken || '').trim();
+  if (!token) return { skipped: 'no-token' };
+  if (napcatWarmInfo('local', port, token).done) return { skipped: 'already-warm' };
+  const r = await warmNapcatWebuiOnce({ scope: 'local', port, token, reason: 'local-startup' });
+  mlog(`[napcat] 本机界面静默预鉴权：${r.ok ? '成功（点开即用）' : '未成功 —— ' + r.note}`);
+  return r;
+}
 
 function sha256Hex(s) {
   return crypto.createHash('sha256').update(String(s ?? '')).digest('hex');
@@ -1733,6 +1853,14 @@ app.get('/api/config', (_req, res) => {
   res.json({ ...cfg, connected: !!(connected && sshConnections.has(cfg.activeServerId)), activeServer: connected });
 });
 
+/* 【2026-09-22 主人要求】连接服务端的状态机（"这个过程希望能带上「服务端启动中」状态机"）。
+ * 界面可以直接轮询这条（比翻 /api/state 便宜），也可以从 /api/state 读；**读它不产生任何网络动作**。 */
+app.get('/api/connect', (_req, res) => {
+  const cfgNow = loadConfig();
+  const connected = !!(cfgNow.activeServerId && sshConnections.has(cfgNow.activeServerId));
+  res.json({ ok: true, connect: connectMachine.view(), connected });
+});
+
 app.post('/api/config', (req, res) => {
   const cfg = loadConfig();
   const next = req.body ?? {};
@@ -1741,6 +1869,8 @@ app.post('/api/config', (req, res) => {
   const killBefore = killOnExitEnabled();
   if (Array.isArray(next.servers)) cfg.servers = next.servers;
   if (typeof next.activeServerId === 'string' || next.activeServerId === null) cfg.activeServerId = next.activeServerId;
+  // 开机自动连服务端的开关（主人 2026-09-22 要求："连接上服务器之后直接退出，下次打开自动连接服务器"）
+  if (typeof next.autoConnectServer === 'boolean') cfg.autoConnectServer = next.autoConnectServer;
   if (next.local && typeof next.local === 'object') cfg.local = { ...cfg.local, ...next.local };
   if (next.instances?.dshIsolated && typeof next.instances.dshIsolated === 'object') cfg.instances.dshIsolated = { ...cfg.instances.dshIsolated, ...next.instances.dshIsolated };
   if (next.instances?.napcatLocal && typeof next.instances.napcatLocal === 'object') cfg.instances.napcatLocal = { ...cfg.instances.napcatLocal, ...next.instances.napcatLocal };
@@ -1834,6 +1964,9 @@ app.get('/api/state', async (req, res) => {
     // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / NapCat(systemd 或 docker) / 桥进程，
     // 与本机那三个实例**分开两处**展示，绝不混在一张卡上（主人 2026-09-14 要求）。
     remoteStatus: r.remoteStatus ?? null,
+    /* 【2026-09-22 主人要求】连接服务端的状态机（connecting → tunnels → server-starting → warming → ready）：
+     * 界面据此显示"服务端启动中：DSH 已就绪 · NapCat 启动中"。读它不花任何网络动作。 */
+    connect: connectMachine.view(),
     instances,
     // 【2026-09-12 可移植性】安装位置体检：所有运行数据（记忆库 memory.db / 社交状态 / 人设）都写在
     // 安装树里，所以装在 Program Files（用户级进程写不进去）或 OneDrive 等同步盘（SQLite 会被反复同步、
@@ -2258,8 +2391,12 @@ app.post('/api/ssh/connect', async (req, res) => {
     // 手动连接 = 明确要连：清掉"用户点过断开"的标记，取消可能在排队的自动重连，然后走同一段建立流程
     manualDisconnects.delete(server.id);
     cancelReconnect(server.id);
-    const tunnelsCreated = await establishConnection(server, { debugLines });
-    res.json({ success: true, message: 'SSH 连接成功，隧道已建立', tunnels: tunnelsCreated });
+    /* 【2026-09-22 状态机】手动连接也是"两步走"：先把 SSH + 隧道建立起来（失败立刻回报人话），
+     * 然后**后台**继续推状态机（等服务端组件逐个就绪 → 静默预鉴权 NapCat 界面）。
+     * 这样点「连接」不会卡住几十秒，而界面上能看到"服务端启动中：DSH 已就绪 · NapCat 启动中 …"。 */
+    const tunnelsCreated = await connectStep(server, 'manual', { debugLines });
+    res.json({ success: true, message: 'SSH 连接成功，隧道已建立', tunnels: tunnelsCreated, connect: connectMachine.view() });
+    void waitServerReady(server, 'manual').catch(() => {});
   } catch (e) {
     const isAuth = /authentication methods failed|authentication failure|Permission denied/i.test(String(e?.message ?? ''));
     // 【2026-09-14】失败的**性质**要记账（凭据 / 连不上 / 其它），冷却时长与提示都按它来算；
@@ -5940,6 +6077,15 @@ app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, 
 app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
 app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
 
+/* 连接服务端的状态机（主人要求"这个过程希望能带上「服务端启动中」状态机"）：
+ * 界面轮询这条**不做任何网络动作**（只是读内存里的阶段），所以可以随便问。
+ * 阶段：idle → connecting → tunnels → server-starting → warming → ready / failed。 */
+app.get('/api/connect', (_req, res) => {
+  const cfgNow = loadConfig();
+  const connected = !!(cfgNow.activeServerId && sshConnections.has(cfgNow.activeServerId));
+  res.json({ ok: true, connect: connectMachine.view(), connected });
+});
+
 /* 【2026-09-22 主人报「NapCat 界面点进去第一次总是鉴权失败，要刷一次」；随后又报
  * 「/api/napcat/webui-ready → HTTP 500，而且还鉴权失败，登录还 limit」】
  *
@@ -5996,6 +6142,7 @@ app.get('/api/napcat/webui-ready', async (req, res) => {
     }
     const limited = ledger.limited;
     const ok = serviceUp && !limited;
+    const warm = napcatWarmInfo(scope, port, token);
     let note;
     if (localOff) note = '当前目标是服务器，本机 NapCat 不探测（' + localOff + '）';
     else if (!serviceUp) note = 'NapCat WebUI 还没起来（127.0.0.1:' + port + ' 不通）—— 等它起来会自动重载一次';
@@ -6006,6 +6153,7 @@ app.get('/api/napcat/webui-ready', async (req, res) => {
     res.json({
       ok, scope, port, server: serverName, serviceUp, tokenPresent: !!token, off: localOff, note,
       verify,
+      warm,
       rateLimit: {
         napcatLimit: ledger.napcatLimit,
         budget: ledger.budget,
@@ -7407,20 +7555,51 @@ if (process.env.QBM_NO_LISTEN !== '1') {
     /* 【2026-09-15 主人反馈"本地没显示服务端运行中"】管理器一启动就把上次连着的那台服务器连回来：
      * 连接表在内存里（进程重启就空），以前打开应用永远显示"服务端未运行"，非要人手点一次「连接」。
      * 延迟 1.5s 等后端自己稳下来；冷却中则交给 scheduleReconnect 的冷却分支处理。 */
+    /* 【2026-09-15 主人反馈"本地没显示服务端运行中"】管理器一启动就把上次连着的那台服务器连回来：
+     * 连接表在内存里（进程重启就空），以前打开应用永远显示"服务端未运行"，非要人手点一次「连接」。
+     * 延迟 1.5s 等后端自己稳下来；冷却中则交给 scheduleReconnect 的冷却分支处理。
+     * 【2026-09-22 主人要求】"连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
+     * 服务端启动中状态机" —— 开机这一次**不再走 scheduleReconnect**（那里第一次要等 5 秒退避，
+     * 而且不推状态机），改成直接 connectStep + 后台 waitServerReady：界面一打开就能看到
+     * "正在连接服务器… → 隧道已建立 → 服务端启动中（DSH/NapCat/桥逐个就绪）→ 预鉴权 → 已就绪"。 */
     setTimeout(() => {
-      try {
-        const cfg2 = loadConfig();
-        const srv = cfg2.activeServerId ? cfg2.servers.find((s) => s.id === cfg2.activeServerId) : null;
-        if (!srv) return;
-        if (sshConnections.has(srv.id)) return;
-        mlog(`[ssh] 启动自动连接 ${srv.name || srv.host}…`);
-        scheduleReconnect(srv.id, 'startup');
-      } catch (e) { mlog(`[ssh] 启动自动连接失败：${e?.message ?? e}`); }
+      void (async () => {
+        try {
+          const cfg2 = loadConfig();
+          // servers[].autoConnect === false 时这台不自动连（默认自动），用户主动断开过的那台也不连
+          if (cfg2.autoConnectServer === false) { connectMachine.idle('已配置为不自动连接服务器（SSH 配置页可改）'); return; }
+          const srv = cfg2.activeServerId ? cfg2.servers.find((s) => s.id === cfg2.activeServerId) : null;
+          if (!srv) { connectMachine.idle('没有要连接的服务器'); return; }
+          if (srv.autoConnect === false) { connectMachine.idle(`${srv.name || srv.host} 配置为不自动连接`); return; }
+          if (sshConnections.has(srv.id)) { connectMachine.ready('服务端已连接', 'startup'); return; }
+          const cool = sshCooldownInfo(srv);
+          if (cool.ms > 0) {
+            connectMachine.fail(new Error(sshCooldownText(cool)), 'startup');
+            scheduleReconnect(srv.id, 'startup');
+            return;
+          }
+          manualDisconnects.delete(srv.id);
+          mlog(`[ssh] 启动自动连接 ${srv.name || srv.host}…`);
+          try {
+            await connectStep(srv, 'startup');
+            void waitServerReady(srv, 'startup').catch(() => {});
+          } catch (e) {
+            mlog(`[ssh] 启动自动连接失败：${e?.message ?? e}`);
+            scheduleReconnect(srv.id, 'startup');
+          }
+        } catch (e) { mlog(`[ssh] 启动自动连接失败：${e?.message ?? e}`); }
+      })();
     }, 1500).unref?.();
     // 每 60s 复查：应用可能是"复用已在跑的后端"打开的，那一路上没有新后端去自动武装，
     // 靠这个定时复查把守卫补上（应用没开时什么都不做）。
     const gTimer = setInterval(ensureGuardianArmed, 60000);
     gTimer.unref?.();
+    /* 【2026-09-22】本机 NapCat 也做**一次**静默预鉴权（主人："本地端你自己看着改"）：
+     * 它平时不随应用启动，所以不能只在开机时试一次 —— 每 60 秒看一眼它起没起，起来了就预鉴权一次
+     * （同一个 token 一小时只做一次，走 funnel 的预算与缓存），起了之后界面点开即用、不用再刷。 */
+    const warmTimer = setInterval(() => { void warmLocalNapcatIfUp().catch(() => {}); }, 60000);
+    warmTimer.unref?.();
+    setTimeout(() => { void warmLocalNapcatIfUp().catch(() => {}); }, 6000).unref?.();
   });
 }
 

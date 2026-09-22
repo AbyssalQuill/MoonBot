@@ -544,6 +544,28 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
             )}
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {/* 【2026-09-22 主人要求】"连接上服务器之后直接退出，下次打开自动连接服务器" —— 这个开关
+                  决定下次打开应用要不要自动把上次那台连回来（默认开）。关掉就纯粹手动点「连接」。 */}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--nc-foreground-600)' }}>
+                <input
+                  type="checkbox"
+                  checked={state?.autoConnectServer !== false}
+                  onChange={async (e) => {
+                    const v = e.target.checked;
+                    try {
+                      await postConfig({ autoConnectServer: v });
+                      setMsg(v ? '已开启：下次打开应用会自动连接这台服务器' : '已关闭：下次打开不会自动连接（仍可手动点「连接」）');
+                      onRefresh?.();
+                    } catch (err: any) { setMsg('保存失败：' + String(err?.message ?? err)); }
+                  }}
+                />
+                启动时自动连接服务器（上次连着的那台）
+                {state?.connect && state.connect.phase !== 'idle' && state.connect.phase !== 'ready' && (
+                  <span style={{ marginLeft: 6, color: 'var(--nc-foreground-500)' }}>
+                    · 当前：{({ connecting: '正在连接', tunnels: '隧道建立中', 'server-starting': '服务端启动中', warming: '完成界面鉴权', failed: '连接失败' } as Record<string, string>)[state.connect.phase] || state.connect.phase}
+                  </span>
+                )}
+              </label>
               {servers.map((s) => {
                 const active = s.id === selectedId;
                 const connected = state?.connected && state.activeServer?.id === s.id;
@@ -563,6 +585,13 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
                       <div style={{ color: 'var(--nc-foreground-500)', fontSize: 12, marginTop: 2 }}>
                         {s.username}@{s.host}:{s.port}
                       </div>
+                      {/* 【2026-09-22】这台正在连接/正在起服务端时，把状态机的阶段就地写出来 */}
+                      {connected && state?.connect && state.connect.phase !== 'ready' && state.connect.phase !== 'idle' && (
+                        <div style={{ fontSize: 12, marginTop: 2, color: 'var(--nc-foreground-500)' }}>
+                          {({ connecting: '正在连接…', tunnels: '隧道建立中…', 'server-starting': '服务端启动中…', warming: '完成界面鉴权…', failed: '连接失败（会自动重试）' } as Record<string, string>)[state.connect.phase] || state.connect.phase}
+                          {state.connect.note ? ` · ${state.connect.note}` : ''}
+                        </div>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={(e) => e.stopPropagation()}>
                       <button className="btn btn-sm" disabled={testing === s.id} onClick={() => test(s)}>
