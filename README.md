@@ -2,7 +2,7 @@
 
 一个跑在 QQ 上的聊天机器人：**NapCat / OneBot v11** 负责接 QQ，**隔离的 DeepSeek Harness（DSH）实例**负责当大脑，中间的 **qq-bridge** 负责唤醒判定、提示词组装、工具调用与发送，一个 **Electron 管理端**负责装、配、拉起来、看着它。
 
-当前版本 **1.2.5**，对外安装包为 `MoonBot Pro Setup.exe`。更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.3.0**，对外安装包为 `MoonBot Pro Setup.exe`（完整版）与 `MoonBot Pro Manager Setup.exe`（管理端精简版）。更新记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 <p>
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4">
@@ -26,6 +26,78 @@
 | [docs/PIXIV-AND-QZONE.md](docs/PIXIV-AND-QZONE.md) | 发 pixiv 原图为什么这么绕？QQ 空间配图为什么不能落盘？ | 处理图片链路、排查"发出去的是缩略图"的人 |
 
 其他：`CHANGELOG.md`（逐版本变更）、`docs/release-1.0.0.md`（1.0.0 发布说明）、`qq-bridge/docs/`（桥接层内部文档，含交接记录）。
+
+---
+
+## 核心机制与实测数字
+
+这一节把四份深潜文档里**最该被记住的结论**前置出来，每条都带代码入口，便于复算或推翻。
+
+### 1. 上下文：钱花在「重建」，不在「上下文大」
+
+按线上 `state/token-usage.jsonl` 的 4,659 次主聊天请求分桶实测（11.2 天）：
+
+| 上下文区间 | 请求占比 | 每次平均花费 | 其中大未命中(≥20k) |
+| --- | --- | --- | --- |
+| 0~30k | 5.8% | **¥0.0382** | **49.8%**（刚压缩/换会话完的重建） |
+| 30~50k | 36.8% | ¥0.0105 | 10.6% |
+| 50~70k | 22.2% | ¥0.0033 | 0.9% |
+| 70~90k | 15.6% | ¥0.0043 | 1.2% |
+| 90~120k | 13.2% | ¥0.0040 | 0.0% |
+| 120~160k | 5.5% | ¥0.0051 | 0.4% |
+
+50k 以上回归得 **每次 ≈ ¥0.0020 + 0.022 ¥/M × 上下文**（≈ 缓存命中价）——上下文本身几乎不花钱，
+贵的是「压缩 / 换会话 / 长时间空闲之后要**整段重读**一次」（实测一次重建 ≈ ¥0.036，频率 ∝ 1/阈值）。
+
+- **压缩阈值**：每天成本 = 步数×(固定+边际×平均上下文) + 每天重建次数×重建单价 → 最省在 **0.16**
+  （稳健区间 0.14~0.20）。代码：`qq-bridge/src/core/config.js` 的 `dshCompaction.thresholdRatio`，
+  由 `qq-bridge/src/lib/dsh-compaction.js` 写进 DSH 的 `cordis.patch.yml`。
+- **换会话频率**：换一次要付一次整段重建（≈¥0.04~0.11），而每步只省 `0.022¥/M × ΔC ≈ ¥0.00066` →
+  平衡点 ≈75 步 ≈ 18~25 个来回；**纯成本最优是永久会话**（`social.autoReset.permanent = true`，
+  上下文交给 DSH 压缩——压缩会留摘要，不丢连贯）。
+- **复算脚本**：`node qq-bridge/tools/compaction-threshold.mjs`（参数全部从线上用量现场量，改价后重跑）。
+- 完整推导（缓存 TTL、闭环最优、峰谷倍率）：[docs/COMPACTION-MATH.md](docs/COMPACTION-MATH.md)。
+
+### 2. 工具表：代理恒开，两处旋钮分工明确
+
+隔离 DSH **不直连** napcat MCP，而是连开源 **mcp-compressor** 代理；代理只把 2 个包装工具
+（`napcat_get_tool_schema` / `napcat_invoke_tool`）发给模型，把压过的清单塞进描述里。
+实测相对完整工具表：**低档 38.8% · 中档 14.0% · 高档 6.2% · 极限档 3.6%**。
+
+- **代理恒开**：`qq-bridge/src/lib/dsh-side.js` 默认就拉代理；没装压缩机自动回退直连，绝不把工具表搞没。
+- **工具名单档位**（`social.slimTools.level`，定义在 `qq-bridge/src/lib/tool-tiers.js`）决定**后端注册哪些**：
+  实测在用的能力一个都不丢，当前档位砍掉的具体工具名**逐个列在管理端那张卡上**（不用猜）。
+- 代价：模型遇到本轮没用过的工具要先查 schema 再调用（一步变两步）；桥已按真实工具名解包，
+  发送判定 / 幂等账本 / 回合收尾都不受影响。
+
+### 3. 图片链路：两道闸门、一条规矩
+
+- **pixiv**：候选按档位分桶（**缩略档永不发**）、用作品详情的宽高与实际像素**对账**、字节要过完整性闸门
+  （JPEG 的 FFD9 / PNG 的 IEND / GIF 的 0x3B / RIFF 长度 + `content-length`）——任一不过就换下一个候选，
+  **绝不发半幅灰图**。入口：`qq-bridge/src/lib/pixiv.js`、`qq-bridge/src/safe-fetch.js`。
+- **QQ 空间配图**：**零落盘优先**（≤10MB 直接把 `base64://` 交给 NapCat），超限才写进 `napcat.tmpDir`
+  并在 `try/finally` 里成败都删；NapCat 的 `send_qzone_msg` **只读 `images`**（旧代码传的 `file` 一直被静默忽略）。
+  入口：`qq-bridge/src/lib/qzone-image.js`。
+- 两条链路的共同教训与回归测试：[docs/PIXIV-AND-QZONE.md](docs/PIXIV-AND-QZONE.md)。
+
+### 4. 收到图片时：唤醒与在途注入**都要附**
+
+模型正忙着那一步时你发的图走的是「在途注入」；图片附件原来只挂在「唤醒」那条路上 —— 于是模型只看到
+`[图片] [image]` 占位文本。现在两条路共用 `pickAttachableMedia`（挑选规则）+ `resolveMediaList`（取图闸门），
+带图被拒会自动回退纯文本重投，且**水位只在图真投出去后才推进**（否则那张图两条路都不再附）。
+见 `qq-bridge/src/core/social-state.js`、`qq-bridge/src/core/wake-send.js`，回归测试 `qq-bridge/tests/steer-media.test.js`。
+
+### 5. 行为默认值（拟人）
+
+| 项 | 缺省 | 在哪改 |
+| --- | --- | --- |
+| 打字节拍 | 150 ms/字（第 2 条气泡起按字数等），下限 250 / 上限 4000 ms；桥侧夹在 [60,320] / [800,6000] | 「发送节奏与间隔」 |
+| 回复前停顿 | 上限 30s、静默 8s、新消息后至少静默 10s | 「等待：回复前的停顿」 |
+| 私聊不抢话 | 看对方打字、最多等 12s、连发续窗 5s、插话概率 0.15 | 「私聊打字等待」 |
+| 唤醒模式 | **默认活跃**；想潜水时给有限时长（不再有「无限期潜水」这个勾） | 「唤醒 · 潜水 / 活跃」 |
+| 上下文压缩 | 阈值 0.16、逐字保留 2%、单个工具结果 8192 字符 | 「上下文治理」 |
+
+管理端「上下文治理」卡里还有一个 **「恢复默认配置（拟人默认，全局）」** 按钮：一次把上面这些写回表单。
 
 ---
 
