@@ -2382,8 +2382,12 @@ registerTool(
 );
 
 // ── QZone 共享鉴权与 HTTP（看/评/赞都走空间网页 API；cookie 由 NapCat get_cookies 中转）────────
-// 统一开关：config.json → social.tools.qzone（评论/回复/点赞/查看/发说说；默认开）。管理端可关。
-const QZONE_TOOL_DISABLED = cfg.social?.tools?.qzone === false || cfg.social?.tools?.qzoneView === false;
+/* 统一开关：config.json → social.tools.qzone（评论/回复/点赞/查看/发说说；默认开）。管理端可关。
+ * 【2026-09-22 修 M16】以前写成 `qzone === false || qzoneView === false` —— 于是只想关掉"看空间"这一项，
+ * 会**连带把 qq_send_qzone（发说说）/评论/回复/点赞全禁掉**（这些是各自独立的能力，主人在用）。
+ * 现在只认总开关 qzone；qzoneView 只影响"看空间"这一个工具自己的注册与启用。 */
+const QZONE_TOOL_DISABLED = cfg.social?.tools?.qzone === false;
+const QZONE_VIEW_DISABLED = QZONE_TOOL_DISABLED || cfg.social?.tools?.qzoneView === false;
 function qzoneDisabledNote() {
   return '空间互动功能已关闭（config → social.tools.qzone），需要时可在管理端开启';
 }
@@ -2503,7 +2507,8 @@ registerTool(
   },
   async ({ key, token, uid, num }) => {
     try {
-      if (QZONE_TOOL_DISABLED) return { content: [{ type: 'text', text: qzoneDisabledNote() }], isError: true };
+      // 【2026-09-22 修 M16】只有"看空间"这一项受 qzoneView 影响；评论/回复/点赞/发说说只受总开关 qzone 管
+      if (QZONE_VIEW_DISABLED) return { content: [{ type: 'text', text: qzoneDisabledNote() }], isError: true };
       const cleanUid = String(uid).trim().replace(/^o/i, '').replace(/\D/g, '') || String(uid).trim();
       const count = Math.min(20, Math.max(1, Number(num) || 10));
       const { cookies, gtk } = await getQzoneAuth();
