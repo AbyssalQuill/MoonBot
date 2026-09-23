@@ -94,11 +94,13 @@ check('/set active（不带时段）= 全天活跃', () => {
 check('/set diving（不带时段）= 全天潜水', () => {
   assert.deepEqual(parseSetModeCommand('/set diving'), { mode: 'diving', range: null });
 });
-check('/set mode active / /set mode diving 仍然认（等价老写法）', () => {
-  assert.deepEqual(parseSetModeCommand('/set mode active'), { mode: 'active', range: null });
-  assert.deepEqual(parseSetModeCommand('/set mode diving'), { mode: 'diving', range: null });
+check('【2026-09-23 已删除】/set mode active / /set mode diving 不再识别', () => {
+  // 主人要求去掉这套老写法：它与 /set active、/set diving 完全等价，只多打了 "mode"。
+  // 现在应当落到"不匹配 → null"，由上层当普通文本放给模型。
+  assert.equal(parseSetModeCommand('/set mode active'), null);
+  assert.equal(parseSetModeCommand('/set mode diving'), null);
 });
-check('中英混写的老写法已被移除（/set mode 活跃 / 潜水 不认）', () => {
+check('中英混写的老写法同样不认（/set mode 活跃 / 潜水）', () => {
   assert.equal(parseSetModeCommand('/set mode 活跃'), null);
   assert.equal(parseSetModeCommand('/set mode 潜水'), null);
 });

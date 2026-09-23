@@ -280,6 +280,10 @@ function closeTunnels(connId) {
  */
 const reconnectTimers = new Map();     // serverId -> timer
 const manualDisconnects = new Set();   // 用户明确点过「断开」的 serverId（不自动重连）
+/* 【2026-09-23 修「断网重连状态机反复循环」】正在被主动替换掉的旧连接所属的 serverId。
+ * 旧连接被 end() 时会抛 'close'，那不是真掉线；没有这个标记，'close' 会把"换连接"误判成
+ * "掉线"，于是排一次重连、重连里又换连接、又抛 close …… 状态机空转不停（见 establishConnection）。 */
+const replacingConnections = new Set();
 let reconnectState = { serverId: null, attempt: 0, nextAt: 0, reason: '' };
 const RECONNECT_BACKOFF_MS = [5000, 10000, 20000, 30000, 60000];
 
@@ -291,7 +295,22 @@ function cancelReconnect(serverId) {
 
 /** 与「连接」按钮同一段建立流程（鉴权 + 隧道 + 缓存作废 + 设为活动服务器）。 */
 async function establishConnection(server, opts = {}) {
-  if (sshConnections.has(server.id)) { try { sshConnections.get(server.id).end(); } catch {} sshConnections.delete(server.id); closeTunnels(server.id); }
+  if (sshConnections.has(server.id)) {
+    /* 【2026-09-23 修「断网重连时状态机反复循环」】
+     * 这里换掉旧连接时调的 `end()` 会触发旧连接的 'close' 事件，而那一刻 sshConnections 里
+     * 这台刚被 delete（下面一行），于是 'close' 里那条"是不是被新连接取代了"的判据
+     *   `sshConnections.get(id) !== conn && sshConnections.has(id)`
+     * 两个条件都不成立 → **判定成"真掉线"** → scheduleReconnect → 5s 后再走一遍 connectStep
+     * → 又在这里 end() 下一个连接 → 又触发一次 'close' …… 状态机就在
+     * connecting → tunnels → server-starting → (failed) 之间空转，界面看起来"反复循环"。
+     * 修法：先把这台标记成"正在主动替换"，让旧连接的 close 处理器认出这是自家人为切断、直接忽略。 */
+    replacingConnections.add(server.id);
+    try { sshConnections.get(server.id).end(); } catch { /* 旧连接已经死了就算了 */ }
+    sshConnections.delete(server.id);
+    closeTunnels(server.id);
+    /* 让旧连接的 close 回调先跑完再摘标记 —— close 是异步派发的，同一 tick 里摘掉就白标了。 */
+    setTimeout(() => { replacingConnections.delete(server.id); }, 0);
+  }
   const conn = await connectOne(server, opts);
   sshConnections.set(server.id, conn);
   const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
@@ -311,6 +330,9 @@ async function establishConnection(server, opts = {}) {
   // 连接掉了就自动重连（用户主动断开的那台除外）
   conn.on('close', () => {
     if (manualDisconnects.has(server.id)) return;
+    /* 【2026-09-23】主动替换旧连接时，旧连接也会抛 'close' —— 那不是掉线，不能当掉线处理。
+     * 没有这一条就会自己触发自己：换连接 → 旧连接 close → 排重连 → 再换连接 …… 无限循环。 */
+    if (replacingConnections.has(server.id)) return;
     if (sshConnections.get(server.id) !== conn && sshConnections.has(server.id)) return;
     mlog(`[ssh] ${server.name || server.host} 连接断开 → 自动重连`);
     scheduleReconnect(server.id, 'connection-closed');
@@ -403,11 +425,19 @@ async function waitServerReady(server, reason = 'manual', { waitServerMs = 15000
       connectMachine.warmed(r, reason);
       return { ok: true, warm: r, remote: st };
     }
-    /* 整套都没在跑时不用干等：状态机已经写明"点一键启动整套"，这里就到点为止。 */
+    /* 整套都没在跑时不用干等：状态机已经写明"点一键启动整套"，这里就到点为止。
+     * 【2026-09-23】注意这条 break 之后**不能**直接判 failed 就完事：服务端刚开机/刚重启时
+     * "三件套都没在跑"是正常的过渡态，旧代码在这里 fail 之后没有任何人再推进状态机，
+     * 界面就永远停在"连接失败"，而重连定时器还在按退避反复触发 → 看起来就是"反复循环"。 */
     if (d.down) break;
     await sleepMs(pollMs);
   }
+  /* 到点或遇到"整套没在跑"：如实记失败原因，但**同时安排一次重连**，让状态机能自己走下去。
+   * 已在重连中（reconnectTimers 有本机）时不重复排，避免叠加定时器。 */
   connectMachine.fail(new Error('服务端组件到点还没就绪（看状态机里的组件明细，或点「一键启动整套」）'), reason);
+  if (!reconnectTimers.has(server.id) && !manualDisconnects.has(server.id)) {
+    scheduleReconnect(server.id, 'server-not-ready');
+  }
   return { ok: false, remote: connectMachine.get().components };
 }
 
@@ -632,12 +662,13 @@ function buildRuntimeInfo(id, cfg) {
   let probeUrl;
   if (id === 'dsh-isolated') {
     url = `http://127.0.0.1:${cfg.port}`;
-    if (running) {
-      // 官方 dsh（0.1.2+，token 鉴权）：把日志里最新 web token 拼进 GUI「打开」的 URL，
-      // 否则 0.1.2 对无 token 请求返回 401 → iframe 白屏 / 「打不开」。
-      const tok = readLatestDshToken(instanceLogPath(id));
-      if (tok) url = `http://127.0.0.1:${cfg.port}/?token=${tok}`;
-    }
+    /* 官方 dsh（0.1.2+，token 鉴权）：把日志里最新 web token 拼进 GUI「打开」的 URL，
+     * 否则 0.1.2 对无 token 请求返回 401 → iframe 白屏 / 「打不开」。
+     * 【2026-09-23】原来这段写在 `if (running)` 里 —— 而 `running` 看的是本进程的 runtimes：
+     * **管理器自身重启后 runtimes 是空的，DSH 却还在跑**，那种情况就取不到 token（点开 401）。
+     * 日志里永远有"最近一次启动"打的 token，所以无条件读。 */
+    const tok = readLatestDshToken(instanceLogPath(id));
+    if (tok) url = `http://127.0.0.1:${cfg.port}/?token=${tok}`;
     probeUrl = `http://127.0.0.1:${cfg.port}`;
   }
   if (id === 'napcat-local') {
@@ -825,7 +856,18 @@ function startIsolatedDsh(cfgIso) {
       if (!existsSync(dshBin)) { resolve({ success: false, message: `找不到 dsh 可执行文件：${dshBin}` }); return; }
       // 全新机器引导标记：DSH_HOME 尚未被 qq-bridge setup 初始化过 → 先以最小 profile 起一次再注入 preset
       const bootMarker = join(home, 'qqbridge-setup.done');
-      const dshArgs = [dshBin, '--profile', cfgIso.profile, '--port', String(cfgIso.port), '--no-open', '--trusted-host', `127.0.0.1:${cfgIso.port}`, '--trusted-host', `localhost:${cfgIso.port}`];
+      /* 【2026-09-23 随「payload 升到 dsh 0.1.2-rc.1」一起加】rc.1 起，profile 的 patchReload 默认是
+       * live（dsh-app-boot 的 PROFILE_TEMPLATES.web 默认值），会加载 @deepseek-ai/cordis-plugin-hmr；
+       * 而 rc.1 的 HMR 构造函数要求进程带 `--expose-internals`，否则整个 boot 直接失败：
+       *     failed to apply loader entry (@deepseek-ai/cordis-plugin-hmr):
+       *     --expose-internals is required for HMR service
+       * （rc.6 的 HMR 没有这条要求，所以以前不传也能起。）
+       * 这里跑的是 qbm-node.exe —— **真 Node**，Node 命令行 flag 是通的（实测 `qbm-node.exe
+       * --expose-internals -e …` 的 process.execArgv 里有它；Electron-as-Node 那边则会被 Electron 吃掉，
+       * 这正是 E 盘隔离版只能把 patchReload 钉成 startup 的原因）。补上它既让 rc.1 起得来，
+       * 又保住 patch 文件热加载。只在直接调 bin.js（真 Node 路径）时加，走 .cmd shim 时不加。 */
+      const nodeFlags = /bin\.js$/i.test(dshBin) ? ['--expose-internals'] : [];
+      const dshArgs = [...nodeFlags, dshBin, '--profile', cfgIso.profile, '--port', String(cfgIso.port), '--no-open', '--trusted-host', `127.0.0.1:${cfgIso.port}`, '--trusted-host', `localhost:${cfgIso.port}`];
       const dshOpts = {
         env: { ...process.env, DSH_HOME: home, ...loadCredentialEnv(home) },
         cwd: dirname(dshBin) || undefined,
@@ -1338,6 +1380,40 @@ function startCommandInstance(id, cfg, logLabel) {
   });
 }
 
+/** 【2026-09-23 新增】本机 NapCat 的注入需要一个 QQ 客户端。
+ *
+ *  背景（别人反馈的"打不进QQ"）：随包只带了 QQ 的**安装包**（`napcat-onekey\QQ.exe`，273MB），
+ *  而代码里从来没有执行过它 —— 只做 OneKey 定位 + 跑 `NapCatWinBootMain.exe` 注入。
+ *  所以没装 QQ 的机器上，注入必然失败（或静默失败），用户看到的就是"打不进QQ"。
+ *  这里只做两件事：**检测**常见 QQ NT 安装位置（含注册表），以及给「一键安装」入口；
+ *  真正拉起安装程序在 /api/napcat/install-qq。
+ */
+function findLocalQq() {
+  if (process.platform !== 'win32') return { ok: false, path: '' };
+  const ps = [
+    '$c = @()',
+    '$c += (Join-Path $env:ProgramFiles "Tencent\\QQNT\\QQ.exe")',
+    'if (${env:ProgramFiles(x86)}) { $c += (Join-Path ${env:ProgramFiles(x86)} "Tencent\\QQNT\\QQ.exe") }',
+    '$c += (Join-Path $env:LOCALAPPDATA "Programs\\Tencent\\QQNT\\QQ.exe")',
+    'foreach ($k in @("HKLM:\\SOFTWARE\\WOW6432Node\\Tencent\\QQNT","HKLM:\\SOFTWARE\\Tencent\\QQNT","HKCU:\\SOFTWARE\\Tencent\\QQNT")) {',
+    '  try { $p = (Get-ItemProperty $k -ErrorAction Stop).Install; if ($p) { $c += (Join-Path $p "QQ.exe") } } catch {} }',
+    'foreach ($p in $c) { if ($p -and (Test-Path -LiteralPath $p)) { Write-Output $p; break } }',
+  ].join('; ');
+  try {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    const found = String(r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || '';
+    return { ok: !!found && existsSync(found), path: found };
+  } catch { return { ok: false, path: '' }; }
+}
+
+/** 随包 QQ 安装包的位置（NapCat OneKey 目录下的 QQ.exe） */
+function bundledQqInstaller() {
+  const onekey = findNapcatOneKey();
+  if (!onekey) return '';
+  const p = join(onekey.dir, 'QQ.exe');
+  return existsSync(p) ? p : '';
+}
+
 function startNapcatLocal(cfgNap) {
   const id = 'napcat-local';
   return new Promise(async (resolve) => {
@@ -1361,6 +1437,21 @@ function startNapcatLocal(cfgNap) {
       // 2) Windows：自动定位 OneKey
       const onekey = findNapcatOneKey();
       if (onekey) {
+        /* 【2026-09-23 预检】注入需要有 QQ 客户端；随包只带了 QQ 的安装包，从没执行过它。
+         * 缺 QQ 时直接给出可执行的一步，而不是让 NapCat 在后台静默失败（用户看到的是"打不进QQ"）。
+         * 注意：这里只拦"自动定位 OneKey"这条路 —— 显式配了启动命令的用户上面已经 return 了。 */
+        const qq = findLocalQq();
+        if (!qq.ok) {
+          const installer = bundledQqInstaller();
+          const msg = '没有检测到 QQ 客户端，NapCat 没有可注入的目标，启动后会表现为"打不进QQ"。\n'
+            + (installer
+              ? `随包的 QQ 安装包在这里：${installer}\n点管理端的「安装 QQ」一键装，或直接双击它装完再回来启动。`
+              : '随包也没找到 QQ 安装包：请先自行安装 QQ NT（https://im.qq.com/），再回来启动。');
+          mlog('[napcat] ' + msg.replace(/\n/g, ' '));
+          resolve({ success: false, message: msg, needQq: true, qqInstaller: installer });
+          return;
+        }
+        mlog(`[napcat] 检测到 QQ 客户端：${qq.path}`);
         /* 【2026-09-19 真机事故修复】拉起 NapCat 之前先做一次完整性自检 / 自修。
          * 事故：别人装完启动即崩 `Error [ERR_MODULE_NOT_FOUND]: Cannot find module
          * '...\conout-D9oph_Le.js' imported from '...\napcat.mjs'` —— 根因是我们打出去的 payload 里
@@ -1770,15 +1861,25 @@ async function resolveServices(cfg, connected) {
   const dshIso = cfg.instances?.dshIsolated ?? DEFAULT_CONFIG.instances.dshIsolated;
   const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
   const brLocal = cfg.instances?.bridgeLocal ?? DEFAULT_CONFIG.instances.bridgeLocal;
-  const dshIsoUp = await probe(`http://127.0.0.1:${dshIso.port}/`, 700);
-  const napUp = await probe(`http://127.0.0.1:${napLocal.webuiPort || 6099}/`, 700);
-  const brUp = await probe(`http://127.0.0.1:${brLocal.webuiPort || 3100}/`, 700);
+  /* 【2026-09-23 修「连上服务器后卡片还显示启动、整体感觉连接很慢」】
+   * 这三条探测原来是**依次 await**，每条 700ms 超时 —— 本机实例没跑时最坏就是 2.1s
+   * 白白串在 /api/state 的关键路径上。而前端每 1.2~3 秒就轮询一次 /api/state，
+   * 响应比轮询还慢 → 请求堆积 → 界面状态永远滞后一拍（主人看到的就是"服务端明明在跑，
+   * 卡片还显示『启动服务端』"）。三条互不依赖，改并行；语义完全不变。 */
+  const [dshIsoUp, napUp, brUp] = await Promise.all([
+    probe(`http://127.0.0.1:${dshIso.port}/`, 700),
+    probe(`http://127.0.0.1:${napLocal.webuiPort || 6099}/`, 700),
+    probe(`http://127.0.0.1:${brLocal.webuiPort || 3100}/`, 700),
+  ]);
 
   /* 【2026-09-14 修串台】本机那一组**不再回退到隧道**：本地实例没跑时，原来的写法会把
    * `127.0.0.1:13000/13080/13100`（那是服务器端口的隧道）当成"本机入口"填进去 ——
    * 于是「本机 · NapCat 官方界面」点开看到的是**服务器**的 NapCat（实测 reachable=false→串到隧道）。
    * 现在本机就是本机端口（没跑就如实显示不可达），服务端那组单独给（见下方 remoteServices）。 */
-  const localDshUrl = `http://127.0.0.1:${dshIso.port}`;
+  /* 【2026-09-23】本机 DSH 入口也**必须带 token**：rc.1（官方 0.1.2+）对不带 token 的请求一律 401，
+   * 只给 `http://127.0.0.1:<port>` 点开就是白屏。token 从实例日志尾部取（与 buildRuntimeInfo 同一份真相）。 */
+  const localDshTok = readLatestDshToken(instanceLogPath('dsh-isolated'));
+  const localDshUrl = `http://127.0.0.1:${dshIso.port}${localDshTok ? '/?token=' + encodeURIComponent(localDshTok) : ''}`;
   // NapCat 本机入口同样**带 webui token**（主人要求：点开就用，不用再输 token）
   // 【2026-09-20】token 来源改为"现场真相优先 + 现场验证"，见 napcatWebuiTokenFor / verifyNapcatWebuiToken
   // 【2026-09-21】本机 NapCat 没启用时（判据见 localNapcatOffReason）这次"现场验证"根本不会发网络请求，
@@ -1803,8 +1904,12 @@ async function resolveServices(cfg, connected) {
     iframeBlocked: !!p.iframeBlocked,
     iframeBlockReason: p.iframeBlocked ? (p.xfo ? `X-Frame-Options: ${p.xfo}` : `CSP ${p.frameAncestors}`) : '',
   });
+  /* 【2026-09-23】原来是 `for (const s of localServices) services.push(mk(s, await probe(s.url)))`
+   * —— 4 条串行探测，每条默认 1200ms 超时，最坏再加 4.8s 到 /api/state 的关键路径上。
+   * 四条互不依赖，改并行；mk/入队顺序保持原样，语义不变。 */
   const services = [];
-  for (const s of localServices) services.push(mk(s, await probe(s.url)));
+  const localProbes = await Promise.all(localServices.map((s) => probe(s.url)));
+  localServices.forEach((s, i) => services.push(mk(s, localProbes[i])));
 
   /* ── 服务端一组（只在 SSH 已连接时出现）──────────────────────────────
    * 以前这里只有一组 url，且带「本机实例在跑就优先用本机」的规则：连上服务器后点「打开官方界面」
@@ -1844,7 +1949,31 @@ app.get('/api/napcat/launchers', (_req, res) => {
   const onekey = findNapcatOneKey();
   if (!onekey) return res.json({ success: false, found: false, message: '未定位到 NapCat OneKey 目录' });
   const vbs = ensureNapcatVbs(onekey.dir, cfg.instances?.napcatLocal?.quickLogin || '');
-  res.json({ success: true, found: true, dir: onekey.dir, exe: onekey.exe, qr: vbs.qr, quick: vbs.quick, quickLogin: vbs.quickLogin });
+  /* 【2026-09-23】顺带把"有没有 QQ 客户端"报给界面：没有就显示「安装 QQ」，
+   * 这正是不装 QQ 的机器"打不进QQ"的那一步。 */
+  const qq = findLocalQq();
+  const installer = bundledQqInstaller();
+  res.json({
+    success: true, found: true, dir: onekey.dir, exe: onekey.exe, qr: vbs.qr, quick: vbs.quick, quickLogin: vbs.quickLogin,
+    qq: { ok: qq.ok, path: qq.path, installer },
+  });
+});
+
+/** 【2026-09-23 新增】一键装 QQ：跑随包的 QQ 安装包（napcat-onekey\QQ.exe）。
+ *  QQ 是交互式安装程序，所以 detached + 可见窗口；装完用户回来点「启动本机 NapCat」即可。 */
+app.post('/api/napcat/install-qq', (_req, res) => {
+  const installer = bundledQqInstaller();
+  if (!installer) {
+    return res.json({ success: false, message: '随包没有找到 QQ 安装包（napcat-onekey\\QQ.exe）—— 请先自行安装 QQ NT 再试。' });
+  }
+  try {
+    const child = spawn(installer, [], { detached: true, stdio: 'ignore', windowsHide: false });
+    child.unref();
+    mlog('[napcat] 已启动随包 QQ 安装程序：' + installer);
+    res.json({ success: true, message: '已启动 QQ 安装程序。装完（保持登录）后回来点「启动本机 NapCat」即可。', installer });
+  } catch (e) {
+    res.json({ success: false, message: '启动 QQ 安装程序失败：' + (e?.message || e) });
+  }
 });
 
 app.get('/api/config', (_req, res) => {
@@ -1953,6 +2082,13 @@ app.get('/api/state', async (req, res) => {
   res.json({
     mode: r.mode, activeServer: r.server, services, tunnels: tunnelsInfo,
     connected: !!connected && sshConnections.has(connected.id),
+    /* 【2026-09-23 修「SSH 配置页那个开关勾不上也取消不掉」】
+     * 前端读的是 state.autoConnectServer（`checked = state?.autoConnectServer !== false`），
+     * 但这条响应体此前**从来没带过这个字段** → 前端恒拿到 undefined → `undefined !== false`
+     * 恒为 true → 开关永远显示成"开"、点了保存再刷新又弹回勾选态。
+     * 写入（L1961）与读取（L7658）本身都是好的，坏的只是"没往外报"。
+     * 这里回一个**具体布尔值**（缺省视为开），前端不必再靠 !== false 猜。 */
+    autoConnectServer: cfg.autoConnectServer !== false,
     /* 【2026-09-15】断线自动重连的现场状态：界面可以显示"服务端重连中…"，
      * 而不是在自动重连的几秒里显示成"服务端未运行"（主人会以为又断了）。 */
     reconnecting: reconnectState.serverId ? {
@@ -7533,8 +7669,22 @@ app.get('/api/ssh/deploy/tasks', (_req, res) => {
 
 const distDir = join(RUNTIME_ROOT, 'dist');
 if (existsSync(join(distDir, 'index.html'))) {
-  app.use(express.static(distDir));
-  app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(join(distDir, 'index.html')));
+  /* 【2026-09-23 修「前端改了、完全退出重启也看不到」】
+   * 带 hash 的 assets 可以放心缓存（文件名变了就是新文件），但 **index.html 绝不能缓存**：
+   * Electron 壳是"建窗时 loadURL 一次、没有菜单也没有刷新快捷键"（见打包工程的 moonbot-app/main.js），
+   * 一旦它把旧 index.html 留在自己的 HTTP 缓存里，之后每次启动都会照着**旧 index.html** 去要
+   * 已经不存在的旧 bundle；而下面那条兜底路由会把 index.html 的内容当 HTML 回给 .js 请求，
+   * 于是要么白屏、要么从缓存里把旧 bundle 拿出来继续用 —— 表现就是"怎么重启都还是原来的样子"。
+   * 让入口一律 no-store，壳每次启动都从服务端拿最新入口。 */
+  app.use(express.static(distDir, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-store');
+    },
+  }));
+  app.get(/^\/(?!api\/).*/, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(join(distDir, 'index.html'));
+  });
 }
 
 // 【保命护栏】管理器里跑着一堆后台任务（部署/同步/重启实例）。任何一个漏掉 catch 的 rejection 都会让

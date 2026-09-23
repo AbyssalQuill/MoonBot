@@ -1179,7 +1179,7 @@ registerTool(
 
 registerTool(
   'qq_set_system_config',
-  'Modify system run config (owner private chat only). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model), visionBaseUrl (OpenAI-compatible endpoint for a SEPARATE vision model; empty = images are sent to the main model as attachments), visionApiKey (key for that endpoint), permanentSession (true = never rotate the DSH session; context is kept bounded by DSH compaction instead, which saves the first-turn tokens of every new session), compactionEnabled (true = prune oversized tool results before summarizing), compactionThresholdRatio (fraction of the model context window that triggers cleanup, default 0.06), compactionToolResultChars (per tool result character budget, default 1500) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. Tell the owner the applied value; non-owner sessions are rejected.',
+  'Modify system run config (owner or admin; works in any chat they are speaking in). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model), visionBaseUrl (OpenAI-compatible endpoint for a SEPARATE vision model; empty = images are sent to the main model as attachments), visionApiKey (key for that endpoint), permanentSession (true = never rotate the DSH session; context is kept bounded by DSH compaction instead, which saves the first-turn tokens of every new session), compactionEnabled (true = prune oversized tool results before summarizing), compactionThresholdRatio (fraction of the model context window that triggers cleanup, default 0.06), compactionToolResultChars (per tool result character budget, default 1500) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. Tell the owner the applied value; sessions where neither the owner nor an admin just spoke are rejected.',
   {
     key: z.string().describe('Config key: privateProbability / privateProactiveMin / proactiveEnabled etc. (see qq_get_system_config)'),
     value: z.union([z.string(), z.number(), z.boolean()]).describe('New value: probability/interval etc.; intervals accept ms numbers or 30min, 2h, 30分钟'),
@@ -2369,9 +2369,9 @@ registerTool(
 
 registerTool(
   'qq_admin_set',
-  'Grant or revoke DSH admin permission - only works from the owner private chat. Use when the owner says to make X an admin or remove those rights. uid = the QQ number (from contacts or the group member list).',
+  'Grant or revoke DSH admin permission. Works when the owner or an existing admin is the one talking in this session (group or private); a group member who is neither is rejected. Use when the owner says to make X an admin or remove those rights. uid = the QQ number (from contacts or the group member list).',
   {
-    key: z.string().describe('Session key; must be the owner private session key (private:<owner QQ>), else rejected'),
+    key: z.string().describe('Session key (group:ID or private:QQ). Must be the owner\'s private chat, or a session where the owner/admin just spoke.'),
     token: z.string().describe('Session token (from the wake prompt)'),
     uid: z.string().describe('Target QQ number'),
     action: z.enum(['grant', 'revoke']).describe('grant=set as admin, revoke=remove admin')
@@ -2388,9 +2388,9 @@ registerTool(
 
 registerTool(
   'qq_whitelist',
-  'Add a group to or remove it from the chat whitelist - only works from the owner private chat. Use when the owner says to whitelist/open group X or remove/ban group X.',
+  'Add a group to or remove it from the chat whitelist. Works when the owner or an existing admin is the one talking in this session (group or private); a group member who is neither is rejected. Use when the owner says to whitelist/open group X or remove/ban group X.',
   {
-    key: z.string().describe('Session key; must be the owner private session key (private:<owner QQ>), else rejected'),
+    key: z.string().describe('Session key (group:ID or private:QQ). Must be the owner\'s private chat, or a session where the owner/admin just spoke.'),
     token: z.string().describe('Session token (from the wake prompt)'),
     groupId: z.union([z.number(), z.string()]).describe('Group id'),
     action: z.enum(['add', 'remove']).describe('add=add to whitelist, remove=remove from whitelist')

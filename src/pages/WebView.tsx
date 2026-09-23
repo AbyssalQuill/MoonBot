@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ExternalLink, RefreshCw, Loader2 } from 'lucide-react';
 import { getState, getNapcatWebuiReady } from '../api';
 
-/** 从带 token 的 WebUI 地址里取令牌（只用于给 localStorage 记账分桶，不做鉴权）。 */
-function tokenOf(u: string): string {
-  try { return new URL(u, window.location.href).searchParams.get('token') || ''; } catch { return ''; }
+/** WebUI 的 origin（协议+主机+端口），**不含 token**。
+ *  【2026-09-23 修「静默鉴权后点一次按钮还会再鉴权一次」】见下面 gateKey 的注释。
+ *  （原来的 tokenOf() 已删除：鉴权账本改按 origin 分桶后它没有使用方了。） */
+function originOf(u: string): string {
+  try { const x = new URL(u, window.location.href); return x.origin || 'default'; } catch { return 'default'; }
 }
 
 /** "这个令牌已经在浏览器里完成过一次鉴权"-的记录；45 分钟过期（NapCat 的 Credential 一小时有效）。 */
@@ -89,8 +91,15 @@ export default function WebView({ url, title, onBack }: Props) {
     let alive = true;
     const reloadOnce = () => { if (alive) setNonce((n) => n + 1); };
 
-    /* 已经为这个令牌重载过一次（且没过期）→ 直接载入就进去了，别再动它。 */
-    const gateKey = 'qbm.napcatAuth.' + (tokenOf(url) || 'default');
+    /* 已经为这个 NapCat 实例重载过一次（且没过期）→ 直接载入就进去了，别再动它。
+     * 【2026-09-23 修「首次启动静默鉴权后，还要再点一次按钮才会稳定」】
+     * 原来这里按 **token** 分桶（`qbm.napcatAuth.<token>`），但读的是**挂载时那份 url 快照**里的 token，
+     * 而写的时候（下面 tick / reauth）用的是**刚取回的最新** token —— 首次启动恰好这两者不一致
+     * （NapCat 刚写出令牌、或刚换过令牌），于是 gate 查不中 → 又重载一次、又花一次登录额度。
+     * 改用 **origin（host:port）** 分桶：gate 要回答的是"这个浏览器有没有为该 NapCat 换过 Credential"，
+     * 而 Credential 本来就存在**该源下的 localStorage** 里、与 token 无关 —— origin 才是正确的主键。
+     * 45 分钟 TTL 仍覆盖 Credential 的一小时有效期。 */
+    const gateKey = 'qbm.napcatAuth.' + originOf(url);
     const gate = readAuthGate(gateKey);
     if (gate) {
       setNote('已登录过（' + Math.max(0, Math.round((Date.now() - gate) / 60000)) + ' 分钟前完成鉴权）—— 需要的话点「重新鉴权」');
@@ -114,7 +123,18 @@ export default function WebView({ url, title, onBack }: Props) {
         setNote(r.note || 'NapCat 还没起来：等它起来会自动重载一次');
         return true;
       }
-      writeAuthGate(gateKey);
+      /* 【2026-09-23 修「首次启动必须手点一次『重新鉴权』才进得去」】
+       * 原因是一处**手动能通、自动不通**的不对称：手动 reauth() 先 freshestUrl() 取回**最新令牌**
+       * 再重载，所以一点就通；而自动路径这里只 bump nonce 重载**当前 src**，而挂载时那份 url 是
+       * 快照 —— 首次启动时 NapCat 往往还没写出令牌、或刚换过令牌，用旧令牌重载必然登录失败。
+       * 旧代码还在重载**之前**就把 auth gate 写死（45 分钟 TTL），于是失败后再也不会自动重试，
+       * 主人只能手点一次。这里照手动路径补齐"取最新地址"这一步，并用**真正载入的那个令牌**记账
+       * （否则下次挂载算出的 gateKey 对不上，会白白多刷一次、白花一次登录额度）。 */
+      let fresh = src;
+      try { fresh = (await freshestUrl(src, url)) || src; } catch { /* 管理器暂时不可达：沿用当前地址 */ }
+      if (!alive) return false;
+      if (fresh !== src) setSrc(fresh);
+      writeAuthGate('qbm.napcatAuth.' + originOf(fresh));
       reloadOnce();
       setNote(r.warm?.done ? 'NapCat 已就绪（后台已静默鉴权）：载入中…' : 'NapCat 已就绪：正在自动完成鉴权…');
       return false;
@@ -141,7 +161,7 @@ export default function WebView({ url, title, onBack }: Props) {
       const next = await freshestUrl(src, url);
       setSrc(next);
       setNonce((n) => n + 1);
-      writeAuthGate('qbm.napcatAuth.' + (tokenOf(next) || 'default'));
+      writeAuthGate('qbm.napcatAuth.' + originOf(next));
       if (!ready) { setNote('取新令牌失败：管理器没响应'); return; }
       if (ready.rateLimit?.limited) {
         setNote('NapCat 登录接口被限流中（还有 ' + Math.ceil((ready.rateLimit.retryAfterMs || 0) / 1000) + ' 秒）—— 稍后再点；这不代表 QQ 掉线');

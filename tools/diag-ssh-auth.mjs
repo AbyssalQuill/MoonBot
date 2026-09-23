@@ -23,7 +23,7 @@ const describe = (pw) => {
   return `长度=${s.length} 首尾有空白=${s !== s.trim()} 含空格=${/\s/.test(s)} 含非ASCII=${/[^\x20-\x7E]/.test(s)} 含引号=${/['"]/.test(s)}`;
 };
 
-const tryConnect = (server, password, label) => new Promise((resolve) => {
+const tryConnect = (server, password, label, privateKey = null) => new Promise((resolve) => {
   const conn = new Client();
   const done = (r) => { try { conn.end(); } catch {} resolve(r); };
   const timer = setTimeout(() => done({ ok: false, err: '连接超时（15s）' }), 15000);
@@ -39,6 +39,12 @@ const tryConnect = (server, password, label) => new Promise((resolve) => {
   conn.connect({
     host: server.host, port: server.port || 22, username: server.username,
     password,
+    /* 【2026-09-23 修】原来这里**没有 privateKey** —— 于是"私钥认证"那条分支实际跑的是
+     * "不带任何凭据"的握手，必然回 `All configured authentication methods failed`，
+     * 把一把可用的密钥报成坏的（实测同一把钥匙走 deploy.connectOne 是 READY 的）。
+     * 用户照着这个结论去换密钥/改 authorized_keys，真正的部署问题反而被掩盖。 */
+    privateKey: privateKey ?? undefined,
+    passphrase: server.passphrase || undefined,
     tryKeyboard: true,          // 服务器用 keyboard-interactive 时，没有这个就一定失败
     readyTimeout: 10000,
     keepaliveInterval: 30000,
@@ -58,8 +64,9 @@ for (const s of servers) {
     let key = null;
     try { key = readFileSync(s.privateKey); } catch (e) { console.log('读私钥失败: ' + e.message); }
     if (key) {
-      const r = await tryConnect({ ...s, password: undefined }, undefined, 'key');
+      const r = await tryConnect({ ...s, password: undefined }, undefined, 'key', key);
       console.log(`私钥认证: ${r.ok ? '成功 ✅' : '失败 ❌  ' + r.err}`);
+      if (!r.ok && r.log?.length) { console.log('  —— ssh2 原始日志（已遮蔽敏感串）——'); for (const l of r.log.slice(-12)) console.log('  ' + l); }
     }
     continue;
   }

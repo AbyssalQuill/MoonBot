@@ -24,6 +24,22 @@ import os from 'os';
 /* ---------------- 任务注册表 ---------------- */
 const deployTasks = new Map(); // taskId -> { lines:[], status, updatedAt }
 
+/** 模板机（本机）运行时的真实 DSH 版本；读不到返回空串（那时部署就不锁版本、装 latest）。
+ *  用途见「安装全局 DSH CLI」那一步：硬写版本号会让目标机的 preset/插件对不上。 */
+function localDshVersion() {
+  const rel = ['node_modules', '@deepseek-ai', 'dsh', 'package.json'];
+  const cands = [
+    join(process.cwd(), 'dsh', ...rel),                     // 打包版：<runtime>/dsh/node_modules/...
+    join(process.cwd(), 'runtime', 'dsh', ...rel),
+    join(process.cwd(), 'dsh-runtime', ...rel),             // 开发版：<repo>/dsh-runtime/...
+    join(process.cwd(), '..', 'dsh', ...rel),
+  ];
+  for (const p of cands) {
+    try { const v = JSON.parse(readFileSync(p, 'utf8')).version; if (v) return String(v); } catch { /* 下一个候选 */ }
+  }
+  return '';
+}
+
 function taskLine(task, text) {
   const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   task.lines.push(`[${ts}] ${text}`);
@@ -690,6 +706,17 @@ export function buildLocalStagePlan(task, opts = {}) {  const p = opts.localPath
         `${basename(p.bridgeDir)}/state/*.log`,
         `${basename(p.bridgeDir)}/state/agents/*/node_modules`,
         `${basename(p.bridgeDir)}/tests`,
+        /* 【2026-09-23】本机历史备份不要带走 —— 实测这里躺着 **41.4 MB**：
+         *   · `state.bak-* / state.old-* / state.merge-stage-*`（6 个目录，各 6~7 MB）是本机
+         *     历次 state 迁移的旧拷贝，里面是**旧的会话/社交状态**；
+         *   · `config.json.bak-*` 有 30 多个，**每一个都带着主人 QQ、NapCat 令牌、服务器地址**。
+         * 目标机是"全新部署"，这些既没用、又白白把主人的隐私多复制一份过去。
+         * 新机器不需要它们：真正要迁的是当前那份 config.json / state/ / persona.md。 */
+        `${basename(p.bridgeDir)}/*.bak`,
+        `${basename(p.bridgeDir)}/*.bak-*`,
+        `${basename(p.bridgeDir)}/state.bak-*`,
+        `${basename(p.bridgeDir)}/state.old-*`,
+        `${basename(p.bridgeDir)}/state.merge-stage-*`,
       ],
       /* 【2026-09-19】解包前先把目标机**原有的** config.json 与 state/voice-config.json 备份出来：
        * 这条路径是"整套复刻"，会把本机的 config 覆盖上去；如果主人是在服务端那侧配的（pixiv 登录 cookie、
@@ -739,9 +766,43 @@ export function packLocalStage(task, item, outDir) {
   const args = ['czf', out, ...(item.excludes || []).map((e) => `--exclude=${e}`), '-C', item.cwd, ...item.members];
   const r = spawnSync('tar', args, { encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
   if (r.error) return { ok: false, error: r.error.message };
-  if (r.status !== 0) return { ok: false, error: String(r.stderr || '').trim().slice(0, 300) || `tar exit ${r.status}` };
+  /* 【2026-09-23 修「从本机复刻在新服务器上一键部署失败」——打包 dsh-home 必挂】
+   * 现场：`tar czf dsh-home.tar.gz -C <isolatedHome> .` 退出码 1，stderr 全是
+   *   `tar: ./profiles/node_modules/@deepseek-ai/dsh: Cannot stat: No such file or directory`
+   * 成因：pnpm 装的 `profiles/node_modules` 是一整片 **junction**，而它们指向的
+   *   `%APPDATA%\npm\node_modules\@deepseek-ai\dsh\node_modules\...` 在本机已经不存在
+   *   （全局 dsh 被卸载/搬走过）。于是本机实测 **489 条链接里 484 条是悬空的**。
+   * Windows 的 bsdtar 遇到悬空 junction 会报 Cannot stat 并让**整个 tar 以非 0 退出**，
+   * 而 `--exclude` 拦不住它（排除只影响归档内容，stat 照样发生 —— 实测加不加排除都一样）。
+   * 由于 dsh-home 不是可选包，这一条非 0 就 `throw` → **整场部署在打包阶段就中断**，
+   * 根本走不到传输。这就是"一键部署不好使"的真正原因。
+   *
+   * 判据收得很紧，避免掩盖真错误：
+   *   ① 归档文件**确实生成了**且非空（说明 tar 主体是成功的）；
+   *   ② stderr 里**每一行**都是 `Cannot stat`（悬空链接/被删文件的警告），
+   *      出现任何别种错误（I/O、权限、磁盘满…）仍然照常判失败；
+   *   ③ 这种情况如实写进部署日志（主人能在界面上看到"跳过了 N 条悬空链接"）。
+   * 这些悬空链接指向本机已不存在的路径，**对目标机毫无用处**，且 buildTargetDshHealScript
+   * 会在目标机重建 profiles/plugins 的链接 —— 所以跳过它们不影响"全部能力"。 */
+  const stderrText = String(r.stderr || '').trim();
+  const stderrLines = stderrText ? stderrText.split('\n').map((s) => s.trim()).filter(Boolean) : [];
   let size = 0;
   try { size = statSync(out).size; } catch { /* ignore */ }
+  /* 良性行只有两种：
+   *   · `tar: <path>: Cannot stat: ...`   —— 悬空链接/文件在打包途中消失；
+   *   · `tar: Error exit delayed from previous errors` —— bsdtar 在"有警告但归档已完成"时
+   *     固定追加的汇总行（它自己就把这种情况和真失败区分开了）。
+   * 除这两者之外的任何一行（I/O、权限、磁盘满…）都不放过。 */
+  const benign = (l) => /Cannot stat/i.test(l) || /Error exit delayed from previous errors/i.test(l);
+  const allBenign = stderrLines.length > 0 && stderrLines.every(benign);
+  if (r.status !== 0) {
+    if (size > 0 && allBenign) {
+      const n = stderrLines.filter((l) => /Cannot stat/i.test(l)).length;
+      taskLine(task, `  已打包 ${item.name}: ${(size / 1048576).toFixed(1)} MB（跳过 ${n} 条悬空链接：指向本机已不存在的路径，目标机用不到）`);
+      return { ok: true, path: out, size, warning: `skipped ${n} dangling link(s)` };
+    }
+    return { ok: false, error: stderrText.slice(0, 300) || `tar exit ${r.status}` };
+  }
   taskLine(task, `  已打包 ${item.name}: ${(size / 1048576).toFixed(1)} MB`);
   return { ok: true, path: out, size };
 }
@@ -1046,9 +1107,24 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       taskLine(task, '  ⚠ docker 不可用：仍会继续（后面拉镜像/建容器会再次尝试并报出具体原因）');
     }
     await step('安装全局 DSH CLI(@deepseek-ai/dsh)', async () => {
-      // 本机复刻时**跟随本机版本**（本机跑的是 0.1.2-rc.1 之类的新版；硬写模板机的版本会让目标机
-      // 的 preset/插件版本对不上，出现"克隆完起不来"这类很难查的问题）。
-      const dshVer = isLocal ? String(opts.dshVersion || '').trim() : '0.1.1-rc.2';
+      /* 【2026-09-23 修 P3】原来非本机源**硬写 '0.1.1-rc.2'**：目标机上已经装着别的版本时
+       * （实测这台服务器与本机都是 0.1.2-rc.1），`npm ls -g @deepseek-ai/dsh@0.1.1-rc.2` 必然不匹配
+       * → 又装一份甚至降级 → preset/插件/MCP 版本全对不上，典型症状就是"部署完 DSH 起不来 / 工具全丢"。
+       * 而且本机源那条路本来就有同样的注释说别硬写 —— 这条分支被漏掉了。
+       * 现在：① 目标机已有 dsh → 跟随它的版本，不动它；② 没有 → 依次取
+       * opts.dshVersion / 模板机运行时的真实版本 / 不锁版本（latest）。 */
+      const probe = await runCmd(dstConn, 'dsh --version 2>/dev/null | head -1 || echo none', 30000);
+      const existing = String(probe.out || '').trim().replace(/^v/, '');
+      let dshVer = '';
+      if (existing && existing !== 'none') {
+        dshVer = existing;
+        taskLine(task, `  目标机已有 dsh ${dshVer} → 跟随它，不覆盖（要换版本请在部署选项里显式指定 dshVersion）`);
+      } else {
+        dshVer = String(opts.dshVersion || '').trim() || localDshVersion();
+        taskLine(task, dshVer
+          ? `  目标机没有 dsh → 将安装 ${dshVer}（模板机运行时的版本）`
+          : '  目标机没有 dsh → 将安装 latest（没拿到模板机版本，建议随后核对）');
+      }
       const spec = dshVer ? `@deepseek-ai/dsh@${dshVer}` : '@deepseek-ai/dsh';
       // 【2026-09-12】多给一次机会 + 装完用真实可执行复核（原来一次 npm i -g 失败就 throw）。
       // 【2026-09-13 修「dsh 明明装上了却报未装上」】实测：npm 全局装完（/usr/lib/node_modules 里已有包）
@@ -1136,8 +1212,23 @@ export async function runDeploy(taskId, source, target, opts = {}) {
         /* 优先用随代码包同步过去的 restart-bridge.sh（它会先停旧桥再起，并回报 new/old pid）；
          * 老写法 `nohup bash start-bridge.sh` 不杀旧桥 → 旧桥继续占着 3100，新实例 EADDRINUSE 自退，
          * 而判据只看 pgrep 命中 → 永远"bridge-up"其实没重启（2026-09-19 实测）。全新机器上脚本还可能
-         * 不存在（这次是首次部署），那种情况退回老写法。 */
-        const r = await runCmd(srcConn, `if [ -f /root/qq-bridge/tools/restart-bridge.sh ]; then bash /root/qq-bridge/tools/restart-bridge.sh; else cd /root/qq-bridge && rm -f state/bridge.lock && nohup bash start-bridge.sh >/dev/null 2>&1 & sleep 3; pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down; fi`, 120000);
+         * 不存在（这次是首次部署），那种情况退回落步骤 —— 同样**先杀旧桥**、并用"pid 变了"当判据
+         * （2026-09-23：原来这里的回步骤还是老形状，机器上没脚本时会静默走回老毛病）。 */
+        const r = await runCmd(srcConn, [
+          'cd /root/qq-bridge || exit 1',
+          'OLD=$(pgrep -f "node src/bridge[.]js" | head -1)',
+          'if [ -f tools/restart-bridge.sh ]; then',
+          '  bash tools/restart-bridge.sh',
+          'else',
+          '  echo "restart-script-missing → 走兜底：先杀旧桥再起"',
+          '  rm -f state/bridge.lock',
+          '  pkill -f "node src/bridge[.]js" 2>/dev/null; sleep 2; pkill -9 -f "node src/bridge[.]js" 2>/dev/null; sleep 1',
+          '  nohup bash start-bridge.sh >/dev/null 2>&1 &',
+          '  sleep 6',
+          '  NEW=$(pgrep -f "node src/bridge[.]js" | head -1)',
+          '  if [ -n "$NEW" ]; then echo "bridge-up pid=$NEW old=$OLD"; else echo "bridge-down"; fi',
+          'fi',
+        ].join('\n'), 180000);
         taskLine(task, `  bridge: ${r.out || r.err}`);
       });
     }
@@ -1385,26 +1476,61 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     // 老命令会打印 "Failed to start dsh-polyfill.service: Unit not found." 并回 rc=5 —— 看着像失败、
     // 其实 dsh-web 照样起来了（实测）。改成"有 unit 才启"。
     await step('启动 DSH Web', async () => {
+      /* 【2026-09-23 修 P2】原来只有 `systemctl enable --now dsh-web`：对**已经在 active 的 unit**
+       * 它不会重启（start 对 running unit 是 no-op），而前面第 4 步刚刚 `rm -rf /root/.dsh` 并解包了
+       * 一份新的（settings.yaml / .credentials.yaml / profiles/web / plugins 全换）。dsh 只在**启动时**
+       * 读这些 → 症状是"部署完了，但新配置 / 新插件 / 新 key 一律不生效"，而且老进程还攥着已被删掉的
+       * inode 继续写，数据面处于混合状态。现在显式 restart，并当场确认 is-active + 3080 真有应答。 */
       const r = await runCmd(dstConn, [
-        'systemctl enable --now dsh-web 2>&1 | tail -2',
+        'systemctl enable dsh-web 2>&1 | tail -1',
+        'systemctl restart dsh-web 2>&1 | tail -2',
         'if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl enable --now dsh-polyfill 2>&1 | tail -2; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi',
         'sleep 5',
-        'echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"',
-      ].join('\n'), 60000);
+        'CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 5 http://127.0.0.1:3080/ || echo down)',
+        'echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY code=$CODE"',
+      ].join('\n'), 90000);
       taskLine(task, `  ${r.out || r.err}`);
-      if (!/dsh-web=active/.test(r.out || '')) taskLine(task, '  ⚠ dsh-web 未 active, 见上输出');
+      if (!/dsh-web=active/.test(r.out || '')) throw new Error(`dsh-web 重启后不是 active：${(r.out || r.err || '').trim()}`);
+      // 3080 返回 401 也算活着（DSH 无 token 一律 401）；down/000 才说明没起来。
+      if (/code=(down|000)\b/.test(r.out || '')) throw new Error(`dsh-web 虽然 active，但 3080 没应答：${(r.out || '').trim()}`);
     });
+    let bridgePidAfter = '';
     await step('启动桥', async () => {
-      // 优先用随仓库发出去的 start-bridge.sh（老模板服务器上有同名的旧脚本，兼容），
-      // 没有才退回直起 node —— 少了这层兜底，目标机就是 3100 永远不监听。
+      /* 【2026-09-23 修 · 与 server/index.js:4999「重启远端桥」同源的那次事故】
+       * 原来这里是内联 `nohup bash start-bridge.sh … & sleep 5; pgrep -f 'node src/bridge.js' && echo bridge-up`：
+       *   ① start-bridge.sh **不杀旧桥** → 旧桥继续占着 3100，新实例 EADDRINUSE 自退；
+       *   ② 判据 pgrep 命中的正是**旧进程** → 永远回 "bridge-up"。
+       * 结果：部署报成功、界面全绿，而服务器上跑的还是旧代码（别人的"部署完打不进 QQ / 旧进程还占着"
+       * 就是这个现场）。现在优先走随代码包同步过去的 tools/restart-bridge.sh（停旧桥 → 等它退出 →
+       * 超时才 -9 → 起新桥 → 回报 `pid= old= napcat-conn= console-listen=`）；只有机器上还没有那个脚本
+       * （首次克隆）时才走兜底，而兜底也**必须先杀旧桥**，并用"pid 变了"当判据。 */
       const r = await runCmd(dstConn, [
         'cd /root/qq-bridge || exit 1',
-        'rm -f state/bridge.lock',
-        'if [ -f start-bridge.sh ]; then nohup bash start-bridge.sh >/dev/null 2>&1 & else nohup node src/bridge.js >/dev/null 2>&1 & fi',
-        'sleep 5',
-        "pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-up || echo bridge-down",
-      ].join('\n'), 60000);
-      taskLine(task, `  ${r.out || r.err}`);
+        'OLD=$(pgrep -f "node src/bridge[.]js" | head -1)',
+        'if [ -f tools/restart-bridge.sh ]; then',
+        '  bash tools/restart-bridge.sh',
+        'else',
+        '  echo "restart-script-missing → 走兜底：先杀旧桥再起"',
+        '  rm -f state/bridge.lock',
+        '  pkill -f "node src/bridge[.]js" 2>/dev/null; sleep 2; pkill -9 -f "node src/bridge[.]js" 2>/dev/null; sleep 1',
+        '  nohup bash start-bridge.sh >/dev/null 2>&1 &',
+        '  sleep 6',
+        '  NEW=$(pgrep -f "node src/bridge[.]js" | head -1)',
+        '  if [ -n "$NEW" ]; then echo "bridge-up pid=$NEW old=$OLD"; else echo "bridge-down"; fi',
+        'fi',
+      ].join('\n'), 180000);
+      const out = String(r.out || '');
+      taskLine(task, `  ${out || r.err}`);
+      if (!out.includes('bridge-up')) throw new Error(`目标机桥没起来：${out || r.err || '(无输出)'}`);
+      const m = out.match(/pid=(\d+)\s+old=(\d*)/);
+      if (m) {
+        bridgePidAfter = m[1];
+        if (m[2] && m[1] === m[2]) {
+          throw new Error(`目标机桥的进程号没变（pid=${m[1]}）—— 旧桥仍在跑，新同步的代码没生效`);
+        }
+      } else {
+        taskLine(task, '  （脚本没回 old=/pid=，无法比对进程号；请确认目标机的 restart-bridge.sh 是新版）');
+      }
     });
     await step('启动 NapCat', async () => {
       // 原生 systemd 还是 docker 容器，交给 napcatCtlCmd 现场判（与 server/index.js 的控制路径同形状）
@@ -1418,14 +1544,27 @@ export async function runDeploy(taskId, source, target, opts = {}) {
 
     /* 6. 自检 */
     taskLine(task, '—— 目标机自检');
+    /* 【2026-09-23】Bridge 那一项原来只看"3100 上有没有人应答 + 有没有桥进程"——
+     * 旧桥应答、旧桥进程，两项都绿。现在比对**进程号**：必须等于刚才 restart-bridge.sh 回报的新 pid，
+     * 否则这一步会指名道姓地说出来（而不是让用户以为部署成功了）。 */
     const checks = [
       ['DSH Web(3080)', `curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:3080/ || echo down`],
-      ['Bridge(3100)', `curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:3100/api/ping 2>/dev/null; echo; pgrep -f 'node src/bridge.js' >/dev/null && echo bridge-proc-up || echo bridge-proc-down`],
+      ['Bridge(3100)', `NOW=$(pgrep -f 'node src/bridge[.]js' | head -1); echo "http=$(curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:3100/ 2>/dev/null) pid=$NOW"`],
       ['NapCat WebUI(6099)', `curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:6099/ || echo down`],
     ];
     for (const [label, cmd] of checks) {
       const r = await runCmd(dstConn, cmd, 20000);
-      taskLine(task, `  ${label}: ${(r.out || r.err).replace(/\n/g, ' / ')}`);
+      const out = (r.out || r.err || '').replace(/\n/g, ' / ');
+      taskLine(task, `  ${label}: ${out}`);
+      if (label.startsWith('Bridge')) {
+        const pid = (out.match(/pid=(\d+)/) || [])[1] || '';
+        if (!pid) taskLine(task, '    ⚠ 没找到桥进程：桥没起来（看上面「启动桥」那步的输出）');
+        else if (bridgePidAfter && pid !== bridgePidAfter) {
+          taskLine(task, `    ⚠ 桥进程号 ${pid} 与刚重启后的 ${bridgePidAfter} 不一致：中途可能有别的实例接管，请复核`);
+        } else if (bridgePidAfter) {
+          taskLine(task, `    ✓ 桥确实是本次重启的新进程（pid=${pid}）`);
+        }
+      }
     }
 
     /* 7. 清理打包残留 */
@@ -1439,6 +1578,14 @@ export async function runDeploy(taskId, source, target, opts = {}) {
         await runCmd(srcConn, `rm -rf ${stageDir}`, 30000);
       });
     }
+    /* 【2026-09-23 修 P6】成功路径也要清**目标机**的 stage（默认 /root/.qqbridge-clone）：
+     * 里面是 napcat-app / dsh-home / qq-bridge / meme 几个上百 MB 的 tar.gz。原来只有
+     * "isLocal 清本机临时目录、远端源清源机" —— 目标机那坨没人清（实测服务器上留着约 119 MB，
+     * 日期停在两次部署那几天）；失败路径（本文件末尾 catch）本来就清它，成功路径漏了。 */
+    await safely('清理目标机打包残留', async () => {
+      await runCmd(dstConn, `rm -rf ${stageDir} 2>/dev/null; echo cleaned`, 30000);
+      taskLine(task, `  已清理目标机 ${stageDir}`);
+    });
 
     task.status = 'done';
     taskLine(task, '===== 克隆部署完成 =====');

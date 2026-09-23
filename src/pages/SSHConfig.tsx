@@ -3,7 +3,7 @@ import NoticeBar from '../components/NoticeBar';
 import type { ReactNode } from 'react';
 import { api, postConfig, deployStart, deployStatus, syncBridge, removeServerStack, remoteStackById } from '../api';
 import type { SSHServer, ManagerState } from '../stores/types';
-import { ArrowLeft, Plus, Trash2, Loader2, PlugZap, Plug, TestTube2, Server, Settings, Save, Rocket, X, RefreshCw, Play, Square } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, Loader2, PlugZap, Plug, TestTube2, Server, Settings, Save, Rocket, X, Check, RefreshCw, Play, Square } from 'lucide-react';
 import NumInput from '../components/NumInput';
 
 /* 远程端口默认值（与 server/index.js tunnelMapFor 一致） */
@@ -51,6 +51,35 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
   const [testOk, setTestOk] = useState<boolean | null>(null);
   const [testedServer, setTestedServer] = useState<SSHServer | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  /* 【2026-09-23】「启动时自动连接服务器」按钮的乐观状态：
+   * autoPending 保存"刚点下去、等刷新回来确认"的值；为 null 时跟随服务端下发的 state。
+   * 为什么需要它：以前是个裸 checkbox，直接读 state.autoConnectServer，而后端当时不返回这个字段
+   * → 恒为 undefined → 恒显示"开"，点了也弹不回去（主人报"勾不上也取消不掉"）。
+   * 后端已补上该字段；这里再加一层乐观值，避免"点了以后要等一次刷新才变色"的迟滞感。 */
+  const [autoPending, setAutoPending] = useState<boolean | null>(null);
+  const [autoSaving, setAutoSaving] = useState(false);
+  /** 按钮实际显示的状态：优先用刚点下去的乐观值，否则跟服务端下发值（缺省=开）。 */
+  const autoConnectOn = autoPending ?? (state?.autoConnectServer !== false);
+  /** 服务端值追上了乐观值 → 交回给服务端，避免长期持有陈旧本地状态。 */
+  useEffect(() => {
+    if (autoPending !== null && state?.autoConnectServer === autoPending) setAutoPending(null);
+  }, [state?.autoConnectServer, autoPending]);
+  const toggleAutoConnect = async () => {
+    if (autoSaving) return;
+    const next = !autoConnectOn;
+    setAutoSaving(true);
+    setAutoPending(next);
+    try {
+      await postConfig({ autoConnectServer: next });
+      setMsg(next ? '已开启：下次打开应用会自动连接这台服务器' : '已关闭：下次打开不会自动连接（仍可手动点「连接」）');
+      onRefresh?.();
+    } catch (err: any) {
+      setAutoPending(null);   // 存不上就退回服务端值，绝不让按钮显示一个没生效的状态
+      setMsg('保存失败：' + String(err?.message ?? err));
+    } finally {
+      setAutoSaving(false);
+    }
+  };
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   // 「启动Bot / 终止Bot」：正在执行的按钮 id（形如 `<serverId>:start`），用于禁用按钮 + 转圈
@@ -546,26 +575,30 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {/* 【2026-09-22 主人要求】"连接上服务器之后直接退出，下次打开自动连接服务器" —— 这个开关
                   决定下次打开应用要不要自动把上次那台连回来（默认开）。关掉就纯粹手动点「连接」。 */}
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--nc-foreground-600)' }}>
-                <input
-                  type="checkbox"
-                  checked={state?.autoConnectServer !== false}
-                  onChange={async (e) => {
-                    const v = e.target.checked;
-                    try {
-                      await postConfig({ autoConnectServer: v });
-                      setMsg(v ? '已开启：下次打开应用会自动连接这台服务器' : '已关闭：下次打开不会自动连接（仍可手动点「连接」）');
-                      onRefresh?.();
-                    } catch (err: any) { setMsg('保存失败：' + String(err?.message ?? err)); }
-                  }}
-                />
-                启动时自动连接服务器（上次连着的那台）
+              {/* 【2026-09-23 主人要求】原来是裸 checkbox：既跟这套 nc_pink 主题不搭，又因为后端
+                  不返回该字段而恒显"开"、勾不上也取消不掉。现在改成内置粉色按钮（开 = .btn-primary
+                  实心粉、关 = .btn-outline 描边），状态由 autoConnectOn 统一给，点一下即切。 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`btn btn-sm ${autoConnectOn ? 'btn-primary' : 'btn-outline'}`}
+                  disabled={autoSaving}
+                  onClick={toggleAutoConnect}
+                  title={autoConnectOn
+                    ? '已开启：下次打开应用会自动连接这台服务器。点一下关闭。'
+                    : '已关闭：下次打开不会自动连接（仍可手动点「连接」）。点一下开启。'}
+                >
+                  {autoSaving
+                    ? <Loader2 size={14} className="spin" />
+                    : autoConnectOn ? <Check size={14} /> : <X size={14} />}
+                  启动时自动连接服务器（上次连着的那台）：{autoConnectOn ? '开' : '关'}
+                </button>
                 {state?.connect && state.connect.phase !== 'idle' && state.connect.phase !== 'ready' && (
-                  <span style={{ marginLeft: 6, color: 'var(--nc-foreground-500)' }}>
-                    · 当前：{({ connecting: '正在连接', tunnels: '隧道建立中', 'server-starting': '服务端启动中', warming: '完成界面鉴权', failed: '连接失败' } as Record<string, string>)[state.connect.phase] || state.connect.phase}
+                  <span style={{ color: 'var(--nc-foreground-500)', fontSize: 12 }}>
+                    当前：{({ connecting: '正在连接', tunnels: '隧道建立中', 'server-starting': '服务端启动中', warming: '完成界面鉴权', failed: '连接失败' } as Record<string, string>)[state.connect.phase] || state.connect.phase}
                   </span>
                 )}
-              </label>
+              </div>
               {servers.map((s) => {
                 const active = s.id === selectedId;
                 const connected = state?.connected && state.activeServer?.id === s.id;

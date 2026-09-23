@@ -197,10 +197,26 @@ export function NapcatKillOnExitSwitch({ value, onChange }: { value?: boolean; o
 /** NapCat VBS 隐藏启动器信息（融合进项目：双击/管理器启动均无黑窗） */
 function NapcatLauncherInfo({ quickLogin, webuiToken, killOnExit }: { quickLogin?: string; webuiToken?: string; killOnExit?: boolean }) {
   const [info, setInfo] = useState<any>(null);
-  useEffect(() => {
-    api<any>('/napcat/launchers').then((r) => setInfo(r.success ? r : { success: false, message: '未定位 NapCat OneKey' })).catch(() => setInfo({ success: false, message: '加载失败' }));
-  }, [quickLogin]);
+  const [installing, setInstalling] = useState(false);
+  const [note, setNote] = useState('');
+  const load = () => api<any>('/napcat/launchers')
+    .then((r) => setInfo(r.success ? r : { success: false, message: '未定位 NapCat OneKey' }))
+    .catch(() => setInfo({ success: false, message: '加载失败' }));
+  useEffect(() => { load(); }, [quickLogin]);
+
+  /* 【2026-09-23】QQ 预检：本机 NapCat 是"注入进 QQ"的，没装 QQ 就必然打不进 QQ。
+   * 随包带了 QQ 的安装包（napcat-onekey\QQ.exe），后端 /napcat/install-qq 负责把它拉起来。 */
+  async function installQq() {
+    setInstalling(true); setNote('');
+    try {
+      const r = await api<any>('/napcat/install-qq', { method: 'POST' });
+      setNote(r.message || (r.success ? '已启动安装程序' : '启动失败'));
+    } catch (e: any) { setNote('调用失败：' + (e?.message || e)); }
+    finally { setInstalling(false); }
+  }
+
   if (!info || !info.success) return info ? <div className="card" style={{ marginTop: 14 }}><div className="card-title">VBS 隐藏启动器</div><div style={{ color: 'var(--nc-foreground-500)' }}>{info.message}</div></div> : null;
+  const qq = info.qq || { ok: true, path: '', installer: '' };
   return (
     <div className="card" style={{ marginTop: 14 }}>
       <div className="card-title">VBS 隐藏启动器（双击 = 后台启动，无黑窗）</div>
@@ -212,6 +228,24 @@ function NapcatLauncherInfo({ quickLogin, webuiToken, killOnExit }: { quickLogin
           {killOnExit === false ? '（退出管理器不碰 NapCat，它继续后台跑）' : '（退出管理器会一并结束本机这套 NapCat，不留残留进程）'}
           {' ｜ 快速登录账号：'}{info.quickLogin} ｜ WebUI 登录令牌：{webuiToken || 'truefriend'} ｜ 管理器「启动 NapCat」也会走 VBS 隐藏拉起。
         </div>
+      </div>
+      <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--nc-border, #3333)', fontSize: 12 }}>
+        <div>
+          QQ 客户端：
+          <b style={{ color: qq.ok ? 'inherit' : '#e5484d' }}>{qq.ok ? '已检测到' : '未检测到（不装 QQ 就必然"打不进QQ"）'}</b>
+          {qq.path ? <span style={{ color: 'var(--nc-foreground-500)' }}>　{qq.path}</span> : null}
+        </div>
+        {!qq.ok && (
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn" disabled={installing || !qq.installer} onClick={installQq}>
+              {installing ? '正在启动…' : '安装 QQ（用随包安装包）'}
+            </button>
+            {qq.installer
+              ? <span style={{ color: 'var(--nc-foreground-500)' }}>随包安装包：<code>{qq.installer}</code></span>
+              : <span style={{ color: 'var(--nc-foreground-500)' }}>随包没有 QQ 安装包，请先自行安装 QQ NT</span>}
+          </div>
+        )}
+        {note && <div style={{ marginTop: 6, color: 'var(--nc-foreground-500)' }}>{note}{qq.ok ? '' : '　装完回到这里刷新（重新加载本卡）即可。'}</div>}
       </div>
     </div>
   );

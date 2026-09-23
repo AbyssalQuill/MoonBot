@@ -575,7 +575,7 @@ function mcpLabel(fullName: string) {
   // —— 回合保持（social.turnHold）：4.49 之后重写的持段协议，管理端逐项说明 ——
   'social.turnHold.enabled': '「回合保持」总开关。开着的时候：桥在一次唤醒里把 DSH 那个回合**留住**一段时间，你在这段时间里连着补的几句话会被并进同一个回合处理，'
     + '不用每条都重新唤醒（省一次整包提示 + 少一轮排队）。关掉就回到"每条消息各自起一轮"的老行为。',
-  'social.turnHold.keys': '限定哪些会话生效（每行一个，如 `private:1736784911` 或 `group:123456789`）；留空 = 不按会话限制，具体范围由下面「只对私聊保持」决定。',
+  'social.turnHold.keys': '限定哪些会话生效（每行一个，如 `private:10001` 或 `group:123456789`）；留空 = 不按会话限制，具体范围由下面「只对私聊保持」决定。',
   'social.turnHold.privateOnly': '只对私聊保持：群聊不开保持（群里人多、话题散，一直占着回合既费额度又容易答错对象）。'
     + '想让某个群也保持，就在这里关掉它，再用上面的「限定会话」写死那几个群号。',
   'social.turnHold.maxExchanges': '一次保持里最多来回多少轮：到数就放行，防止你一直说话害它一直不结束（回合数直接等于模型步数，就是额度）。',
@@ -1568,7 +1568,8 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
               <DocSection title="怎么用">
                 <ul>
                   <li>在 QQ 里（群聊或私聊都可以）直接发这些指令，机器人会立刻照做并回一句话确认。</li>
-                  <li><b>管理类指令只有管理员（也就是配置里的「主人 QQ」）能生效</b>；其他人发会被回「管理命令仅管理员可用」。</li>
+                  <li><b>管理类指令只有主人与管理员能生效</b>（主人 = 配置里的「主人 QQ」；管理员 = 主人用 <code>/op</code> 加的人）。其他人发会被回「管理命令仅管理员可用」。</li>
+                  <li><b>群聊和私聊都能发</b>——只要发的人**是主人或管理员**，在群里发同样生效，不限于私聊。</li>
                   <li>指令要单独发一条，且以 <code>/</code> 开头；带参数时参数用空格隔开。</li>
                 </ul>
               </DocSection>
@@ -1598,7 +1599,6 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
                   <li><code>/set active 09:00-01:00</code>：只在<b>这段时间</b>活跃，其余时间潜水（只回 @ 与点名）。跨午夜写成 <code>09:00-01:00</code> 就行。</li>
                   <li><code>/set diving</code>：本会话全天潜水——平时不打扰群，被 @、被点名或有人问时才出来。</li>
                   <li><code>/set diving 00:00-21:00</code>：<b>这段时间</b>潜水（只回 @ 与点名），其余时间照常活跃。</li>
-                  <li><code>/set mode active</code> / <code>/set mode diving</code>：上面两条不带时段的等价老写法。</li>
                   <li><code>/set sleep 01:00-06:00</code>：设每日作息窗口（北京时间）。窗口内群聊只回 @，其余不读以省 token；私聊不受限。</li>
                   <li><code>/set sleep 30m</code> / <code>/set sleep 2h</code>：定时休息 30 分钟 / 2 小时，到点自动醒。</li>
                   <li><code>/set wake</code> 或 <code>/set cancel</code>：一键取消所有睡眠状态（含作息窗口与定时休息）。</li>
@@ -1628,7 +1628,20 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
                   <li><code>/portrait learn</code>（也认 <code>/portrait start</code>、<code>/群友画像学习</code>、<code>/画像学习</code>）：立刻按当前筛选条件挑人跑一轮画像学习。不带参数时自动从聊天库里选人。</li>
                   <li><code>/portrait stop</code>：停止正在跑的画像学习（已在跑的目标不会落半成品）。</li>
                   <li><code>/portrait status</code>：回一条状态——是否启用、自动触发方式、筛选条件、最近一轮学了哪几个人。</li>
-                  <li>只有管理员（配置里的「主人 QQ」）能发；其他人发会被回「画像学习只有主人能指挥」。</li>
+                  <li>只有主人与管理员能发；其他人发会被回「画像学习只有主人能指挥」。</li>
+                </ul>
+              </DocSection>
+
+              <DocSection title="用量与统计">
+                <ul>
+                  <li><code>/token</code>：报今天用了多少 token、花了多少钱。**由桥直接算、不经过模型**，所以随时可用、也不花额度。</li>
+                  <li><code>/token 7</code>：报最近 7 天的合计（<code>1</code>~<code>60</code> 天，不带参数等于今天）。</li>
+                  <li>回的内容分两个口径，都逐行标了出处，和「学习」页的实测区对得上：
+                    <br />· <b>今日总量</b>取<b>平台计费日</b>（北京时 08:00 换日，与提供方控制台一致）；
+                    <br />· <b>命中/未命中/输出</b>与<b>金额</b>取<b>北京自然日</b> 00:00 起的分时实测（含 00:00–08:00 那段，平台把它算在昨天，所以会单独写一行说明）。
+                  </li>
+                  <li>单价在「常用设置 → 计价口径」里改（命中 / 未命中 / 输出 三个单价 + 高峰倍率），改完 <code>/token</code> 与面板同时变。</li>
+                  <li>「按今天的节奏，全天大概 N tok」是按时段习惯曲线外推的预估，仅供参考、不计钱。</li>
                 </ul>
               </DocSection>
 

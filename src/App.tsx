@@ -28,14 +28,30 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     let iv: ReturnType<typeof setTimeout> | null = null;
+    /* 【2026-09-23 启动预热窗】从挂载起 20 秒内一律 1.2 秒一拍。
+     * 为什么必须要有它：自启动连接服务器时，**首轮 getState() 拿到的 phase 还是 'idle'**
+     * （后端此刻才刚开始连，bridge.log 实测：窗口 46.3s 加载页面、46.94s 才开始 connecting），
+     * 于是 transient 判为 false → 轮询间隔被定成 4000ms → 下一次采样要等到 50.3s，
+     * 而 46.9~50.3 这 3.4 秒里 connecting 和半个 tunnels 已经走完了。
+     * 结果就是主人看到的"中间态根本没出现"——不是没渲染，是**前 4 秒压根没采样**。
+     * 预热窗保证连接从第一刻起就在被采样。 */
+    const mountedAt = Date.now();
     // 状态机在启动/停止过程中要"看得见地"往前走，所以轮询间隔跟着 phase 变：
     //   有实例处于 starting/stopping → 1.2 秒（秒数在跳，用户知道它在动）
     //   全部稳定 → 4 秒（本地回环，代价可忽略）
+    /* 【2026-09-23 修「卡片小字还是从未启动直接跳到运行中」】
+     * 原来这个 transient 判据**只看本机实例**（instances[].phase），没看服务器的连接状态机。
+     * 于是连接服务器期间仍按 4 秒轮询，把中间那几个瞬时阶段整个跳过去：
+     * 上一拍"未启动"，下一拍"运行中"，卡片小字里那个中间态等于白写。
+     * 现在把连接状态机与预热窗一并纳入判据。 */
     const load = async () => {
       try {
         const s = await getState();
         if (alive) setState(s);
-        const transient = (s?.instances ?? []).some((i) => i.phase === 'starting' || i.phase === 'stopping');
+        const instanceTransient = (s?.instances ?? []).some((i) => i.phase === 'starting' || i.phase === 'stopping');
+        const connectTransient = !!s?.connect && s.connect.phase !== 'idle' && s.connect.phase !== 'ready';
+        const warmingUp = Date.now() - mountedAt < 20000;
+        const transient = instanceTransient || connectTransient || warmingUp;
         if (alive) iv = setTimeout(load, transient ? 1200 : 4000);
       } catch {
         if (alive) iv = setTimeout(load, 4000);   // 后端没起时退避，别把浏览器打满

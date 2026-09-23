@@ -54,7 +54,19 @@ check('remoteRestartBridge 里没有脚本时会明确报错（不是静默成�
   /restart-script-missing/.test(index) && /ok: false/.test(index));
 
 const deploy = read(DEPLOY);
-check('server/deploy.js 的克隆路径优先走脚本', /restart-bridge\.sh/.test(deploy));
+/* 【2026-09-23 加严】原来这里只判"deploy.js 里出现过 restart-bridge.sh 这个字符串"——
+ * 于是**旧写法还在文件里也照样 PASS**：事实上 deploy.js 的克隆路径 1397 行就退回了
+ * 「内联 nohup bash start-bridge.sh + pgrep 判据」的老形状（不杀旧桥、判据命中旧进程 →
+ * 永远 bridge-up）。现在按 index.js 那两条同等的力度断言，并额外守住两件本次修掉的事：
+ * 部署后必须显式重启 dsh-web（enable --now 对已 active 的 unit 是空操作）、
+ * 重启桥必须以 old=/pid= 的比对为准（不是"有进程就算成功"）。 */
+check('server/deploy.js 不留内联 start-bridge.sh 的旧写法（不杀旧桥 + 只看 pgrep）',
+  !/pgrep -f 'node src\/bridge\.js' >\/dev\/null && echo bridge-up/.test(deploy)
+  && !/nohup bash start-bridge\.sh[^\n]*\n[^\n]*pgrep -f 'node src\/bridge\.js' >\/dev\/null/.test(deploy));
+check('server/deploy.js 的重启桥会回报 old=/pid=（看得出真的换了进程）',
+  /old=\$OLD/.test(deploy) && /bridge-up pid=\$NEW old=\$OLD/.test(deploy));
+check('server/deploy.js 部署后会显式 restart dsh-web（enable --now 对已在跑的 unit 是空操作）',
+  /systemctl restart dsh-web/.test(deploy));
 
 // 反面样本：确认这把门禁真的会抓到旧写法（自己测自己）
 const WEAK = 'await sshExecCapture(conn, "cd /root/qq-bridge && nohup bash start-bridge.sh </dev/null >/dev/null 2>&1 & sleep 3; pgrep -f \'node src/bridge[.]js\' >/dev/null && echo bridge-up || echo bridge-down", 30000);';

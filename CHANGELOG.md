@@ -2,6 +2,32 @@
 
 本文件按主题归纳 MoonBot 的用户可见变化，不逐条罗列提交标题。版本号遵循语义化版本；分组约定为「新增能力 / 修复 / 变更与不兼容 / 内部与工程」。
 
+## 2.0.0 — 2026-09-23
+
+这一版把**"别人拿到安装包之后能不能真的跑起来、能不能一键部署到自己的新服务器"**这条路打通，顺带修掉了几个只有真机才会暴露的问题。
+
+### 修复
+
+- **一键部署到新服务器根本走不通（阻断级）**：`server/deploy.js` 打 `dsh-home` 包时必失败 —— tar 报 `tar: ./profiles/node_modules/…: Cannot stat`，且**整个 tar 以退出码 1 结束**。现场查明：pnpm 装的 `profiles/node_modules` 是一整片 junction（本机实测 **489 条里 484 条悬空**，都指向已被卸载的全局 `dsh`），Windows 的 bsdtar 遇悬空 junction 会 stat 失败。排除规则拦不住它（做过 8 组对照，**连完全不加 `--exclude` 也一样失败**），而 `dsh-home` 不是可选包，于是 `throw` → 部署在打包阶段就中断，根本走不到传输。现在按"归档确实生成且非空 + stderr 每行都是良性警告"放行，其它错误照常判失败；跳过的条数写进部署日志。
+- **出厂包少带 41.4 MB 本机垃圾**：`state.bak-* / state.old-* / state.merge-stage-*`（六个目录）与 **30 多个 `config.json.bak-*`** 会被搬去目标机 —— 后者每一个都带着主人 QQ、NapCat 令牌、服务器地址。已排除，`bridge` 包 27.8 MB → 15.6 MB。
+- **`/token` 的分时数据全是 0**：根因是 `Number(null) === 0`。`initTokenMeter` 把 `nowMsOverride` 写成 `null`，而 `nowMsOf()` 用 `Number(null)` 判断有限性 —— 得到 0 而不是 NaN，于是"现在"变成 1970-01-01，分时桶的门永远不匹配。**总量对、分时全 0** 这个怪组合就是这么来的。改成先判 null/undefined。
+- **断网重连时状态机反复循环**：`establishConnection` 换连接时对旧连接调 `end()`，旧连接异步抛 `close`，而那一刻 `sshConnections` 里这台刚被删掉 —— 于是"是不是被新连接取代了"那条判据两个条件都不成立，被误判成真掉线 → 排重连 → 又换连接 → 无限空转。新增 `replacingConnections` 标记识别自家人为切断；同时 `waitServerReady` 失败后改为自己安排重连（原来失败后没人再推进状态机）。
+- **主动唤醒的回合挂住"深度求索中"**：保持循环的价值只在于合并对方连发的几句，但自发起回合（`proactiveCheck`/`probability`/`replyCheck`/`timeout`/`topic`/`activityStart`）根本没有对方消息可并；模型这一轮不开口时连 `turnHasBubble` 都是 false，必然拖到 `idleCloseMs` 30 分钟。现在自发起 + 无待交付 → 立即收尾。
+- **群聊里的昵称对不上人**：`profiles` 表有 23 行、**有名字的只有 1 行**，而通讯录是 `WHERE name != ''` —— 注入给模型的 `[Contacts]` 里只有主人一个。群友的群名片其实一直是解析好的（消息里就带着），只是从没写进档案。现在每条入站消息顺手补一行 `profiles.name`（只在为空时写）。
+- **NapCat 静默鉴权后还要手点一次**：鉴权账本按 **token** 分桶，但读的是挂载时的旧快照、写的是刚取回的新 token，首次启动两者必然不一致 → 账本查不中 → 白刷一次。改用 **origin（host:port）** 分桶：Credential 本来就存在该源下的 localStorage 里，与 token 无关。
+- **首开按钮有一小段浅粉色不可点**：那是首次 `/api/state` 没回来的窗口，按钮显示「加载中…」+ disabled 样式。现在直接显示「服务端连接中…」。
+
+### 变更与不兼容
+
+- **删除 `/set mode active` / `/set mode diving`**：与 `/set active`、`/set diving` 完全等价，只多打四个字母，留着两套只会让文档和排错都变复杂。发了会被当普通文本交给模型。
+- **指令权限不再限制在主人私聊**：`/api/social/tunables`、`admin-set`、`whitelist` 三处原来硬判 `key === private:<ownerQQ>`，于是主人在群里说"把某群加白名单"一律被拒。现在判据是"主人私聊 **或** 本会话最近一条人话是主人/管理员（10 分钟内）"。
+- **群聊补 `[OWNER-HERE]` 标记**：`[OWNER]` 原本只在主人私聊出现，群里哪怕主人本人开口也没有权威身份信息，persona 的 `[OWNER MODE]` 认不到标记。现在群里主人/管理员说话时显式标注。
+
+### 内部与工程
+
+- **新增回归测试 `qq-bridge/tests/connect-loop-guard.test.js`**（22 条），锁住重连循环的两条修法。
+- **前端帮助文案里的示例 QQ 改成通用值**：原来写着主人的真实 QQ 号，而 `sanitize-full-payload.mjs` 只扫 `qq-bridge/`，`dist/` 不在范围内 —— 于是它会随安装包发给每一个拿到包的人。
+
 ## 1.3.0 — 2026-09-21
 
 这一版解决的是同一件事的四个面：**机器人花的钱里绝大部分是"每一步都要重发一遍的东西"，而它记住的东西却很容易在轮换中丢掉。** 所以四件事一起做 —— 工具描述按档位压缩、提示词收成短行 spec、记忆改成有分层且有全文检索的库、上下文里动态的东西全部挪到"每轮本来就新"的位置。下面的百分比都是**实测**的，复算脚本都在仓库里。

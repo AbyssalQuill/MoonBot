@@ -230,6 +230,50 @@ let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔�
  * 桥侧 mcp-napcat-safe.js 更是直接不注册它们（social.meme.enabled=false → 工具从列表里消失）。 */
 const memeEnabled = () => cfgRef?.social?.meme?.enabled !== false;
 
+/* ── 【2026-09-23 主人要求】管理端点不再"仅限主人私聊" ──────────────────────────
+ * 原话："所有指令只要是主人或者管理员发出的都生效，不要单独限制在主人私聊里"。
+ * 以前 /api/social/tunables、/api/social/admin-set、/api/social/whitelist 都硬判
+ * `key === private:<ownerQQ>`，于是**主人在群里**说"把某群加白名单""把模型换成 X"一律被拒
+ * （回一句"只有主人私聊能…"）。管理员更是完全做不到。
+ *
+ * 现在判据改成"身份 + 时效"，任一命中即放行：
+ *   ① 主人自己的私聊会话（key 是 private:<ownerQQ> 且 token 对得上）—— 原行为，保留；
+ *   ② 这个会话里**最近一条人话**是主人或管理员发的，且在 TRUST_SPOKE_WINDOW_MS 内。
+ *      「主人或管理员」不需要另外判：social-flow 存的 m.isOwner 本身就是
+ *      `uid === ownerQQ || adminQQ.includes(uid)`（见 mux.js 的同名变量）。
+ *      只认"最近一条"而不是翻历史找：负责指挥的应该是**当下**说话的人；
+ *      否则几分钟前主人说过一句、之后群友再怎么发也都会被当成主人授权。
+ * 放行时返回命中的档位（写进日志/回包，便于事后追责）。 */
+const TRUST_SPOKE_WINDOW_MS = 10 * 60 * 1000;
+function trustLevelFor(key, token) {
+  const k = String(key ?? '').trim();
+  if (!k) return null;
+  const ownerKey = 'private:' + String(cfgRef?.ownerQQ ?? '');
+  const ownerTok = social.conversations.get(ownerKey)?.agentToken;
+  if (k === ownerKey && token && ownerTok && String(token) === String(ownerTok)) return 'owner-private';
+  try {
+    const list = social.conversations.get(k)?.recentMessages;
+    if (!Array.isArray(list)) return null;
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const m = list[i];
+      if (!m || m.isSelf) continue;                     // 只看别人发来的
+      const fresh = Date.now() - Number(m.time || 0) < TRUST_SPOKE_WINDOW_MS;
+      return m.isOwner && fresh ? 'trusted-spoke-here' : null;
+    }
+  } catch { /* 读不到 = 不可信 */ }
+  return null;
+}
+/** tunables 那条路只有 token（没有 key），按 token 反查会话再走同一套判据。 */
+function trustLevelForToken(token) {
+  const t = String(token ?? '').trim();
+  if (!t) return null;
+  for (const [ck, cst] of social.conversations.entries()) {
+    if (cst && cst.agentToken && String(cst.agentToken) === t) return trustLevelFor(ck, t);
+  }
+  return null;
+}
+const NOT_TRUSTED_MSG = '这个只有主人或管理员能改：私聊里直接说，或在群里等主人/管理员亲口说那句（10 分钟内有效）。';
+
 // ══════════════════════════════════════════════════════════════════════════════
 // 学习管理 / 用量统计（学习系统重构：console 侧 REST + 配置落盘，纯追加模块级代码，
 // 不改动任何既有路由语义。按共享规格 v1「管理端 GUI」一节：3100 为纯 JSON API，
@@ -4693,9 +4737,9 @@ export function startConsoleServer() {
       if (req.method === 'POST' && url.pathname === '/api/social/tunables') {
         const body = await readBody();
         const tunKey = String(body.key ?? '').trim();
-        // 仅主人私聊会话的令牌可修改系统配置（群友/其他会话一律拒绝）
-        if (!tokenBelongsToOwner(String(req.headers['x-agent-token'] ?? ''))) {
-          sendJson({ ok: false, error: '仅主人私聊可修改系统配置（qq_set_system_config 只在主人私聊生效）' }, 403);
+        // 主人私聊 / 或本会话最近一条人话是主人或管理员 → 放行（见 trustLevelFor 注释）
+        if (!trustLevelForToken(String(req.headers['x-agent-token'] ?? ''))) {
+          sendJson({ ok: false, error: NOT_TRUSTED_MSG }, 403);
           return;
         }
         const spec = findTunable(tunKey);
@@ -4774,7 +4818,7 @@ export function startConsoleServer() {
         if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
         if (!SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (!ToolEnabled('adminSet')) { sendJson({ ok: false, error: '工具未启用：qq_admin_set' }, 403); return; }
-        if (key !== `private:${String(cfgRef.ownerQQ ?? '')}`) { sendJson({ ok: false, error: '只有主人私聊能设置管理员' }, 403); return; }
+        if (!trustLevelFor(key, token)) { sendJson({ ok: false, error: NOT_TRUSTED_MSG }, 403); return; }
         const cur = Array.isArray(cfgRef.adminQQ) ? cfgRef.adminQQ.map(String) : [];
         let changed = false;
         if (action === 'grant') {
@@ -4799,7 +4843,7 @@ export function startConsoleServer() {
         if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
         if (!SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (!ToolEnabled('whitelist')) { sendJson({ ok: false, error: '工具未启用：qq_whitelist' }, 403); return; }
-        if (key !== `private:${String(cfgRef.ownerQQ ?? '')}`) { sendJson({ ok: false, error: '只有主人私聊能改群白名单' }, 403); return; }
+        if (!trustLevelFor(key, token)) { sendJson({ ok: false, error: NOT_TRUSTED_MSG }, 403); return; }
         const cur = Array.isArray(cfgRef.allow?.groups) ? cfgRef.allow.groups.map(String) : [];
         let changed = false;
         if (action === 'add') {

@@ -2,7 +2,7 @@
 import { redactKnownTokensOnly } from '../lib/outbound-text.js';
 import { log } from '../lib/log.js';
 import { sanitizeForwardId } from '../forward.js';
-import { persistChatMessage, recentChatMessages } from './memory.js';
+import { persistChatMessage, recentChatMessages, rememberContactName } from './memory.js';
 import { getSocialState, saveSocialState, social, seenForwardIds } from './social-state.js';
 import { messageMediaStore } from './session-state.js';
 import { currentMode } from './mode.js';
@@ -12,6 +12,12 @@ let cfgRef = null;
 export function initSocialFlowCore(cfg) { cfgRef = cfg; }
 
 export function appendSocialMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, files = [], quoteTargetId = null) {
+  /* 【2026-09-23 修「群聊的人的 QQ 号昵称无法识别」】顺手把这个人的昵称补进通讯录。
+   * 为什么放在这里：这是**每条入站消息都必经**的唯一收口，而 `sender` 已经是解析好的
+   * 群名片/昵称（mux 传的是 event.sender.card || nickname），QQ 号在 userId —— 两样都现成。
+   * 只在 profiles.name 为空时写（见 rememberContactName），不会覆盖画像学习的结果。
+   * 失败绝不影响消息入库，所以整段吞异常。 */
+  try { if (userId != null && sender) rememberContactName(userId, sender); } catch { /* 补名字失败不影响主流程 */ }
   const st = getSocialState(key);
   const recentLimit = Number(cfgRef.social?.context?.recentLimit) || 100;
   const unreadLimit = Number(cfgRef.social?.context?.unreadLimit) || 30;

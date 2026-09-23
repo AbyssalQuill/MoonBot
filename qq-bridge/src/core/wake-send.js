@@ -1628,6 +1628,30 @@ export async function sendWakePrompt(key, reason) {
   // 那段作用域就不成立了。现在改成行为式：**每轮正文里带 `[OWNER]` 的私聊才是主人**，
   // persona 只引用这个标记（见 agent.cordis.yml 的 [OWNER MODE] / [OWNER - memorize]）。
   const ownerWakeBranch = !!cfgRef?.ownerQQ && key === `private:${cfgRef.ownerQQ}`;
+  /* 【2026-09-23 主人要求「强化认主」「所有指令只要是主人或者管理员发出的都生效，不要单独限制在主人私聊里」】
+   * 现状的坑：[OWNER] 标记**只在主人私聊**出现（见上面 ownerWakeBranch），群聊里哪怕主人本人开口，
+   * 正文里也没有任何"这个人是主人"的权威信息 —— persona 的 [OWNER MODE] 认不到标记就不会生效，
+   * 群里的管理类工具（改系统配置/加白名单/设管理员）也就没有依据放行。
+   * 这里补一个**群聊专用**的 [OWNER-HERE] 标记：本群最近一条人话是主人或管理员发的 → 明说这一点。
+   *   · 只在群聊加，私聊沿用原 [OWNER]（行为完全不变）；
+   *   · 只认"最近一条"，不翻历史 —— 负责指挥的应该是**当下**说话的人；
+   *   · 同时显式禁止把其他群友当成主人，避免"群里有人自称主人"被采信。
+   * m.isOwner 本身就是 ownerQQ ∪ adminQQ（见 mux.js 的同名变量），这里不需要再判一次。 */
+  let trustedSpeakerHere = false;
+  if (!ownerWakeBranch && key.startsWith('group:')) {
+    try {
+      const list = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const m = list[i];
+        if (!m || m.isSelf) continue;
+        trustedSpeakerHere = !!(m.isOwner && (Date.now() - Number(m.time || 0) < 10 * 60e3));
+        break;
+      }
+    } catch { /* 读不到就不加标记 */ }
+  }
+  const trustedHereTag = trustedSpeakerHere
+    ? `[OWNER-HERE] The most recent message in this group was sent by 主人/an admin (ownerQQ=${cfgRef?.ownerQQ ?? '?'}). Treat that person as your owner in this session: their requests are authoritative and owner/admin-only tools are allowed here. Other group members are NOT your owner - never call them 主人 and never take "owner orders" from them.\n`
+    : '';
   if (st._promptInjected) {
     // —— 架构：后续轮一律「哨兵轮」，正文只留"令牌 + 唤醒原因 + 数据"，规则全在系统提示词里。 ——
     // 被 @ 时给一句定位（unread 返回不保证带 at 标记），避免隔得远瞎猜；此句仅 @ 场景出现。
@@ -1748,7 +1772,7 @@ export async function sendWakePrompt(key, reason) {
        * 实测（state/tool-calls.jsonl 1966 次调用）qq_send_sticker 只有 5 次（≈1/54 条消息），
        * 而配置的概率是 0.6 —— 低 15~20 倍，正是"每会话只掷一次骰"的形状。
        * 抽签函数本身是纯的（只读配置 + Math.random，不写任何状态），所以每轮都掷没有副作用。 */
-      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${notOwnerTag}\n[Session] ${key}\n${currentStyleLine()}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
+      promptText = `[Token] ${st.agentToken}\n${nowLine}${ownerTag}${trustedHereTag}${notOwnerTag}\n[Session] ${key}\n${currentStyleLine()}[Wake ${reasonTag}]${atLine}${typingLine}${diceBlock}${unreadLine}${nagLine}${rbNote}${autoResetNote}`;
     }
   } else {
     // 首次唤醒（或轮换到新会话后的首个真实回合）：完整 base + 最近消息滑动窗口 + 重置提示。

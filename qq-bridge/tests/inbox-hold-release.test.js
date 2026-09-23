@@ -65,7 +65,14 @@ console.log('== ④ 答过一轮就早点收回合（主人报：出了 OK 之�
  * "深度求索中"。修法：本回合**已经说过话**（turnHasBubble）且静默超过 answeredIdleCloseMs（默认 90s）
  * → 收回合。下面这几条把"判据存在、参数正确、排序正确"都钉住。 */
 ok('保持循环里有 answeredIdleCloseMs 判据', /answeredIdleCloseMs/.test(hold));
-ok('默认 90 秒（配置缺省也能生效）', /\|\|\s*90000\)/.test(hold));
+/* 【2026-09-23 更新】原来这里断言的是 `|| 90000` 这个**写法本身**。但那个写法有两个坑叠在一起：
+ *   · 显式的 0 是 falsy，会被 `||` 当成"没配"而还原成 90000；
+ *   · 守卫又写成 `answeredIdleMs > 0`，于是 0 只让这条判据**永不触发** → 退回 idleCloseMs。
+ * 主人要求"私聊答完就立刻收回合"，所以改成 isFinite 判定 + 显式 0 语义。
+ * 缺省仍回落 90000（行为不变），但断言不该再钉死具体写法，改为钉住这三件事。 */
+ok('配置缺省/非法时仍回落 90000（行为不变）', /:\s*90000;/.test(hold));
+ok('不再用 `|| 90000` 兜底（0 会被 falsy 吞掉）', !/\|\|\s*90000\)/.test(hold));
+ok('显式 0 = 答完即刻收，支持"回了就停"', /answeredIdleMs === 0/.test(hold));
 ok('用 turnHasBubble(key, sid, st) 三参判"本回合说过话"', /turnHasBubble\(key, sid, st\)/.test(hold));
 ok('放行理由叫 answered-idle（日志里一眼能认）', /finish\('answered-idle'\)/.test(hold));
 ok('这条判据排在 30 分钟 idleCloseMs 之前（否则永远走不到它）',

@@ -231,11 +231,12 @@ function complementWindows(range) {
   else { if (s > 0) out.push({ start: 0, end: s }); if (e < 1440) out.push({ start: e, end: 1440 }); }
   return out;
 }
-/** 解析 /set active|diving|mode；不匹配返回 null，时段格式非法返回 { invalid:true } */
+/** 解析 /set active|diving [时段]；不匹配返回 null，时段格式非法返回 { invalid:true }
+ *  【2026-09-23 主人要求】老写法 `/set mode active` / `/set mode diving` **已删除**：
+ *  它和 `/set active` 完全等价、只是多打了 "mode" 四个字母，留着两套写法只会让文档和排错都变复杂。
+ *  现在只认 `/set active|diving`（可带时段）。发了老写法的会被当普通文本放给模型，由它自然回应。 */
 function parseSetModeCommand(text) {
   const s = String(text ?? '').trim();
-  const legacy = s.match(/^\/set\s+mode\s+(active|diving)$/i);
-  if (legacy) return { mode: legacy[1].toLowerCase(), range: null };
   const m = s.match(/^\/set\s+(active|diving)(?:\s+(.+))?$/i);
   if (!m) return null;
   const mode = m[1].toLowerCase();
@@ -600,9 +601,10 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       return;
     }
     /* ── /set active [HH:MM-HH:MM] / /set diving [HH:MM-HH:MM] ─────────────
-     * 【2026-09-19 主人要求】用英文指令设"特定时段活跃 / 潜水"，不带时段 = 全天；
-     * `/set mode active|diving` 保留为等价老写法（不带时段）。中英混写的旧写法
-     * （/set mode 活跃、/set mode 潜水）按"去除中英混杂指令"的要求一并删掉。 */
+     * 【2026-09-19 主人要求】用英文指令设"特定时段活跃 / 潜水"，不带时段 = 全天。
+     * 【2026-09-23 主人要求】删掉老写法 `/set mode active` / `/set mode diving`
+     * （与 /set active、/set diving 完全等价，多写 "mode" 而已）。
+     * 中英混写的旧写法（/set mode 活跃、/set mode 潜水）此前已按"去除中英混杂指令"删掉。 */
     const setMode = parseSetModeCommand(plainContent);
     if (setMode) {
       if (setMode.invalid) {

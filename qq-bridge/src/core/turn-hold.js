@@ -139,8 +139,20 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
    * 一直没返回，界面就一直显示"思考中"。这不是卡死，是"保持"本身太久了：它的价值只在于
    * **把主人连发的那几句并在同一个回合里**（他几秒内接着说的下一句），而"已经答过一轮、又静默了两分钟"
    * 这种状态下继续持有只剩下副作用（界面骗人、白白占着一个在跑的回合）。
-   * 所以加一个更短的判据：**本回合已经说过话（turnHasBubble）+ 静默超过 answeredIdleCloseMs → 收回合**。 */
-  const answeredIdleMs = Math.max(0, Math.round(Number(t.answeredIdleCloseMs) || 90000));
+   * 所以加一个更短的判据：**本回合已经说过话（turnHasBubble）+ 静默超过 answeredIdleCloseMs → 收回合**。
+   *
+   * 【2026-09-23 主人要求「私聊回了就立刻停，别再挂深度求索中」→ 支持显式 0】
+   * 语义定义（answeredIdleCloseMs）：
+   *   · 0    = 已经答过、且手上没有待交付消息 → **立刻**放行关回合（不等静默窗口）
+   *   · >0   = 答过之后再静默这么久才放行（原行为，默认 90000）
+   * ⚠️ 旧写法 `Number(x) || 90000` 有两个坑叠在一起：显式的 0 是 falsy，会被 `||` 当成"没配"
+   *    而还原成 90000；而下面的守卫又写成 `answeredIdleMs > 0`，于是就算把 0 传进来也只会让这条
+   *    判据**永不触发**，直接退回 idleCloseMs（30 分钟）—— 想调短的人反而把回合挂得更久。
+   *    这里改用 isFinite 判定，不再用 `||` 兜底，0 才真正表示"立刻"。 */
+  const answeredIdleRaw = Number(t.answeredIdleCloseMs);
+  const answeredIdleMs = Number.isFinite(answeredIdleRaw) && answeredIdleRaw >= 0
+    ? Math.round(answeredIdleRaw)
+    : 90000;
   const maxWaitMs = Math.max(idleCloseMs, Math.round(Number(t.maxWaitMs) || 3600000));
   // 单次 HTTP 请求最多持有多久（必须 < 插件侧 timeoutMs，也必须 < undici 的 300s）。
   const requestBudgetMs = Math.min(120000, Math.max(3000, Math.round(Number(t.requestBudgetMs) || 55000)));
@@ -177,6 +189,22 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
 
   log(`[hold] ${key} 回合保持开始（turn=${turnNo}，已来回 ${1 + exchanges}/${maxExchanges}，baselineSeq=${baseline}，本段预算 ${Math.round(requestBudgetMs / 1000)}s，空闲 ${Math.round(idleCloseMs / 1000)}s 后放行）`);
 
+  /* 【2026-09-23 主人要求「主动唤醒的回合还会挂住深度求索中 → 立即收尾」】
+   * 保持循环存在的唯一理由，是把**对方连着发的那几句**并在同一个回合里。
+   * 但"机器人自己发起"的回合（主动冒泡 / 概率唤醒 / 回复检查 / 超时 / 话题 / 活动开始）
+   * 根本没有"对方消息"可并 —— 此时继续保持只剩副作用：DSH 的 turn-stopping 钩子不返回，
+   * 界面就一直挂着"深度求索中"，直到 idleCloseMs（默认 30 分钟）才放行。
+   * 尤其是模型这一轮选择**不开口**时（主动机会检查后决定不说话），连 turnHasBubble 都是 false，
+   * 连 'answered-idle' 那条都命中不了，必然拖到 30 分钟 —— 这正是主人看到的现象。
+   * 所以：自发起回合 + 手上没有待交付批次 → 立刻收尾。
+   * 待交付批次非空时仍不收（那是刚到的真实消息，必须让它 steer 进本回合）。 */
+  const SELF_INITIATED_WAKES = /^(proactiveCheck|probability|replyCheck|timeout|topic|activityStart)$/;
+  const wakeBaseReason = String(st.lastWakeReason ?? '').split(':')[0];
+  if (SELF_INITIATED_WAKES.test(wakeBaseReason) && collectMidTurnBatch(st).length === 0) {
+    log(`[hold] ${key} 本回合是自发起唤醒（${wakeBaseReason}）且无待交付消息 → 立即收尾，不再挂住"深度求索中"`);
+    return finish('self-initiated');
+  }
+
   while (true) {
     if (shouldAbort && shouldAbort()) return finish('client-gone');
     if (!TurnStartAt.has(sid) && !collectors.has(sid)) return finish('turn-gone');
@@ -194,15 +222,17 @@ async function holdLoop({ key, sid, st, turn, t, cfg, shouldAbort }) {
       return finish('rotate-threshold');
     }
     if (1 + exchanges >= maxExchanges) return finish('max-exchanges');
-    /* 已经答过一轮、又没有新消息 → 早点结束这一轮（见 answeredIdleMs 的注释）：
-     * 让界面上的"思考中"在主人停止说话的 ~1.5 分钟内消失，而不是挂满 30 分钟。 */
-    if (answeredIdleMs > 0 && (now() - lastActivity >= answeredIdleMs)) {
+    /* 已经答过一轮 → 结束这一轮（见上面 answeredIdleMs 的注释）。
+     * 【2026-09-23】answeredIdleMs === 0 时不再等静默窗口：模型这一步已经答完、手上又没有待交付
+     * 批次，就没有任何理由继续持有 —— 继续持有只会让界面一直挂着"深度求索中"。
+     * 待交付批次非空时**不收**：那是主人刚发的新消息，必须留给下面的 steer 合并进本回合。 */
+    if (answeredIdleMs === 0 ? collectMidTurnBatch(st).length === 0 : (now() - lastActivity >= answeredIdleMs)) {
       let answered = false;
       /* turnHasBubble(key, sessionId, st)：三个判据（本回合发送类工具成功过 / 本回合已有待发正文 /
        * lastAiReplyAt 晚于本回合开始）任一命中即为"已经说过话"。 */
       try { answered = turnHasBubble(key, sid, st) === true; } catch { answered = false; }
       if (answered) {
-        log(`[hold] ${key} 本回合已经答过（${Math.round(answeredIdleMs / 1000)}s 无新消息）→ 收回合，别再让界面挂着"思考中"`);
+        log(`[hold] ${key} 本回合已经答过（${answeredIdleMs === 0 ? '答完即刻收' : Math.round(answeredIdleMs / 1000) + 's 无新消息'}）→ 收回合，别再让界面挂着"思考中"`);
         return finish('answered-idle');
       }
     }

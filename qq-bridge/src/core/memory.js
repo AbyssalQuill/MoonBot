@@ -266,6 +266,38 @@ export function getProfile(uid) {
   }
 }
 
+/** 把**观察到的**昵称补进通讯录（只在当前为空时写，绝不覆盖已学到的/主人设过的名字）。
+ *
+ * 【2026-09-23 修「群聊的人的 QQ 号昵称好像还无法识别」】
+ * 现场诊断（服务端 state/memory.db）：`profiles` 共 23 行，**有名字的只有 1 行**；
+ * 而 `formatContactsLine()` 是 `WHERE name != '' ... LIMIT 30`，于是注入给模型的
+ * `[Contacts]` 只有主人一个人。群友在消息里明明带着解析好的昵称
+ * （recentMessages 里 sender="马卡龙不是南梁" / "坐忘道" / "星痕Ofter" …），
+ * 但那些名字**从来没有被写进 profiles** —— 模型看得到号码，通讯录里却查无此人。
+ * 写入时机就是每条入站消息：桥手上已经有 `event.sender.card || nickname` 与 QQ 号，
+ * 顺手补一行即可，不必等画像学习跑到那个人（学习是抽样、覆盖不全，这才是根因）。 */
+export function rememberContactName(uid, name) {
+  const u = String(uid ?? '').trim();
+  const n = String(name ?? '').trim();
+  if (!u || !n) return false;
+  if (!/^\d{5,12}$/.test(u)) return false;   // 只认 QQ 号
+  if (/^\d+$/.test(n)) return false;         // "名字"本身就是号码 → 没有信息量
+  if (n.length > 64) return false;           // 群名片不会这么长，多半是误传的正文
+  const db = initMemoryDb();
+  if (!db) return false;
+  try {
+    const cur = db.prepare('SELECT name FROM profiles WHERE uid = ?').get(u);
+    if (cur && String(cur.name ?? '').trim()) return false;   // 已有名字：不动
+    db.prepare(`INSERT INTO profiles (uid, name, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(uid) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`)
+      .run(u, n.slice(0, 500), Date.now());
+    return true;
+  } catch (error) {
+    log(`[memory] 补昵称失败 ${u}: ${error?.message ?? error}`);
+    return false;
+  }
+}
+
 export function setProfileField(uid, field, value) {
   const db = initMemoryDb();
   if (!db || !uid) return null;

@@ -231,9 +231,33 @@ function realSigSeen(sessionId, tsMs, sig) {
   return false;
 }
 
-/** 计量用的"现在"：默认真实时钟；测试用 initTokenMeter({nowMs}) 钉死（见 nowMsOverride 的注释）。 */
+/** 计量用的"现在"：默认真实时钟；测试用 initTokenMeter({nowMs}) 钉死（见 nowMsOverride 的注释）。
+ *
+ * 【2026-09-23 修「/token 分时数据全 0」—— 根因是 `Number(null) === 0`】
+ * 线上症状：`/token` 的「今日 token」「全天预计」都对，但「未命中/命中/输出」「费用」全是 0，
+ * `naturalTotal` 也是 0；管理端分时图整片空白。
+ *
+ * 成因链：
+ *   ① `initTokenMeter(cfg)` 末尾（见本文件 362 行）把 `meter.nowMsOverride` 置为
+ *      `Number.isFinite(Number(opt.nowMs)) ? Number(opt.nowMs) : null` —— 线上 cfg 不带 nowMs，
+ *      所以它被写成 **null**；
+ *   ② 原先这里写 `Number(meter.nowMsOverride)`：`Number(null)` 是 **0**（不是 NaN！），
+ *      `Number.isFinite(0)` 为 **true**，于是 nowMsOf() 返回 **0** = 1970-01-01；
+ *   ③ `applyToMemory` 的分时桶门是 `bjK === bjKey(nowMsOf())`，回放时右边恒为 '1970-01-01'，
+ *      与任何一条记录都不相等 → `meter.hours` 永远空 → 分时桶全 0。
+ *   ④ 而 `meter.days`（日维度）用的是 `billingKey(nowMsOf())` 只做**过滤**、不做**清空**，
+ *      所以日合计照常正确 —— 这正是"总量对、分时全 0"这个奇怪组合的来源。
+ *
+ * 为什么单独调用 getTokenReport 时正常：那时 ensureInit 是惰性触发，`meter.nowMsOverride`
+ * 还停在模块初始化的 **undefined**，`Number(undefined)` 是 NaN → 正确回落到 Date.now()。
+ * 只要先走一次 initTokenMeter(null) 就会踩中 —— 桥启动正是这条路径，所以**线上必现**。
+ *
+ * 修法：先判 null/undefined 再判有限性，绝不把 null 送进 Number()。
+ */
 function nowMsOf() {
-  const o = Number(meter.nowMsOverride);
+  const override = meter.nowMsOverride;
+  if (override === null || override === undefined) return Date.now();
+  const o = Number(override);
   return Number.isFinite(o) ? o : Date.now();
 }
 
