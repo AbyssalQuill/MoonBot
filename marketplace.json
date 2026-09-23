@@ -1,0 +1,90 @@
+[
+  {
+    "id": "dsh-smooth-stream",
+    "package": "dsh-smooth-stream",
+    "name": "Smooth Stream",
+    "description": "把流式输出渲染成丝滑的逐字显现，带背压自适应与可调参数。本机已装并做过四轮调参。",
+    "repoUrl": "https://www.npmjs.com/package/dsh-smooth-stream",
+    "installYaml": "- insert:\n    - id: dsh-smooth-stream\n      name: dsh-smooth-stream"
+  },
+  {
+    "id": "dsh-pocket",
+    "package": "dsh-pocket",
+    "name": "Pocket",
+    "description": "移动端口袋伴侣：把 DSH 会话带在身上。",
+    "repoUrl": "https://www.npmjs.com/package/dsh-pocket",
+    "installYaml": "- insert:\n    - id: dsh-pocket\n      name: dsh-pocket"
+  },
+  {
+    "id": "dsh-whale-widget",
+    "package": "dsh-whale-widget",
+    "name": "Whale Widget",
+    "description": "桌面端的鲸鱼小挂件。",
+    "repoUrl": "https://www.npmjs.com/package/dsh-whale-widget",
+    "installYaml": "- insert:\n    - id: dsh-whale-widget\n      name: dsh-whale-widget"
+  },
+  {
+    "id": "dsh-genui",
+    "package": "@changfenhuang/dsh-genui",
+    "name": "GenUI",
+    "description": "结构化交互界面：在回答里直接渲染表格、图表、看板与可交互组件。",
+    "repoUrl": "https://www.npmjs.com/package/@changfenhuang/dsh-genui",
+    "installYaml": "- insert:\n    - id: dsh-genui\n      name: '@changfenhuang/dsh-genui'"
+  },
+  {
+    "id": "dsh-ssh",
+    "package": "@linxin666/dsh-ssh",
+    "name": "SSH",
+    "description": "SSH 主机管理：在多台服务器上批量执行命令、上传下载与端口转发。",
+    "repoUrl": "https://www.npmjs.com/package/@linxin666/dsh-ssh",
+    "installYaml": "- insert:\n    - id: dsh-ssh\n      name: '@linxin666/dsh-ssh'"
+  },
+  {
+    "id": "modsearch",
+    "package": "@liustack/modsearch",
+    "name": "ModSearch",
+    "description": "网页与 X（Twitter）检索：带结构化证据、来源链接与不确定性标注。",
+    "repoUrl": "https://www.npmjs.com/package/@liustack/modsearch",
+    "installYaml": "- insert:\n    - id: modsearch\n      name: '@liustack/modsearch'"
+  },
+  {
+    "id": "dsh-agent-teams",
+    "package": "@nanmicoder/dsh-agent-teams",
+    "name": "Agent Teams",
+    "description": "多智能体团队协作：队长编排 DAG、成员并行执行、质量门与评审回路。",
+    "repoUrl": "https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams",
+    "installYaml": "- insert:\n    - id: dsh-agent-teams\n      name: '@nanmicoder/dsh-agent-teams'"
+  },
+  {
+    "id": "dsh-market",
+    "package": "@dsh-market/plugin",
+    "name": "DSH Market",
+    "description": "插件市场：浏览、搜索、一键安装社区插件（索引约 6000+ 个）。",
+    "repoUrl": "https://github.com/2BingLing/dsh-market",
+    "installYaml": "- insert:\n    - id: dsh-market\n      name: '@dsh-market/plugin'"
+  },
+  {
+    "id": "dsh-client-ui-custom",
+    "package": "@ha-na-bi/dsh-client-ui-custom",
+    "name": "UI Custom",
+    "description": "桌面端外观与交互定制：主题、壁纸、毛玻璃、透明度、字体、快捷键，以及插件市场页本身。",
+    "repoUrl": "https://www.npmjs.com/package/@ha-na-bi/dsh-client-ui-custom",
+    "installYaml": "- insert:\n    - id: ui-custom\n      name: '@ha-na-bi/dsh-client-ui-custom'"
+  },
+  {
+    "id": "dsh-desktop",
+    "package": "dsh-desktop",
+    "name": "DSH Desktop",
+    "description": "为 DSH 插件生态打造的桌面端方案 —— 万物皆插件，桌面本身也是插件。",
+    "repoUrl": "https://github.com/anywhere-labs/dsh-desktop",
+    "installYaml": "- insert:\n    - id: dsh-desktop\n      name: dsh-desktop"
+  },
+  {
+    "id": "dsh-routing-suite",
+    "package": "dsh-routing-suite",
+    "name": "Routing Suite",
+    "description": "运行时注入器 + 路由标准套件：按任务类型路由到合适的推理模式。",
+    "repoUrl": "https://github.com/yjh051108/dsh-routing-suite",
+    "installYaml": "- insert:\n    - id: dsh-routing-suite\n      name: dsh-routing-suite"
+  }
+]
