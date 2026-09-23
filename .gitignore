@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # MoonBot — 仓库只放**代码 + 骨架文档**。
 # 运行数据、个人配置、第三方运行时、安装包一律不进版本管理
 # （它们都还留在本地目录里，只是不会被 git 跟踪）。
@@ -53,6 +53,9 @@ tsconfig.tsbuildinfo
 !/docs/CAPABILITIES.md
 !/docs/COMPACTION-MATH.md
 !/docs/PIXIV-AND-QZONE.md
+# 桌面端 DSH 的那一套（与 COMPACTION-MATH.md 姊妹：同一个模型，参数各自标定）
+!/docs/DSH-COMPACTION.md
+!/docs/dsh-compaction-math.mjs
 /手动同步与SSH说明.md
 /本地运行指引.md
 /qq-bridge/docs/HANDOFF*.md
