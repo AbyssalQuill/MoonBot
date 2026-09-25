@@ -18,8 +18,7 @@ MIT · Windows 10 / 11 · Node.js ≥ 22.13 · Electron 28 · React 18 · 版本
 
 | 安装包 | 内容 | 适用 |
 | --- | --- | --- |
-| `MoonBot Pro Setup.exe` | 管理端与整套内置组件：NapCat（OneKey 与 QQ 客户端）、DSH CLI、qq-bridge 出厂桥 | 本机运行整套 |
-| `MoonBot Pro Manager Setup.exe` | 管理端（内置 Node 运行时） | 远程控制台、连接自备服务器 |
+| `MoonBot Pro Setup.exe` | 管理端与整套内置组件：NapCat（OneKey 与 QQ 客户端）、DSH CLI、qq-bridge 出厂桥 | 本机运行整套；也可只使用其 SSH 配置页连接自备服务器 |
 
 安装步骤：
 
