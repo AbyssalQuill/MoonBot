@@ -32,7 +32,7 @@ QQ messages ──► NapCat (OneBot v11 WS) ──► qq-bridge ──► DSH W
 ## Requirements
 
 - Node.js >= 22.13
-- Running DeepSeek Harness Web (isolated instance default `http://127.0.0.1:13210`; override via `QQB_DSH_BASE_URL`; start dsh-isolated in the Manager first)
+- Running DeepSeek Harness Web (isolated instance default `http://127.0.0.1:10721`; override via `QQB_DSH_BASE_URL`; start dsh-isolated in the Manager first)
 - Running NapCat with OneBot v11 WebSocket and HTTP API enabled
 
 ## Quick Start

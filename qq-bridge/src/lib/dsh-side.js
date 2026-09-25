@@ -1,6 +1,6 @@
 // DSH 端安装与定位（2026-09-06 二期）：
 // qq-bridge 需要把 agent preset / MCP(cordis.patch.yml) / qq-mode 插件装进「内置隔离 DSH」
-// （QQ-Bridge\.runtime\dsh-isolated-home，端口 13210）。所有路径自动推导，不写死；
+// （QQ-Bridge\.runtime\dsh-isolated-home，端口 10721）。所有路径自动推导，不写死；
 // 默认绝不动桌面端 DSH（AppData\Roaming\DeepSeek Harness\dsh-home 与 ~/.dsh），
 // 仅当显式传入 allowDesktopHome / --home 指向它们时才允许。
 //
@@ -9,7 +9,7 @@
 //   profile 补丁：<home>/profiles/<profile>/cordis.patch.yml（MCP/agent-presets overlay）；
 //   插件安装：<home>/plugins/qq-mode-console 链接 + <home>/profiles/node_modules/qq-mode-console 链接
 //             （profiles/node_modules 是各 profile 共享的“安装面”，不会落到桌面端）。
-//   隔离实例由 manager（server/index.js）以 DSH_HOME=<home> dsh --profile web --port 13210 启动。
+//   隔离实例由 manager（server/index.js）以 DSH_HOME=<home> dsh --profile web --port 10721 启动（端口取自 instances.dshIsolated.port）。
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';

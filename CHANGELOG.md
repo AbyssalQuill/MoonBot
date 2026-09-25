@@ -2,6 +2,20 @@
 
 本文件按主题归纳 MoonBot 的用户可见变化，不逐条罗列提交标题。版本号遵循语义化版本；分组约定为「新增能力 / 修复 / 变更与不兼容 / 内部与工程」。
 
+## 2.0.2 — 2026-09-25
+
+### 修复
+
+- **首次启动、配置完随包 QQ 之后，整屏盖着一层"白纱"且消不掉**。根因是 `.view-veil`（`position:fixed; inset:0; z-index:60` 的近白径向渐变）**靠动画把自己淡出**，而 `prefers-reduced-motion: reduce` 分支里写着 `animation: none !important` —— 动画被掐掉后它停在初始态（不透明度 1），于是变成一层永久的固定遮罩；首启时主人 QQ 弹窗 `z-index:160` 压在它上面，关掉弹窗正好露出它，所以现象表现为"配置完 QQ 之后才出现"。修法：`.view-veil` 基础态直接 `opacity: 0` + `animation: … forwards`，并在 reduced-motion 分支里补 `display: none` 兜底；`.view-swap::after` 的高光层同样处理（`src/styles/app.css`）。
+- **陈旧注释与端口口径**：`qq-bridge/src/lib/dsh-side.js` 顶部注释与 `qq-bridge/README.md` / `README.en.md` 里的"隔离实例默认 13210"改为 **10721**（端口实际取自 `instances.dshIsolated.port`，目标机为 `3080`）；`server/index.js` 隐藏器两处注释"观察 120 秒"改为 **12 小时**（与常量 `QQB_HIDER_DEFAULTS.budgetMs = 43200000` 一致）。
+- **README 里已删除的模块**：仓库地图与测试命令清单中移除 `server/napcat-webui-auth.js` 及其回归，并把该模块当年的结论标注为"后续更正（2026-09-23 整体移除）"，避免新读者按图找文件。
+
+### 内部与工程
+
+- **三份技术文档重写**（技术／学术文体，逐条带相对路径与常量，未知项显式标注）：`docs/ARCHITECTURE.md` 651 → 1,089 行（新增安装布局与路径解析、通信面全表、首启与鉴权、NapCat 守护、SSH 克隆部署深挖、DSH 集成、打包分发、可靠性与不变量、待确认清单）；`docs/CAPABILITIES.md` → 1,764 行 / 205 KB（§0 总表 52 条能力 + §13.5–13.9 与 §17–§18 的 DSH／管理端／部署面）；`docs/COMPACTION-MATH.md` 540 → 1,196 行（符号系统、分块与递归摘要、成本泛函与触发判据、最优性、复杂度、实验口径，新增 §4.5 生产复算记录）。
+- **压缩阈值按生产用量复算**：取生产机 `/root/qq-bridge/state/token-usage.jsonl`（1.6 MB / 6,952 行）跑 `node qq-bridge/tools/compaction-threshold.mjs <stateDir> 1000000`，样本 5,957 次请求 / 13.8 天 / 430 步每天：最优点 **0.14**（¥2.057/天），稳健区间 **12%~16%**，出厂 **0.16** 落在区间上端（¥2.082/天，比最优点差 1.2%）；同一口径下模型对实测仍**系统性低估 27%**（¥2.310 对 ¥3.161/天）。出厂值不变，复算过程与口径说明写入 `docs/COMPACTION-MATH.md` §4.5。
+- **回归套件恢复全绿**（`cd qq-bridge && npm run check` → exit 0）。三处"结果取决于本机环境"的断言改成密闭：`tests/send-pace-clamp.test.js` 随 2026-09-24 的契约变更（`perChar` 上限 320 → 1000）更新期望值；`tests/character-tools-mcp.test.js` 以 `QQB_SLIM_TOOLS_OFF=1` 量"注册表本身"（否则会被本机所选的 `slimTools` 档位按设计砍掉角色卡四件）；`tests/repeat-failure-guard.test.js` 自建临时表情包并经 `QQB_MEME_ROOT` 指过去（产品已不再随包分发表情库，否则该测试在干净机器上必红）。
+
 ## 2.0.1 — 2026-09-24
 
 ### 新增能力

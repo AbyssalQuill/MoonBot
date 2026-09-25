@@ -4,17 +4,39 @@
 // 下一步又原样重试 —— 每次失败都要付**一整个模型步**的上下文重发（该会话 ≈34k tokens/步）。
 //
 // 用 qq_send_meme 的"找不到这张表情"路径触发确定性失败：纯本地查库、不发网络请求、不碰真状态。
+// 2026-09-25：表情包**不再随包分发**（产品决定），所以本测试自带一个临时 pack 并通过
+// QQB_MEME_ROOT 指过去 —— 否则在"没装表情库"的机器上 qq_send_meme 会直接回"工具不可用"，
+// 测的就不再是重复失败短路，而是这台机器装没装表情包（原来的写法就是这种情况）。
 // 用法：node tests/repeat-failure-guard.test.js
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, '..', 'src', 'mcp-napcat-safe.js');
 
-function startServer(serverFile, timeoutMs = 25000) {
-  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'] });
+// 临时 pack：只要 index.db 非空且表结构对得上，工具就认为"本机装了表情包"
+const MEME_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'qbh-meme-'));
+const MEME_ROOT = path.join(MEME_TMP, 'meme-packs');
+const packDir = path.join(MEME_ROOT, 'test-pack-001');
+fs.mkdirSync(packDir, { recursive: true });
+fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify({ id: 'test-pack-001', name: 'repeat-guard test pack' }));
+{
+  const db = new DatabaseSync(path.join(packDir, 'index.db'));
+  db.exec('CREATE TABLE memes (path TEXT PRIMARY KEY, file_name TEXT, tag TEXT, caption TEXT, keywords TEXT)');
+  db.exec("INSERT INTO memes (path, file_name, tag, caption, keywords) VALUES ('memes/happy/ok.webp', 'ok.webp', 'happy', '测试用图', '测试 图')");
+  db.close();
+}
+
+function startServer(serverFile, timeoutMs = 25000, extraEnv = null) {
+  const child = spawn(process.execPath, [serverFile], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  });
   let stdout = '';
   let stderr = '';
   let seq = 500;
@@ -43,7 +65,7 @@ function startServer(serverFile, timeoutMs = 25000) {
   return { rpc, send, stop: () => { try { child.stdin.end(); } catch {} try { child.kill(); } catch {} } };
 }
 
-const srv = startServer(SERVER);
+const srv = startServer(SERVER, 25000, { QQB_MEME_ROOT: MEME_ROOT });
 let pass = 0;
 let fail = 0;
 const t = async (name, fn) => {
@@ -82,5 +104,6 @@ await t('换了参数：不短路（只挡完全相同的调用）', () => {
 });
 
 srv.stop();
+try { fs.rmSync(MEME_TMP, { recursive: true, force: true }); } catch { /* Windows 占用忽略 */ }
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILED'}  pass=${pass} fail=${fail}`);
 process.exit(fail === 0 ? 0 : 1);

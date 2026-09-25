@@ -40,7 +40,7 @@ QQ 消息 ──► NapCat（OneBot v11 WS）──► 本桥接进程 ──►
 
 ## 前置条件
 
-1. 运行中的 DeepSeek Harness Web（内置隔离实例默认 `http://127.0.0.1:13210`，可用 `QQB_DSH_BASE_URL` 覆盖；先在 Manager 启动一次 dsh-isolated）
+1. 运行中的 DeepSeek Harness Web（内置隔离实例默认 `http://127.0.0.1:10721`，可用 `QQB_DSH_BASE_URL` 覆盖；先在 Manager 启动一次 dsh-isolated）
 2. 运行中的 NapCat，且配置好 OneBot WebSocket 与 HTTP API（默认 `ws://127.0.0.1:3001` / `http://127.0.0.1:3000`，`accessToken` 视配置填写）
 3. Node.js ≥ 22.13
 

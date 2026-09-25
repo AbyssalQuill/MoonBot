@@ -26,9 +26,13 @@ const check = async (name, fn) => {
   }
 };
 
-/** 起一个 MCP server（stdio），跑完 initialize + tools/list，返回 { names, rpc, stop } */
-function startServer(serverFile, timeoutMs = 20000) {
-  const child = spawn(process.execPath, [serverFile], { stdio: ['pipe', 'pipe', 'pipe'] });
+/** 起一个 MCP server（stdio），跑完 initialize + tools/list，返回 { names, rpc, stop }
+ *  extraEnv：给这个子进程额外注入的环境变量（phase 1 用它关掉工具裁剪档 —— 见下面的调用处）。 */
+function startServer(serverFile, timeoutMs = 20000, extraEnv = null) {
+  const child = spawn(process.execPath, [serverFile], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+  });
   let stdout = '';
   let stderr = '';
   let seq = 100;
@@ -71,8 +75,12 @@ const callText = async (srv, tool, args) => {
 };
 
 // ── 1. 真实源码：注册 + 真调用 ──
+/* 2026-09-25：这里必须关掉工具裁剪档（QQB_SLIM_TOOLS_OFF=1），否则本测试的结果取决于
+ * **本机 config.json 里选的那一档**：low 档的 drop 名单里就有 qq_character_list/read/pack/search
+ * （lib/tool-tiers.js:110 明列，理由是"实测零调用且体积大"），于是同一份源码在"主人选了低档"的
+ * 机器上必然少这四个 —— 测试报的是环境，不是回归。关掉裁剪后量的才是"注册表本身"这一层。 */
 const SERVER = path.join(HERE, '..', 'src', 'mcp-napcat-safe.js');
-const srv = startServer(SERVER);
+const srv = startServer(SERVER, 20000, { QQB_SLIM_TOOLS_OFF: '1' });
 try {
   await check('工具表：四个 qq_character_* 已注册，描述英文、只读、写清"什么时候用它"和参数', async () => {
     const init = await srv.init();

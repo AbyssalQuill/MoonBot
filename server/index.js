@@ -1321,7 +1321,7 @@ async function startNapcatHidden(onekey, quickLogin) {
  *   · 轮询必须落在同一个常驻进程里 —— 每轮起一个新 powershell 光启动就要 100ms+，
  *     那个"起进程"的时间本身就是一次闪窗（旧实现每 3 秒一次，就是闪的第二个原因）。
  *   · 藏过一次不算完 —— QQ 自己可能再把窗口弹出来，所以循环不能提前退出，见到可见窗口就再藏。
- *   · 观察者不能变成孤儿 —— 到点（默认 120 秒）自己 exit 0；父进程（管理器）先没了也 exit 0。
+ *   · 观察者不能变成孤儿 —— 到点（默认 12 小时，见 QQ_HIDER_DEFAULTS.budgetMs）自己 exit 0；父进程（管理器）先没了也 exit 0。
  *
  * 路径守卫（最重要的一条，一个字都不能松）：只处理"可执行文件路径在本 Shell 目录之下"的
  * QQ 进程 —— 判据是进程自己的 Path（= MainModule.FileName），取不到 Path 的一律跳过；
@@ -1332,7 +1332,7 @@ async function startNapcatHidden(onekey, quickLogin) {
  * 退回 hideBundledQqWindows（一次性轮询：等 1 秒 → 最多 10 次 × 0.5 秒）。
  */
 
-/** 常驻隐藏器默认参数：观察 120 秒 / 200ms 轮询 / 随包 QQ 一露面切 50ms 快扫 5 秒。 */
+/** 常驻隐藏器默认参数：观察 12 小时 / 200ms 轮询 / 随包 QQ 一露面切 50ms 快扫 5 秒。 */
 const QQ_HIDER_DEFAULTS = { budgetMs: 43200000, pollMs: 200, burstMs: 50, burstWindowMs: 5000, readyTimeoutMs: 2500 };   // budgetMs 12 小时：需求是"NapCat 在跑的全程都不许冒黑框"，而不是只盯前两分钟。真正的退出条件交给父进程守卫（管理端没了就收工）。
 /** 活着的隐藏器（正常 0~1 个；重启 NapCat 时新的会把旧的收掉，绝不叠着跑）。 */
 const qqHiders = new Set();
