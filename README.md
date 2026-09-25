@@ -100,9 +100,36 @@ MoonBot Public/
 - **SSH 部署与同步**：远程部署保留目标机既有数据，代码、数据、表情包与 `config.json` 分别同步；配置热加载；上下文压缩（阈值 0.16）与工具表压缩；Token 计量与费用估算。
 - **管理端页面**：首页（进程与日志）、实例配置、SSH 配置、功能配置、聊天记录、群友画像、学习与用量、语音、内嵌界面、关系图。
 
+### MCP 工具
+
+三组 MCP server 共注册 98 条工具：`mcp-napcat` 91 条、`mcp-napcat-host` 5 条、`mcp-web-search-safe` 2 条。运行时实际注册数另受工具名单档位裁剪（`toolAllowedByTier`）与 `config.json` 的开关分支影响（如 `napcat.allowProcessControl` 关闭时进程控制工具不注册）。下表为名称清单，必填与可选参数、最低保留档位与功能表述见 [docs/TECHNICAL.md](docs/TECHNICAL.md) 附录 A 与附录 B。
+
+表 3：MCP 工具清单（98 条）
+
+| 用途分组 | 条数 | 工具 |
+| --- | --- | --- |
+| 状态、时间与运行时信息 | 5 | `qq_status`、`get_time`、`qq_get_prompt`、`qq_social_state`、`qq_global_overview` |
+| 群组与会话 | 4 | `qq_list_groups`、`qq_get_group_members`、`qq_get_group_owner`、`qq_get_active_members` |
+| 消息发送 | 7 | `qq_send_message`、`qq_reply`、`qq_send_group_message`、`qq_send_private_message`、`qq_proactive_send`、`qq_withdraw_message`、`qq_send_poke` |
+| 消息读取与历史 | 8 | `qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_my_recent_messages`、`qq_get_message_detail`、`qq_get_group_history`、`qq_get_forward_msg`、`qq_history_delete`、`qq_history_clear` |
+| 唤醒、收尾与等待 | 3 | `qq_set_wake_config`、`qq_mark_read`、`qq_wait_for_messages` |
+| 记忆与群内用语 | 8 | `qq_memory_search`、`qq_memory_remember`、`qq_memory_query`、`qq_memory_append`、`qq_memory_remove`、`qq_memory_clear`、`qq_slang_query`、`qq_slang_submit` |
+| 人设与角色 | 8 | `qq_persona_learn_start`、`qq_persona_learn_stop`、`qq_persona_learn_status`、`qq_character_list`、`qq_character_read`、`qq_character_pack`、`qq_character_search`、`qq_character_switch` |
+| 档案、关系与权限 | 7 | `qq_profile_get`、`qq_profile_set`、`qq_like`、`qq_blacklist`、`qq_remove_friend`、`qq_admin_set`、`qq_whitelist` |
+| 图片、表情与表情包 | 13 | `qq_get_message_images`、`qq_send_image`、`qq_get_self_image`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_send_sticker`、`qq_collect_sticker`、`qq_sticker_note`、`qq_set_sticker_remark`、`qq_meme_search`、`qq_send_meme`、`qq_face_list`、`qq_send_qq_face` |
+| 语音、文件与文档 | 4 | `qq_send_voice`、`qq_transcribe_voice`、`qq_get_file_content`、`qq_send_docx` |
+| 卡片、转发与视频 | 4 | `qq_send_rich`、`qq_send_forward`、`qq_video_parse`、`qq_video_search` |
+| 网络素材检索 | 4 | `qq_image_search`、`qq_pixiv_search`、`qq_send_pixiv`、`qq_music_search` |
+| QQ 空间 | 5 | `qq_qzone_view`、`qq_qzone_comment`、`qq_qzone_reply_comment`、`qq_qzone_like`、`qq_send_qzone` |
+| 计划与定时 | 3 | `qq_schedule_message`、`qq_schedule_list`、`qq_schedule_cancel` |
+| 跨会话通信 | 2 | `qq_crosschat_send`、`qq_crosschat_inbox` |
+| 配置与管理 | 6 | `qq_get_system_config`、`qq_set_system_config`、`qq_get_activity_hours`、`qq_set_activity_hours`、`qq_deepsleep`、`qq_report_feedback` |
+| 宿主服务（`mcp-napcat-host`） | 5 | `qq_learning_corpus`、`qq_learning_submit`、`napcat_status`、`start_napcat`、`stop_napcat` |
+| 联网检索（`mcp-web-search-safe`） | 2 | `web_search`、`web_fetch` |
+
 ## 配置要点
 
-表 3：`qq-bridge/config.json` 关键项与出厂默认（模板为 `qq-bridge/config.example.json`；真实配置与 `state/` 不纳入版本管理）
+表 4：`qq-bridge/config.json` 关键项与出厂默认（模板为 `qq-bridge/config.example.json`；真实配置与 `state/` 不纳入版本管理）
 
 | 配置项 | 出厂默认与说明 |
 | --- | --- |
@@ -164,7 +191,7 @@ systemctl status napcat                         # NapCat（原生跑法）
 - 隔离 DSH 重启不影响桥：桥每 5 秒探活一次，其间收到的消息进入队列缓存（每会话上限 50 条），DSH 恢复后自动补投。
 - `config.json` 由桥原地热加载；`roles/` 与 `state/current-role.json` 按文件 mtime 感知；agent preset 与 MCP 配置的改动须重启隔离 DSH。
 
-表 4：常见故障与最短处置
+表 5：常见故障与最短处置
 
 | 现象 | 处置 |
 | --- | --- |
@@ -183,7 +210,7 @@ systemctl status napcat                         # NapCat（原生跑法）
 
 ## 文档索引
 
-表 5：配套文档
+表 6：配套文档
 
 | 文档 | 内容范围 |
 | --- | --- |
