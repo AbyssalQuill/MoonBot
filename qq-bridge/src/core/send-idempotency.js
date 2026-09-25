@@ -1,31 +1,31 @@
 // 出站回复幂等账本（2026-09-16 真机事故「reset 之后同一条回复发了两遍」）
 //
 // ── 现场（logs/bridge-local.log，UTC）────────────────────────────────────────────
-//   14:11:54 [send-chain] 已取消 group:*** 的待发任务（会话重置/隔离）      ← 会话重置
-//   14:12:12 新会话 group:*** -> session-0e99aedd-…
+//   14:11:54 [send-chain] 已取消 group:* 的待发任务（会话重置/隔离）      ← 会话重置
+//   14:12:12 新会话 group:* -> session-0e99aedd-…
 //   14:12:34 模型调 qq_send_message：messages=["喵什么喵","又不是猫娘"] @了一个不存在的 uid
 //   14:12:35 QQ 发送失败: OneBot send_group_msg 失败: Get Uid Error
 //   14:12:36 工具统一发送部分成功 1/2 条，已记录已发消息                    ← 「又不是猫娘」已经真的发出去了
-//   14:12:47 模型把**整批**重发一遍（这次不带 @）
-//   14:12:49 工具统一发送 group:***: 成功 2/2 条                           ← 「又不是猫娘」第二次进群
-//   14:13:10 主人在群里报障：“好像在reset之后会重复回复一次”
+//   14:12:47 模型把整批重发一遍（这次不带 @）
+//   14:12:49 工具统一发送 group:*: 成功 2/2 条                           ← 「又不是猫娘」第二次进群
+//   14:13:10 用户在群里报障：“好像在reset之后会重复回复一次”
 //   state/social-state.json 的 recentMessages 也留着两条 self:true 的「又不是猫娘」
 //   （messageId 1275818397 @14:12:36 与 1430508901 @14:12:50），是双发最硬的证据。
 //
 // ── 根因 ────────────────────────────────────────────────────────────────────
-//   console-server.js 的发送端点只有「整批第一条文本 + 上一次**成功**后才记账」这一条重复判定：
+//   console-server.js 的发送端点只有「整批第一条文本 + 上一次成功后才记账」这一条重复判定：
 //     · 成功路径才写 `lastSendDedup`（sendMessages 返回之后），
 //     · 走到 catch（部分失败）时只 `recordSentMessages(error.sent)` 记下已发的那几条，
 //       既没写 lastSendDedup，也没有任何「这一条已经出去了」的逐条记录。
 //   于是模型看到 ok:false 后重发整批时：
 //     · 90s 同文本闸门（lastSendDedup）里没有这批的账 → 不拦；
 //     · 也没有逐条账可以告诉它「哪几条已经发过了」 → 连已经送达的那条一起再发一次。
-//   本模块补的就是这两件事，并刻意**做成模块级状态**：reset 会把
+//   本模块补的就是这两件事，并刻意做成模块级状态：reset 会把
 //   `social.conversations[key]` 整个删掉（answeredMessageIds / lastDeliveredSeq /
 //   _wakeIntendedSeq / lastUnreadSeq 一起没了），账本挂在会话状态里就等于每次 reset 都失忆。
 //
 // ── 判据为什么是「逐条文本 + 未了结的重发窗口」而不是「一律少发」──────────────
-//   只有**上一批存在失败**时才进入 pendingPartial；一旦整批成功，账本立刻清空。
+//   只有上一批存在失败时才进入 pendingPartial；一旦整批成功，账本立刻清空。
 //   所以正常的新回复（前一批是成功的）永远不经过过滤，不存在「一律少发」误杀。
 //   反过来，部分失败后的重发是模型唯一会重发旧文本的场景，也正是双发的唯一来源。
 //
@@ -49,8 +49,8 @@ export function normBubble(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** 会话重置时**必须跨重置活下来**的「已回复账本」字段（见 social-state.resetConversationKeepingLedger）。
- *  ⚠️ 这四项是一组，必须同生同死：只保水位不保 seq 计数器 → 重置后新消息的 seq 从 1 重新数，
+/** 会话重置时必须跨重置活下来的「已回复账本」字段（见 social-state.resetConversationKeepingLedger）。
+ *  这四项是一组，必须同生同死：只保水位不保 seq 计数器 → 重置后新消息的 seq 从 1 重新数，
  *  会被 lastDeliveredSeq（例如 63）判成"早就交付过" → 机器人直接装死不回（这是比双发更严重的误杀）。 */
 export const REPLY_LEDGER_FIELDS = ['answeredMessageIds', 'lastDeliveredSeq', '_wakeIntendedSeq', 'lastUnreadSeq'];
 
@@ -72,10 +72,10 @@ export function noteBatchOutcome(key, { attempted = [], delivered = [], failed =
   const failedCount = Array.isArray(failed) ? failed.length : Number(failed) || 0;
   if (failedCount > 0) {
     /* 只登记"真的发出去了"的那几条：重发时它们要被挡下，没发出去的照发。
-     * 【2026-09-22 修 M17·"账本被整批覆盖"】旧写法是**直接 set 一个全新的 Set**：第一批发了 A、失败 B
-     * （账本 {A}）；模型重发时发出 B、又失败 C → 账本被覆盖成 {B}，**A 的记录丢了**；
-     * 第三次它把 [A,B] 又发一遍时只挡得住 B → A 被**真的重复发出去**。
-     * 现在改成在重发窗口内**并集合并**：窗口内的历史已发条目一律保留。 */
+     * 2026-09-22 修 M17·"账本被整批覆盖"：旧写法是直接 set 一个全新的 Set：第一批发了 A、失败 B
+     * （账本 {A}）；模型重发时发出 B、又失败 C → 账本被覆盖成 {B}，A 的记录丢了；
+     * 第三次它把 [A,B] 又发一遍时只挡得住 B → A 被真的重复发出去。
+     * 现在改成在重发窗口内并集合并：窗口内的历史已发条目一律保留。 */
     const prev = pendingPartial.get(k);
     const merged = new Set((prev && (now - Number(prev.at || 0)) <= REPLAY_WINDOW_MS) ? prev.delivered : []);
     for (const t of deliveredNorms) merged.add(t);

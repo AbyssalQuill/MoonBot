@@ -1,12 +1,12 @@
-// 「模型漏引号导致 messages 被丢掉」的兜底发送：把裸文本捞回来，交给**同一条发送端点**发出去。
+// 「模型漏引号导致 messages 被丢掉」的兜底发送：把裸文本捞回来，交给同一条发送端点发出去。
 //
-// 为什么这么做（2026-09-20 主人要求"一开始根治，而不是等失败了再修正"）：
-//   模型偶尔把工具参数写成 `{"key":"…","messages": 主人这么直接啊 我脸都热了,"token":"…"}` ——
-//   不是合法 JSON。参数解析在 DSH 里（宽松解析，非法成员整个丢掉），桥改不了；但桥在**事件流**
+// 为什么这么做（2026-09-20 需求："一开始根治，而不是等失败了再修正"）：
+//   模型偶尔把工具参数写成 `{"key":"…","messages": 今天挺热的啊,"token":"…"}` ——
+//   不是合法 JSON。参数解析在 DSH 里（宽松解析，非法成员整个丢掉），桥改不了；但桥在事件流
 //   里拿得到原始参数串（core/mux.js 的 tool/call 帧）。于是：这次调用一旦失败在
 //   "messages 至少一个不能为空"，桥就用 lib/args-repair.js 把那段裸文本捞回来，走
 //   POST /api/social/send-message 自己发出去 —— 同一条端点意味着额度/幂等/脱敏/去重/引用解析
-//   全部照旧生效，并且这一批会被端点记进**幂等账本**，模型随后的"重发"会被判成"已经发过了"。
+//   全部照旧生效，并且这一批会被端点记进幂等账本，模型随后的"重发"会被判成"已经发过了"。
 //   结果：用户看到消息照常到达，而不是（现状）两次报错、第三次才成功。
 //
 // 只在"确实因为 messages 为空而失败"时触发；修不出来就什么都不做（绝不猜内容）。
@@ -16,7 +16,7 @@ import { getSocialState } from './social-state.js';
 
 /** 这些工具的 key/messages 语义与 qq_send_message 一致，可以直接复用同一个端点。 */
 const RECOVERABLE = new Set([
-  'qq_send_message', 'qq_send_group_message', 'qq_send_private_message', 'qq_send_burst', 'qq_reply',
+  'qq_send_message', 'qq_send_group_message', 'qq_send_private_message', 'qq_reply',
 ]);
 
 export function isRecoverableSendTool(toolName) {

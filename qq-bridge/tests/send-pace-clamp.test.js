@@ -1,10 +1,10 @@
-// 回归测试：打字节拍的**安全钳制**（config.js: clampSendPace）
+// 回归测试：打字节拍的安全钳制（config.js: clampSendPace）
 //
-// 现场（2026-09-22 主人报"感觉现在唤醒后要响应一段时间，不知道是不是因为 mcp 压缩工具"）：
+// 现场（2026-09-22 报障："感觉现在唤醒后要响应一段时间，不知道是不是因为 mcp 压缩工具"）：
 //   线上服务器的 config.json 里 social.send = { linearPerCharMs: 650, linearCapMs: 15000 }，
 //   于是"一次回复里第 2 条气泡起 = 本条字数 × 650ms"：17 个字 = 11.0 秒。DSH 会话日志里每条
 //   qq_send_message 的结果都写着这个数（delays 5237 / 8050 / 9388 / 10989 / 11753 ms），
-//   118 次发送共执行 990 秒。同一段窗口里 napcat_get_tool_schema **一次都没被调用**（MCP 压缩代理
+//   118 次发送共执行 990 秒。同一段窗口里 napcat_get_tool_schema 一次都没被调用（MCP 压缩代理
 //   0 次额外往返），每步首个 token 0.7~1.7s（模型思考也正常）—— 慢的就是这个节拍。
 //   这些键模型自己在私聊里就能改（console-server.js 的可调项名单），只改文件挡不住下一次自调，
 //   所以把钳制放进 loadConfig：perChar ∈ [60, 320]、cap ∈ [800, 6000]。

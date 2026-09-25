@@ -1,8 +1,8 @@
 /**
- * 连接服务端的**状态机**（纯逻辑，可单测）。
+ * 连接服务端的状态机（纯逻辑，可单测）。
  *
- * 主人要求（2026-09-22）："我们连接上服务器之后，直接退出，下次打开自动连接服务器，这个过程希望能带上
- * 「服务端启动中」状态机。" —— 打开应用那一下最难受的不是慢，而是**看不出它在干什么**：SSH 连上没有？
+ * 2026-09-22：需求是"我们连接上服务器之后，直接退出，下次打开自动连接服务器，这个过程希望能带上
+ * 「服务端启动中」状态机。" —— 打开应用那一下最难受的不是慢，而是看不出它在干什么：SSH 连上没有？
  * 隧道几条？服务端那三个组件（DSH / NapCat / 桥）谁是好的、谁还在起？以前只在界面上写"服务端重连中…"，
  * 于是"服务端在起"和"凭据错了永远起不来"看起来一模一样。
  *
@@ -11,14 +11,14 @@
  *        → warming（静默预鉴权 NapCat 界面，一次性）→ ready
  *   任何一步失败 → failed（带人话原因），并按退避重试。
  *
- * 本模块只做**状态与文案**：不联网、不起进程。推进由 server/index.js 的驱动函数负责，
+ * 本模块只做状态与文案：不联网、不起进程。推进由 server/index.js 的驱动函数负责，
  * 判定"服务端组件好了没有"用的就是既有的 getRemoteServerStatus 结果（纯函数 describeRemoteStatus）。
  */
 
 /** 阶段枚举（界面按这个顺序显示进度）。 */
 export const PHASES = ['idle', 'connecting', 'tunnels', 'server-starting', 'warming', 'ready', 'failed'];
 
-/** 某个端口通不通。优先看**组件自己报的** ports（NapCat 那份），再退回顶层聚合表；两处都没有 → null（不判定）。 */
+/** 某个端口通不通。优先看组件自己报的 ports（NapCat 那份），再退回顶层聚合表；两处都没有 → null（不判定）。 */
 function portUpFor(remote, port, componentId = '') {
   const own = componentId ? remote?.[componentId]?.ports : null;
   const fromOwn = own ? own[String(port)] : undefined;
@@ -29,7 +29,7 @@ function portUpFor(remote, port, componentId = '') {
 }
 
 /**
- * 把 getRemoteServerStatus 的结果翻译成"三个组件各自什么状态"。**纯函数**（单测直接喂样例对象）。
+ * 把 getRemoteServerStatus 的结果翻译成"三个组件各自什么状态"。纯函数（单测直接喂样例对象）。
  * @returns {{ready:boolean, down:boolean, starting:boolean, components:Array<{id:string,name:string,state:'ready'|'starting'|'down',detail:string}>, note:string}}
  */
 export function describeRemoteStatus(remote, opts = {}) {

@@ -72,7 +72,7 @@
 
   /* 圆角 */
   --nc-radius-s: 8px;
-  --nc-radius-m: 12px;
+  --nc-radius-m: 10px;
   --nc-radius-l: 14px;
 
   /* 阴影（HeroUI light） */
@@ -111,10 +111,24 @@
   src: url('/fonts/AaCute-full.ttf') format('truetype');
   font-weight: 400; font-style: normal; font-display: swap;
 }
+/* 等宽（代码 / JSON 编辑器 / 日志查看器）：JetBrains Mono 自带文件，不再依赖系统等宽字体。
+   文件来自仓库自带 NapCat 资源（napcat-onekey/.../napcat/static/fonts/），已复制到 public/fonts/。 */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono.ttf') format('truetype');
+  font-weight: 400; font-style: normal; font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-Italic.ttf') format('truetype');
+  font-weight: 400; font-style: italic; font-display: swap;
+}
 html, body, #root { height: 100%; width: 100%; }
 body {
-  /* 全界面统一可爱圆体；JSON/代码/log 区在下方显式保持等宽（见 code/.json-text/.log-viewer 等规则） */
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* 全界面统一可爱圆体：只用自带字体（AaCute 为主，AaCute-full 同族兜底吃缺字），
+     不再回退到任何具体系统字体名；JSON/代码/log 区在下方显式保持等宽。
+     emoji 不在 AaCute 里，会自然落到内核的 emoji 字体（未写死任何 emoji 字体名）。 */
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   background: var(--nc-bg);
   color: var(--nc-foreground);
   font-size: 15px; line-height: 1.6;
@@ -123,12 +137,38 @@ body {
 }
 h1,h2,h3,h4,h5,h6 { color: hsl(222.2 47.4% 11.2%); letter-spacing: -0.02em; }
 ::selection { background-color: #ffcdba; color: #fff; }
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; border-radius: 3px; }
-::-webkit-scrollbar-thumb { background: rgba(255,182,193,.4); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,127,172,.6); }
+/* ---------- 滚动条：全站统一（2026-09-30：「下拉框底下的小条条没改统一，而且感觉宽度太小了」） ----------
+   此前只有上面这 4 条 WebKit 规则，且颜色写死 rgba 粉、与主题变量脱钩；既没有横竖分向，
+   也没有 `scrollbar-width` / `scrollbar-color` 标准属性，更没有 `::-webkit-scrollbar-corner`，
+   于是凡是没被这 4 条命中的滚动区（含 Firefox 等不吃 WebKit 伪元素的浏览器）仍是系统默认外观
+   —— 浅灰、方角、6px 细条，与界面配色不是一套。
+   现在一套写法覆盖全部可滚动区域：
+     · 标准属性写在 `html` 上：`scrollbar-width` / `scrollbar-color` 都是继承属性，
+       在 html 上写一次即作用于全部后代滚动容器（页面主区 .page-body、各栏内滚 .lrn-status-scroll、
+       .log-viewer、弹层正文、textarea、JSON 编辑器……）。Firefox 与 Chrome 121+ 走这一条。
+     · WebKit 伪元素写全局（不带选择器限定）—— 旧版 Chrome / Edge / Safari 走这一条。
+     · 颜色一律取既有主题变量：常态 --nc-primary-200（粉 80%），悬停 --nc-primary-400（粉 60%），
+       按下 --nc-primary-500（主色）。不引入新变量名，不写 rgba 硬编码。
+     · 轨道透明：滚动条自身不铺一条灰带，落在卡面上与卡片底色一致；
+       因此 `.log-viewer`（浅底黑字）与 SSHConfig 里行内写死底色的 `.log-box` 的底色、字号、
+       等宽字体完全不受影响 —— 这里只改滚动条自身的颜色与圆角。
+     · 宽/高 6px → 10px（反馈"宽度太小"），圆角 999px（胶囊，与全站圆角语言一致）。
+   注：Chrome 121+ 只要设置了 `scrollbar-color`，引擎就改用标准属性、忽略 `::-webkit-scrollbar-*`；
+   两套写法不会同时生效，观感一致（同一组主题色），不会出现两套配色。
+   ↓↓ 「点开 <select> 弹出的选项列表」内部那条滚动条不在本规则覆盖范围内，原因见
+      app.css 末尾「下拉浮层」一段的实情说明。 */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nc-primary-200) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
+::-webkit-scrollbar-thumb { background: var(--nc-primary-200); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--nc-primary-400); }
+::-webkit-scrollbar-thumb:active { background: var(--nc-primary-500); }
+::-webkit-scrollbar-corner { background: transparent; }
 
-/* ---------- 纯输入：全站数字输入框一律去掉原生上下箭头（2026-09-12 主人要求） ----------
+/* ---------- 纯输入：全站数字输入框一律去掉原生上下箭头（2026-09-12 变更要求） ----------
    `type="number"` 的 spinner 会"点一下加一"，而且受控输入在删空时会回填一个删不掉的 0。
    新版数字框（src/components/NumInput.tsx）本身用 type="text"，这里再兜一层：
    万一还有遗漏的原生 number 框（旧页面/浏览器），也不显示箭头。 */
@@ -171,18 +211,123 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 .btn-block { width: 100%; }
 .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
 
-/* 输入控件 */
+/* ============================================================
+   输入控件四态：默认 / 悬停 / 聚焦 / 错误
+   （2026-09-29 变更要求：「优化所有输入框，点击都要带颜色色边框比如有红的和浅蓝，
+     也就是全局的边框样式」）
+   ------------------------------------------------------------
+   覆盖：.input / .select / .textarea（类化控件）+ 裸 input / select / textarea +
+        [type=file]（本项目里其余 file 控件都是 hidden）+ [type=checkbox] / [type=radio]
+        （只用 accent-color + 焦点环，不强行画外框）。
+   颜色一律取既有变量（--nc-primary-* / --nc-danger-*），不写死主色。
+   只碰 border / box-shadow / accent-color / outline，不碰 font-family ——
+   app.css 里 .json-text、#bridge-json、.log-viewer 的等宽字体设定不受影响。
+   裸元素规则包在 :where() 里（优先级 0），保证 app.css 中 .profile-panel / .cost-* 等
+   既有湛蓝配色在它之后仍然生效（湛蓝面板的焦点环由 app.css 补同色系，见那里）。
+   ============================================================ */
 .input, .select, .textarea {
   width: 100%; padding: 9px 13px; font-size: 14px;
-  background: var(--nc-bg); border: 1px solid var(--nc-default-200);
+  background: var(--nc-bg); border: 1.5px solid var(--nc-default-200);
   border-radius: var(--nc-radius-m); color: var(--nc-foreground);
   outline: none; transition: border-color .15s, box-shadow .15s;
 }
-.input:focus, .select:focus, .textarea:focus {
-  border-color: var(--nc-primary-400);
-  box-shadow: 0 0 0 3px var(--nc-primary-100);
+
+/* 2026-09-30：「下拉框的所有下拉面板宽度加宽」
+ * 原生 <select> 的选项浮层宽度 = 控件自身宽度，浮层不能单独变宽，所以只能把控件垫宽。
+ * `min(200px, 100%)` 是关键：不到 200px 就撑到 200px；父容器本身更窄时退让到 100%，
+ * 于是"垫宽"永远不会造成横向溢出（窄卡片、并排两列、移动端都安全）。
+ * 只垫宽度，不动字号与内边距；`.input` 不参与（普通文本框本来就够宽）。 */
+select,
+.select {
+  min-width: min(200px, 100%);
 }
-.textarea { resize: vertical; font-family: 'JetBrains Mono', 'Cascadia Code', monospace; font-size: 13px; }
+
+/* 1) 裸元素：补上同一套默认外观（排除复选/单选/滑块/取色/按钮类 input） */
+:where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='submit'], [type='button'], [type='reset']), select, textarea) {
+  border: 1.5px solid var(--nc-default-200);
+  border-radius: var(--nc-radius-m);
+  background: var(--nc-bg);
+  color: var(--nc-foreground);
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+/* 2) 悬停（未聚焦、未禁用、非错误态）：比默认灰边略深一点点，让"可点"看得出来
+   （优先级压到 0,1,0 及以下：既不抢 .profile-panel / .cost-* 的既有配色，
+     也不会盖掉下面的错误态红边） */
+.input:where(:hover):where(:not(:disabled)):where(:not(.input-error, .is-error, [aria-invalid='true'])),
+.select:where(:hover):where(:not(:disabled)):where(:not(.input-error, .is-error, [aria-invalid='true'])),
+.textarea:where(:hover):where(:not(:disabled)):where(:not(.input-error, .is-error, [aria-invalid='true'])),
+:where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='submit'], [type='button'], [type='reset']), select, textarea):where(:hover):where(:not(:disabled)) {
+  border-color: var(--nc-primary-300);
+}
+
+/* 3) 聚焦/点击：主题色边框（1.5px 描边 + 1px 贴边 + 3px 浅粉外圈 ≈ 3px 视觉宽度）+ 柔和外发光 */
+.input:focus, .select:focus, .textarea:focus,
+:where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='submit'], [type='button'], [type='reset']), select, textarea):where(:focus) {
+  border-color: var(--nc-primary-500);
+  box-shadow: 0 0 0 1px var(--nc-primary-400), 0 0 0 3px var(--nc-primary-100), 0 2px 12px hsl(339.2 90.36% 51.18% / .16);
+}
+
+/* 4) 复选 / 单选：走 accent-color（原生着色）+ 焦点环，不强行画边框 */
+input[type='checkbox'], input[type='radio'] { accent-color: var(--nc-primary-500); }
+input[type='checkbox']:focus-visible, input[type='radio']:focus-visible {
+  outline: 2px solid var(--nc-primary-400);
+  outline-offset: 2px;
+}
+
+/* 5) 文件选择：[type=file] 本体一圈浅边，内部按钮保持主题粉色 */
+input[type='file'] { padding: 6px 8px; cursor: pointer; }
+input[type='file']:hover:not(:disabled) { border-color: var(--nc-primary-300); }
+input[type='file']:focus-visible {
+  border-color: var(--nc-primary-500);
+  box-shadow: 0 0 0 1px var(--nc-primary-400), 0 0 0 3px var(--nc-primary-100);
+}
+input[type='file']::file-selector-button {
+  margin-right: 10px; padding: 5px 12px; cursor: pointer;
+  color: var(--nc-primary-700); background: var(--nc-primary-100);
+  border: none; border-radius: var(--nc-radius-s);
+}
+input[type='file']::file-selector-button:hover { background: var(--nc-primary-200); }
+
+/* 6) 错误 / 校验无效：红边 + 浅红外圈
+   命中方式：可复用类 .input-error / .is-error、aria-invalid="true"、
+   以及原生 :invalid —— 只有带 required / pattern / min 等约束的字段才会命中
+   （本项目当前没有任何 required/pattern，所以常态下不会误报红）。 */
+.input-error, .is-error, [aria-invalid='true'],
+:where(input, select, textarea)[aria-invalid='true'],
+.input:invalid, .select:invalid, .textarea:invalid,
+:where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='submit'], [type='button'], [type='reset']), select, textarea):where(:invalid) {
+  border-color: var(--nc-danger-500);
+  box-shadow: 0 0 0 1px var(--nc-danger-400), 0 0 0 3px var(--nc-danger-100);
+}
+/* 错误态在聚焦时也要是红的（要比上面的 :focus 规则靠后/更强） */
+.input-error:focus, .is-error:focus, [aria-invalid='true']:focus,
+.input:invalid:focus, .select:invalid:focus, .textarea:invalid:focus,
+:where(input:not([type='checkbox'], [type='radio'], [type='range'], [type='color'], [type='submit'], [type='button'], [type='reset']), select, textarea):where(:invalid):where(:focus) {
+  border-color: var(--nc-danger-500);
+  box-shadow: 0 0 0 1px var(--nc-danger-400), 0 0 0 3px var(--nc-danger-100), 0 2px 12px hsl(325.82 69.62% 53.53% / .2);
+}
+/* 更"聪明"的失效判定：只有用户真交互过才标红（新浏览器支持；不支持则该条整体失效，
+   上面那条 :invalid 仍然兜底）。单独成条，避免整组选择器一起被丢弃。 */
+:where(.input, .select, .textarea):where(:user-invalid) {
+  border-color: var(--nc-danger-500);
+  box-shadow: 0 0 0 1px var(--nc-danger-400), 0 0 0 3px var(--nc-danger-100);
+}
+
+/* 禁用态：不发光、悬停不变色 */
+.input:disabled, .select:disabled, .textarea:disabled,
+:where(input, select, textarea):where(:disabled) {
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* 减少动效：输入框的过渡也一并停掉（发光本身保留） */
+@media (prefers-reduced-motion: reduce) {
+  .input, .select, .textarea,
+  :where(input, select, textarea) { transition: none !important; }
+}
+.textarea { resize: vertical; font-family: 'JetBrains Mono', monospace; font-size: 13px; }
 .label { display: block; font-size: 12px; font-weight: 600; color: var(--nc-foreground-500); margin-bottom: 6px; }
 .form-group { margin-bottom: 14px; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -197,7 +342,7 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 }
 /* 已删除 .card-title 的重复定义（2026-09-11）：原规则
    `font-size:14px; font-weight:700; margin-bottom:14px; display:flex; align-items:center; gap:8px;
-    color:var(--nc-foreground-800)` 的**每一个属性**都被 app.css 的 .card-title 覆盖
+    color:var(--nc-foreground-800)` 的每一个属性都被 app.css 的 .card-title 覆盖
    （main.tsx 里 app.css 紧跟 global.css 导入，同特异性后者胜），整条都是死规则。
    .card-title 的权威定义现在只有 app.css 那一处。 */
 
@@ -235,16 +380,16 @@ input[type='number'] { -moz-appearance: textfield; appearance: textfield; }
 /* 已删除 .page-title / .page-subtitle 的重复定义（2026-09-11）：
    原文是 `.page-title{font-size:20px;font-weight:800;color:var(--nc-foreground-900)}` 与
    `.page-subtitle{font-size:12px;color:var(--nc-foreground-500);margin-top:3px}`，
-   但**每个属性**都被 app.css 的对应规则覆盖（app.css 后导入、同特异性），是死规则。
+   但每个属性都被 app.css 的对应规则覆盖（app.css 后导入、同特异性），是死规则。
    它们的危害是把标题色写成 foreground-900/500，容易让人（和 AI）以为标题是深灰——
-   实际生效的永远是 app.css 的 primary-500。**改标题色只能改 app.css。** */
+   实际生效的永远是 app.css 的 primary-500。改标题色只能改 app.css。 */
 .page-body { flex: 1; overflow-y: auto; padding: 20px 28px; }
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 50px 20px; text-align: center; color: var(--nc-foreground-500); }
 .notice-bar { padding: 10px 15px; margin-bottom: 14px; background: var(--nc-primary-50); border: 1px solid var(--nc-primary-200); border-radius: var(--nc-radius-m); font-size: 13px; cursor: pointer; color: var(--nc-foreground-800); }
-code { font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace; font-size: 12px; background: var(--nc-content1); padding: 1px 5px; border-radius: 4px; }
+code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--nc-content1); padding: 1px 5px; border-radius: 4px; }
 .link-btn { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; color: var(--nc-primary-600); font-size: 12px; cursor: pointer; padding: 2px; }
 .link-btn:hover { color: var(--nc-primary-500); text-decoration: none; }
 .icon-btn { background: none; border: none; color: var(--nc-foreground-400); cursor: pointer; padding: 2px; display: inline-flex; }
 .icon-btn:hover { color: var(--nc-primary-500); }
-.log-viewer { background: hsl(240 6% 97%); border: 1px solid var(--nc-border); border-radius: var(--nc-radius-m); padding: 12px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; line-height: 1.6; max-height: 260px; overflow-y: auto; }
+.log-viewer { background: hsl(240 6% 97%); border: 1px solid var(--nc-border); border-radius: var(--nc-radius-m); padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; max-height: 260px; overflow-y: auto; }
 .log-line { padding: 1px 0; color: var(--nc-foreground-600); }

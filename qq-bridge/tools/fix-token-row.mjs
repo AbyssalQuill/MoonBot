@@ -4,7 +4,7 @@
  *   session-724f5d85 / tsMs=2026-09-18 13:35:13 / prompt=476,993 / cacheRead=0 / reconciled=true
  * 桥侧当日至 19:16:32 = 22,039,411，减去这 476,993 = 21,562,418 = DSH 逐 step = 提供方控制台(21,563,440，差 1022)
  *
- * ⚠️ 这是**改数据**，所以：先备份、只删完全匹配的那一行、删完复核。
+ * 这是**改数据**，所以：先备份、只删完全匹配的那一行、删完复核。
  * 用法：node /root/napfix-tools/fix-token-row.mjs            （预演，只报告不写）
  *       node /root/napfix-tools/fix-token-row.mjs --apply    （真删，先自动备份）
  */

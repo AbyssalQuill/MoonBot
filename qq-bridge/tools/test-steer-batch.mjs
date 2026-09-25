@@ -1,4 +1,4 @@
-// 回归测试：【一次连发只注入一次】——主人 2026-09-12 报的两个问题
+// 回归测试：一次连发只注入一次（2026-09-12 报的两个问题）
 //   ① 连发两条 → 桥注入两次（第 10、11 次），模型跑两步、发两条气泡，还把第二条留到下一次唤醒；
 //   ② 注入正文太肥（约 1.6KB），而它会长期留在上下文里、步步重发。
 //
@@ -64,7 +64,7 @@ const push = (seq, text, agoMs = 0) => {
   st.lastUnreadSeq = Math.max(Number(st.lastUnreadSeq) || 0, seq);
 };
 
-// ── ① 连发两条（第一条发完对方**继续打字**，1.2s 后发第二条）：只注入一次，且两条都在同一次注入里 ──
+// ── ① 连发两条（第一条发完对方继续打字，1.2s 后发第二条）：只注入一次，且两条都在同一次注入里 ──
 push(1, '第一条：在吗');
 st.peerTypingUntil = Date.now() + 1800;          // 模拟"对方还在输入"（typing 事件维护的字段）
 const p1 = wakeMod.steerIntoRunningTurn(KEY, 'private', { force: true });
@@ -97,13 +97,13 @@ check('③ 新周期可以再次注入', sent.length === 2, `注入次数=${sent
 check('③ 第二次注入只带第三条', /第三条/.test(sent[1]?.text ?? '') && !/第一条/.test(sent[1]?.text ?? ''), (sent[1]?.text ?? '').slice(0, 80));
 check('③ 返回值 true', r3 === true, String(r3));
 
-// ── ④ 注入正文体积（省额度）：主人要求精简 ──
-// 【2026-09-12 二次精简】规则散文（ONE-AND-DONE / 不复读 / 第一次看到当普通唤醒 / 真没内容才不发 /
-// 主人私聊收尾方式）已整段搬进系统提示词 agent.cordis.yml 的 [WAKE TYPES] 第 1 条；
+// ── ④ 注入正文体积（省额度）：精简优先 ──
+// 2026-09-12 二次精简：规则散文（ONE-AND-DONE / 不复读 / 第一次看到当普通唤醒 / 真没内容才不发 /
+// owner 私聊收尾方式）已整段搬进系统提示词 agent.cordis.yml 的 [WAKE TYPES] 第 1 条；
 // 注入正文只剩「[Token] + [Mid-turn] 数据头 + 消息行」。所以这里同时断言：
 //   · 体积再降一档（< 400 字符；原版 1,600、上一轮 690）
-//   · 形态就是主人要求的那种（[Token] 行 + [Mid-turn] N new message(s)...）
-//   · 规则**确实不再**出现在正文里（搬走了，不是删了——搬去哪由 test-wake-protocol.mjs 断言）
+//   · 形态就是约定的那种（[Token] 行 + [Mid-turn] N new message(s)...）
+//   · 规则确实不再出现在正文里（搬走了，不是删了——搬去哪由 test-wake-protocol.mjs 断言）
 const sizes = sent.map((s) => s.chars);
 check('④ 单次注入正文 < 400 字符（原版约 1600 / 上一轮约 690）', sizes.every((n) => n < 400), `实测 ${sizes.join(' / ')}`);
 const body = sent[0].text;

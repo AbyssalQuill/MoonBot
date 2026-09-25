@@ -49,8 +49,8 @@
     "_note": "NapCat 会话守护：定期用 get_rkey 探活（该接口每次都真的请求 QQ 服务器，且对别人不可见），连续 failThreshold 次失败就判定「会话假死」并重启容器自愈。autoHeal=null（默认）表示「容器配了免扫码回退登录（NAPCAT_QUICK_PASSWORD_MD5）才自动重启」；没配就只记录告警不出手，避免把机器人推到必须扫码的状态。管理端「NapCat」卡里可以开关、手动自愈、看二维码。"
   },
   "sessionCwd": "",
-  "agentPreset": "default",
-  "workspaceTitle": "QQ 聊天",
+  "agentPreset": "qq-chat",
+  "workspaceTitle": "Agents",
   "allow": {
     "private": [],
     "groups": []
@@ -103,13 +103,13 @@
     "injectMax": 8,
     "injectIntoPrompt": false,
     "learnerPreset": "qq-chat",
-    "workspaceTitle": "QQ 黑话学习",
+    "workspaceTitle": "SlangAgent",
     "autoResearch": true
   },
   "social": {
     "enabled": true,
     "autoReplyCheckMs": 30000,
-    "agentPreset": "default",
+    "agentPreset": "qq-chat",
     "provideRecommendations": true,
     "tools": {
       "getPrompt": true,
@@ -119,7 +119,6 @@
       "sendGroup": true,
       "sendPrivate": true,
       "reply": true,
-      "sendBurst": true,
       "sendMessage": true,
       "waitMessages": true,
       "feedback": true,
@@ -154,7 +153,8 @@
       "recommendedSleepMaxMs": 7200000,
       "recommendedProbability": 0.05,
       "recommendedKeywords": [
-        "小鲸鱼",
+        "机器人",
+        "小助手",
         "DeepSeek",
         "deepseek",
         "DS",
@@ -165,8 +165,6 @@
         "D师傅",
         "d师傅",
         "深度求索",
-        "大肥鱼",
-        "鲸鱼",
         "DeepSeek V3",
         "DeepSeek R1",
         "R1"
@@ -199,7 +197,7 @@
       "linearCapMs": 4000,
       "linearJitterRatio": 0.25,
       "linearResetMs": 20000,
-      "_linearNote": "打字节拍只有这一种（按字数）：同一条回复里第 1 条气泡立即发，第 2 条起等 本条字数 × linearPerCharMs 毫秒（上下浮动 linearJitterRatio，夹在 linearMinMs~linearCapMs 之间）。linearEnabled=false = 完全不等。这些项都可以在 QQ 里用自然语言让机器人改（主人私聊专属）。旧的 linearBaseMs/linearStepMs/gapBaseMs/gapPerCharMs/gapJitterRatio 已废弃，写了也不生效。"
+      "_linearNote": "打字节拍只有这一种（按字数）：同一条回复里第 1 条气泡立即发，第 2 条起等 本条字数 × linearPerCharMs 毫秒（上下浮动 linearJitterRatio，夹在 linearMinMs~linearCapMs 之间）。linearEnabled=false = 完全不等。这些项都可以在 QQ 里用自然语言让机器人改（仅 owner 私聊可用）。旧的 linearBaseMs/linearStepMs/gapBaseMs/gapPerCharMs/gapJitterRatio 已废弃，写了也不生效。"
     },
     "wait": {
       "defaultMs": 30000,
@@ -277,6 +275,7 @@
       "maxExchanges": 24,
       "idleCloseMs": 1800000,
       "maxWaitMs": 3600000,
+      "answeredIdleCloseMs": 0,
       "requestBudgetMs": 55000
     },
     "typing": {
@@ -286,7 +285,7 @@
       "breakProbability": 0.15
     },
     "toolCompressor": {
-      "_note": "MCP 工具压缩代理（开源 mcp-compressor，2026-09-21 主人要求接上）：打开后 DSH 不再直连 napcat MCP，而是连代理，代理把 90 个工具压成 2 个包装工具（napcat_get_tool_schema / napcat_invoke_tool），工具清单塞进包装工具的描述里。实测相对完整工具表：low 38.8% / medium 14.0% / high 6.2% / max 3.6%。代价是遇到不熟的工具要\"先查 schema 再调用\"= 一步变两步；桥侧已按真实工具名解包，发送判定/幂等账本不受影响。⚠ 压缩机没装（pip3 install mcp-compressor）时**自动回退直连**，不会把工具表搞没。改完必须重启隔离 DSH。 【默认恒开】只有显式写 enabled:false 才关（老配置没有这个键也走代理）。",
+      "_note": "MCP 工具压缩代理（开源 mcp-compressor，2026-09-21 接入）：打开后 DSH 不再直连 napcat MCP，而是连代理，代理把 90 个工具压成 2 个包装工具（napcat_get_tool_schema / napcat_invoke_tool），工具清单塞进包装工具的描述里。实测相对完整工具表：low 38.8% / medium 14.0% / high 6.2% / max 3.6%。代价是遇到不熟的工具要\"先查 schema 再调用\"= 一步变两步；桥侧已按真实工具名解包，发送判定/幂等账本不受影响。压缩机没装（pip3 install mcp-compressor）时自动回退直连，不会把工具表搞没。改完必须重启隔离 DSH。 默认恒开：只有显式写 enabled:false 才关（老配置没有这个键也走代理）。",
       "enabled": true,
       "level": "medium",
       "excludeTools": [],

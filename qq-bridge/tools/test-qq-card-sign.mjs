@@ -1,23 +1,23 @@
-/* 线上实测「音乐卡手机端有没有封面」的**端到端**脚本（只读，不发消息）。
+/* 线上实测「音乐卡手机端有没有封面」的端到端脚本（只读，不发消息）。
  *
  * 用法（在 VPS 上，cwd = /root/qq-bridge）：
  *     node test-qq-card-sign.mjs qq  <songmid>  [关键词]
  *     node test-qq-card-sign.mjs 163 <songid>   [关键词]
  *
  * 它做三件事：
- *   1) 走真流程（先搜一次拿到 title/artist，再拼卡）→ 拿到**真正会发出去的那张卡**（含 image）。
+ *   1) 走真流程（先搜一次拿到 title/artist，再拼卡）→ 拿到真正会发出去的那张卡（含 image）。
  *   2) 把这张卡原样 POST 给签名服务（musicSignUrl，线上默认 http://106.55.0.102:10087/）。
  *   3) 对比：我们交出去的 image vs 签名服务最终写进 Ark 的 preview。
  *
- * ── 判定口径（2026-09-19 从**真消息记录**反推出来的，别凭直觉）──────────────────
- * ✅ **好**：preview 与我们给的 image **一模一样**（原样透传）。
- *           真机验证过的卡就是这么来的（05:25:10 / 05:27:54，主人确认"正常"）：
+ * ── 判定口径（2026-09-19 从真消息记录反推出来的，别凭直觉）──────────────────────
+ * 好：preview 与我们给的 image 一模一样（原样透传）。
+ *           真机验证过的卡就是这么来的（05:25:10 / 05:27:54，现场确认"正常"）：
  *             preview = https://y.qq.com/music/photo_new/T002R300x300M000004fXSyj3bWTMN.jpg
- * ❌ **坏**：preview 被改写成 `https://qq.ugcimg.cn/v1/<超长串>` —— 签名服务把图**转存**了。
+ * 坏：preview 被改写成 `https://qq.ugcimg.cn/v1/<超长串>` —— 签名服务把图转存了。
  *           真机验证过的那张没图的卡正是这样（08:04:18）。这种链接手机端不渲染。
- *           触发条件：交出去的 image 是**第三方图片代理**的 URL（曾被转存的都长这样）。
+ *           触发条件：交出去的 image 是第三方图片代理的 URL（曾被转存的都长这样）。
  *
- * 【踩过的坑】签名服务返回体是**被 JSON 编码过一次的字符串**（`"{\"app\":\"…\"}"`），
+ * 踩过的坑：签名服务返回体是被 JSON 编码过一次的字符串（`"{\"app\":\"…\"}"`），
  * 只 parse 一层会拿到字符串、取不到 app/preview → 会把每一张卡都误判成"卡片构造失败"。
  * 本脚本 parse 两层。当年那份"封面 host 决定成败"的对照表就是栽在这个坑上。
  */
@@ -32,7 +32,7 @@ const { createMediaDomain } = await import('/root/qq-bridge/src/core/media.js');
 const cfg = JSON.parse(readFileSync('/root/qq-bridge/config.json', 'utf8'));
 const { buildMusicCard, musicSearch } = createMediaDomain(cfg);
 
-/* 为什么要先搜一次：解析接口现在**只认歌名/歌手**（光给 id 解析不出来）。真流程就是模型先搜、
+/* 为什么要先搜一次：解析接口现在只认歌名/歌手（光给 id 解析不出来）。真流程就是模型先搜、
  * 再拿 id 去拼卡，这里照抄，测出来的才是线上真正会发出去的那张。 */
 console.log(`=== 0) 先按关键词搜一次（${KEYWORD}）===`);
 const found = await musicSearch(KEYWORD, PLATFORM === '163' ? 'netease' : 'qqmusic', 3);

@@ -1,4 +1,4 @@
-// 「qq_send_meme 没给 file 也能发」回归（2026-09-22 主人看到 `-32602: missing required tool_input fields: file`）：
+// 「qq_send_meme 没给 file 也能发」回归（2026-09-22 线上看到 `-32602: missing required tool_input fields: file`）：
 //   ① schema 里 file 不再是必填，多了 fileName 别名与 query/tag 兜底；
 //   ② 没有 file 但有 query/tag 时，桥自己按 qq_meme_search 同一套 SQL 挑第一张，并把挑中的名字回报模型；
 //   ③ 既没有 file 也没有 query 时给的是"两条路怎么走"的提示，而不是参数校验层的 -32602；

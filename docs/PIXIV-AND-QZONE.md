@@ -127,7 +127,7 @@ const PIXIV_ORIGINAL_NAME_RE  = /\/\d+_p\d+\.(?:jpe?g|png|webp|gif)$/i;
 
 ### 工具层的默认值
 
-`qq_send_pixiv` 的 `sizeEff`（`mcp-napcat-safe.js:3280`）：
+`qq_send_pixiv` 的 `sizeEff`（`mcp-napcat-safe.js:3443`）：
 
 ```js
 const sizeEff = String(size ?? 'original').toLowerCase() === 'master' ? 'master' : 'original';
@@ -199,7 +199,7 @@ MAX_IMAGE_FETCH_BYTES = 15 * 1024 * 1024     // safe-fetch.js:348
 
 ---
 
-## A.6 工具层的完整流程（`qq_send_pixiv`，`mcp-napcat-safe.js:3245` 起）
+## A.6 工具层的完整流程（`qq_send_pixiv`，`mcp-napcat-safe.js:3443` 起）
 
 ### 三条入口
 
@@ -211,7 +211,7 @@ MAX_IMAGE_FETCH_BYTES = 15 * 1024 * 1024     // safe-fetch.js:348
 
 画师名字这条路的历史坑（`pixiv.js:1520-1532`）：web 搜索引擎那条路实测不可靠 —— 那台 VPS 上 bing 候选恒 0、duckduckgo 时好时坏 202，且"七菜"这种常见名会捞出 3 个同名号而真号不在前列。所以**只做候选，不做自动定号**。
 
-### 逐候选试的顺序与闸门（`mcp-napcat-safe.js:3395-3460`）
+### 逐候选试的顺序与闸门（`mcp-napcat-safe.js:3354-3460`）
 
 ```
 sources = pixivImageSources(work, { page, size: sizeEff, originals })
@@ -247,7 +247,7 @@ plan    = planPixivSend(sources, { size: sizeEff })
 | `source` | 走了哪条入口：`illustId` / `authorId` / `search` |
 | `pick` | 画师那条路的人话说明（"按名字「X」搜到画师 N，名下共 M 件公开作品，按投稿时间新→旧取第 K 件"） |
 
-`lossless` 的旧写法是 `lossless: sizeEff === 'original'` —— 于是**降级发了 720/1200 档、甚至缩略图，结果里照样写 `lossless: true`**。现在只有在三个条件都成立时才敢说真话（`mcp-napcat-safe.js:3502-3506`）。
+`lossless` 的旧写法是 `lossless: sizeEff === 'original'` —— 于是**降级发了 720/1200 档、甚至缩略图，结果里照样写 `lossless: true`**。现在只有在三个条件都成立时才敢说真话（`mcp-napcat-safe.js:3461-3506`）。
 
 ---
 
@@ -261,7 +261,7 @@ plan    = planPixivSend(sources, { size: sizeEff })
 | `qq_send_pixiv` | **永远排除 R-18/R-18G**（刻意不给 `r18` 参数 —— 不适合的内容**无法**被发进 QQ） |
 | 空间配图 | 同一规矩（说说公开可见） |
 
-发图那条路的闸门写在 `mcp-napcat-safe.js:3338-3347`：xRestrict 缺失/非 0 都当 R-18；命中就返回错误并列出标签。
+发图那条路的闸门写在 `mcp-napcat-safe.js:3297-3347`：xRestrict 缺失/非 0 都当 R-18；命中就返回错误并列出标签。
 
 > 顺带一个实测更正：本镜像站默认搜索里 `xRestrict` **恒为 0**（「初音ミク」「エロ」「R-18」「巨乳」「オリジナル」各 60 条全是 0）—— 它只搜全年龄库。所以 `r18='only'` 实测恒为空。过滤逻辑仍保留（`xRestrict !== 0` + R-18/R-18G 标签兜底），因为上游随时可能变，且标签兜底确实能挡住"关键词本身就是 R-18 标签"的作品（`pixiv.js:55-60`）。
 
@@ -283,7 +283,7 @@ plan    = planPixivSend(sources, { size: sizeEff })
 
 ### 按作品号取图的一个历史 bug
 
-`mcp-napcat-safe.js:3288-3291` 记着：旧写法在这里造了个 `thumbUrl` 为空的对象就往下走，而候选是**从缩略图推日期路径**的 —— 于是 **0 个候选**，这条路**从来没通过**。现在先按号把详情和原图直链问出来。
+`mcp-napcat-safe.js:3247-3291` 记着：旧写法在这里造了个 `thumbUrl` 为空的对象就往下走，而候选是**从缩略图推日期路径**的 —— 于是 **0 个候选**，这条路**从来没通过**。现在先按号把详情和原图直链问出来。
 
 同类的一个纯函数坑：`pixivMasterUrl` **一律拼 `.jpg`** —— 实测 png 原图的作品 `..._p0_master1200.png` 是 **404**，`.jpg` 才是 200/740KB（`pixiv.js:1315-1321`）。
 
@@ -312,11 +312,11 @@ plan    = planPixivSend(sources, { size: sizeEff })
 **从这条链路推出两条结论**：
 
 - **(a) 图片可以按 URL / base64 直传，桥这边一个字节都不用落盘** ⇒ 策略选"**能零落盘就零落盘**"
-- **(b) 旧代码给的是 `file`，而 NapCat 只读 `images`** —— 那个参数**一直被静默忽略**（配了图也发不出来、**还不报错**）。已修（`mcp-napcat-safe.js:2700-2703`）
+- **(b) 旧代码给的是 `file`，而 NapCat 只读 `images`** —— 那个参数**一直被静默忽略**（配了图也发不出来、**还不报错**）。已修（`mcp-napcat-safe.js:2659-2703`）
 
 ### 顺手修掉的第二个 bug：`tid` 恒为 null
 
-`onebot()` 返回的就是 OneBot 响应里的 `data`，`tid` 在 **`data.tid`**；旧写法只读 `data.data.tid`（多套了一层）→ **发说说成功后 `tid` 恒为 null**。现在两种形态都兼容（`mcp-napcat-safe.js:2705-2707`）：
+`onebot()` 返回的就是 OneBot 响应里的 `data`，`tid` 在 **`data.tid`**；旧写法只读 `data.data.tid`（多套了一层）→ **发说说成功后 `tid` 恒为 null**。现在两种形态都兼容（`mcp-napcat-safe.js:2664-2707`）：
 
 ```js
 const out = { ok: true, tid: data?.tid ?? data?.data?.tid ?? null, content: text };
@@ -426,7 +426,7 @@ if (!ext)          return { ...base, ok: false, reason: '认不出图片格式�
 
 ---
 
-## B.6 工具入口与参数（`qq_send_qzone`，`mcp-napcat-safe.js:2661`）
+## B.6 工具入口与参数（`qq_send_qzone`，`mcp-napcat-safe.js:2701`）
 
 ```
 content      说说正文
@@ -441,7 +441,7 @@ imageCount   配几张：默认 1，上限 3（QZONE_IMAGE_MAX）
 
 参数优先级（工具描述里明写）：**`file` > `imageUrl` > `pixivIllustId`/`pixivQuery` > `imageQuery`**。
 
-配图相关的返回字段（`mcp-napcat-safe.js:2708-2716`）：
+配图相关的返回字段（`mcp-napcat-safe.js:2667-2716`）：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -452,7 +452,7 @@ imageCount   配几张：默认 1，上限 3（QZONE_IMAGE_MAX）
 | `imageNotes` | 取图过程中的说明（如"pixiv 作品 X 是 R-18，不配进公开说说"） |
 | `imageFailures` | 请求了配图但一张都没配上时，列出试过的地址与失败原因 |
 
-**`prepared` 的 `cleanup` 一定在 `finally` 里逐个 await**（`mcp-napcat-safe.js:2718-2721`）：无配图时 `prepared` 为空；有临时文件（>10MB 才会出现）**必须成败都删**。
+**`prepared` 的 `cleanup` 一定在 `finally` 里逐个 await**（`mcp-napcat-safe.js:2677-2721`）：无配图时 `prepared` 为空；有临时文件（>10MB 才会出现）**必须成败都删**。
 
 ---
 
@@ -460,7 +460,7 @@ imageCount   配几张：默认 1，上限 3（QZONE_IMAGE_MAX）
 
 | 工具 | 坑 |
 | --- | --- |
-| `qq_qzone_like` | 走 **QZone 现役接口 `internal_dolike_app`**（`w.qzone.qq.com` 前缀，POST 表单，返回**纯 JSON 而不是 JSONP**）；老的 `emotion_cgi_do_like_v6` **已 HTTP 500**（`mcp-napcat-safe.js:2634-2635`） |
+| `qq_qzone_like` | 走 **QZone 现役接口 `internal_dolike_app`**（`w.qzone.qq.com` 前缀，POST 表单，返回**纯 JSON 而不是 JSONP**）；老的 `emotion_cgi_do_like_v6` **已 HTTP 500**（`mcp-napcat-safe.js:2661-2635`） |
 | `qq_qzone_comment` | `tid` 来自 `qq_qzone_view` 返回文本里的 `[tid=xxx]` |
 | `qq_qzone_reply_comment` | 楼中楼回复需要 `commentId`，从 `qq_qzone_view` 的评论列表拿 |
 | `qq_qzone_view` | 返回里**带评论（id + 作者 + 内容）**，就是为了让回复工具能直接拿 `commentId`；回复时的 @ 需要作者昵称 |
@@ -499,7 +499,7 @@ imageCount   配几张：默认 1，上限 3（QZONE_IMAGE_MAX）
 # D. 未核实项
 
 - **NapCat 内部行号**（`napcat.mjs` 的 80276~80283、9237、11560、11578、11585 等）来自 `lib/qzone-image.js` 顶部注释里记录的**读包结果**（本机 NapCat 9.9.26-44498）。我本轮**没有重新解包核对这些行号** —— NapCat 升级后它们会平移，函数名（`SendQzoneMsg._handle`、`uploadImageToQzone`、`publishQzoneMsg`）是更稳的锚点。
-- `qq_send_pixiv` 里"写临时文件 → POST `/api/social/send-message`"之后的**投递侧**（`core/console-server.js:2112` 起的 `send-message` 端点、`core/qq-send.js` 的 `onebotSend`）我只核到端点与调用，**没有逐行读发送实现**。
+- `qq_send_pixiv` 里"写临时文件 → POST `/api/social/send-message`"之后的**投递侧**（`core/console-server.js:1973` 起的 `send-message` 端点、`core/qq-send.js` 的 `onebotSend`）我只核到端点与调用，**没有逐行读发送实现**。
 - `lib/image-compress.js` 的 `IMAGE_HARD_MAX_BYTES` 已核对：`image-compress.js:47` 就是 `15 * 1024 * 1024`，与 `MAX_IMAGE_FETCH_BYTES` 同值，投递前的两道卡口确实都放宽到 15MB（`image-compress.js:250`、`295-296` 是判定处）。
 - 干跑脚本 `_qzone_dryrun.mjs` 是 `lib/qzone-image.js:2693` 注释里提到的工作区临时脚本，**本仓库 `tools/` 下没有它**（我搜过 `qq-bridge/tools/`），所以那条实测结论是**转述代码注释**，我没有复现。
 - 本文没有覆盖 `qq_send_image`（联网找图直发）的完整实现，只核到它复用了 `safeFetchBuffer` 的同一道闸门。

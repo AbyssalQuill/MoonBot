@@ -32,7 +32,7 @@ export const IMAGE_MAX_SIDE = 1280;
 export const IMAGE_HARD_MAX_SIDE = 4096;
 /** 硬字节上限：本桥**投递前**允许交给 DSH 的单张图片字节数 = 15MB。
  *
- *  【2026-09-18 更正并放宽 5MB → 15MB】旧注释写着"DSH 默认 maxImageBytes = 5MB"，这个依据是错的：
+ *  2026-09-18 更正并放宽 5MB → 15MB：旧注释写着"DSH 默认 maxImageBytes = 5MB"，这个依据是错的：
  *  线上装的 DSH 0.1.2-rc.1 里，真正管投递的 `@deepseek-ai/dsh-attachment-local` 是
  *    `/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js:637`
  *    `const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024;`（README.zh.md 第 41 行同样写 20 MiB），

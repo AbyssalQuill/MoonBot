@@ -42,7 +42,7 @@ export function shouldResetSeqWatermark(known, maxRec) {
 /**
  * 从 DSH web 的启动日志里取最新的 `?token=`。
  *
- * 【2026-09-18 修：尾部窗口 256KB → 逐级放大】原实现只看文件最后 256KB，
+ * 2026-09-18 修：尾部窗口 256KB → 逐级放大：原实现只看文件最后 256KB，
  * 一旦最后一条 token 距 EOF 超过这个距离就返回 null，而 `_ensureSession` 的失败是
  * **静默降级**（不带 cookie 继续请求），现场表现为全链路 401，非常难查。
  * 实测那次：/root/.dsh/dsh-web.log 4260469 B，最后一条 token 在 3978919 B 处，
@@ -324,7 +324,7 @@ export class NodeApiClient {
   async respondProxy(req) {
     const eventId = req?.rpcId;
     const clientId = this._eventsClientId;
-    /* 【2026-09-22 修 M7·"伪造成功"】以前缺上下文时 `return { result: { ok: true, value: {} } }` 等于**谎报成功**：
+    /* 2026-09-22 修 M7·"伪造成功"：以前缺上下文时 `return { result: { ok: true, value: {} } }` 等于**谎报成功**：
      * 调用方（console-server 的审批路由）会照常回"✅ 已通过审批"并**删掉挂起项**，而 DSH 侧那次 approval/question
      * 永远等不到应答，且再也无法重试（挂起项已删）。现在如实报错，让调用方如实提示、并且不要清挂起项。 */
     if (!eventId || !clientId) {
@@ -341,7 +341,7 @@ export class NodeApiClient {
     const res = await this._call('$events/result', {
       args: { clientId, eventId, outcome: { kind: 'result', value: outcomeValue } },
     }, 10000);
-    // 【2026-09-22 修 M7】必须和本文件其它调用一样走 unwrap（它在本文件顶层定义，不是方法）：
+    // 2026-09-22 修 M7：必须和本文件其它调用一样走 unwrap（它在本文件顶层定义，不是方法）：
     // 以前直接 return res（多包一层），调用方读 res.result.ok 得到 undefined → 把"没成功"当成"成功"。
     return unwrap(res, '$events/result');
   }

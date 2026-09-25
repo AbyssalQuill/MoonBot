@@ -1,6 +1,6 @@
 // OneBot 发送回执判定：区分「真失败」与「已送达但回执异常」。
 //
-// 【2026-09-18 线上实测 · 纠正一条长期误判】
+// 2026-09-18 线上实测 · 纠正一条长期误判：
 // 这台 QQ（Linux 3.2.33-52892 + NapCat 4.18.28）上，**每一条**发送（私聊/群聊、文本/语音/卡片）
 // 都返回下面这种"失败"：
 //
@@ -32,7 +32,7 @@
 // `网络连接异常`/`1006514` 没有这两个前缀时（例如会话真的被腾讯作废）仍按老规矩当失败重试。
 
 /** 回执文本里出现它就说明：内核 sendMsg 已完成，失败的是事件确认（=已送达未确认）。
- *  【2026-09-19 扩充】除了 `EventChecker Failed`，NapCat 还会回**超时**形态：
+ *  2026-09-19 扩充：除了 `EventChecker Failed`，NapCat 还会回**超时**形态：
  *    "Timeout: NTEvent serviceAndMethod:NodeIKernelMsgService/sendMsg
  *     ListenerName:NodeIKernelMsgListener/onMsgInfoListUpdate EventRet:{\"result\":0,\"errMsg\":\"\"}"
  *  实测（发高德图文卡）：这条回执是 500，但**卡片确实进了内核消息表**（我们那串随机 token + ctime

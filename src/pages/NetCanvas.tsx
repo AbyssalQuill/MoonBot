@@ -2,20 +2,20 @@ import React, { useEffect, useMemo, useRef } from 'react';
 
 /* ==================================================================
  * NetCanvas —— 零依赖球面力导向网络
- *  默认: 全员平等, 所有节点贴地壳(半径1硬归一, 永不脱离)
- *  centerUid 可选: 仅该"主人公"放球心(固定), 其余仍贴地壳环绕 + 细亮辐条
- *  防抖: DT=0.25 / DAMP=0.84 / MAX_SPEED=0.035 / temp*=0.985 / 静止休眠
- *  交互: 自动缓转; 拖=转球; 缩放已固定(≈滚轮放大两档的大小, 不再滚轮缩放);
- *        悬停不选中; 点击打开档案; 双击恢复自动缓转(配合 pauseSpinOnDrag)
- *  线色: 标注过的关系用 REL_CAT_COLOR 的五类色(大图小图同一套)，没标注的是低饱和蓝灰默认线
- *  尺寸: 节点圆与圈内文字按球半径等比缩放(uScaleOf)，主图观感不变、小图不再糊成一团
+ *  默认：全员平等，所有节点贴合地壳（半径 1 硬归一，永不脱离）
+ *  centerUid 可选：仅将该「中心人物」置于球心（固定），其余节点仍贴地壳环绕并连接细亮辐条
+ *  防抖：DT=0.25 / DAMP=0.84 / MAX_SPEED=0.035 / temp*=0.985 / 静止后休眠
+ *  交互：自动缓转；拖拽 = 转球；缩放已固定（≈滚轮放大两档的大小，滚轮不再缩放）；
+ *        悬停不选中；点击打开档案；双击恢复自动缓转（配合 pauseSpinOnDrag）
+ *  线色：已标注的关系取 REL_CAT_COLOR 的五类色（大图小图同一套），未标注的取低饱和蓝灰默认线
+ *  尺寸：节点圆与圈内文字按球半径等比缩放（uScaleOf），主图观感不变，小图不再糊成一团
  * ================================================================== */
-/** 群内角色：'owner'=群主、'admin'=管理员（**不是** CNode.kind 的 'owner'=主人本人） */
+/** 群内角色：'owner'=群主、'admin'=管理员（不是 CNode.kind 的 'owner'=owner 本人） */
 export type CRole = 'owner' | 'admin' | 'member';
 export interface CNode { uid: string; name: string; kind: 'owner' | 'friend' | 'member' | 'tag'; role?: CRole | null; }
 export interface CLink { from: string; to: string; strength: number; }
 
-/* 固定缩放: 等效原滚轮向上两档(每档约 ×1.14)后的大小; 之后滚轮不再缩放 */
+/* 固定缩放：等效于原滚轮向上两档（每档约 ×1.14）后的尺寸；此后滚轮不再缩放 */
 const FIXED_SCALE = 1.3;
 
 const PAL = {
@@ -24,7 +24,7 @@ const PAL = {
   lineOwner: 'rgba(224,158,182,0.55)', lineFriend: 'rgba(123,134,220,0.55)', lineMember: 'rgba(150,164,178,0.55)',
   spoke: 'rgba(224,120,156,0.9)',
 };
-/** 群主/管理员在球上的一圈细色环（与聚焦卡片里的角色徽标同色，见 GroupPortrait 的 ROLE_BADGE） */
+/** 群主／管理员在球上的一圈细色环（与聚焦卡片中的角色徽标同色，见 GroupPortrait 的 ROLE_BADGE） */
 const ROLE_RING: Record<string, string> = { owner: '#c98a00', admin: '#0b7d74' };
 const colorOf = (k: string) => (k === 'owner' ? PAL.owner : k === 'friend' ? PAL.friend : PAL.member);
 const softOf = (k: string) => (k === 'owner' ? PAL.ownerSoft : k === 'friend' ? PAL.friendSoft : PAL.memberSoft);
@@ -46,67 +46,67 @@ const DT = 0.25;
 const TEMP_INIT = 0.035;
 const SZ = 1.5;
 
-/* ── 强/弱关系的弹簧目标距离（球面弦长，单位球最大 2）──────────────────────────
- * 原来所有连线都用同一个 SPR_TARGET=0.85：显示弱关系时凭空多出一百多条
- * 「都要求贴到 0.85」的弹簧，总拉力翻倍 → 整颗球被压小、人挤成团，
- * 原本均匀的球面结构就没了（这正是「显示弱关系会把人拉一起」的原因）。
- * 现在按强度插值：强关系贴到 0.85（熟人靠在一起），弱关系目标 = 4/3
- * —— 单位球上两个随机点的平均弦长恰好是 4/3，也就是「既不强拉也不强推」的中性距离。
- * 于是弱关系只是**画出来给你看**，不再参与塑形，球面分布保持不变。
+/* ── 强／弱关系的弹簧目标距离（球面弦长，单位球最大 2）──────────────────────────
+ * 原实现所有连线共用同一个 SPR_TARGET=0.85：显示弱关系时凭空多出一百多条
+ * 「均要求贴合 0.85」：的弹簧，总拉力翻倍 → 整颗球被压小、节点挤成团，
+ * 原本均匀的球面结构随之消失（此即「显示弱关系会把人拉一起」的成因）。
+ * 现按强度插值：强关系贴合 0.85（熟人相互靠近），弱关系目标 = 4/3
+ * —— 单位球上两个随机点的平均弦长恰为 4/3，即「既不强拉也不强推」的中性距离。
+ * 于是弱关系仅用于呈现，不再参与塑形，球面分布保持不变。
  */
-const WEAK_TARGET = 4 / 3;   // 中性弦长：E[|p-q|] = 4/3（p,q 独立均匀分布在单位球面）
-const STRENGTH_FLOOR = 0.35; // 数据里实际出现的最弱档（实测最小 0.367）
+const WEAK_TARGET = 4 / 3;   // 中性弦长：E[|p-q|] = 4/3（p,q 独立均匀分布于单位球面）
+const STRENGTH_FLOOR = 0.35; // 数据中实际出现的最弱档（实测最小 0.367）
 function springTarget(strength: number): number {
   const s = Math.max(0, Math.min(1, (strength - STRENGTH_FLOOR) / (1 - STRENGTH_FLOOR)));
   return WEAK_TARGET + (SPR_TARGET - WEAK_TARGET) * s;
 }
-/** 单条连线每帧最大速度增量：防止某条跨半球的弱关系一帧就把人拽飞（MAX_SPEED 的 ~1/4）。 */
+/** 单条连线每帧的最大速度增量：避免某条跨半球的弱关系一帧内把节点拽飞（MAX_SPEED 的 ~1/4）。 */
 const MAX_LINK_PULL = 0.009;
 
 export interface EdgeClick { from: string; to: string; strength: number; sx: number; sy: number; }
-/* 关系配色（2026 主人要求「大图上也显示对应线的颜色，且五类要区分得开」）
- * 原来 qunyou='#8fb6e6' 与「未标注」渐变线的中段几乎同色，标了「群友」的线和没标注的线看不出区别。
- * 现在五类统一用中高饱和色（色相拉开 紫 271° / 金 41° / 红 358° / 绿 131° / 蓝 204°），
- * 未标注线整体降饱和成蓝灰（见 defaultLineColor）。实测（脚本按源码取值算）：
+/* 关系配色（2026 要求「大图上也显示对应线的颜色，且五类要区分得开」）
+ * 原 qunyou='#8fb6e6' 与「未标注」渐变线的中段几乎同色，标为「群友」的线与未标注线无法分辨。
+ * 现五类统一取中高饱和色（色相拉开 紫 271° / 金 41° / 红 358° / 绿 131° / 蓝 204°），
+ * 未标注线整体降饱和为蓝灰（见 defaultLineColor）。实测（脚本按源码取值计算）：
  * 五类两两最小 RGB 距离 105、关系色与未标注线的最小距离 92（≥40 即可分辨）；
- * 画布底色是浅色（卡片 rgba(255,255,255,.6)），五类对浅底的对比度 3.3~4.4（jiaren 原本 #c98a00 只有
- * 2.85，细线会发飘，压深到 #b57d00），对深底 4.0~5.3。
- * （2026-09-19 主人澄清：未标注线**保留**"互动越多线越深"的强度梯度，但整条梯度走**蓝系**、
- *   强端直接取 qunyou 的值 —— 未标注的那对本来就是群友关系。这样「显示强关系」与「显示弱关系」
- *   两个视图里的线读起来是同一支蓝色，不会一边偏蓝一边偏灰。
- *   另外 qunyou 由原来的蓝白 #8fb6e6 改成饱和的 #1f8fdc：它既要有别于未标注的淡蓝，
- *   又不能让"标了群友"和"没标注"看起来是两种颜色 —— 取同一个蓝的深浅两端即可。
- *   实测（脚本按源码取值算）：五类两两最小 RGB 距离 105，关系色与未标注线最小距离 92（≥40 即可分辨）。） */
+ * 画布底色为浅色（卡片 rgba(255,255,255,.6)），五类对浅底的对比度 3.3~4.4（jiaren 原 #c98a00 仅
+ * 2.85，细线会发飘，压深至 #b57d00），对深底 4.0~5.3。
+ * （2026-09-19 澄清：未标注线保留「互动越多线越深」的强度梯度，但整条梯度走蓝系、
+ *   强端直接取 qunyou 的值 —— 未标注的那一对本就属群友关系。如此「显示强关系」与「显示弱关系」
+ *   两个视图中的线读起来是同一支蓝色，不会一边偏蓝一边偏灰。
+ *   另 qunyou 由原蓝白 #8fb6e6 改为饱和的 #1f8fdc：既须有别于未标注的淡蓝，
+ *   又不能让「标了群友」与「未标注」看起来是两种颜色 —— 取同一蓝色的深浅两端即可。
+ *   实测（脚本按源码取值计算）：五类两两最小 RGB 距离 105，关系色与未标注线最小距离 92（≥40 即可分辨）。） */
 export const REL_CAT_COLOR: Record<string, string> = {
-  guimi: '#9b51e0',   // 闺蜜/诡秘(紫)
-  jiaren: '#b57d00',  // 家人(金)
-  qinglv: '#e5484d',  // 情侣(红)
-  chouren: '#2f9e44', // 仇人(绿)
-  qunyou: '#1f8fdc',  // 群友(蓝；原 #8fb6e6 太浅、会和未标注线混)
+  guimi: '#9b51e0',   // 闺蜜／诡秘（紫）
+  jiaren: '#b57d00',  // 家人（金）
+  qinglv: '#e5484d',  // 情侣（红）
+  chouren: '#2f9e44', // 仇人（绿）
+  qunyou: '#1f8fdc',  // 群友（蓝；原 #8fb6e6 过浅，会与未标注线混淆）
 };
-/** 类别文案：卡片按钮与图例共用一份，避免两处写不一致 */
+/** 类别文案：卡片按钮与图例共用同一份，避免两处写法不一致 */
 export const REL_CAT_LABEL: Record<string, string> = {
   guimi: '闺蜜/诡秘', jiaren: '家人', qinglv: '情侣', chouren: '仇人', qunyou: '群友',
 };
-/** 未标注（默认群友）连线：**蓝系**强度梯度，弱→强 = 淡蓝→群友蓝。
+/** 未标注（默认群友）连线：蓝系强度梯度，弱→强 = 淡蓝→群友蓝。
  *
- *  【2026-09-19 主人澄清】**不是**要去掉梯度 —— 要的是「显示强关系」和「显示弱关系」这两个视图里
- *  线色**读起来是同一支颜色**，并且**未标注线默认就是群友色（蓝）**：没标注的那对本来就是群友关系，
- *  所以它不该是灰调，而应该和 qunyou 同属蓝系。
+ *  2026-09-19 澄清：不是要去掉梯度 —— 所要求的是「显示强关系」与「显示弱关系」两个视图中
+ *  线色读起来是同一支颜色，且未标注线默认即为群友色（蓝）：未标注的那一本就属群友关系，
+ *  故不应取灰调，而应与 qunyou 同属蓝系。
  *
- *  · 强端**直接取 qunyou 的值**（REL_CAT_COLOR.qunyou），这样"标了群友的线"和"没标注的线"
- *    在强关系视图里是同一个蓝，不会一个偏灰一个偏蓝；
- *  · 弱端是同一色相的淡蓝（不是灰）→ 弱关系视图里那些弱线看起来仍然是"蓝色系",
- *    于是两个视图之间不会出现"一边蓝一边灰"的观感差；
- *  · 深浅仍然表达强度（"互动越多线越深"这条原意保留）。
+ *  · 强端直接取 qunyou 的值（REL_CAT_COLOR.qunyou），使「标了群友的线」与「未标注的线」
+ *    在强关系视图中为同一蓝色，不至于一个偏灰一个偏蓝；
+ *  · 弱端为同一色相的淡蓝（非灰）→ 弱关系视图中的弱线读起来仍属蓝色系，
+ *    两个视图之间不会出现「一边蓝一边灰」的观感差异；
+ *  · 深浅仍表达强度（「互动越多线越深」这一原意保留）。
  *
- *  ⚠️ qunyou 的色值改这里也要跟着改 —— 所以下面从 REL_CAT_COLOR 取，不另写一份字面量。
+ *  注意 修改 qunyou 的色值时此处须同步 —— 故下方从 REL_CAT_COLOR 取值，不再另写字面量。
  */
 function hexRgb(hex: string): [number, number, number] {
   const h = String(hex).replace('#', '');
   return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
 }
-/** 弱端：与 qunyou 同色相的淡蓝。不用灰 —— 灰调会让"弱关系视图"整体看着不是蓝色系。 */
+/** 弱端：与 qunyou 同色相的淡蓝。不用灰 —— 灰调会使「弱关系视图」整体不呈蓝色系。 */
 const WEAK_LINE_RGB: [number, number, number] = [172, 203, 231];
 function defaultLineColor(strength: number): string {
   const t = Math.max(0, Math.min(1, strength));
@@ -116,10 +116,10 @@ function defaultLineColor(strength: number): string {
   const b = Math.round(WEAK_LINE_RGB[2] + (b2 - WEAK_LINE_RGB[2]) * t);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
-/** 节点/文字尺寸随球半径等比缩放。
- *  依据（按同一套常量复算）：R = min(W,H) * 0.34 * 1.3。主图卡片高 600 → R≈265；聚焦弹层里的小图
- *  只有 340 高 → R≈150。原来所有尺寸都是固定像素，小图里前排节点半径 27.7px（直径 55px，占球径
- *  301px 的 1/5），12 个人挤成一团；缩放后前排 16.6px、后排 11.1→6.6px。主图 R≥265 时系数为 1，观感不变。 */
+/** 节点／文字尺寸随球半径等比缩放。
+ *  依据（按同一套常量复算）：R = min(W,H) * 0.34 * 1.3。主图卡片高 600 → R≈265；聚焦弹层内的小图
+ *  高仅 340 → R≈150。原所有尺寸均为固定像素，小图中前排节点半径 27.7px（直径 55px，占球径
+ *  301px 的 1/5），12 人挤成一团；缩放后前排 16.6px、后排 11.1→6.6px。主图 R≥265 时系数为 1，观感不变。 */
 const NODE_REF_R = 265;
 const uScaleOf = (R: number) => Math.max(0.6, Math.min(1, R / NODE_REF_R));
 const pairKey = (a: string, b: string) => (a < b ? a + '|' + b : b + '|' + a);
@@ -132,7 +132,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
   onEdge?: (e: EdgeClick) => void;      // 点击连线
   onOpen?: (n: CNode) => void;
   onPick?: (uid: string | null) => void;
-  /** 拖转后不自动恢复缓转（聚焦弹层里的小图用）。默认 false=主图行为：松手即恢复自动缓转。 */
+/** 拖转后不自动恢复缓转（用于聚焦弹层中的小图）。默认 false = 主图行为：松手即恢复自动缓转。 */
   pauseSpinOnDrag?: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -141,8 +141,8 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
   const linkList = useMemo(() => links.filter((l) => nodeById.has(l.from) && nodeById.has(l.to)), [links, nodeById]);
 
   const listRef = useRef<SNode[]>([]);
-  /** uid → SNode 的索引。原来每帧对每条连线做两次 arr.find()（O(连线×节点)），
-   *  显示弱关系时连线从 ~84 涨到 ~200+，每帧就是上万次线性扫描，直接拖慢转球动画。 */
+/** uid → SNode 的索引。原实现每帧对每条连线执行两次 arr.find()（O(连线×节点)）；
+   *  显示弱关系时连线由 ~84 增至 ~200+，每帧即上万次线性扫描，直接拖慢转球动画。 */
   const idxRef = useRef<Map<string, SNode>>(new Map());
   const reindex = () => { const m = new Map<string, SNode>(); for (const s of listRef.current) m.set(s.uid, s); idxRef.current = m; };
   const hoverRef = useRef<string | null>(null);
@@ -155,13 +155,15 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedUid ?? null;
   const relationsRef = useRef<Record<string, string> | undefined>(undefined);
-  /* relations 用 effect 同步，而不是渲染期直接 relationsRef.current = relations：
-   * 渲染期写 ref 在并发渲染下可能来自一次被丢弃的渲染、StrictMode 下还会写两次；
-   * 绘图循环每帧都现场读 relationsRef.current，所以走 effect 最多晚一帧(≈16ms)，
-   * 保存关系后两个图的线色依旧是"立刻"变，既不需要重启循环也不需要重排球面。 */
+  /* relations 以 effect 同步，而不在渲染期直接赋值 relationsRef.current = relations：
+   * 渲染期写 ref 在并发渲染下可能来自一次被丢弃的渲染，StrictMode 下还会写两次；
+   * 绘图循环每帧现场读取 relationsRef.current，故经 effect 最多晚一帧（≈16ms），
+   * 保存关系后两图的线色依旧「立即」变化，既不需重启循环也不需重排球面。 */
   useEffect(() => { relationsRef.current = relations; }, [relations]);
 
-  /* ---------- 初始化 ---------- */
+  /* ---------- 初始化 ----------
+   * 以 Fibonacci 球（黄金角螺旋）在单位球面上均匀布点；依赖项为 [nodes.length, centerUid]，
+   * 故仅当节点数或中心节点变化时才重新初始化。 */
   useEffect(() => {
     const cid = centerUidRef.current;
     const arr: SNode[] = [];
@@ -187,11 +189,11 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes.length, centerUid]);
 
-  /* ---------- 连线集合变化：温和重排，而不是把新边直接叠到已冷却/休眠的系统上 ----------
-   * 显示/隐藏弱关系、换群、换筛选都会换 linkList。以前没有这一步：系统若已休眠，
-   * 新连线根本不参与计算（位置冻住、看着像"没生效"）；若还在动，一百多条边一帧全叠上去，
-   * 就会猛地把人拽到一起。现在只补一点点温度让它平滑收敛，且因为弱关系目标=中性距离，
-   * 收敛结果与"隐藏弱关系"时基本一致（球面分布不被破坏）。
+  /* ---------- 连线集合变化：温和重排，而非把新边直接叠加到已冷却／休眠的系统上 ----------
+   * 显示或隐藏弱关系、切换群、切换筛选都会更换 linkList。此前无这一步：系统若已休眠，
+   * 新连线根本不参与计算（位置冻住，观感如同「未生效」）；若仍在运动，一百多条边一帧内全部叠加，
+   * 会把节点猛然拉近。现仅补充少量温度使其平滑收敛；且因弱关系目标为中性距离，
+   * 收敛结果与「隐藏弱关系」时基本一致（球面分布不被破坏）。
    */
   useEffect(() => {
     tempRef.current = Math.max(tempRef.current, TEMP_INIT * 0.5);
@@ -272,7 +274,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
           if (cur > MAX_SPEED) { const r = MAX_SPEED / cur; p.vx *= r; p.vy *= r; p.vz *= r; }
           maxVel = Math.max(maxVel, cur);
           p.x += p.vx; p.y += p.vy; p.z += p.vz;
-          // 硬性地壳约束: 永远贴半径1球面, 绝不脱离
+          // 硬性地壳约束：始终贴合半径 1 球面，绝不脱离
           const L = Math.hypot(p.x, p.y, p.z);
           if (L > 0.00001) { p.x /= L; p.y /= L; p.z /= L; }
         }
@@ -291,7 +293,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
       const cosY = Math.cos(cam.yaw), sinY = Math.sin(cam.yaw);
       const cosP = Math.cos(cam.pitch), sinP = Math.sin(cam.pitch);
 
-      /** 圆角矩形路径（名字气泡底衬用；手写 arcTo，不依赖 ctx.roundRect 的浏览器支持） */
+      /**     / 圆角矩形路径（名字气泡底衬用；手写 arcTo，不依赖 ctx.roundRect 的浏览器支持） */
       const roundRectPath = (x: number, y: number, w: number, h: number, rr: number) => {
         const k = Math.min(rr, w / 2, h / 2);
         ctx.beginPath();
@@ -302,11 +304,11 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         ctx.arcTo(x, y, x + w, y, k);
         ctx.closePath();
       };
-      /** 圈内首字 + 悬停/选中时的名字气泡。两个实测坑：
-       *  1) 原来固定 17px 字号且永远画 2 个汉字；球背面节点半径只有 ~11px（小图里 ~6.6px），
-       *     两个汉字宽 34px 比圆（直径 22px／小图 13px）还宽，糊成一团。现在字号跟半径走（≈0.72r），
-       *     半径 < 14px 只画 1 个字 —— 同一套常量复算过：背面文字宽 34px → 11px（小图 8.5px）。
-       *  2) 悬停名字原来是 15px 灰字直接压在连线上，密集交叉处读不出来。现在先铺一层半透明白底
+      /**     / 圈内首字与悬停／选中时的名字气泡。两处实测问题：
+       *  1) 原实现固定 17px 字号并恒画 2 个汉字；球背面节点半径仅 ~11px（小图内 ~6.6px），
+       *     两个汉字宽 34px 超过圆的直径（22px／小图 13px），糊成一团。现字号随半径变化（≈0.72r），
+       *     半径 < 14px 时只画 1 个字 —— 按同一套常量复算：背面文字宽 34px → 11px（小图 8.5px）。
+       *  2) 悬停名字原为 15px 灰字直接压在连线上，密集交叉处无法辨读。现先铺一层半透明白底
        *     再写字，并把气泡夹在画布内，贴边时不会被截断。 */
       const drawNodeText = (nd: CNode, x: number, y: number, r: number, col: string, act: boolean) => {
         const init = initialOf(nd);
@@ -329,8 +331,8 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(nm, bx + bw / 2, by + bh / 2 + 0.5);
       };
-      /** 群主/管理员：节点外再套一圈细色环（与聚焦卡片的徽标同色），一个图里也认得出谁是谁。
-       *  只画在圆外侧 2.5px，不动节点本身尺寸 —— 主人调好的球面观感不变。 */
+      /**     / 群主／管理员：节点外再套一圈细色环（与聚焦卡片的徽标同色），同一图内亦可辨识角色。
+       *  仅画在圆外侧 2.5px，不改变节点本身尺寸 —— 既有的球面观感不变。 */
       const drawRoleRing = (nd: CNode, x: number, y: number, r: number, act: boolean) => {
         const rc = nd.kind === 'owner' || !nd.role ? undefined : ROLE_RING[nd.role];
         if (!rc) return;
@@ -356,7 +358,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
       const sorted = [...arr].sort((a, b) => a.depth - b.depth);
 
       ctx.lineCap = 'round';
-      // 壳面之间的连线（标注过的线用关系色，没标注的用低饱和蓝灰默认色）
+      // 壳面之间的连线（已标注的线取关系色，未标注的取低饱和蓝灰默认色）
       for (const l of linkList) {
         if (cid && (l.from === cid || l.to === cid)) continue;
         const p1 = idxRef.current.get(l.from);
@@ -366,19 +368,19 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         const zf01 = (avg + 1) / 2;
         const cat = relationsRef.current?.[pairKey(l.from, l.to)];
         const labeled = !!(cat && REL_CAT_COLOR[cat]);
-        // 远侧减负：只隐藏"没标注"的线。标注过的关系即使转到球背面也照画（下面有 alpha 下限），
-        // 否则主人标完一条线、球刚好转过去，就以为"颜色没生效"。
+        // 远侧减负：仅隐藏「未标注」的线。已标注的关系即使转到球背面仍照画（下方设 alpha 下限），
+        // 否则标完一条线、球恰好转过去，会误认为「颜色未生效」。
         if (avg < -0.55 && !labeled) continue;
-        // 关系线的 alpha 有下限（0.34）：原来最低 0.14，深色线转到远侧直接被冲成灰。
-        // 未标注线保留强度因子（"互动越多线越实"这条原意主人要求保留）——
-        // 淡蓝 + 低 alpha 只是"更淡的蓝"，色相不变，所以弱关系视图里读起来仍是蓝系。
+        // 关系线的 alpha 设有下限（0.34）：原最低 0.14，深色线转到远侧会被冲成灰。
+        // 未标注线保留强度因子（「互动越多线越实」这一原意按要求保留）——
+        // 淡蓝 + 低 alpha 只是「更淡的蓝」，色相不变，故弱关系视图中读起来仍属蓝系。
         ctx.globalAlpha = labeled ? 0.34 + 0.5 * zf01 : 0.2 + 0.44 * zf01 * (0.5 + 0.5 * l.strength);
         ctx.strokeStyle = labeled ? REL_CAT_COLOR[cat!] : defaultLineColor(l.strength);
         ctx.lineWidth = (0.5 + l.strength * 1.2 + (labeled ? 0.4 : 0)) * (0.7 + 0.6 * zf01);
         ctx.beginPath(); ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy); ctx.stroke();
       }
 
-      // 主人公在球心: 细亮辐条
+      // 中心节点在球心：细亮辐条
       const cObj = arr.find((s) => s.fixed);
       if (cObj) {
         for (const l of linkList) {
@@ -387,10 +389,10 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
           const o = idxRef.current.get(oth);
           if (!o) continue;
           const zf = (o.depth + 1) / 2;
-          /* 原来辐条一律 PAL.spoke（粉）—— 而小图里 12 条线**全是辐条**（壳面之间的线被上面
-           * `if (cid && ...) continue` 跳过了），于是 relations 传进来根本没机会生效，
-           * 这正是主人说的"小图的线和它表示的关系对不上"。现在标注过的辐条用同一套关系色，
-           * 没标注的保持原来的粉色细辐条（= 默认群友线），两者一眼可分辨。 */
+          /* 原辐条一律取 PAL.spoke（粉）—— 而小图中 12 条线全为辐条（壳面之间的线被上方
+           * `if (cid && ...) continue` 跳过），于是 relations 传入后无机会生效，
+           * 此即此前反馈的「小图的线和它表示的关系对不上」。现已标注的辐条取同一套关系色，
+           * 未标注的保持原粉色细辐条（即默认群友线），两者可一眼分辨。 */
           const cat = relationsRef.current?.[pairKey(l.from, l.to)];
           const labeled = !!(cat && REL_CAT_COLOR[cat]);
           ctx.globalAlpha = labeled ? 0.42 + 0.5 * zf : 0.3 + 0.55 * zf;
@@ -401,12 +403,12 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
       }
       ctx.globalAlpha = 1;
 
-      /* 壳面节点 + 球心那位，统一按 depth 从远到近画。
-       * 原来球心那位是**无条件最后画**（恒在最前），可它 depth=0，正对相机那一半的壳面点投影后
-       * 差不多落在同一个位置（正交投影下屏幕距球心 = R*sqrt(1-depth²)）。按同一套常量复算：
-       * 小图转一整圈共 1728 个"点·帧"，旧画法有 46 个被球心圆盖住 —— 其中 40 个本该在球心**前面**，
-       * 看着就是"有人挤没了、点不中"。改成按深度画后只剩 6 个，且都在球心后面（几何上正确的遮挡）。
-       * 球心尺寸不随深度缩放（它是"这张网的中心"）。 */
+      /* 壳面节点与球心那位，统一按 depth 由远及近绘制。
+       * 原实现中球心那位无条件最后绘制（恒在最前），但其 depth=0，正对相机那一半的壳面点投影后
+       * 几乎落在同一位置（正交投影下屏幕距球心 = R*sqrt(1-depth²)）。按同一套常量复算：
+       * 小图转一整圈共 1728 个「点·帧」，旧画法有 46 个被球心圆遮住 —— 其中 40 个本应在球心前面，
+       * 观感即「有人被挤没了、点不中」。改为按深度绘制后仅余 6 个，且均在球心之后（几何上正确的遮挡）。
+       * 球心尺寸不随深度缩放（它是「这张网的中心」）。 */
       for (const p of sorted) {
         const nd = nodeById.get(p.uid);
         if (!nd) continue;
@@ -423,9 +425,9 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
           ctx.lineWidth = isSel ? 2.6 : isHover ? 2 : 1.3;
           ctx.strokeStyle = col;
           ctx.stroke();
-          // 球心这位若是群主/管理员，同样给角色环（和聚焦卡片的徽标对上）
+          // 球心这位若是群主／管理员，同样给角色环（与聚焦卡片的徽标对应）
           drawRoleRing(nd, p.sx, p.sy, r, isHover || isSel);
-          // 球心这位的名字一直显示（小图里就是"这张网的中心是谁"，比灰字压在辐条上看得清）
+          // 球心这位的名字常显（小图里即「这张网的中心是谁」，比灰字压在辐条上更易辨认）
           drawNodeText(nd, p.sx, p.sy, r, col, true);
           continue;
         }
@@ -458,7 +460,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
   const hitAt = (x: number, y: number): string | null => {
-    // 命中半径必须和绘制时的 USCALE 用同一个口径，否则小图里"看着圆很大、点不中"
+    // 命中半径必须与绘制时的 USCALE 取同一口径，否则小图中会出现「看着圆很大、却点不中」
     const cv = cvRef.current;
     const U = cv ? uScaleOf(Math.min(cv.clientWidth, cv.clientHeight) * 0.34 * camRef.current.Rscale) : 1;
     let best: string | null = null, bd = 1e9;
@@ -514,8 +516,8 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         const nd = nodeById.get(st.hit);
         if (nd) { onPick?.(nd.uid); onOpen?.(nd); }
       } else if (st.moved <= 4) {
-        // 没点到节点 → 尝试命中连线(点到线段的最近距离<8px 视为点击连线)
-        // 用 idxRef 而不是每次 find()：前者是文件顶部就写明的索引，这里原来漏了
+        // 未命中节点 → 尝试命中连线（到线段最近距离 < 8px 视为点击连线）
+        // 使用 idxRef 而不是每次 find()：前者是文件顶部已写明的索引，此处原先遗漏
         let bestEdge: { l: CLink; d: number } | null = null;
         for (const l of linkList) {
           const p1 = idxRef.current.get(l.from), p2 = idxRef.current.get(l.to);
@@ -534,9 +536,9 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
       }
     }
     st.mode = 'idle'; st.hit = undefined;
-    /* 主图：松手就恢复自动缓转（主人调好的"缓缓漂动"）。
-     * 小图(pauseSpinOnDrag)：拖转后停下 —— 原来松手立刻继续转，刚转到的角度马上跑掉，想点某个
-     * 壳上的人全靠追。暂停后视图稳定，双击（onDoubleClick）可恢复自动旋转，不会走进死胡同。 */
+    /* 主图：松手即恢复自动缓转（既有的「缓缓漂动」观感）。
+     * 小图（pauseSpinOnDrag）：拖转后停止 —— 原实现松手立即继续转，刚转到的角度马上跑掉，欲点壳上某人
+     * 只能靠追逐。暂停后视图稳定，双击（onDoubleClick）可恢复自动旋转，不会陷入死角。 */
     if (!pauseSpinOnDrag) camRef.current.spinning = true;
     try { cvRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
   };
@@ -550,7 +552,7 @@ export function NetCanvas({ nodes, links, selectedUid, centerUid, relations, onE
         onDoubleClick={() => { camRef.current.spinning = true; }}
         onPointerLeave={() => { hoverRef.current = null; }}
         onWheel={(e) => {
-          // 缩放已固定(约滚轮放大两档), 滚轮不再改变球大小, 仅阻止页面滚动
+          // 缩放已固定（约滚轮放大两档），滚轮不再改变球大小，仅阻止页面滚动
           e.preventDefault();
         }}
       />

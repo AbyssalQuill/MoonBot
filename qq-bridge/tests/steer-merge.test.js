@@ -1,13 +1,13 @@
-// 回归测试：【一个模型步 = 一个 [Mid-turn] 块】（合并注入，2026-09-15）
+// 回归测试：一个模型步 = 一个 [Mid-turn] 块（合并注入，2026-09-15）
 //
-// 主人反馈（原话）："我相隔极端时间的消息好像 dsh 的思考里不会同时获取到，然后两条不是两个注入吗
+// 反馈（原话）："我相隔极端时间的消息好像 dsh 的思考里不会同时获取到，然后两条不是两个注入吗
 // 它会等第一个注入处理完到第二个注入再处理下一条，我倒是希望它能省去第二次注入然后思考过程中还能获取到消息"。
 //
 // 本测试用 mock 的 DSH api 驱动真实的 src/core 模块（绝不动真配置/真状态）：
-//   ① 同一个模型步里、**相隔一段时间**到达的两条消息 → 只产生**一个** [Mid-turn] 块，两条都在里面；
+//   ① 同一个模型步里、相隔一段时间到达的两条消息 → 只产生一个 [Mid-turn] 块，两条都在里面；
 //   ② 两个步边界注入器都能把这批带走：`step/end`（flushStepBatch）与回合钩子（handleTurnHold）；
 //   ③ 步边界机制失效时必须有兜底（错过步边界 → 放行即时注入），消息绝不被静默卡住；
-//   ④ 非保持会话（群聊 / turn-hold 关）行为**保持原样**（立刻注入，不攒）。
+//   ④ 非保持会话（群聊 / turn-hold 关）行为保持原样（立刻注入，不攒）。
 //
 // 用法：node tests/steer-merge.test.js
 import assert from 'node:assert/strict';
@@ -26,7 +26,7 @@ fs.writeFileSync(path.join(sandbox, 'config.json'), JSON.stringify({
   dsh: { baseUrl: 'http://127.0.0.1:10721' },
   social: {
     steerEnabled: true,
-    // 主人私聊的线上配置：turn-hold 打开、全部私聊、长保持
+    // 线上私聊配置：turn-hold 打开、全部私聊、长保持
     turnHold: { enabled: true, keys: [], privateOnly: true, maxExchanges: 24, idleCloseMs: 1800000, maxWaitMs: 3600000, requestBudgetMs: 55000 },
   },
 }, null, 2));
@@ -105,7 +105,7 @@ check('① 返回 true（调用方语义：不用你另起一轮/别再投）', 
 check('① 第一条记进"推迟交付"名单（mark_read 不能吞它）', (st._steerDeferredSeqs || []).map(Number).includes(s1), JSON.stringify(st._steerDeferredSeqs));
 check('① 第一条**没有**被标成"已给过"（仍在未读里）', !(st.turnSteeredSeqs || []).map(Number).includes(s1), JSON.stringify(st.turnSteeredSeqs));
 
-await sleep(1200);   // ← 主人说的"相隔极端时间"：不是同一瞬间连发
+await sleep(1200);   // ← 上面说的"相隔极端时间"：不是同一瞬间连发
 const s2 = push('第二条：算了你忙你的');
 const r2 = await wakeMod.steerIntoRunningTurn(KEY, 'private');
 check('① 第二条到的时候**也还是攒着**（没有第二次注入）', sent.length === 0, `已注入 ${sent.length} 次`);
@@ -154,7 +154,7 @@ check('④ 兜底这一投也把两条合成一个块', /第五条/.test(block3)
 check('④ 兜底调用返回 true', r6 === true, String(r6));
 
 console.log('=== ⑤ 保持循环（agent/turn-stopping 钩子）也能带走"钩子开始前就到达"的消息 ===');
-// 这一步是关键：合并注入把消息**攒在 unread 里**，它们比钩子开始得更早 ——
+// 这一步是关键：合并注入把消息攒在 unread 里，它们比钩子开始得更早 ——
 // 保持循环若还按旧的 `lastUnreadSeq > baseline` 判据，就一条都看不见，只会干等到预算用完。
 push('第七条：在吗');
 push('第八条：同时发的两条');
@@ -179,7 +179,7 @@ check('⑥ 非保持会话这一投把第九条带上了', /第九条：群聊�
 check('⑥ 非保持会话不写"推迟交付"名单（那条路只在保持托管里用）', !(st._steerDeferredSeqs || []).map(Number).includes(seqNo), JSON.stringify(st._steerDeferredSeqs));
 
 // 对照实验（这就是改动前的行为，非保持会话刻意保持原样）：同一模型步里相隔一会儿的两条消息
-// → **两个注入、两个块**。保持托管那条路现在是 1 个块（见 ①~③），对比一眼可见。
+// → 两个注入、两个块。保持托管那条路现在是 1 个块（见 ①~③），对比一眼可见。
 await sleep(1700);   // 越过非保持会话的短周期闸（1500ms）
 wakeMod.markSteerCycleStart(KEY, 'step/end');
 push('第十条：群聊里隔了一会儿的第二条');
@@ -188,16 +188,16 @@ check('⑥ 对照：非保持会话里两条相隔的消息 = 两个注入（保
 check('⑥ 对照：第二个块只带第十条（不是把两条又合起来投一遍）', /第十条/.test(sent[sent.length - 1]?.text ?? '') && !/第九条/.test(sent[sent.length - 1]?.text ?? ''));
 
 console.log('=== ⑦ 对方还在打字 → 一条都不投，等 ta 打完合成一次注入（2026-09-16 主人要求）===');
-// 主人原话："这两句应该检测我的输入状态然后合并成 [Mid-turn] 2 new message(s)"。
-// 线上实测（09-15 15:54~15:58）：他连着发了 5 条，桥在**每个模型步边界各注入一次** ——
+// 原话："这两句应该检测我的输入状态然后合并成 [Mid-turn] 2 new message(s)"。
+// 线上实测（09-15 15:54~15:58）：他连着发了 5 条，桥在每个模型步边界各注入一次 ——
 // 对话窗口里就是 5 个独立的 `[Mid-turn] 1 new message(s)`。原因：打字判定只管"要不要新起一轮"，
 // 在途回合的注入完全不看输入状态。现在这条路上也接上同一个判据（typing-hold.js）。
 cfg.social.turnHold.enabled = true;
 stateMod.holdActiveKeys.add(KEY);
 // 骰子写成 0（绝不插话），这样"等"这一支是确定的，不受随机影响
 cfg.social.typing = { enabled: true, holdMaxMs: 12000, refreshOnMessageMs: 5000, breakProbability: 0 };
-// 【2026-09-16 晚 语义收紧（修「思考期间到的消息被塞进下一个唤醒」）】"允许短暂延迟"多了一条前提：
-// **本回合已经发出去过气泡**（= 真的在连发/打字保持中）。模型还在生成、这一轮一条都还没发时，
+// 2026-09-16 晚 语义收紧（修「思考期间到的消息被塞进下一个唤醒」）："允许短暂延迟"多了一条前提：
+// 本回合已经发出去过气泡（= 真的在连发/打字保持中）。模型还在生成、这一轮一条都还没发时，
 // 一律改成"注入当前轮"（对话窗口里都还没有气泡，"不抢话"无从谈起）—— 那一条覆盖在新测试
 // tests/mid-turn-steer.test.js 里。这里按 mux 线上记法补上"本回合已发过气泡"这个前提。
 stateMod.sendToolSucceededSessions.add(SID);

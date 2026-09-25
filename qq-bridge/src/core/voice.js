@@ -79,14 +79,20 @@ function defaults() {
     enabled: false,
     models,
     defaultVoice: '冰糖',
-    style: '',                 // 全局风格指令（可选，放进 user 消息；如「语气甜甜的，语速稍快」）
+    /* 2026-09-24 出厂默认风格改成英文的「像真人说话」描述：
+       旧值是空串，等于不注入任何风格指令，合成出来偏朗读腔。这里改成一段英文描述：
+       自然口语、有停顿与语气词、不疾不徐、语气情绪贴合句子本身的含义，
+       并明确排除播音腔 / 客服腔 / 机械平读。
+       注意：**只改出厂默认**。配置文件里显式写成空串（表示"不要任何风格"）依旧尊重原值，
+       不会被这里的默认覆盖。 */
+    style: 'Talk the way a real person talks: natural, unhurried everyday speech with small pauses and the occasional filler, pitch and emphasis following what the line actually carries. Keep it warm and conversational, and avoid announcer or customer-service delivery, flat mechanical reading and over-clean articulation.',
     format: 'mp3',
     maxChars: 120,             // 单条语音文本上限（群聊语音太长没人听）
     dailyChars: 20000,         // 每日合成字数上限（0 = 不限）
     cacheEnabled: true,
     maxCacheFiles: 300,
     asrLanguage: 'auto',
-    // 主动发语音的节奏（主人要求：文字里**掺着**发语音，且概率可调）
+    // 主动发语音的节奏（产品要求：文字与语音交替出现，且概率可调）
     send: {
       probability: 0.2,     // 每次唤醒抽签命中的概率（0~1）。0 = 永不主动发（只能被明确要求），1 = 每次都可以
       cooldownMs: 600000,   // 同一会话刚发过语音后，多久内不再抽中（防连发刷屏），默认 10 分钟
@@ -166,7 +172,7 @@ export function voiceConfigPublic() {
     roles: VOICE_ROLES.map((r) => ({ ...r })),
     presets: { tokenPlanCn: DEFAULT_BASE_URL, official: ALT_BASE_URL },
     builtinVoices: BUILTIN_VOICES,
-    // 【2026-09-15 修】这里曾经漏传 models：管理端读不到已保存的地址/模型名，
+    // 2026-09-15 修：这里曾经漏传 models：管理端读不到已保存的地址/模型名，
     // 于是「保存」会把空值写回去，把配好的接入信息洗掉（密钥只回掩码是故意设计）。
     models
   };
@@ -351,9 +357,9 @@ function silentWavBuffer(ms = 300, sampleRate = 8000) {
 
 const MODE_LABEL = { tts: '语音合成', design: '音色设计', clone: '音色复刻' };
 
-/* ── 【2026-09-18 二修「每次发都音色不同」】"音色锚点"必须与回复内容无关 ────────────────
+/* ── 2026-09-18 二修「每次发都音色不同」："音色锚点"必须与回复内容无关 ────────────────
  * §11.3 的冻结（design 音色 → 冻一段音频 → 之后都走 clone）已经把"每次现设计一个音色"解决了，
- * 线上日志也确实全是 `音色复刻 / 音色=样本复刻`（= m 已经是 clone，冻结生效）。但主人仍听出漂移，
+ * 线上日志也确实全是 `音色复刻 / 音色=样本复刻`（= m 已经是 clone，冻结生效）。但实际听感仍有漂移，
  * 因为剩下的这条链路里还有两件事：
  *   ① 冻结用的那一段音频是**某一条回复的朗读** —— 它短（一两秒到几秒）、而且带着那句话的情绪
  *      （疑问/惊叹/撒娇都被念进音色里）。零样本复刻里参考越短越糊，说话人嵌入估计得越不准。
@@ -402,7 +408,7 @@ export async function synthesize({
   // 这次合成用的到底是"哪一种音色来源" + 具体是哪个文件：**只进日志**，是线上定位音色漂移的唯一证据
   let voiceSrc = '';
   let voiceRefPath = '';
-  // 【2026-09-18】本音色是从音色库里的**描述型自建音色**解析来的，记一下 —— 合成成功后要把它冻结
+  // 2026-09-18：本音色是从音色库里的**描述型自建音色**解析来的，记一下 —— 合成成功后要把它冻结
   let designRec = null;
   if (m === 'tts') {
     const wanted = resolvedVoice || String(cfg.defaultVoice ?? '').trim();
@@ -415,11 +421,11 @@ export async function synthesize({
         voiceRefPath = hit.samplePath;
         resolvedVoice = '';
       } else if (hit?.kind === 'design' && hit.description) {
-        // 【2026-09-18】冻结过就按 clone 走同一个锚点（音色才稳），没冻结才现设计
+        // 2026-09-18：冻结过就按 clone 走同一个锚点（音色才稳），没冻结才现设计
         const frozen = frozenSampleOf(hit);
         if (frozen) {
           m = 'clone';
-          /* 【2026-09-18 二修】老锚点（frozenFrom 不是 fixed-text）是"某一条回复的音频"，是弱锚点：
+          /* 2026-09-18 二修：老锚点（frozenFrom 不是 fixed-text）是"某一条回复的音频"，是弱锚点：
            * 它短、还带着那句话的情绪，而服务端会把**当前文本**也算进音色条件里（见 ANCHOR_TEXT 上方说明），
            * 于是每条不同文本都会把它拉出一点偏差 —— 这就是冻结生效之后仍在漂的那部分。
            * 这里补一次重建：换成固定锚点文本；重建成功立刻就用新的，失败/已试过就继续用旧锚点。
@@ -458,7 +464,7 @@ export async function synthesize({
   const cloneVoice = m === 'clone' ? toVoiceDataUrl(useVoice) : '';
   const styleText = String(style || cfg.style || '').trim();
 
-  /* 【2026-09-18 修「音色抖动」的关键日志】每次合成到底用了哪种模式、哪个参考样本、样本哈希是多少。
+  /* 2026-09-18 修「音色抖动」的关键日志：每次合成到底用了哪种模式、哪个参考样本、样本哈希是多少。
    * 线上连发三条语音，看这行就知道该怎么定论：
    *   · `样本sha1=` 三条完全一样 → 送出去的参考样本字节一致，"音色被换掉"这条排除，
    *     漂移只可能来自服务端按当前文本重新采样（见 ANCHOR_TEXT 那段说明）；
@@ -512,12 +518,12 @@ export async function synthesize({
   const buf = Buffer.from(b64, 'base64');
   if (!buf.length) throw new Error('语音服务返回的音频为空');
   fs.writeFileSync(filePath, buf);
-  /* 【2026-09-18 修「音色小幅漂移」】第一次按描述设计出来的音色，立刻把这段音频冻成参考样本，
+  /* 2026-09-18 修「音色小幅漂移」：第一次按描述设计出来的音色，立刻把这段音频冻成参考样本，
    * 之后每次合成都会走 clone 复用同一个锚点 —— 否则每次都是"重新设计一个音色"，必然轻微漂移。
    * 放在这里（而不是只放在 synthesizeWithSavedVoice）是因为全语音模式走的是 synthesize({text,cfg})
    * 这条直路，冻结必须在合成入口就发生。
    *
-   * 【2026-09-18 二修】锚点**不能再是"这条回复的音频"**：那条音频短、还带着这句话的情绪，
+   * 2026-09-18 二修：锚点**不能再是"这条回复的音频"**：那条音频短、还带着这句话的情绪，
    * 而服务端又把当前文本算进音色条件（见 ANCHOR_TEXT 上方说明）→ 弱锚点压不住，每条文本都把它拉偏一点。
    * 所以顺序改成：
    *   ① 先用**固定锚点文本**设计一段，冻成强锚点（与回复内容无关、长度足够、情绪中性）；
@@ -564,7 +570,7 @@ function sniffAudio(buf) {
 
 /**
  * 复刻模型的 audio.voice 必须是 **DataURL**，不能是裸 base64。
- * 【2026-09-15 实测踩到】给裸 base64 会直接被服务端拒：
+ * 2026-09-15 实测踩到：给裸 base64 会直接被服务端拒：
  *   `Param Incorrect: audio.voice must be a DataURL for voice clone model`（HTTP 400）。
  * 这里统一按样本头部字节推断 MIME（mp3/wav），已经带 data: 前缀的原样放行。
  */
@@ -655,7 +661,7 @@ export function listVoices() {
       sampleBytes: Number(v.sampleBytes) || 0,
       hasSample: Boolean(v.samplePath && fs.existsSync(v.samplePath)),
       createdAt: v.createdAt ?? '',
-      // 【2026-09-18】锚点状态：管理端「语音」页看一眼就知道这个音色的参考样本是什么时候、按哪种方式冻的
+      // 2026-09-18：锚点状态：管理端「语音」页看一眼就知道这个音色的参考样本是什么时候、按哪种方式冻的
       // （fixed-text = 固定锚点文本，音色最稳；reply-audio = 某条回复的音频，属弱锚点，下次合成会自动重建）
       frozenAt: v.frozenAt ?? '',
       frozenFrom: v.frozenFrom ?? '',
@@ -712,7 +718,7 @@ export function deleteCustomVoice(id) {
   const [gone] = lib.voices.splice(idx, 1);
   if (gone?.samplePath) { try { fs.unlinkSync(gone.samplePath); } catch {} }
   atomicWriteJson(VOICE_LIB_FILE, lib);
-  // 【2026-09-15 修】删掉的正好是当前默认音色时，把默认音色退回内置的冰糖：
+  // 2026-09-15 修：删掉的正好是当前默认音色时，把默认音色退回内置的冰糖：
   // 否则默认音色指向一个已不存在的自建音色，之后每次合成都报「Unknown voice」。
   const cfg = voiceConfig();
   const def = String(cfg.defaultVoice ?? '');
@@ -723,10 +729,10 @@ export function deleteCustomVoice(id) {
   return { ok: true };
 }
 
-/* ── 【2026-09-18 修「每次发送的语音音色有小幅漂移」】────────────────────────────
+/* ── 2026-09-18 修「每次发送的语音音色有小幅漂移」：────────────────────────────
  * 根因（子代理复核过代码链路）：
  *   · `design`（文字设计）型音色是**每次调用现设计一个音色** —— 同一段描述两次合成，
- *     服务端内部有随机性，音色就会轻微漂移。而主人的默认音色正是自建 design 音色，
+ *     服务端内部有随机性，音色就会轻微漂移。而当前默认音色正是自建 design 音色，
  *     全语音模式下每条回复都重新设计一次，漂移最明显。
  *   · `cacheKeyFor()` 把 `text` 也算进 key，所以只有"同一句话"才命中缓存，换个说法必然重新合成。
  *   · `clone`（音频复刻）有参考音频当锚点，天然稳得多。
@@ -861,7 +867,7 @@ export function unfreezeVoice(id) {
 }
 
 // ── 全语音发送模式（voice-config.json 的 send.allVoice）────────────────────────
-// 主人要的：开关一开，机器人的回复**一律以语音发出**，不再发文字。
+// 需求：开关一开，机器人的回复**一律以语音发出**，不再发文字。
 //
 // 为什么由**桥**来转，而不是只在提示词里写一句"本轮必须用语音"：
 //   提示词是软约束，模型会不照办（本文件上面那条「默认音色被模型自己换成冰糖」就是同一类问题）。
@@ -945,16 +951,16 @@ export async function tryAllVoiceReply(key, text, { replyToMessageId = null, has
     return { ok: true, messageId: out.messageId, bytes: out.bytes, cached: synth.cached === true, text: plan.text };
   } catch (error) {
     const reason = String(error?.message ?? error).replace(/\s+/g, ' ').slice(0, 200);
-    // ⚠️ 注意：与文字通道同一类风险 —— 请求报错不代表绝对没送出去（超时可能已送出），
+    // 注意：与文字通道同一类风险 —— 请求报错不代表绝对没送出去（超时可能已送出），
     // 这里仍然退回文字。极少数情况下对方会同时看到一条语音和一条文字；
-    // 相比"整条消息消失"，这个方向的代价是主人明确要的（不丢消息优先）。
+    // 相比"整条消息消失"，这个方向的代价是明确认可的（不丢消息优先）。
     log(`[voice] 全语音模式：语音发送失败，退回文字（原因：${reason}）`);
     return { ok: false, reason };
   }
 }
 
 // ── 「文字里掺着发语音」的抽签 ────────────────────────────────────────────────
-// 主人要求：提示词里写成「文字和语音掺着发」，并且发语音的**概率可配置**。
+// 约定：提示词里写成「文字和语音掺着发」，并且发语音的**概率可配置**。
 // 实现选择：不让模型自己去猜概率（那要多花一轮思考、而且判得很飘），而是桥这边每次唤醒掷一次骰子，
 // 把结果当**数据行**写进唤醒提示词（[Voice] dice HIT/MISS + 概率 + 默认音色），模型照着办。
 // 掷骰与冷却的具体实现抽在 core/send-dice.js 里，表情包用的是同一套（只是 kind 不同）。
@@ -969,12 +975,12 @@ export function noteVoiceSent(key) {
  * 唤醒提示词里的一行语音数据（英文，与 preset 的英文指令框架一致）。
  * 语音未启用时返回 ''（一字符都不注入）。
  *
- * 【2026-09-16 修「我设了自定义音色，它却一直用内置冰糖」】主人 09-16 报：默认音色已经设成自建的
+ * 2026-09-16 修「我设了自定义音色，它却一直用内置冰糖」：2026-09-16 反馈：默认音色已经设成自建的
  * 「20岁女大音色」，发出来的还是冰糖。查日志与工具调用记录，根因是**模型自己显式传了内置音色**：
  *   04:17:44 [voice] 语音合成 完成：14 字 → 21336 字节（音色=冰糖）
- * 提示词里只有 HIT 那一支会带音色名，MISS 支不带 → 模型在"主人让我多说语音"这种场景下自己挑了一个
+ * 提示词里只有 HIT 那一支会带音色名，MISS 支不带 → 模型在"被要求多说语音"这种场景下自己挑了一个
  * 它认识的内置音色（冰糖）。现在**两支都把默认音色名带上**，并在 preset/工具描述里明确：
- *   省略 voice = 用主人配的默认音色；除非有人点名要某个音色，否则不要自己指定。
+ *   省略 voice = 用配置里的默认音色；除非有人点名要某个音色，否则不要自己指定。
  */
 export function voiceTurnHint(key) {
   const cfg = voiceConfig();
@@ -985,7 +991,7 @@ export function voiceTurnHint(key) {
   /* ── 全语音模式（send.allVoice）────────────────────────────────────────────
    * 桥侧本来就会把正文自动转成语音（tryAllVoiceReply），那为什么还要改提示词？
    * 因为**能合成**和**好意思听**是两回事：文字通道的正文可以几百字、带 markdown/链接/表情，
-   * 而这些要么超过 maxChars 被退回文字（主人看到的就是"开了全语音还在发文字"），要么念出来很怪。
+   * 而这些要么超过 maxChars 被退回文字（用户看到的就是"开了全语音还在发文字"），要么念出来很怪。
    * 所以这里只做一件事：把"本轮一律语音、说人话、一口气之内"交给模型，让它直接产出**可朗读的短句**；
    * 同时明确告诉它桥会兜底，**别自己再发一遍文字造成双发**。
    * 这一支**不掷骰**：全语音模式下概率与冷却是无关参数（见文件上方"关于 send.cooldownMs"的说明）。 */
@@ -996,7 +1002,7 @@ export function voiceTurnHint(key) {
   const { p, cooling, hit } = dice('voice', key, cfg.send?.probability ?? 0.2, cfg.send?.cooldownMs ?? 0);
   const cap = Math.min(60, Number(cfg.maxChars) || 60);
   if (hit) {
-    // 【2026-09-19】与表情同理：HIT 从"许可"改成"指令"（原文 you MAY → 实际常常抽了也不发）
+    // 2026-09-19：与表情同理：HIT 从"许可"改成"指令"（原文 you MAY → 实际常常抽了也不发）
     return `[Voice] dice HIT (p=${p}, default voice=${voiceName}): ADD ONE short voice bubble to this turn's reply (qq_send_voice) - text is still the carrier, never voice instead of the answer, never the same words twice, under ${cap} chars; skip it only if this line has nothing speakable in it.\n`;
   }
   const why = cooling ? 'cooldown' : 'dice MISS';
@@ -1041,7 +1047,7 @@ export async function sendVoiceToOneBot(key, filePath, { replyToMessageId = null
   // 换不出去就退回 base64:// —— 与图片/表情走的是同一套逻辑，避免各写一份。
   const fileArg = napcatImageFileArg(p, cfgRef);
   const segments = [];
-  /* 【2026-09-18 修「引用有框、框下面没内容」】语音**不带 reply 段**。
+  /* 2026-09-18 修「引用有框、框下面没内容」：语音**不带 reply 段**。
    * 实测（线上 16:14–16:15，全语音模式）：QQ 渲染不了 `[{type:'reply'},{type:'record'}]` ——
    * 引用框在、语音没了；内核消息表里那几条也正是 `[reply+record]`。
    * 只有把 `social.send.quoteMode` 显式设成 `native`（老行为）才保留这个组合。 */
@@ -1075,7 +1081,7 @@ export async function sendVoiceToOneBot(key, filePath, { replyToMessageId = null
     }
   }
   if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) {
-    /* 【2026-09-18 线上实测】EventChecker Failed = 语音**已经发出去**了。
+    /* 2026-09-18 线上实测：EventChecker Failed = 语音**已经发出去**了。
      * 旧代码在这里抛错 → sendMessages 判定"语音发送失败"→ 原地退回文字再发一遍，
      * 于是每条回复都变成"语音 + 文字"两份。现在按已送达处理。
      * 详见 lib/onebot-delivery.js。 */
@@ -1145,7 +1151,7 @@ export async function fetchVoiceFromMessage(messageId) {
 //     ↔ 容器 /app/napcat/config/moonbot-tmp），传容器内路径 → 发送成功（message_id 已回）；
 //  5) 取回别人发来的语音：get_msg 的 record 段 {file, path, url} → get_record{file,out_format:'mp3'}
 //     返回容器内 mp3 路径 → docker cp 取回宿主 → ASR 识别成功。
-//  6) 【2026-09-15 补】音色复刻（clone）：样本必须用 DataURL 传 audio.voice，裸 base64 会被
+//  6) 2026-09-15 补：音色复刻（clone）：样本必须用 DataURL 传 audio.voice，裸 base64 会被
 //     400 拒（Param Incorrect: audio.voice must be a DataURL for voice clone model）；
 //     改成 DataURL 后复刻成功，把复刻出的音频再喂给 ASR 能识别回原文。
 //  验证脚本留在 _diag/（mimo-voice-verify.py / qq-voice-send-verify.py / qq-voice-inbound-verify.py /

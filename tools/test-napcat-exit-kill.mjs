@@ -1,23 +1,23 @@
 /* 回归测试：【关闭界面时结束 NapCat】开关（instances.napcatLocal.killOnExit）的退出收尾行为
- *   （主人 2026-09-18 要求："napcat配置界面加一个本地启动后关闭界面终结napcat进程的选项，支持自由开关"）
+ *   （2026-09-18：napcat 配置界面加一个"本地启动后、关闭界面就终结 napcat 进程"的选项，且要能自由开关）
  *
- * ⚠️ 这个测试**绝不碰真 NapCat、真 QQ，也不读主人的真配置**，做法是三件"假的"套在一起：
- *   · **假 NapCat**：把 node.exe 硬链接成 `NapCatWinBootMain.exe` 放进"假 OneKey 目录" —— 进程名与真 NapCat
+ * 这个测试绝不碰真 NapCat、真 QQ，也不读用户真实的配置，做法是三件"假的"套在一起：
+ *   · 假 NapCat：把 node.exe 硬链接成 `NapCatWinBootMain.exe` 放进"假 OneKey 目录" —— 进程名与真 NapCat
  *     同名，于是"按进程名 + 路径前缀匹配"那套逻辑可以原样跑通，但它不会登录任何 QQ；
- *   · **假 HOME**：给子进程喂 USERPROFILE/HOME=临时目录 → `os.homedir()` 指过去 → 配置
+ *   · 假 HOME：给子进程喂 USERPROFILE/HOME=临时目录 → `os.homedir()` 指过去 → 配置
  *     （~/.qq-bridge-manager/config.json）、托管目录（~/Downloads/NapCat.Shell.Windows.OneKey）全在临时目录里；
- *   · **假运行时根目录**：把 server/index.js 与 server/deploy.js 复制到临时目录再导入 →
+ *   · 假运行时根目录：把 server/index.js 与 server/deploy.js 复制到临时目录再导入 →
  *     `RUNTIME_ROOT`（= index.js 的上级目录）也指向临时目录，于是 `findNapcatOneKeyAll()` 里
- *     "仓库里的 napcat-onekey / 本机已安装的 MoonBot"那些**真实候选目录一个都不会被扫到**。
+ *     "仓库里的 napcat-onekey / 本机已安装的 MoonBot"那些真实候选目录一个都不会被扫到。
  *     这一层是必须的：第二档兜底是按"托管目录前缀"直接 Stop-Process 的，若托管目录里混进真 OneKey 目录，
- *     而主人恰好正跑着 NapCat，跑一次测试就会把真进程收掉（第一版测试就写出了这个隐患，现已堵死）。
+ *     而用户恰好正跑着 NapCat，跑一次测试就会把真进程收掉（第一版测试就写出了这个隐患，现已堵死）。
  *   再加上 `QBM_NO_LISTEN=1`：不监听端口、不自动武装守卫、不自动拉起任何实例，
  *   只借用它的 process.on('exit') 收尾逻辑（那正是"管理器进程退出"这条路径本身）。
  *
  * 覆盖：
  *   ① 开关开 + 本进程拉起过（登记了 pid）→ 退出时假 NapCat 被精确收掉（taskkill /pid /T /F）
- *   ② 开关关 → 退出时一根手指都不碰，假 NapCat 必须还活着（主人要求：关着 = 保持不影响的现状）
- *   ③ 开关开但**本次没拉起过** → 也要一根手指都不碰（否则会误杀用户在同一个 OneKey 目录里自己启动的那份）；
+ *   ② 开关关 → 退出时一根手指都不碰，假 NapCat 必须还活着（约定：关着 = 保持不影响的现状）
+ *   ③ 开关开但本次没拉起过 → 也要一根手指都不碰（否则会误杀用户在同一个 OneKey 目录里自己启动的那份）；
  *      这一条特意把"假 OneKey 目录里真的跑着一个 NapCatWinBootMain"摆在面前：代码一旦走错就会咬钩
  *   ④ 开关开、拉起过但没登记到 pid → 走第二档"按 OneKey 目录前缀兜底"（启动后几秒就被关掉的情形）
  *   ⑤ 守卫的 --kill-napcat 0：只跳过 NapCat，桥 / 隔离 DSH 的清理照旧（开关不该顺手废掉守卫本职）

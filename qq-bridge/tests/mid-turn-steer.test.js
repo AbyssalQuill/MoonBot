@@ -1,16 +1,16 @@
-// 回归测试：【模型正在思考时收到的消息必须注入当前这一轮，不许被塞进下一个唤醒】
+// 回归测试：模型正在思考时收到的消息必须注入当前这一轮，不许被塞进下一个唤醒。
 //（2026-09-16 真机 bug；只覆盖 qq-bridge/**，不动 src/**、server/**）
 //
 // 现场（bridge.log / 管理端 bridge-local.log，UTC）：
 //   14:05:39 消息在模型还在跑这一步时到达 → 打字闸门判"等" → 在途注入被推迟 →
 //   14:05:40 投递时要么"没有正在跑的模型回合"、要么调用方把"推迟"读成"塞不进去" →
 //            `[default] 会话繁忙且即时注入未成功 → 走正常唤醒流程` + `唤醒 private:***（private）`
-//            + `首次唤醒，注入完整 prompt` —— 一条在途消息被当成**下一个唤醒**投出去。
+//            + `首次唤醒，注入完整 prompt` —— 一条在途消息被当成下一个唤醒投出去。
 //
 // 本测试用 mock 的 DSH api 驱动真实的 src/core 模块（绝不动真配置/真状态），覆盖三条路径：
-//   ① 模型还在生成、这一轮一条都还没发出去 → **注入当前轮**（不是 defer、更不是下一轮）；
-//   ② 本回合已发过气泡 + 对方在连发 → 允许**短暂**推迟，但打字窗一结束必须**在同一轮内补投**；
-//   ③ 极端情况（注入通道失败 / 补投时回合已经跑完）→ 消息**不被吞**、明确落到下一轮、日志写明原因。
+//   ① 模型还在生成、这一轮一条都还没发出去 → 注入当前轮（不是 defer、更不是下一轮）；
+//   ② 本回合已发过气泡 + 对方在连发 → 允许短暂推迟，但打字窗一结束必须在同一轮内补投；
+//   ③ 极端情况（注入通道失败 / 补投时回合已经跑完）→ 消息不被吞、明确落到下一轮、日志写明原因。
 // 三条路径各自必须各留一行日志（`注入当前轮` / `短暂延迟后注入` / `只能留到下一轮`），测试里逐条断言。
 //
 // 用法：node tests/mid-turn-steer.test.js
@@ -32,7 +32,7 @@ fs.writeFileSync(path.join(sandbox, 'config.json'), JSON.stringify({
   dsh: { baseUrl: 'http://127.0.0.1:10721' },
   social: {
     steerEnabled: true,
-    // 主人私聊的线上配置：turn-hold 打开、全部私聊
+    // 线上私聊配置：turn-hold 打开、全部私聊
     turnHold: { enabled: true, keys: [], privateOnly: true, maxExchanges: 24, idleCloseMs: 1800000, maxWaitMs: 3600000, requestBudgetMs: 55000 },
     // 打字等待：骰子写 0（绝不插话）→ "该不该推迟"完全由本测试的输入决定，不受随机影响；
     // holdMaxMs 压到 1000 让"短暂延迟"的补投在 1s 内发生（省测试时间，语义不变）。
@@ -116,7 +116,7 @@ const push = (text, typingMs = 1200) => {
   st.unread.push(row);
   st.recentMessages.push(row);
   st.lastUnreadSeq = Math.max(Number(st.lastUnreadSeq) || 0, seqNo);
-  // 【关键】QQ 的 input_status 不可靠，social-flow 会**用消息本身**续上"对方在打字"的窗口
+  // 关键：QQ 的 input_status 不可靠，social-flow 会用消息本身续上"对方在打字"的窗口
   //（refreshOnMessageMs 默认 5s）—— 所以任何一条消息到达时，"打字闸门"看着都像"正在输入"。
   st.peerTypingUntil = Date.now() + typingMs;
   st.peerTypingSince = Date.now();
@@ -180,7 +180,7 @@ check('①-b 合并窗仍是私聊的 1s（不落回"唤醒窗口 5.4s"那种 12
 if (st.pendingWakeTimer) { clearTimeout(st.pendingWakeTimer); st.pendingWakeTimer = null; st.pendingWakeReason = null; }
 
 console.log('=== ② 本回合已发过气泡 + 对方在连发 → 短暂推迟，打字窗一结束在同一轮内补投 ===');
-// 这里把 turn-hold 关掉，专门考"非保持托管"这条最坏的路：它的回合里**没有**保持循环/步边界注入器，
+// 这里把 turn-hold 关掉，专门考"非保持托管"这条最坏的路：它的回合里没有保持循环/步边界注入器，
 // 推迟之后以前根本没有任何同一轮内的补投路径（只能等下一次唤醒）—— 现场那几次"被塞进下一个唤醒"就是它。
 cfg.social.turnHold.enabled = false;
 stateMod.holdActiveKeys.delete(KEY);
@@ -234,7 +234,7 @@ const m4 = push('第四条：补投时回合已经没了', 5000);
 const before4 = sent.length;
 const r4 = await wakeMod.steerIntoRunningTurn(KEY, 'private');
 check('③-b 先拿到"推迟"信号', r4 === 'typing-defer', String(r4));
-// turn-guard.js 的隔离/标记过期清理就是**只删回合标记**（不调 clearSteerPending），线上真的会发生
+// turn-guard.js 的隔离/标记过期清理就是只删回合标记（不调 clearSteerPending），线上真的会发生
 endTurn();
 st.peerTypingUntil = 0;
 const fell4 = await waitFor(() => hasLog(/只能留到下一轮（原因：延后补投未成功、这一轮已经跑完）/), 4000);

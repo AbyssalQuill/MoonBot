@@ -1,7 +1,7 @@
-/* 回归测试：【管理器启动时把守卫武装起来】——用一棵**隔离的假安装树**验证产品代码路径，
+/* 回归测试：【管理器启动时把守卫武装起来】——用一棵隔离的假安装树验证产品代码路径，
  *   不碰真安装、不碰真 NapCat/DSH/桥（假树的 config 里 dsh 端口写成 19999、NapCat 目录为空）。
  *
- * 为什么需要它：真机上"应用关闭 → NapCat 关闭"要等主人关一次窗口才能验；而"有没有武装成功、
+ * 为什么需要它：真机上"应用关闭 → NapCat 关闭"要等用户关一次窗口才能验；而"有没有武装成功、
  * 守卫进程跑的是不是另一个 exe 路径、guard 文件写没写对"这些是可以离线验的，且正是最容易写错的地方。
  *
  * 用法：node tools/test-guardian-arming.mjs
@@ -30,8 +30,8 @@ async function main() {
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 首次运行 */ }
   fs.mkdirSync(path.join(runtime, 'server'), { recursive: true });
   fs.mkdirSync(path.join(runtime, 'qq-bridge', 'src'), { recursive: true });
-  /* 【2026-09-19 修「这项检查一直是红的」】原来只单独拷 index.js / deploy.js / napcat-guardian.mjs ——
-   * 而 index.js 是**静态 import 同目录兄弟文件**的（deploy.js、iso-credential.js、napcat-repair.js …），
+  /* 2026-09-19 修「这项检查一直是红的」：原来只单独拷 index.js / deploy.js / napcat-guardian.mjs ——
+   * 而 index.js 是静态 import 同目录兄弟文件的（deploy.js、iso-credential.js、napcat-repair.js …），
    * 后来新增的 iso-credential.js 没被拷进去，隔离管理器一启动就
    * `ERR_MODULE_NOT_FOUND: .../iso-credential.js`，于是①就失败了（与守卫逻辑无关）。
    * 现在整目录拷贝：以后再加兄弟文件也不会漏。 */
@@ -54,7 +54,7 @@ async function main() {
     },
   }, null, 2), 'utf8');
 
-  // 用**与假安装树同盘**的解释器来跑管理器，才能复现产品的硬链接条件
+  // 用与假安装树同盘的解释器来跑管理器，才能复现产品的硬链接条件
   // （产品里 execPath 就是安装树里的 qbm-node.exe，和链接目标必然同盘）。
   const qbmNode = path.join(DRIVE + '\\', 'MoonBot', 'resources', 'runtime', 'qbm-node.exe');
   const interp = fs.existsSync(qbmNode) ? qbmNode : process.execPath;
@@ -106,7 +106,7 @@ async function main() {
   check('③ 管理器日志写明"已武装"', /已武装/.test(armed), armed);
   check('③ 日志里带上了 exe 路径与托管目录数', /guard-node\.exe|node\.exe/.test(armed) && /托管目录=\d+ 个/.test(armed), armed);
 
-  // 收尾：**先杀守卫再杀管理器**，避免守卫按"父进程没了"去真收东西（本测试用的是隔离目录+假端口，但仍不出手更稳）
+  // 收尾：先杀守卫再杀管理器，避免守卫按"父进程没了"去真收东西（本测试用的是隔离目录+假端口，但仍不出手更稳）
   if (guardPid) { try { process.kill(guardPid); } catch {} }
   await sleep(300);
   manager.kill();

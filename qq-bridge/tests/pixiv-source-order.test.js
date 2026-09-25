@@ -1,10 +1,10 @@
 // Pixiv 来源优先级（官方 app-api 优先，镜像站只做兜底）离线自测。
 // 跑法：node tests/pixiv-source-order.test.js
 //
-// 为什么要有它（2026-09-20 主人要求"官方 pixiv API 优先，镜像站只做兜底"）：
-//   来源顺序写错的后果**在线上完全看不出来** —— 镜像站也能给出正确的图，只是慢、还会偶发超时；
+// 为什么要有它（2026-09-20 需求："官方 pixiv API 优先，镜像站只做兜底"）：
+//   来源顺序写错的后果在线上完全看不出来 —— 镜像站也能给出正确的图，只是慢、还会偶发超时；
 //   "有没有偷偷联系第三方"更是完全静默的（凭证泄露也就这么发生了）。
-//   所以这里用假 fetch 记录**每一次请求的主机名与请求头**，把顺序、回退、凭证边界、归一化全钉住。
+//   所以这里用假 fetch 记录每一次请求的主机名与请求头，把顺序、回退、凭证边界、归一化全钉住。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,7 +22,7 @@ delete process.env.QQBRIDGE_PIXIV_COOKIE;
 
 fs.rmSync(TMP_DIR, { recursive: true, force: true });
 fs.mkdirSync(TMP_DIR, { recursive: true });
-// 一份"还有一小时有效期"的 access_token：让 app-api 那条路可走，且**不需要任何刷新请求**。
+// 一份"还有一小时有效期"的 access_token：让 app-api 那条路可走，且不需要任何刷新请求。
 fs.writeFileSync(process.env.QQBRIDGE_PIXIV_TOKEN_PATH, JSON.stringify({ v: 1, access_token: 'A-test-token', expires_at: Date.now() + 3600_000, refresh_token: '' }));
 
 const { pixivSearch, pixivIllustDetail, pixivIllustOriginals, pixivUserWorkIds, resolvePixivAuthor, pixivBase } =

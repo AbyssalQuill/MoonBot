@@ -1,23 +1,23 @@
 // src/core/context-savings.js — 「上下文剪枝省了多少」的实测计量（2026-09-19）
 //
-// 为什么要有这个模块：主人问「永久会话 + 工具历史剪枝到底省了多少 token，用你自己的实测数据量化对比」。
-// 面板里的用量是**实测**的（提供方 usage 帧），所以节省量也必须是实测的，不能拿字符数估。
+// 为什么要有这个模块：需求是「永久会话 + 工具历史剪枝到底省了多少 token，用实测数据量化对比」。
+// 面板里的用量是实测的（提供方 usage 帧），所以节省量也必须是实测的，不能拿字符数估。
 //
 // ── 数据从哪来（为什么不走事件流）──────────────────────────────────────────────
-// 第一版走桥的 mux 事件流（compaction/prune 帧 + step/start 帧）。真机验证发现**不可行**：
-// 官方 rc.1 没有全局广播，桥是**逐会话** open session/follow（见 dsh-client.js 顶部注释），
+// 第一版走桥的 mux 事件流（compaction/prune 帧 + step/start 帧）。真机验证发现不可行：
+// 官方 rc.1 没有全局广播，桥是逐会话 open session/follow（见 dsh-client.js 顶部注释），
 // 只 follow 自己映射的会话；而且这种"仅日志事件"能不能经 follow 投递没有保证。
-// 现在改成**读会话日志**（DSH 自己落的权威记录）：<dshHome>/sessions/<slug>/<sessionId>/session.jsonl.zstd。
+// 现在改成读会话日志（DSH 自己落的权威记录）：<dshHome>/sessions/<slug>/<sessionId>/session.jsonl.zstd。
 // 每条 compaction/prune 都带 shadowedSeqs + shadowedTokenCount，日志里还完整留着每个 step/start
 // （= 一次模型请求）的 seq 与时间 —— 于是两个量都能精确算出来：
 //   ① prunedTokens = Σ shadowedTokenCount（被从上下文里剪掉多少 token）
-//   ② rereadSaved  = Σ(某条被剪掉的量 × 它之后**同会话**里还发生过多少次请求)
+//   ② rereadSaved  = Σ(某条被剪掉的量 × 它之后同会话里还发生过多少次请求)
 //      —— 那些请求本来都要把这些内容重读一遍（计费 cacheRead），剪掉就不再付。
 //
 // ── 工程约束（都是真机踩出来的）───────────────────────────────────────────────
-//   · 会话日志是**多帧 zstd**（一帧一次 append），Node 的 zstdDecompressSync 只解第一帧 → 自己走帧结构拼；
+//   · 会话日志是多帧 zstd（一帧一次 append），Node 的 zstdDecompressSync 只解第一帧 → 自己走帧结构拼；
 //   · 全量扫一遍很贵（几百 MB），所以按 (mtime, size) 增量：只重读变过的日志，其余用上次的结果；
-//   · 结果是**从日志重算**出来的（幂等、可回填），不是累加器 —— 重复跑不会翻倍；
+//   · 结果是从日志重算出来的（幂等、可回填），不是累加器 —— 重复跑不会翻倍；
 //   · 每份日志只保留"最近 N 天有活动"的（默认 7 天），老的清出内存也清出状态文件。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -31,7 +31,7 @@ const STATE_FILE = 'context-savings.json';
 const DAY_OFFSET_ENV = 'QQ_TOKEN_DAY_OFFSET_MIN';
 const DEFAULT_DAY_OFFSET_MIN = 480;
 const DEFAULT_WINDOW_DAYS = 7;
-/* 状态文件格式版本：**统计字段一变就 +1**。
+/* 状态文件格式版本：统计字段一变就 +1。
  * 缓存按 (mtime,size) 判"文件没变就复用"，不改版本号的话，新加的字段对已缓存的老日志永远是 0
  * —— 真机踩过：加完 retryEvents，扫了 40 份日志全是"复用"，那个字段一直是 0。 */
 const STATE_VERSION = 3;
@@ -104,11 +104,11 @@ export function summarizeSessionLog(text) {
   }
   const steps = evs.filter((e) => e?.type === 'step/start').map((e) => ({ seq: Number(e.seq) || 0, time: Number(e.time) || 0 }));
   const prunes = evs.filter((e) => e?.type === 'compaction/prune');
-  /* 【2026-09-19 主人问"永久会话真的没问题吗，对话也会压缩吗"】摘要压缩（把最老一段聊天换成
+  /* 2026-09-19 问"永久会话真的没问题吗，对话也会压缩吗"：摘要压缩（把最老一段聊天换成
    * <compacted-summary>）是另一条路径，事件是 compaction/summary（同样带 shadowedTokenCount）——
    * 单独统计出来，面板就能如实说明"聊天被摘要过几次、盖掉了多少 token"。 */
   const summaries = evs.filter((e) => e?.type === 'compaction/summary');
-  /* 【2026-09-19 主人拿控制台对数】`llm/retry` = 一次尝试失败后重试：失败的尝试**提供方照计费**、
+  /* 2026-09-19 拿控制台对数：`llm/retry` = 一次尝试失败后重试：失败的尝试提供方照计费、
    * 但 DSH 不给 usage，所以面板会低这一块（真机：控制台 48,063,224 / 面板 47,919,388，差 143,836，
    * 同一天正好 2 条 llm/retry）。这里从日志里把次数数出来（可回填历史，不依赖"功能上线之后"）。 */
   const retries = evs.filter((e) => e?.type === 'llm/retry');
@@ -129,7 +129,7 @@ export function summarizeSessionLog(text) {
     prunedTotal += tokens;
     bump(billingKey(time), 'prunedTokens', tokens);
     bump(billingKey(time), 'pruneEvents', 1);
-    // 之后同会话的每一次请求都少读这么多；按**那次请求发生的那天**记账
+    // 之后同会话的每一次请求都少读这么多；按那次请求发生的那天记账
     for (const s of steps) {
       if (s.seq <= seq) continue;
       bump(billingKey(s.time), 'rereadSaved', tokens);
@@ -240,7 +240,7 @@ export async function reconcileContextSavings(opts = {}) {
       if (st.mtimeMs < cutoff) continue;
       seen.add(file);
       const prev = live.files.get(file);
-      /* 增量：文件没变就沿用上次结果。注意这里**不看 force** —— force 只用来跳过 TTL，
+      /* 增量：文件没变就沿用上次结果。注意这里不看 force —— force 只用来跳过 TTL，
        * 跳过文件缓存会让"面板每次刷新都把所有会话日志重读一遍"。 */
       if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) { reused += 1; continue; }
       try {

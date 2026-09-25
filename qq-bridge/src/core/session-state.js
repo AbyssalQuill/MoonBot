@@ -28,7 +28,7 @@ export const wakeConfigUpdatedKeys = new Set();
 export const markReadCalledKeys = new Set();
 export const wakeConfigMissCount = new Map();
 export const reverse = new Map(); // sessionId -> conv key
-// 【2026-09-11 turn-hold 补完】DSH **权威**运行状态：sessionId 在集合里 = DSH 自己说这个 agent 正在跑。
+// 2026-09-11 turn-hold 补完：DSH **权威**运行状态：sessionId 在集合里 = DSH 自己说这个 agent 正在跑。
 // 来源是事件流的 `host/session-status` 帧（dsh-host-apiproxy/lib/index.js:3699 由 agent/status 事件发出）。
 // 为什么需要它：桥以前只能靠 turn/start、turn/end 事件**推断**"回合在不在跑"，推不准正是当初 steer
 // 吞消息的根因（`isConversationBusy()` 为真 ≠ 模型回合在跑）。有了权威信号，"即时 steer"才有安全前提。

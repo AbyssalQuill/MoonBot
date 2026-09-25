@@ -49,8 +49,8 @@ export function parseClockMin(text) {
 /**
  * 格式化北京时间 YYYY-MM-DD 周X HH:MM（消息时间戳展示用）
  *
- * 【2026-09-20 定稿：给人看的时间保持分钟精度，不要秒】
- * 中途试过精确到秒（对齐 memory.db 的 chat_messages.ts），主人看完当场定稿"不需要带秒"：
+ * 2026-09-20：给人看的时间保持分钟精度，不要秒。
+ * 中途试过精确到秒（对齐 memory.db 的 chat_messages.ts），确认后定稿"不需要带秒"：
  * 唤醒正文里的每一行消息、[Status]、工具结果都会带时间，秒级数字只占字符不提信息量。
  * 需要"精确到毫秒"的只有一处 —— 唤醒的 `[Now]` 行，那里单独附 epochMs（见 wake-send.js），
  * 模型要算"多久之前"用 epochMs 减去消息行的 ts_ms 即可，不需要把秒铺满整段正文。

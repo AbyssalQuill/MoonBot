@@ -1,5 +1,5 @@
 // 功能冒烟：压缩文案之后，MCP server 仍能被拉起、工具仍能真正调用（不是只看 schema）。
-// 只调**只读**工具，避免动线上任何状态。
+// 只调只读工具，避免动线上任何状态。
 // 用法：node tools/test-mcp-tools-live.mjs
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -37,8 +37,8 @@ const st = await wait(10);
 const stText = st?.result?.content?.[0]?.text ?? '';
 check('qq_status 可调用且返回 JSON', /"(online|good|nickname|user_id)"/.test(stText), stText.slice(0, 120));
 
-// 只读：用主人私聊 token 查两条历史（limit=2，最小代价）
-// 主人 QQ 不写死在测试里（仓库要公开）：优先读线上 config.json 的 ownerQQ，
+// 只读：用 owner 私聊 token 查两条历史（limit=2，最小代价）
+// owner QQ 不写死在测试里（仓库要公开）：优先读线上 config.json 的 ownerQQ，
 // 读不到就退化到"social-state 里第一个私聊会话"，保证换人部署也能跑。
 let token = '';
 let ownerKey = '';

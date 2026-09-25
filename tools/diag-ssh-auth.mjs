@@ -39,7 +39,7 @@ const tryConnect = (server, password, label, privateKey = null) => new Promise((
   conn.connect({
     host: server.host, port: server.port || 22, username: server.username,
     password,
-    /* 【2026-09-23 修】原来这里**没有 privateKey** —— 于是"私钥认证"那条分支实际跑的是
+    /* 2026-09-23 修：原来这里**没有 privateKey** —— 于是"私钥认证"那条分支实际跑的是
      * "不带任何凭据"的握手，必然回 `All configured authentication methods failed`，
      * 把一把可用的密钥报成坏的（实测同一把钥匙走 deploy.connectOne 是 READY 的）。
      * 用户照着这个结论去换密钥/改 authorized_keys，真正的部署问题反而被掩盖。 */
@@ -71,7 +71,7 @@ for (const s of servers) {
     continue;
   }
 
-  // ⚠️ 默认只试一次：每次失败都是一次认证失败，服务器上的 fail2ban 很容易因此把本机 IP 封掉
+  // 默认只试一次：每次失败都是一次认证失败，服务器上的 fail2ban 很容易因此把本机 IP 封掉
   // （2026-09-12 实测：三个变体试完，几分钟后连 TCP 都超时了）。要逐个变体试，显式加 --variants。
   const variants = process.argv.includes('--variants')
     ? [

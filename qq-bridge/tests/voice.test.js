@@ -150,7 +150,7 @@ t('群聊语音：走到 send_group_msg，报文里是 record 段 + group_id', a
   }
 });
 
-/* 【2026-09-20 按现契约改写】这条原来断言"带引用时先加 reply 段" —— 那是 `quoteMode=native` 的老行为。
+/* 2026-09-20 按现契约改写：这条原来断言"带引用时先加 reply 段" —— 那是 `quoteMode=native` 的老行为。
  * 现契约（voice.js:1044 那段注释，线上实测）是：语音**默认丢弃引用段**（QQ 渲染不了 [reply+record]，
  * 会变成"有引用框、没语音"的空气泡），只有把 social.send.quoteMode 显式设成 native 才保留。
  * 旧断言留着会让 npm run check 一直红，所以拆成两条：默认 = 只发 record；native = 才先 reply。 */

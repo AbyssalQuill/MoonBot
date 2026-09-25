@@ -35,7 +35,7 @@ let lastLookupResyncAt = 0;
 
 /**
  * 「查不到这个表情 id → 强制全量同步一次再查」的节流版。
- * 【2026-09-15】实测模型并列调用 3 个表情工具、每个都"找不到"就各触发一次强制全量同步
+ * 2026-09-15：实测模型并列调用 3 个表情工具、每个都"找不到"就各触发一次强制全量同步
  * → 1 秒内 4 次 fetch_custom_face，白打 NapCat 4 次。30s 内已经强制同步过就直接用现有库。
  * 只用于**查找失败后的兜底重查**；收藏流程（collectSticker2）必须拿到最新库，不走这里。
  */
@@ -174,7 +174,7 @@ export async function syncStickerLibrary(force = false) {
         name: String(src.name ?? src.emojiName ?? src.emoji_name ?? '').slice(0, 60)
       };
     }).filter(Boolean);
-    // 【2026-09-12 修「收藏表情库被清空」】NapCat 刚重启/QQ 缓存还没就绪时，`fetch_custom_face` 会
+    // 2026-09-12 修「收藏表情库被清空」：NapCat 刚重启/QQ 缓存还没就绪时，`fetch_custom_face` 会
     // **成功地返回空数组**（不是报错）。而下面的 `mergeStickerLibrary` 语义是"以 fetch 到的为准"，
     // 于是空数组会把本地整库抹掉 —— 实测 2026-09-12 01:29:57 启动时 19 条收藏表情被清成 0 条，
     // 之后再没有自动恢复（同步有 TTL，且只有在被调用时才会跑）。
@@ -274,7 +274,7 @@ export async function sendSticker2(key, stickerRef, options = {}) {
       log(`[sticker] 收藏表情原图下载失败 ${entry.id}（将改用 URL 直发兜底）: ${eImg?.message ?? eImg}`);
     }
     if (imgBuf && imgBuf.length > 0) {
-      // 【2026-09-15 修「表情包发不出去」】同样不能把宿主临时路径原样交给 NapCat（容器读不到）。
+      // 2026-09-15 修「表情包发不出去」：同样不能把宿主临时路径原样交给 NapCat（容器读不到）。
       const localFile = napcatImageFileArg(writeStickerTmpFile(imgBuf, imgMime), stickerCfg);
       segments.push({ type: 'image', data: { file: localFile, sub_type: 1 } });
     } else {
@@ -310,7 +310,7 @@ export async function sendSticker2(key, stickerRef, options = {}) {
         return { r, b };
       };
       let { r: res, b: body } = await post();
-      // 【2026-09-15 自愈】NapCat 读不到图片路径（服务器容器读不到宿主路径）→ 换 base64 重发一次。
+      // 2026-09-15 自愈：NapCat 读不到图片路径（服务器容器读不到宿主路径）→ 换 base64 重发一次。
       // 这个错误意味着整条消息没发出去，重发不会重复；配置配对时不会走到这里。
       const errText0 = `${body?.errMsg ?? ''} ${body?.wording ?? ''} ${body?.retcode ?? ''}`;
       if ((!res.ok || body.status !== 'ok' || body.retcode !== 0) && /文件处理失败|识别URL失败|ENOENT|no such file/i.test(errText0)) {
@@ -430,7 +430,7 @@ export function writeStickerTmpFile(buffer, extHint) {
   // add_custom_face 直接用返回的绝对路径读取。曾误用服务器 Docker 挂载路径
   // （/root/napcat/... ↔ /app/napcat/...），本机不存在 → ENOENT 收藏失败。
   //
-  // 【2026-09-15】反过来也踩过：把这个"本机路径"版本同步到服务器后，NapCat 在 Docker 里
+  // 2026-09-15：反过来也踩过：把这个"本机路径"版本同步到服务器后，NapCat 在 Docker 里
   // 读不到宿主路径，连表情都发不出去。所以落盘目录改为可配置：
   //   napcat.tmpDir 指向 **NapCat 容器的宿主挂载目录**（服务器：/root/napcat/config/moonbot-tmp）
   // 即可让两边都成立；发送侧再由 napcatImageFileArg 按 dockerPathMap 换成容器内路径。
@@ -521,7 +521,7 @@ export async function collectSticker2(key, messageRef, remark) {
     }
   }
   if (!tmpFile) throw new Error('无法获取该表情的图片源');
-  // 【2026-09-15】add_custom_face 只接受**本地文件路径**（传 base64 会 ENAMETOOLONG），
+  // 2026-09-15：add_custom_face 只接受**本地文件路径**（传 base64 会 ENAMETOOLONG），
   // 所以这里只做"宿主路径 → 容器路径"映射（服务器 NapCat 在 Docker 里，宿主路径它读不到）。
   file = rewriteToContainerPath(tmpFile, stickerCfg) || tmpFile;
   const maxRemarkChars = Math.max(1, Number(stickerCfg.social?.sticker?.collect?.maxRemarkChars) || 20);

@@ -65,7 +65,7 @@ DSH 存在两个不同的 DSH_HOME：
 两者是**完全独立的目录**，配置不互通。
 
 **关键差异**：
-1. 桌面端 cordis.patch.yml 缺少 `agent-presets` 插件注册 → AI 无法加载 default preset
+1. 桌面端 cordis.patch.yml 缺少 `agent-presets` 插件注册 → AI 无法加载 qq-chat preset（当时叫 default）
 2. 已安装 backend 的 host.schema.js 中 `home` 字段不是 optional → SDK 校验失败
 
 ### 3.2 修复措施

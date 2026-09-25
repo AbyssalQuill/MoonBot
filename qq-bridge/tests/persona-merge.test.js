@@ -1,6 +1,6 @@
 // 回归：人格学习"越学越短"不能覆盖旧的长档案
-// 【2026-09-20 现场】主人画像本来是几百字成文，一轮只交了 nickname 的学习把它写成了
-// `昵称「群魅魔/AbyssalQuill」。`（两个词）—— 旧文被整条覆盖，主人报"我以前是有的是不是被清除了"。
+// 2026-09-20 现场：人格画像本来是几百字成文，一轮只交了 nickname 的学习把它写成了
+// `昵称「群魅魔/AbyssalQuill」。`（两个词）—— 旧文被整条覆盖，报障"我以前是有的是不是被清除了"。
 // 跑法：node tests/persona-merge.test.js
 import assert from 'node:assert/strict';
 import { mergePersonaProfileText } from '../src/core/persona-learn.js';

@@ -8,9 +8,9 @@
 //   14:12:36 工具统一发送部分成功 1/2 条，已记录已发消息   ←「又不是猫娘」真的进群了(messageId 1275818397)
 //   14:12:47 模型把整批重发一遍（这次不带 @）
 //   14:12:49 工具统一发送: 成功 2/2 条                    ←「又不是猫娘」第二次进群(messageId 1430508901)
-//   14:13:10 主人在群里报障“好像在reset之后会重复回复一次”
+//   14:13:10 群里报障“好像在reset之后会重复回复一次”
 //
-// 根因：重复判定只有「整批第一条文本」且只在**整批成功**后才记账 → 部分失败后重发整批时，
+// 根因：重复判定只有「整批第一条文本」且只在整批成功后才记账 → 部分失败后重发整批时，
 //       已经送出去的那条没有账可挡，于是又发一遍。修法见 src/core/send-idempotency.js。
 //
 // 用法：node tests/reset-reply-idempotency.test.js
@@ -99,7 +99,7 @@ t('reset 不能把「已回复账本」带走（answeredMessageIds / 水位 / se
   assert.deepEqual(carried.patch.answeredMessageIds, ['444195792', '1574980149']);
   assert.equal(carried.patch.lastDeliveredSeq, 63);
   assert.equal(carried.patch._wakeIntendedSeq, 64);
-  // ⚠️ 关键坑：seq 计数器必须跟水位一起搬，否则 reset 后新消息 seq 从 1 重新数，
+  // 关键坑：seq 计数器必须跟水位一起搬，否则 reset 后新消息 seq 从 1 重新数，
   // 会被 lastDeliveredSeq=63 判成"早就交付过" → 机器人装死不回（比双发更严重）。
   assert.equal(carried.patch.lastUnreadSeq, 65);
   assert.equal(carried.patch._justAutoReset, true, '新会话首轮要带"刚换上下文、别重答旧话题"的提示');
@@ -111,7 +111,7 @@ t('reset 前后同一批消息：账本在模块级，reset 不清它 → 同一
   const batch = ['贴贴~ ᗜ - ᗜ'];
   // 会话重置前这批发了一半失败（典型：第一条成功、第二条失败）
   idem.noteBatchOutcome(PRIV, { attempted: [...batch, '那你呢'], delivered: batch, failed: [1] }, T0);
-  // reset（social.conversations.delete(key) 那一刀）：本模块是模块级状态，刻意**不**随会话状态清空，
+  // reset（social.conversations.delete(key) 那一刀）：本模块是模块级状态，刻意不随会话状态清空，
   // 所以重置后同一句不会再发一遍。
   const after = idem.filterAlreadySentBubbles(PRIV, batch, T0 + 30000);
   assert.equal(after.kept.length, 0, '重置后重发同一句必须被挡');

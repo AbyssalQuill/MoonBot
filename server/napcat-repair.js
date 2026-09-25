@@ -29,7 +29,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME_ROOT = path.resolve(HERE, '..');
 
 /** 从 napcat.mjs 文本里抠出所有"落地成文件"的相对导入。
- *  【2026-09-19 修漏】必须同时认**副作用导入**（`import "./x.js"`，没有 from）与**再导出**
+ *  2026-09-19 修漏：必须同时认**副作用导入**（`import "./x.js"`，没有 from）与**再导出**
  *  （`export … from "./x.js"`）—— 真机那个 `conout-*.js` 分片就是这种写法，
  *  只认 `from` 的正则会让检查器"看着通过、实际启动即崩"。 */
 export function relativeSpecifiers(text) {

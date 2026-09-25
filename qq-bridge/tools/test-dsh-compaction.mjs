@@ -3,7 +3,7 @@
 //        · compaction-basic：retainRatio < thresholdRatio
 //        · tool-result-pruner：headChars + 标记 + tailChars ≤ thresholdChars
 //   ② 写出来的 YAML 片段是 DSH 认的形状（同 id overlay + config 字段名一字不差）；
-//   ③ 合并进 cordis.patch.yml 时**只动标记之间那段**，用户自己的 overlay 一字不动；
+//   ③ 合并进 cordis.patch.yml 时只动标记之间那段，用户自己的 overlay 一字不动；
 //   ④ 幂等：同样的配置写第二遍返回 changed=false（不白写盘、不触发 DSH 无谓的 patch reload）；
 //   ⑤ 与真实 DSH 的常量对齐：标记字符串、默认值都要跟装的这版 dsh 对得上。
 import assert from 'node:assert/strict';
@@ -60,15 +60,15 @@ console.log('== ① 归一化：永远守住 DSH 的硬约束 ==');
     assert.equal(normalizeCompaction({}).enabled, true);
     assert.equal(normalizeCompaction({ enabled: false }).enabled, false);
   });
-  /* 【2026-09-22 第四次重算：门禁改成"实测口径"】
+  /* 2026-09-22 第四次重算：门禁改成"实测口径"。
    * 前三次（0.06 / 0.12 / 0.08）都在看"每次请求平均花费 vs 上下文大小"这个粗口径，把两类请求混在一桶：
    *   ① 常规步（前缀命中缓存，只按缓存价 ≈ 0.022 ¥/M 计费）；② 重建步（压缩/轮换/长时间空闲之后，
    *   整段上下文按未命中重读 ≈ ¥0.036 一次）。分开量之后结论反过来了：
    *     上下文 50~70k → ¥0.0033/次；70~90k → ¥0.0043；90~120k → ¥0.0040；120~160k → ¥0.0051
-   *   —— 上下文本体几乎不花钱，钱花在"重建次数 × 上下文"上，所以**少压缩才省钱**。
+   *   —— 上下文本体几乎不花钱，钱花在"重建次数 × 上下文"上，所以少压缩才省钱。
    *   模型（步数×(0.0020+0.022/M×平均上下文) + 每天重建次数×重建单价）：0.08 → ¥3.34/天、
-   *   0.12 → ¥2.67、**0.16 → ¥2.53**、0.18 → ¥2.53、0.25 → ¥2.66；稳健区间 0.14~0.20。
-   * 门禁因此改成：**下限**仍高于固定开销（否则每步压缩），**上限** 0.35（再高就等于不治理，
+   *   0.12 → ¥2.67、0.16 → ¥2.53、0.18 → ¥2.53、0.25 → ¥2.66；稳健区间 0.14~0.20。
+   * 门禁因此改成：下限仍高于固定开销（否则每步压缩），上限 0.35（再高就等于不治理，
    * 一旦上下文真的顶到 1M 会直接溢出），并要求缺省值落在实测最省区间内。复算：tools/compaction-threshold.mjs。 */
   const WINDOW = 1048576;
   const FIXED_OVERHEAD = 27500;    // system + 工具表，实测（旧值；压缩后实际更小，用它当保守下限）
@@ -108,7 +108,7 @@ console.log('\n== ② 生成的 YAML 是 DSH 认的形状 ==');
     assert.match(rows, /^- id: compaction-basic$/m);
     assert.match(rows, /^- id: tool-result-pruner$/m);
   });
-  /* 【关键回归】web profile 下 dsh-web-app 的 patch 把这两行设成 disabled: true ——
+  /* 关键回归：web profile 下 dsh-web-app 的 patch 把这两行设成 disabled: true ——
    * 少了 disabled: false，配置写得再对也一行不跑（真机复现过：配置对、压力超阈值，日志里 0 条 prune）。 */
   check('两行都带 disabled: false（web profile 里必须显式重新打开）', () => {
     assert.match(rows, /^- id: compaction-basic\n  disabled: false$/m);
@@ -136,7 +136,7 @@ console.log('\n== ② 生成的 YAML 是 DSH 认的形状 ==');
     const allowed = new Set(['auto', 'thresholdRatio', 'retainRatio', 'maxTokens', 'compactionRetries', 'maxOverflowRetries', 'summarizationProvider', 'summarizationModel', 'thresholdChars', 'headChars', 'tailChars']);
     for (const k of keys) assert.ok(allowed.has(k), `未知字段 ${k}`);
   });
-  /* 【2026-09-19 主人定稿：摘要一律用会话主模型】不再支持单独指定 summarizationProvider/Model
+  /* 2026-09-19 定稿：摘要一律用会话主模型，不再支持单独指定 summarizationProvider/Model
    * （单独换服务商 = 另一条额度 + 另一份缓存，实测省不下钱还多一处凭据）。
    * 老配置里若还留着这两个键，只提示、不写进 patch —— 这条断言就是钉住"别又把它写回去"。 */
   check('指定的摘要模型被忽略（统一用主模型），并且有提示', () => {

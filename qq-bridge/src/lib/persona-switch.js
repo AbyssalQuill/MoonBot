@@ -1,15 +1,15 @@
 /**
- * 人设切换：**写 `qq-bridge/persona.md` 的唯一公共实现**。
+ * 人设切换：写 `qq-bridge/persona.md` 的唯一公共实现。
  *
- * 【2026-09-22 主人报「不能切换人设 / skill 的 bug」·调查结论】
- *   模型侧**根本没有**写 persona.md 的路径：`qq_character_list/read/pack/search` 四个工具是纯只读；
+ * 2026-09-22 修「不能切换人设 / skill 的 bug」·调查结论
+ *   模型侧根本没有写 persona.md 的路径：`qq_character_list/read/pack/search` 四个工具是纯只读；
  *   旧的 `/role <名字>` 命令读的是 `qq-bridge/roles/<名字>.md` + `current-role.json` 那套老机制，
- *   而项目里 `roles/` 目录压根不存在 → 主人说"换成 XX 角色"，无论私聊还是群里都只会得到
+ *   而项目里 `roles/` 目录压根不存在 → 用户说"换成 XX 角色"，无论私聊还是群里都只会得到
  *   "角色「XX」不存在"（或模型在上下文里即兴演，轮换/压缩之后立刻掉回默认人格）。
  *
- * 这个模块把整件事收成一件事：**从角色库挑一张卡 → 合成 → 原子写 persona.md（带备份）**。
- *   入口一：桥侧斜杠命令 `/role <包名>`（`core/mux.js`，主人专用；私聊与群里都能用）
- *   入口二：桥 console 的 `POST /api/persona/switch`（给模型侧工具 `qq_character_switch` 用，带主人校验）
+ * 这个模块把整件事收成一件事：从角色库挑一张卡 → 合成 → 原子写 persona.md（带备份）。
+ *   入口一：桥侧斜杠命令 `/role <包名>`（`core/mux.js`，仅本人/owner 可用；私聊与群里都能用）
+ *   入口二：桥 console 的 `POST /api/persona/switch`（给模型侧工具 `qq_character_switch` 用，带 owner 校验）
  *
  * 生效链路（不需要重启、不打断在跑回合）：persona.md 的 `mtime:size` 版本号一变，
  * `core/wake-send.js` 在下一次唤醒时重新注入 `[PERSONA]`（见 wake-send.js 的 runtimeOverrideStamp
@@ -31,7 +31,7 @@ const BACKUP_KEEP = 5;
 
 /** 卡片合成顺序。**先放"最要紧的两份"**：SKILL.md（可演的完整定义）与 ULTIMATE_ROLEPLAY_PROMPT（终极扮演提示词），
  *  再是 personality / profile / interaction / relations / conflicts / memory。
- *  为什么是这个顺序：超过 16000 字节上限时是**按顺序截断**的，把这两份放前面，保证"台词与性格"永远在，
+ *  为什么是这个顺序：超过 16000 字节上限时是按顺序截断的，把这两份放前面，保证"台词与性格"永远在，
  *  被切掉的只会是更细的档案与记忆（响应里 truncated=true，模型也会收到一行截断说明）。 */
 const CARD_FILES = ['SKILL.md', 'ULTIMATE_ROLEPLAY_PROMPT.md', 'personality.md', 'profile.md', 'interaction.md', 'relations.md', 'conflicts.md', 'memory.md'];
 
@@ -170,9 +170,15 @@ function readText(p) {
   } catch { return null; }
 }
 
-/** 清空人设（回到默认人格）。 */
+/** 清空人设（回到默认人格）。
+ *
+ * 2026-09-24：以前这里写一句中文提示（「未启用角色卡：按默认人格与发言规则说话，不要再演任何角色。」）
+ * 进 persona.md —— 那段话会原样注入给模型，等于每轮都在叮嘱"别再演了"，既是废话也干扰演出。
+ * 现在清空就是真的清空（写空文件）：模型侧没有任何人设文本，由管理端在编辑框里用灰色占位词
+ * （You're a helpful assistant.）说明"当前为人设、即默认助手"，占位词只显示、不落盘。
+ */
 export function clearPersona() {
-  const text = '# PERSONA\n（未启用角色卡：按默认人格与发言规则说话，不要再演任何角色。）\n';
+  const text = '';
   const backup = backupPersona();
   atomicWriteText(PERSONA_PATH, text);
   return { ok: true, cleared: true, bytes: Buffer.byteLength(text, 'utf8'), backup };

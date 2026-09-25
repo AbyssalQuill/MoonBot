@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { withTimeout, sleep } from '../lib/async.js';
 import { log } from '../lib/log.js';
-import { enqueueSend, currentSendChain, setSendLinearCfgReader, nextSendPaceMs, markSendDelivered, resetSendPace } from './send-chain.js';
+import { enqueueSend, currentSendChain, setSendLinearCfgReader, nextSendPaceMs, typingDelayMs, markSendDelivered, resetSendPace } from './send-chain.js';
 import { getSocialState } from './social-state.js';
 import { activeAiTurns } from './session-state.js';
 import { recordAiTurnOutbound } from './turn-guard.js';
@@ -17,7 +17,7 @@ import { writeStickerTmpFile } from './sticker.js';
 import { napcatImageFileArg } from '../lib/napcat-file.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from '../lib/onebot-delivery.js';
 // 全语音发送模式（state/voice-config.json 的 send.allVoice）：回复正文改语音发出、失败退回文字。
-// 放在这里是因为本文件是**模型回复正文**的唯一出口（sendMessages → onebotSend）；
+// 放在这里是因为本文件是模型回复正文的唯一出口（sendMessages → onebotSend）；
 // 开关关闭时 tryAllVoiceReply 是空转（不打日志、不发请求），老用户行为不变。
 import { tryAllVoiceReply } from './voice.js';
 
@@ -46,21 +46,17 @@ export function sendToQQ(key, msg) {
   if (!safeMsg) return currentSendChain();
   const [kind, id] = key.split(':');
   const parts = splitForQQ(safeMsg);
+  // 这次调用 = 一次新的连发批：清掉上几轮攒下的连续发送计数，批内第 1 条秒回、第 2 条起按字数等。
+  // （本函数只服务于桥自己的通知/命令回执；模型走的是 sendMessages —— 那条路是"内置线性延迟"，见下。）
+  resetSendPace(key);
   let partIndex = 0;
   for (const part of parts) {
     const isFirst = partIndex++ === 0;
     enqueueSend(async () => {
-      // 发送线性节拍：pace=null 表示线性关闭 → 保留旧 sendDelayMs 尾部停顿；否则按会话连续计数线性等
-      //
-      // 【2026-09-12 加速】同一条回复的**第一条**不再等节拍（isFirst → 0）。
-      // 线性节拍的本意写在本文件顶部注释里："唤醒/首轮即时，首条 n=0 → base（默认 0 → 秒醒，不延迟）"，
-      // 它要管的是"这一条回复内部、分条之间的真人打字节奏"。但计数器 n 是**按整个会话**累加的
-      // （只有静默超过 linearResetMs 才归零），于是热聊时 n 早早顶到 cap，**每条回复的第一条气泡
-      // 也要先干等最多 1.5 秒**——实测 245 次 qq_send_message 调用**全部是单条调用**，
-      // 也就是说那 1.5 秒纯属白等（NapCat 自身 RTT 实测只有 18ms）。
-      // 改成首条 0 → 模型一决定回，气泡立刻出；第 2 条起按"这条自己打完要多久"等（perChar 模式）。
+      // 发送线性节拍：pace=null 表示线性关闭 → 保留旧 sendDelayMs 尾部停顿；否则按会话连续计数线性等。
+      // 首条 0 → 通知立刻出；第 2 条起按"这条自己打完要多久"等（perChar 模式）。
       const pace = isFirst ? 0 : nextSendPaceMs(key, part.length);
-      if (pace != null && pace > 0) await sleep(pace);
+      if (pace != null && pace > 0) { log(`[pace] ${key} ${part.length} 字 → 等 ${pace}ms 再发`); await sleep(pace); }
       try {
         if (kind === 'private') await withTimeout(botRef.sendPrivateMessage(Number(id), qqTextSeg(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         else await withTimeout(botRef.sendGroupMessage(Number(id), qqTextSeg(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
@@ -74,6 +70,8 @@ export function sendToQQ(key, msg) {
 
 // 分条发送：与 sendToQQ 共用同一发送链，严格顺序；条间随机间隔，
 // 有概率使用长间隔（错落感）；最后一条后不再 sleep。
+/* 保留给外部/旧插件调用：核心发送流程自 2026-09-24 起统一走 sendMessages，
+ * MCP 侧不再暴露"连发"工具（qq_send_burst 已删除）。 */
 export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
   const [kind, id] = key.split(':');
   // 节奏统一走 send-chain.js 的「按字数」打字节拍（social.send.linear*）；
@@ -103,15 +101,15 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
     enqueueSend(async () => {
       // 打字节拍：批内首条秒回；第 2 条起间隔 = 这条气泡字数 × linearPerCharMs（见 send-chain.js）
       const pace = i === 0 ? 0 : nextSendPaceMs(key, msg.length);
-      if (pace != null && pace > 0) await sleep(pace);
+      if (pace != null && pace > 0) { log(`[pace] ${key} ${msg.length} 字 → 等 ${pace}ms 再发`); await sleep(pace); }
       try {
         if (kind === 'private') await withTimeout(botRef.sendPrivateMessage(Number(id), qqTextSeg(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         else await withTimeout(botRef.sendGroupMessage(Number(id), qqTextSeg(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         sent.push(msg);
         if (pace != null) markSendDelivered(key, msg.length);
       } catch (error) { log(`QQ 发送失败 (${key}):`, error?.message ?? error); if (error?.stack) log('[send-stack]', error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | ')); }
-      // 【2026-09-15 清理】这里原本还有一段"线性关闭时按 gapBaseMs+字数×gapPerCharMs 兜底"的旧节奏。
-      // 主人定稿只留"按字数"一种节拍（send-chain.js），两套并存只会互相打架 —— 已删除。
+      // 2026-09-15 清理：这里原本还有一段"线性关闭时按 gapBaseMs+字数×gapPerCharMs 兜底"的旧节奏。
+      // 已定稿只留"按字数"一种节拍（send-chain.js），两套并存只会互相打架 —— 已删除。
       // 现在 pace==null 就等于"不做打字延迟"（linearEnabled=false 的语义），要节奏就调 linearPerCharMs。
     }, key);
   }
@@ -121,21 +119,21 @@ export function sendBurstToQQ(key, messages, socialCfgOrMin, maybeMax) {
 // ── P5-7 追加：onebotSend/sendMessages（自 bridge.js 抽取，1:1） ──────
 
 /* ── 引用怎么发（不要 reply 段 / 要 reply 段）─────────────────────────────────────
- * 【2026-09-18 线上实测 · 终于钉住的引用根因】
- * 主人报"引用有框、框下面没内容"，一直以为是 reply 段本身的问题。真因是**全语音模式**：
+ * 2026-09-18 线上实测 · 终于钉住的引用根因：
+ * 用户报"引用有框、框下面没内容"，一直以为是 reply 段本身的问题。真因是全语音模式：
  *   · 那个会话 `state/voice-config.json` 的 `send.allVoice=true` → 每条回复都先转语音发。
  *   · 于是所有"带引用的回复"实际发出去的都是 `[{type:'reply'},{type:'record'}]`，
- *     而 QQ 客户端**渲染不了"引用 + 语音气泡"这个组合** —— 引用框在，语音没了。
+ *     而 QQ 客户端渲染不了"引用 + 语音气泡"这个组合 —— 引用框在，语音没了。
  *   · 连之前那次"对照实验"也没逃掉：脚本打的是 `/api/social/send-message`，
- *     而那条路**先试语音**，所以所谓"A 文字+引用"其实也是语音+引用。
- * 读内核消息表可以逐条对上（线上 16:14–16:15 主人的实测）：
+ *     而那条路先试语音，所以所谓"A 文字+引用"其实也是语音+引用。
+ * 读内核消息表可以逐条对上（线上 16:14–16:15 的实测）：
  *   16:14:25 [reply+record] 16:15:14 [reply+record] 16:15:31 [reply+record]   ← 全是语音
  * 日志也写着 `[voice] 全语音模式：已用语音发出 …`。
  *
- * 所以规矩是：**要引用的时候就用文字发**（主人原话）。语音只在没有引用时才用。
+ * 所以规矩是：要引用的时候就用文字发。语音只在没有引用时才用。
  * 三种模式（config: `social.send.quoteMode`）：
- *   · `native-text`（默认）：带引用的回复**跳过语音、按文字发**，并保留 QQ 原生 reply 段（引用框最好看）；
- *   · `prefix`：连 reply 段都不用 —— 把被引内容当正文前缀（`> 原话\n我的回复`）发成**纯文字气泡**，
+ *   · `native-text`（默认）：带引用的回复跳过语音、按文字发，并保留 QQ 原生 reply 段（引用框最好看）；
+ *   · `prefix`：连 reply 段都不用 —— 把被引内容当正文前缀（`> 原话\n我的回复`）发成纯文字气泡，
  *     任何客户端都一定渲染得出来（原生引用万一在别的客户端也渲染不出来时用这条兜底）；
  *   · `native`：老行为（引用时也允许走语音）；`off`：干脆不引用。 */
 function quoteModeOf() {
@@ -201,7 +199,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     log(`发送内容疑似泄露会话令牌(${tokenLeak.kind})，已阻止发送 (${kind}:${id})`);
     throw new Error('发送内容疑似泄露会话令牌，已阻止发送');
   }
-  /* 【2026-09-20 硬失败 · 主人实测】正文整体是"被序列化的工具参数数组"就不是人话：
+  /* 2026-09-20 硬失败 · 实测：正文整体是"被序列化的工具参数数组"就不是人话：
    * 现场 qq_send_message 的 messages 被模型整体序列化成一个字符串传下来（且引号嵌套），
    * JSON.parse 失败 → 旧代码把它当"一条消息"原样发进 QQ，用户看到的就是
    *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", ...]
@@ -242,7 +240,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     }
     const buf = fs.readFileSync(imagePath);
     const ext = String(path.extname(imagePath) || '').replace(/^\./, '') || 'img';
-    // 【2026-09-15 修「表情包一张都发不出去」】临时文件路径不能原样交给 NapCat：
+    // 2026-09-15 修「表情包一张都发不出去」：临时文件路径不能原样交给 NapCat：
     // 服务器上 NapCat 在 Docker 里，读不到宿主路径 → 必须按配置换成容器路径或 base64。
     const napcatFile = napcatImageFileArg(writeStickerTmpFile(buf, ext), cfgRef);
     segments.push({ type: 'image', data: { file: napcatFile } });
@@ -280,11 +278,11 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
   const httpUrl = String(cfgRef.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
   // 瞬时网络类错误自动重试一次(间隔 2.5s), 降低偶发抖动误报; 持续失败仍如实报错, 不做无限重试。
   //
-  // 2026-09-11 补：原来只认**响应体**里的 1006514/网络连接异常，而日志里真实出现过的是
-  // `QQ 发送失败 (private:***): fetch failed` —— fetch 层就失败了，拿不到响应，正则匹配不上，
-  // 于是**不重试、静默丢弃**（只在日志留一行）。现在把 fetch 层失败也纳入，但**只重试
-  // "确定没送出去"的连接级错误**：超时(AbortError/TimeoutError)绝不重试 —— 请求可能已经被
-  // NapCat 处理并发出去了，重试会**真的发两遍**（比丢一条更糟）。
+  // 2026-09-11 补：原来只认响应体里的 1006514/网络连接异常，而日志里真实出现过的是
+  // `QQ 发送失败 (private:*): fetch failed` —— fetch 层就失败了，拿不到响应，正则匹配不上，
+  // 于是不重试、静默丢弃（只在日志留一行）。现在把 fetch 层失败也纳入，但只重试
+  // "确定没送出去"的连接级错误：超时(AbortError/TimeoutError)绝不重试 —— 请求可能已经被
+  // NapCat 处理并发出去了，重试会真的发两遍（比丢一条更糟）。
   const CONN_ERR = /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ECONNABORTED/i;
   const isConnError = (e) => {
     const name = String(e?.name ?? '');
@@ -324,8 +322,8 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
     }
   }
   const errText = onebotErrText(body);
-  /* 【2026-09-18】EventChecker Failed = 消息已进 QQ 内核（日志先有「发送 ->」），只是事件确认失败，
-   * 属于**已送达未确认**，重试只会真的发第二遍 —— 所以这类回执既不重试也不报错，直接按送达处理。 */
+  /* 2026-09-18：EventChecker Failed = 消息已进 QQ 内核（日志先有「发送 ->」），只是事件确认失败，
+   * 属于已送达未确认，重试只会真的发第二遍 —— 所以这类回执既不重试也不报错，直接按送达处理。 */
   const deliveredUnconfirmed = isDeliveredUnconfirmed(errText);
   if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
     if (!deliveredUnconfirmed && /1006514|网络连接异常|网络.*异常/i.test(errText)) {
@@ -336,10 +334,10 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
       if (!res && fetchErr) throw new Error(`OneBot ${action} 请求失败: ${fetchErr?.message ?? fetchErr}`);
     }
   }
-  // 【2026-09-15 自愈】NapCat 读不到我们给的图片路径时的兜底重发（**只在明确"图没发出去"时**触发）：
+  // 2026-09-15 自愈：NapCat 读不到我们给的图片路径时的兜底重发（只在明确"图没发出去"时触发）：
   // 服务器 NapCat 在 Docker 里，宿主路径它读不到 → `文件处理失败: 识别URL失败, uri= /root/...`。
   // 配置（napcat.imageFileMode/dockerPathMap）配对了就不会走到这里；这里是配置漂移时的保险：
-  // 把 image 段换成 base64:// 再发一次。该错误意味着**这条消息整体没发出去**，重发不会重复。
+  // 把 image 段换成 base64:// 再发一次。该错误意味着这条消息整体没发出去，重发不会重复。
   const fileErrRe = /文件处理失败|识别URL失败|ENOENT|no such file/i;
   if (fileErrRe.test(errText)) {
     const imgSeg = segments.find((s) => s.type === 'image' && typeof s.data?.file === 'string' && !/^(base64|file|https?):\/\//i.test(s.data.file));
@@ -356,12 +354,12 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
       }
     }
   }
-  /* 【2026-09-16 自愈 · 堵住"双发触发源"的第二层】
-   * atUserId 指向的号 NapCat 解析不出 uid 时（`Get Uid Error`）→ **去掉 @ 段重发一次**：
-   *   · 判据/证据：该错误发生在 uid 解析阶段，**这条消息整体没发出去**。两次真机现场印证过：
+  /* 2026-09-16 自愈 · 堵住"双发触发源"的第二层：
+   * atUserId 指向的号 NapCat 解析不出 uid 时（`Get Uid Error`）→ 去掉 @ 段重发一次：
+   *   · 判据/证据：该错误发生在 uid 解析阶段，这条消息整体没发出去。两次真机现场印证过：
    *     14:12:34 与 14:28:15 两个批次里带 @ 的那条都失败了（日志 `QQ 发送失败: … Get Uid Error`
    *     + `工具统一发送部分成功 1/2 条`），失败的那条从未进群（social-state.json 的 recentMessages 里
-   *     只有成功那一条），所以去掉 @ 重发**不会**产生重复。
+   *     只有成功那一条），所以去掉 @ 重发不会产生重复。
    *   · 为什么值得做：不修的话"带 @ 发失败"= 整批部分失败 = 模型重发整批 = 已送到的那条被再发一次
    *     （双发）。降级成"不带 @ 照常发"以后，这一批整体成功，重发这条链就不存在了。
    *   · 为什么放在这里而不是提前用缓存猜：真号但不在群 / 号码写错这类情况只有 NapCat 说了算；
@@ -396,14 +394,14 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
   return body.data;
 }
 
-/* ── 【2026-09-20 主人定稿：彻底去掉"桥自己猜着引用"】────────────────────────────────
+/* ── 2026-09-20 定稿：彻底去掉"桥自己猜着引用"────────────────────────────────
  * 存在过的东西（2026-09-13 ~ 09-20）：桥在发消息时按"共同词"从本回合投递过的消息里挑一条，
  * 自动加上引用框（pickSmartQuote + SMART_QUOTE_* 一串调参）。它有过两次线上事故：
  *   ① 零共同词也引用 → 张冠李戴（群里答"投降喵"却挂着「决定，绝地反击」的引用框）；
  *   ② 每句话都挂引用框，观感机械；后来加"答最新那条就不引用"才压住。
- * 但这些都只是**调参**，根子上是错的：桥不知道模型在答哪一句，猜错就是引用错误。
- * 主人 09-20 明确："去除，把引用完全交给模型"。现在规则只剩一条 ——
- *   **只有模型显式传 replyToMessageId 才有引用；桥永远不加。**
+ * 但这些都只是调参，根子上是错的：桥不知道模型在答哪一句，猜错就是引用错误。
+ * 2026-09-20 定调："去除，把引用完全交给模型"。现在规则只剩一条 ——
+ *   只有模型显式传 replyToMessageId 才有引用；桥永远不加。
  * 模型那边有 `(id:xxx)` 展示与 qq_get_recent_messages / qq_get_message_detail，
  * 它自己认得出该引哪条（引用前必须核对该条自己的 id，见 preset 第 9b 条）。
  * 本文件不再有任何"智能引用"代码；回归用例见 tests/no-auto-quote.test.js。 */
@@ -413,7 +411,7 @@ export async function onebotSend(kind, id, message, replyToMessageId, atUserId =
  * 为什么不能直接把原文交给 TTS（三个坑，都在 onebotSend 里已经处理过一遍）：
  *   ① 出站文本要先去输入法 emoji + 表情/图片占位符（`[表情:xx]`）——否则 TTS 会把占位符念出来；
  *   ② 整条就是纯占位符（`[表情:…]`）时清洗结果为空：那种消息会被转成真 QQ face 发出，
- *      **不能**改成语音（改了就丢表情），所以这里返回 ''，全语音模式也会按原样发；
+ *      不能改成语音（改了就丢表情），所以这里返回 ''，全语音模式也会按原样发；
  *   ③ 会话令牌绝不能"念出来"：onebotSend 会拦住并报错，这里提前返回 '' 让它照旧走文字通道拦截
  *      （语音通道没有这套拦截，把令牌合成进去就等于泄露）。
  * @returns {string} 可朗读的正文；'' = 这条不该/不能用语音发
@@ -441,48 +439,43 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
     }
   } catch {}
   const [kind, id] = key.split(':');
-  // 【2026-09-12 加速】这一次调用 = 一次新的"连发批"：清掉前几轮攒下的连续发送计数，
-  // 让批内节奏从 0 / step / 2×step 起算（配合下面"首条不等节拍"，第一条气泡零延迟出）。
-  resetSendPace(key);
+  /* 2026-09-24：撤销"那次把连发合并进来时顺手加上的每次调用清零"。
+   * 模型的多气泡回复本来就是一条气泡一次工具调用（不是一次调用带一个数组），
+   * 所以"每次调用都算新批"= 每条气泡都被当成批内首条 = 内置在 qq_send_message 里的线性延迟永远算 0。
+   * 现在本函数不看清零、也不看批内序号：**每条气泡都按它自己的字数等它自己的打字时间**（见下面 pace）。 */
   const sent = [];
   const failed = [];
   const total = Math.max(messages.length, images.length);
   for (let i = 0; i < total; i++) {    const msg = messages[i] ?? '';
     const img = images[i] ?? null;
-    /* 【2026-09-20 主人定稿】引用只可能来自模型显式传的 replyToMessageId。
+    /* 2026-09-20 定稿：引用只可能来自模型显式传的 replyToMessageId。
      * 旧写法在这里有第二个分支：没传引用时调 pickSmartQuoteFor() 让桥自己挑一条 —— 已删除
      * （理由见本文件上方那段注释；猜错就是"引用错误"）。多气泡时只有第一条能带引用。 */
     const explicitQuote = replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '';
     const useAt = i === 0 ? atUserId : null;
     enqueueSend(async () => {
       const useReply = (i === 0 && explicitQuote) ? String(replyToMessageId).trim() : null;
-      // 发送线性节拍：pace=null=线性关闭 → 保留调用方传入的旧 delays 节奏；否则由会话连续计数决定。
-      //
-      // 【2026-09-12 加速 · 这是主人要的"qq_send_message 更快"】**这一条回复的第一条气泡不再等节拍**。
-      // 线性节拍的设计意图（见 send-chain.js 顶部注释）是"唤醒/首轮即时，首条 n=0 → base（默认 0 → 秒醒，不延迟）"，
-      // 它要管的是"同一条回复内部、分条之间的真人打字节奏"。但计数器 n 是**按整个会话**累加的
-      // （只有静默超过 `social.send.linearResetMs` 才归零），于是热聊时 n 早早顶到 cap（1500ms），
-      // **每条回复的第一条气泡也要先干等最多 1.5 秒**。
-      // 实测（`state/tool-calls.jsonl` 245 次 `qq_send_message`）：
-      //   · 245 次**全部是单条调用**（没有一次是"一次调多条"）→ 那 1.5 秒对当前行为**纯属白等**；
-      //   · 中位 0.59s / 平均 1.21s / p90 2.55s，而 NapCat 自身 HTTP RTT 实测只有 **18ms**，
-      //     全量日志里"发送失败/自动重试"**各 0 次** → 这段耗时就是桥自己 sleep 出来的。
-      // 改成首条 = 0：模型一决定回，气泡立刻出；第 2 条起按"这条气泡自己打完要多久"等
-      // （perChar 模式：字数 × linearPerCharMs，见 send-chain.js 顶部说明）。
-      const pace = i === 0 ? 0 : nextSendPaceMs(key, String(msg || '').length);
+      /* 内置线性延迟（2026-09-24 复原）：每条气泡都先等"它自己打完要多久"再发 ——
+       *   等 = clamp(本条字数 × linearPerCharMs × (1 ± linearJitterRatio), linearMinMs, linearCapMs)。
+       * 不看清零、不看批内序号：模型是一次工具调用发一条气泡，任何"只给第 2 条起算"的写法
+       * 在真实调用形态下都等于完全不延迟（342 次调用 / 0 次一次带多条）。
+       * linearEnabled=false（或 perChar=0）→ typingDelayMs 返回 null → 不延迟，节奏交回调用方。 */
+      const paceLen = String(msg || '').length;
+      const pace = typingDelayMs(paceLen);
+      if (pace != null && pace > 0) log(`[pace] ${key} ${paceLen} 字 → 等 ${pace}ms 再发`);
       if (pace != null && pace > 0) await sleep(pace);
       try {
         /* ── 全语音发送模式（state/voice-config.json 的 send.allVoice）──────────────
-         * 开关打开时：这条回复**先试着用语音发**；只要语音没成功（合成失败/超单条上限/
-         * 当日额度用尽/被限流/念不出来/这条带图），就**原地退回下面的文字发送** —— 不丢消息是这个
+         * 开关打开时：这条回复先试着用语音发；只要语音没成功（合成失败/超单条上限/
+         * 当日额度用尽/被限流/念不出来/这条带图），就原地退回下面的文字发送 —— 不丢消息是这个
          * 功能的第一条规矩，所以这里绝不能写 `return`/`continue` 把兜底路径绕过去。
-         * 放在发送任务**里面**（而不是函数开头）的原因：语音要沿用同一套节奏、同一个串行链，
+         * 放在发送任务里面（而不是函数开头）的原因：语音要沿用同一套节奏、同一个串行链，
          * 也要沿用 console-server 在调用前就检查/预占好的发送频率额度（那里在 sendMessages 之前）。
          * 开关关闭时 tryAllVoiceReply 直接返回 off（不打日志、不发请求），老用户完全无感。 */
-        /* 【2026-09-18 修「引用有框、框下面没内容」】这一条带引用时**不走语音**。
+        /* 2026-09-18：修「引用有框、框下面没内容」—— 这一条带引用时不走语音。
          * 根因：QQ 渲染不了 `[{reply},{record}]` 这个组合 —— 引用框在、语音没了；
          * 而全语音模式下每条回复都先转语音，所以"带引用的回复"永远是这个坏组合（详见 quoteModeOf 注释）。
-         * 主人定稿：「改成引用的时候发文字」。spoken='' 就是本文件里"这条别用语音"的既有写法。 */
+         * 定稿：「改成引用的时候发文字」。spoken='' 就是本文件里"这条别用语音"的既有写法。 */
         const quoteWantsText = !!useReply && quoteForcesText();
         const spoken = (img || quoteWantsText) ? '' : speakableForVoice(msg);
         if (quoteWantsText) log(`[quote] ${key} 这条带引用 → 不走语音、按文字发（quoteMode=${quoteModeOf()}）`);
@@ -500,7 +493,7 @@ export function sendMessages(key, messages, delays, replyToMessageId, atUserId =
         } else {
           const sendData = await onebotSend(kind, id, msg, useReply, useAt, img);
           // 记录真实 QQ message_id：撤回（qq_withdraw_message）与 (id:xxx) 展示都依赖它。
-          // 【2026-09-15 主人要求"检查它是否知道自己引用了"】把**实际用上的引用目标**也带回去
+          // 2026-09-15：需求"检查它是否知道自己引用了"→ 把实际用上的引用目标也带回去
           // （auto 引用以前是桥偷偷加的，工具结果里 quoted:null → 模型压根不知道自己引用了谁，
           //   于是它既无法解释、也无法自我纠正）。现在 sent[i].quoted 就是那条被引用的消息 id。
           sent.push({

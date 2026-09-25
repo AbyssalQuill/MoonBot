@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 const needle = process.argv[2] || 'mcp-napcat-safe.js';
 const sh = (cmd, args) => { try { return execFileSync(cmd, args, { encoding: 'utf8' }); } catch (e) { return String(e?.stdout ?? ''); } };
 const list = () => sh('ps', ['-eo', 'pid,ppid,etimes,args']).split('\n').filter((l) => l.includes(needle) && !l.includes('reload-mcp-child'));
-/** ⚠️ `ps` 的行以空格开头：直接 split 会把 pid 解析成空串，判重就永远为假（本脚本第一版真踩了）。 */
+/** `ps` 的行以空格开头：直接 split 会把 pid 解析成空串，判重就永远为假（本脚本第一版真踩了）。 */
 const pidOf = (line) => line.trim().split(/\s+/)[0];
 
 const before = list();

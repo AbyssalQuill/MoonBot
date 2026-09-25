@@ -1,36 +1,48 @@
-// 长期记忆 SQLite 库（主人/群友档案 + 通用记忆 + 完整聊天记录）
-// 。memDb 为模块级单例；群缓存（bot 依赖）暂留 main。
+// 长期记忆 SQLite 库（用户/群友档案 + 通用记忆）
 //
-// ── 【2026-09-21 记忆架构升级（v1.3.0）】───────────────────────────────────────
-// 主人要求："升级记忆架构、档案架构，永久记忆一些东西；SQLite 储存还可以，甚至可以重构这一层。
+// ── 2026-09-24 分家：聊天记录搬去 state/chat.db ────────────────────────────────
+// chat_messages 是全库最大的表，生命周期与记忆档案完全不同：它只增不改、可按会话整段删；
+// profiles / memory_entries 则少量、长期、每一轮都要注入上下文。挤在一个文件里，意味着
+// "删聊天历史"等于"动记忆库"（锁竞争、写放大、备份粒度都跟着变粗）。所以现在：
+//   聊天记录 → core/chat-db.js（state/chat.db，自带 chat_fts 全文索引 + chat_stats 总量计数）
+//   记忆档案 → 本模块（state/memory.db）
+// **调用方零改动**：下面 re-export chat-db 的聊天函数，历史 import 路径全部照旧。
+// memDb 为模块级单例；群缓存（bot 依赖）暂留 main。
+//
+// ── 2026-09-21 记忆架构升级（v1.3.0）───────────────────────────────────────────
+// 需求："升级记忆架构、档案架构，永久记忆一些东西；SQLite 储存还可以，甚至可以重构这一层。
 // 增强上下文理解、语义理解，尽量永久一轮对话或混合着来，用尽一切办法压缩成本。"
 //
 // 这一层原来只有三个朴素表（profiles / memory_entries / chat_messages），检索全靠
 // `content LIKE '%词%'` 全表扫 —— 结论有三条，全是钱和时间：
 //   ① 检索慢且不准：LIKE 没有相关性排序，30 万条历史里"找上次说的那件事"要么扫全表、要么查不着；
-//      模型一旦查不着就会说"我看不到更早的消息"（最贵的一种失败：主人一眼看出失忆）。
-//   ② 没有轻重：一条"主人不吃香菜"和一条随口闲话躺在同一张表里，谁都不会过期、谁都不会被优先注入。
-//   ③ 没有"永久"这个概念：主人真正想永久记住的东西，没有任何机制保证它**每一轮都在**。
+//      模型一旦查不着就会说"我看不到更早的消息"（最贵的一种失败：用户一眼看出失忆）。
+//   ② 没有轻重：一条"用户不吃香菜"和一条随口闲话躺在同一张表里，谁都不会过期、谁都不会被优先注入。
+//   ③ 没有"永久"这个概念：真正想永久记住的东西，没有任何机制保证它每一轮都在。
 //
 // 现在的分层（都在同一个 memory.db 里，不动既有调用方）：
 //   TIER permanent（永久）：pinned=1 或 category ∈ {rule, owner, identity}。永不过期，每轮注入摘要。
 //   TIER durable（长期）：默认层。默认 90 天不活跃才淡出（expires_at 可显式指定）。
 //   TIER working（短期）：显式 working=true 或 importance 很低的临时条目，7 天淡出。
-//   检索：SQLite **FTS5 trigram** 全文索引（content='表名' 外部内容表 + 触发器同步）。
+//   检索：SQLite FTS5 trigram 全文索引（content='表名' 外部内容表 + 触发器同步）。
 //     trigram 对中文是"三字滑窗"，中文子串照样命中，不需要分词器；BM25 天然给出相关性排序。
 //     这就是"语义理解/上下文理解"的底座：模型说一句模糊的话，也能从三年聊天记录里捞回最相关的那几条。
 //   成本：索引与触发器全部在 SQLite 内部完成（C 实现），桥侧只多一次 INSERT 的开销；
-//     注入给模型的是**几百字符的摘要**，不是把历史塞回上下文 —— 省钱靠的是"按需检索"而不是"全都记住"。
+//     注入给模型的是几百字符的摘要，不是把历史塞回上下文 —— 省钱靠的是"按需检索"而不是"全都记住"。
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ROOT } from '../lib/paths.js';
 import { beijingTs } from '../lib/time.js';
 import { log } from '../lib/log.js';
+import { ftsUsable, ftsQueryOf } from '../lib/fts.js';
+// 聊天记录库（state/chat.db）：本模块只用到"总量计数 + 索引重建 + 状态"这几件事，
+// 其余聊天函数通过下面的 re-export 透出给调用方。
+import { chatCounters, chatDbStats, rebuildChatFts } from './chat-db.js';
 
 export let memDb = null;
 
-// ── 长期记忆 SQLite 库（主人/群友档案 + 通用记忆） ─────────────────────────
+// ── 长期记忆 SQLite 库（用户/群友档案 + 通用记忆） ─────────────────────────
 export function initMemoryDb() {
   if (memDb) return memDb;
   try {
@@ -55,50 +67,8 @@ export function initMemoryDb() {
       created_at INTEGER DEFAULT 0
     )`);
     db.exec('CREATE INDEX IF NOT EXISTS idx_mem_uid ON memory_entries(uid, category)');
-    // 完整聊天记录（永久存储，桥接自动写入，不经过大模型）：ts 用「YYYY-MM-DD HH:MM:SS」北京时前缀，
-    // 便于按日期/发送人前缀查找（如 ts LIKE '2026-08-31%'）。
-    db.exec(`CREATE TABLE IF NOT EXISTS chat_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      conv_key TEXT NOT NULL,
-      msg_seq INTEGER DEFAULT 0,
-      message_id TEXT DEFAULT '',
-      sender_uid TEXT DEFAULT '',
-      sender_name TEXT DEFAULT '',
-      is_self INTEGER DEFAULT 0,
-      direction TEXT DEFAULT 'in',
-      kind TEXT DEFAULT 'text',
-      content TEXT DEFAULT '',
-      quote_target TEXT DEFAULT '',
-      media TEXT DEFAULT '',
-      ts TEXT DEFAULT '',
-      ts_ms INTEGER DEFAULT 0
-    )`);
-    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_conv_ts ON chat_messages(conv_key, ts_ms)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_ts ON chat_messages(ts_ms)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_sender ON chat_messages(sender_uid)');
-    db.exec('CREATE INDEX IF NOT EXISTS idx_chat_conv_content ON chat_messages(conv_key, content)');
-    // 2026-09-06 迁移：补齐 QQ 原生 seq / 已读 / 撤回标记列（幂等，兼容存量库）
-    const chatCols = db.prepare('PRAGMA table_info(chat_messages)').all().map((r) => r.name);
-    if (!chatCols.includes('qq_seq')) db.exec('ALTER TABLE chat_messages ADD COLUMN qq_seq INTEGER DEFAULT 0');
-    if (!chatCols.includes('read_at')) db.exec('ALTER TABLE chat_messages ADD COLUMN read_at INTEGER DEFAULT 0');
-    if (!chatCols.includes('recalled_at')) db.exec('ALTER TABLE chat_messages ADD COLUMN recalled_at INTEGER DEFAULT 0');
-    // 幂等收尾：清理 (conv_key, message_id) 存量重复行并建部分唯一索引，防 WS 重投/双路径并发双写。
-    // 部分唯一索引要求 message_id 非空且唯一——存量重复会导致建索引失败，故先删重复（每组保留 id 最小一行）再建。
-    try {
-      const delInfo = db.prepare(
-        `DELETE FROM chat_messages WHERE message_id != '' AND id NOT IN (
-           SELECT MIN(id) FROM chat_messages WHERE message_id != '' GROUP BY conv_key, message_id
-         )`
-      ).run();
-      if ((Number(delInfo.changes) || 0) > 0) log(`[memory] chat_messages 清理重复行 ${delInfo.changes} 条（防唯一索引冲突）`);
-    } catch (error) {
-      log(`[memory] chat_messages 重复行清理失败（忽略，继续启动）: ${error?.message ?? error}`);
-    }
-    try {
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msgid ON chat_messages(conv_key, message_id) WHERE message_id != ''`);
-    } catch (error) {
-      log(`[memory] chat_messages 消息 id 唯一索引创建失败（忽略，继续启动）: ${error?.message ?? error}`);
-    }
+    // 聊天记录（chat_messages 建表 / 四个索引 / 幂等去重 / 消息 id 唯一索引）自 2026-09-24 起
+    // 归 state/chat.db，见 core/chat-db.js 的 initChatDb()；本库只管记忆档案，不再碰那张表。
     memDb = db;
     ensureMemoryIndex(db);
     log('[memory] SQLite 记忆库已初始化');
@@ -115,7 +85,7 @@ export function initMemoryDb() {
 
 /** 记忆层级 → 默认存活时长（ms）。0 = 永不过期。 */
 export const MEMORY_TIERS = { permanent: 0, durable: 90 * 24 * 3600 * 1000, working: 7 * 24 * 3600 * 1000 };
-/** 这些 category 天然属于"永久"（主人定的规矩 / 主人本人 / 身份设定）—— 不需要显式 pin 也不淡出。 */
+/** 这些 category 天然属于"永久"（约定的规则 / 账号本人 / 身份设定）—— 不需要显式 pin 也不淡出。 */
 export const PERMANENT_CATEGORIES = new Set(['rule', 'owner', 'identity']);
 const FTS_SCHEMA_VERSION = '2';   // 索引结构一变就 +1 → 下次启动自动重建（幂等）
 
@@ -149,7 +119,7 @@ export function ensureMemoryIndex(db = memDb) {
       log(`[memory] memory_entries.${name} 加列失败（忽略）: ${e?.message ?? e}`);
     }
   }
-  // ①b 【记忆库 v1.3.0 新增】memory_meta：索引版本等元信息（一张一行的 KV 表）
+  // ①b 记忆库 v1.3.0 新增：memory_meta：索引版本等元信息（一张一行的 KV 表）
   try {
     db.exec('CREATE TABLE IF NOT EXISTS memory_meta (k TEXT PRIMARY KEY, v TEXT DEFAULT \'\')');
   } catch (e) { log(`[memory] memory_meta 建表失败（忽略）: ${e?.message ?? e}`); }
@@ -164,7 +134,8 @@ export function ensureMemoryIndex(db = memDb) {
   //    为什么用外部内容表：文本只存一份（chat_messages / memory_entries 自己），索引里只有词条指针，
   //    数据库不会膨胀一倍；内容更新靠触发器自动同步，桥侧零维护。
   const ftsDefs = [
-    { name: 'chat_fts', src: 'chat_messages', label: '聊天记录' },
+    // 聊天记录的全文索引（chat_fts）随库搬去 core/chat-db.js 了，这里只剩记忆条目这一份；
+    // rebuildMemoryFts() 会把两边一起重建，所以"全量可搜"的对外语义没有变。
     { name: 'mem_fts', src: 'memory_entries', label: '记忆条目' },
   ];
   for (const d of ftsDefs) {
@@ -197,7 +168,7 @@ export function ensureMemoryIndex(db = memDb) {
     }
   }
   // ④ 一次性的索引重建：存量库里已有几十万行，触发器只覆盖"建索引之后"的新增。
-  //    放在 setTimeout(…,0) 里跑，**不拖慢桥启动**；重建期间检索仍可用（只是可能少看到老消息）。
+  //    放在 setTimeout(…,0) 里跑，不拖慢桥启动；重建期间检索仍可用（只是可能少看到老消息）。
   //    （不用 setImmediate：本仓库的静态作用域检查（scripts/check-scope.mjs）只开 DOM lib，
   //      setImmediate 不在其中会被判成"未定义标识符"，改用它就过不了 CI。）
   try {
@@ -209,50 +180,45 @@ export function ensureMemoryIndex(db = memDb) {
   return out;
 }
 
-/** 重建两份全文索引（幂等；大库会跑几秒，因此只在版本变化或手动调用时执行）。 */
+/** 重建全文索引（幂等；大库会跑几秒，因此只在版本变化或手动调用时执行）。
+ *  记忆条目在本库重建；聊天记录那份在 state/chat.db，委托 chat-db 的 rebuildChatFts。
+ *  对外仍然只暴露这一个函数：调用方（控制台接口、测试）调一次就能保证两边都能全量搜。 */
 export function rebuildMemoryFts({ reason = 'manual' } = {}) {
   const db = initMemoryDb();
-  if (!db) return { ok: false, error: '记忆库不可用' };
-  const done = [];
-  for (const name of ['chat_fts', 'mem_fts']) {
+  const out = { ok: true, rebuilt: [] };
+  if (db) {
     try {
       const t0 = Date.now();
-      db.exec(`INSERT INTO ${name}(${name}) VALUES('rebuild')`);
-      done.push(`${name}(${Date.now() - t0}ms)`);
+      db.exec("INSERT INTO mem_fts(mem_fts) VALUES('rebuild')");
+      out.rebuilt.push(`mem_fts(${Date.now() - t0}ms)`);
     } catch (e) {
-      log(`[memory] ${name} 重建失败（检索退回 LIKE）: ${e?.message ?? e}`);
+      log(`[memory] mem_fts 重建失败（检索退回 LIKE）: ${e?.message ?? e}`);
     }
+    try {
+      db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+        .run(FTS_SCHEMA_VERSION);
+      db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_rebuilt_at', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
+        .run(String(Date.now()));
+    } catch { /* 元信息写不进去不影响检索 */ }
+    if (out.rebuilt.length) log(`[memory] 全文索引重建完成（${reason}）：${out.rebuilt.join(', ')}`);
+  } else {
+    out.ok = false;
+    out.error = '记忆库不可用';
   }
+  // 聊天记录索引：chat-db 自带 chat_meta 版本水位与重建实现
   try {
-    db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_version', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
-      .run(FTS_SCHEMA_VERSION);
-    db.prepare("INSERT INTO memory_meta (k, v) VALUES ('fts_rebuilt_at', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v")
-      .run(String(Date.now()));
-  } catch { /* 忽略 */ }
-  if (done.length) log(`[memory] 全文索引重建完成（${reason}）：${done.join(', ')}`);
-  return { ok: true, rebuilt: done };
+    const r = rebuildChatFts({ reason });
+    if (r?.ok) out.rebuilt.push('chat_fts');
+  } catch (e) {
+    log(`[memory] chat_fts 重建失败（检索退回 LIKE）: ${e?.message ?? e}`);
+  }
+  return out;
 }
 
-/** 全文索引可用吗（FTS5 表存在且能查）。不可用时所有检索自动退回 LIKE，功能不消失、只是慢。 */
-function ftsUsable(db, name) {
-  try { db.prepare(`SELECT rowid FROM ${name} LIMIT 1`).get(); return true; } catch { return false; }
-}
-
-/**
- * 把用户/模型给的一段自然语言变成 FTS5 查询串。
- * trigram 分词器要求每个 token ≥ 3 个字符：不足 3 字的碎片会被 FTS5 直接拒绝（返回空），
- * 所以这里**拆成"够长的词"分别 OR**，并把双引号去掉（避免语法错误）。
- * 返回 '' 表示"没法用 FTS 查"→ 调用方退回 LIKE。
- */
-export function ftsQueryOf(text) {
-  const raw = String(text ?? '').replace(/["']/g, ' ').trim();
-  if (!raw) return '';
-  const parts = raw.split(/[\s,，。;；、:：!！?？()（）\[\]【】/\\|+*^-]+/).map((s) => s.trim()).filter((s) => s.length >= 3);
-  if (!parts.length) return '';
-  // 最多 8 个词：词越多越贵，且后面几个基本不改变排序
-  return parts.slice(0, 8).map((p) => `"${p}"`).join(' OR ');
-}
-
+/* ftsUsable / ftsQueryOf 于 2026-09-24 抽到 lib/fts.js：chat-db.js 也要用同一套规则，
+ * 两份实现必然漂移（一处改分词规则、另一处忘改，症状只是"搜不到"且不报错）。
+ * 这里 re-export ftsQueryOf，保持既有 import（含 tests/v13-features.test.js）不变。 */
+export { ftsQueryOf };
 
 export function getProfile(uid) {
   const db = initMemoryDb();
@@ -266,14 +232,14 @@ export function getProfile(uid) {
   }
 }
 
-/** 把**观察到的**昵称补进通讯录（只在当前为空时写，绝不覆盖已学到的/主人设过的名字）。
+/** 把观察到的昵称补进通讯录（只在当前为空时写，绝不覆盖已学到的/用户设过的名字）。
  *
- * 【2026-09-23 修「群聊的人的 QQ 号昵称好像还无法识别」】
- * 现场诊断（服务端 state/memory.db）：`profiles` 共 23 行，**有名字的只有 1 行**；
+ * 2026-09-23 修「群聊的人的 QQ 号昵称好像还无法识别」：
+ * 现场诊断（服务端 state/memory.db）：`profiles` 共 23 行，有名字的只有 1 行；
  * 而 `formatContactsLine()` 是 `WHERE name != '' ... LIMIT 30`，于是注入给模型的
- * `[Contacts]` 只有主人一个人。群友在消息里明明带着解析好的昵称
+ * `[Contacts]` 只有账号所有者一个人。群友在消息里明明带着解析好的昵称
  * （recentMessages 里 sender="马卡龙不是南梁" / "坐忘道" / "星痕Ofter" …），
- * 但那些名字**从来没有被写进 profiles** —— 模型看得到号码，通讯录里却查无此人。
+ * 但那些名字从来没有被写进 profiles —— 模型看得到号码，通讯录里却查无此人。
  * 写入时机就是每条入站消息：桥手上已经有 `event.sender.card || nickname` 与 QQ 号，
  * 顺手补一行即可，不必等画像学习跑到那个人（学习是抽样、覆盖不全，这才是根因）。 */
 export function rememberContactName(uid, name) {
@@ -303,7 +269,7 @@ export function setProfileField(uid, field, value) {
   if (!db || !uid) return null;
   const allowed = new Set(['name', 'personality', 'likes', 'dislikes', 'birthday', 'notes']);
   if (!allowed.has(field)) throw new Error(`档案字段只能是：${[...allowed].join('/')}`);
-  // 长度上限分字段：personality/notes 要装得下**一整段人格画像**（成文介绍上千字，
+  // 长度上限分字段：personality/notes 要装得下一整段人格画像（成文介绍上千字，
   // 旧的统一 500 会把介绍从中间切掉，界面和提示词里都只剩半句）；其它短字段保持 500。
   const cap = (field === 'personality' || field === 'notes') ? 4000 : 500;
   const clean = String(value ?? '').trim().slice(0, cap);
@@ -392,277 +358,20 @@ export function resolveNameToUid(name) {
   return null;
 }
 
-// ── 完整聊天记录持久化（SQLite chat_messages，桥接自动写入，不经过大模型） ──
-
-export function persistChatMessage(convKey, entry) {
-  try {
-    const db = initMemoryDb();
-    if (!db || !convKey || !entry) return;
-    const tsMs = Number(entry.time || Date.now());
-    const text = String(entry.text ?? entry.plain ?? '');
-    const isSelf = !!entry.isSelf;
-    const messageId = entry.messageId != null ? String(entry.messageId) : '';
-    // 幂等：同一会话同一条真实 QQ message_id 只落库一次（WS 重投/双路径发送不重复写）
-    if (messageId) {
-      const hit = db.prepare("SELECT 1 AS x FROM chat_messages WHERE conv_key = ? AND message_id = ? AND message_id != '' LIMIT 1")
-        .get(String(convKey), messageId);
-      if (hit) return;
-    }
-    let kind = 'text';
-    if (entry.kind === 'poke') kind = 'poke';
-    else if (entry.sticker) kind = 'sticker';
-    else if (isSelf && text.startsWith('[QQ表情')) kind = 'qqface';
-    const mediaJson = (() => {
-      try { return Array.isArray(entry.media) && entry.media.length ? JSON.stringify(entry.media) : ''; }
-      catch { return ''; }
-    })();
-    db.prepare(`INSERT INTO chat_messages (conv_key, msg_seq, qq_seq, message_id, sender_uid, sender_name, is_self, direction, kind, content, quote_target, media, read_at, ts, ts_ms)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(
-        String(convKey),
-        Number(entry.seq) || 0,
-        Number(entry.qqSeq ?? entry.messageSeq) || 0,
-        messageId,
-        entry.userId != null ? String(entry.userId) : (isSelf ? 'self' : ''),
-        String(entry.sender || '').slice(0, 80),
-        isSelf ? 1 : 0,
-        isSelf ? 'out' : 'in',
-        kind,
-        text.slice(0, 2000),
-        String(entry.quoteTarget || '').slice(0, 300),
-        mediaJson.slice(0, 20000), // 完整合法 JSON；多图不截断成非法串
-        Number(entry.readAt) || 0,
-        beijingTs(tsMs),
-        tsMs
-      );
-  } catch (error) {
-    log(`[chat-history] 写入失败: ${error?.message ?? error}`);
-  }
-}
-
-/** 把某会话截至本地 seq（msg_seq）的入向消息标记为已读（read_at），返回更新行数。 */
-export function markMessagesRead(convKey, upToSeq = 0, at = Date.now()) {
-  const db = initMemoryDb();
-  if (!db || !convKey) return { ok: false, error: '记忆库不可用' };
-  try {
-    const params = [Number(at) || Date.now(), String(convKey)];
-    // 只管入向：read_at 是「入向未读水位」，落库时 out 行 read_at 恒为 0，若不带 direction 条件
-    // 会把自发消息也一并置为已读，使 updated 计数虚高、水位语义与 fetchUnreadChatMessages 不一致。
-    let sql = "UPDATE chat_messages SET read_at = ? WHERE conv_key = ? AND direction = 'in' AND read_at = 0";
-    if (Number(upToSeq) > 0) {
-      sql += ' AND msg_seq <= ?';
-      params.push(Number(upToSeq));
-    }
-    const info = db.prepare(sql).run(...params);
-    return { ok: true, updated: Number(info.changes) || 0 };
-  } catch (error) {
-    log(`[chat-history] 标记已读失败: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error) };
-  }
-}
-
-/** 把某条已落库消息标记为撤回（recalled_at=now，幂等可重复调用）。
- *  同一函数覆盖两个方向：bot 自查撤回命中 direction='out' 的自发消息行，对方撤回命中 'in' 行；
- *  方向由调用方保证 messageId 属于该会话即可，函数本身只按 (conv_key, message_id) 定位。 */
-export function markChatRecalled(convKey, messageId, at = Date.now()) {
-  const db = initMemoryDb();
-  const mid = messageId != null ? String(messageId) : '';
-  if (!convKey) return { ok: false, error: 'convKey 空' };
-  if (!mid) return { ok: false, error: 'messageId 空' };
-  if (!db) return { ok: false, error: '记忆库不可用' };
-  try {
-    const info = db.prepare(
-      "UPDATE chat_messages SET recalled_at = ? WHERE conv_key = ? AND message_id = ? AND message_id != ''"
-    ).run(Number(at) || Date.now(), String(convKey), mid);
-    return { ok: true, updated: Number(info.changes) || 0 };
-  } catch (error) {
-    log(`[chat-history] 标记撤回失败 ${convKey} ${mid}: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error) };
-  }
-}
-
-/** 语义别名：bot 自查撤回（自发消息 direction='out'）专用入口，实现与 markChatRecalled 完全相同。 */
-export const markOutboundRecalled = markChatRecalled;
-
-/** 拉取某会话未读消息（read_at=0 的入向消息，按时间升序），供重启后恢复未读队列。
- *  minTsMs>0 时只取晚于该时间戳的消息（结合会话 lastAiSeenAt 水位，避免把迁移前旧历史误当未读）。 */
-export function fetchUnreadChatMessages(convKey, limit = 30, minTsMs = 0) {
-  const db = initMemoryDb();
-  if (!db || !convKey) return [];
-  try {
-    const n = Math.min(100, Math.max(1, Number(limit) || 30));
-    const params = [String(convKey)];
-    let extraSql = '';
-    if (Number(minTsMs) > 0) { extraSql = ' AND ts_ms > ?'; params.push(Number(minTsMs)); }
-    params.push(n);
-    const rows = db.prepare(
-      `SELECT * FROM (SELECT * FROM chat_messages WHERE conv_key = ? AND direction = 'in' AND read_at = 0${extraSql} ORDER BY ts_ms DESC, id DESC LIMIT ?) ORDER BY ts_ms ASC, id ASC`
-    ).all(...params);
-    return rows.map((r) => {
-      let media = [];
-      try { media = r.media ? JSON.parse(r.media) : []; } catch {}
-      return {
-        seq: Number(r.msg_seq) || 0,
-        messageId: r.message_id || '',
-        isSelf: false,
-        sender: r.sender_name || '',
-        userId: (r.sender_uid && r.sender_uid !== 'self') ? r.sender_uid : null,
-        time: Number(r.ts_ms) || 0,
-        text: r.content || '',
-        kind: r.kind || 'text',
-        media,
-        recalled: !!r.recalled_at   // 撤回标记：与内存 recentMessages 的 recalled 对齐（渲染 [已撤回]）
-      };
-    });
-  } catch (error) {
-    log(`[chat-history] 拉取未读失败: ${error?.message ?? error}`);
-    return [];
-  }
-}
-
-/** 拉取某会话最近 N 条聊天记录（升序，来自 SQLite chat_messages —— 冷启动/新会话开局上下文用）。
- *  返回与 st.recentMessages 同形状的条目（media 反序列化为数组），查不到返回空数组。 */
-export function recentChatMessages(convKey, limit = 25) {
-  const db = initMemoryDb();
-  if (!db || !convKey) return [];
-  try {
-    const rows = db.prepare(
-      `SELECT * FROM (SELECT * FROM chat_messages WHERE conv_key = ? ORDER BY ts_ms DESC, id DESC LIMIT ?) ORDER BY ts_ms ASC, id ASC`
-    ).all(String(convKey), Math.min(200, Math.max(1, Number(limit) || 25)));
-    return rows.map((r) => {
-      let media = [];
-      try { media = r.media ? JSON.parse(r.media) : []; } catch {}
-      return {
-        seq: Number(r.msg_seq) || 0,
-        messageId: r.message_id || '',
-        isSelf: !!r.is_self,
-        sender: r.sender_name || '',
-        userId: (r.sender_uid && r.sender_uid !== 'self') ? r.sender_uid : null,
-        time: Number(r.ts_ms) || 0,
-        text: r.content || '',
-        kind: r.kind || 'text',
-        media,
-        quoteTarget: r.quote_target || '',
-        recalled: !!r.recalled_at   // 撤回标记：与内存 recentMessages 的 recalled 对齐（渲染 [已撤回]）
-      };
-    });
-  } catch (error) {
-    log(`[chat-history] 拉取最近消息失败: ${error?.message ?? error}`);
-    return [];
-  }
-}
-
-/** chat_messages 行 → 检索结果的统一形状（搜索分支与 FTS 分支共用，避免两处漂移）。 */
-function rowToSearchMessage(r) {
-  return {
-    id: Number(r.id),
-    convKey: r.conv_key,
-    seq: Number(r.msg_seq) || 0,
-    messageId: r.message_id || '',
-    senderUid: r.sender_uid || '',
-    senderName: r.sender_name || '',
-    isSelf: !!r.is_self,
-    direction: r.direction || 'in',
-    kind: r.kind || 'text',
-    content: r.content || '',
-    quoteTarget: r.quote_target || '',
-    media: r.media || '',
-    ts: r.ts || '',
-    tsMs: Number(r.ts_ms) || 0,
-    recalledAt: Number(r.recalled_at) || 0,   // 撤回时间戳（0=未撤回）
-    recalled: !!r.recalled_at                  // 撤回标记（控制台最近消息回退读取等映射用）
-  };
-}
-
-export function searchChatMessages(opts = {}) {
-  const db = initMemoryDb();
-  if (!db) return { ok: true, total: 0, messages: [] };
-  const where = [];
-  const params = [];
-  if (opts.convKey) { where.push('conv_key = ?'); params.push(String(opts.convKey)); }
-  /* 【2026-09-21 检索升级】给了 query 就走 FTS5 trigram（BM25 相关性排序），
-   * 查不到 / 短于 3 字 / 该库没编 FTS5 时自动退回原来的 LIKE —— 行为只增不减。 */
-  let joinSql = '';
-  let orderSql = 'ts_ms DESC, id DESC';
-  const ftsQ = opts.query ? ftsQueryOf(opts.query) : '';
-  const useFts = !!ftsQ && ftsUsable(db, 'chat_fts');
-  if (opts.query && useFts) {
-    /* 【2026-09-22 修「带 query 的历史检索 100% 失败」】FTS5 的 MATCH **不认表别名**：
-     * 原来 JOIN 写成 `chat_fts f`（起了别名），WHERE / ORDER BY 写 `chat_fts` → 报 "no such column: chat_fts"；
-     * 反过来把三处都改成别名 `f` 也不行 → 报 "no such column: f"（实测两种写法都试过）。
-     * 正确写法是**不给 FTS 表起别名**、三处一律用真名 —— 也就是下面这样。整条语句一报错就被 catch 吞掉、
-     * 静默退回 LIKE，所以症状是"搜历史搜不到/不按相关度排"，而且没有任何报错。
-     * 回归测试：tests/memory-fts.test.js（六项，含单字退 LIKE 与 convKey 过滤）。 */
-    joinSql = ' JOIN chat_fts ON chat_fts.rowid = chat_messages.id';
-    where.push('chat_fts MATCH ?');
-    params.push(ftsQ);
-    orderSql = 'bm25(chat_fts) ASC';
-  } else if (opts.query) {
-    where.push('content LIKE ?'); params.push('%' + String(opts.query) + '%');
-  }
-  if (opts.sender) { where.push('(sender_name LIKE ? OR sender_uid = ?)'); params.push('%' + String(opts.sender) + '%', String(opts.sender)); }
-  if (opts.date) { where.push('ts LIKE ?'); params.push(String(opts.date) + '%'); }
-  if (opts.fromTs) { where.push('ts_ms >= ?'); params.push(Number(opts.fromTs)); }
-  if (opts.toTs) { where.push('ts_ms <= ?'); params.push(Number(opts.toTs)); }
-  if (opts.direction) { where.push('direction = ?'); params.push(opts.direction === 'out' ? 'out' : 'in'); }
-  const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-  const limit = Math.min(200, Math.max(1, Number(opts.limit) || 50));
-  const offset = Math.max(0, Number(opts.offset) || 0);
-  try {
-    if (useFts) {
-      // FTS 分支：不数总数（MATCH 下 COUNT 要再扫一遍索引，模型侧也不需要这个数）
-      const rows = db.prepare(`SELECT chat_messages.* FROM chat_messages${joinSql}${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-      return { ok: true, total: rows.length, limit, offset, ranked: true, messages: rows.map(rowToSearchMessage) };
-    }
-    const total = Number(db.prepare(`SELECT COUNT(*) AS c FROM chat_messages${whereSql}`).get(...params)?.c || 0);
-    const rows = db.prepare(`SELECT * FROM chat_messages${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-    const messages = rows.map(rowToSearchMessage);
-    return { ok: true, total, limit, offset, messages };
-  } catch (error) {
-    log(`[chat-history] 搜索失败: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error), total: 0, messages: [] };
-  }
-}
-
-export function deleteChatMessages(opts = {}) {
-  const db = initMemoryDb();
-  if (!db) return { ok: false, error: '记忆库不可用' };
-  const where = [];
-  const params = [];
-  if (Array.isArray(opts.ids) && opts.ids.length) {
-    const list = opts.ids.map(Number).filter(Number.isFinite);
-    if (!list.length) return { ok: false, error: 'ids 无效' };
-    where.push(`id IN (${list.map(() => '?').join(',')})`);
-    params.push(...list);
-  }
-  if (opts.convKey) { where.push('conv_key = ?'); params.push(String(opts.convKey)); }
-  if (opts.query) { where.push('content LIKE ?'); params.push('%' + String(opts.query) + '%'); }
-  if (opts.sender) { where.push('(sender_name LIKE ? OR sender_uid = ?)'); params.push('%' + String(opts.sender) + '%', String(opts.sender)); }
-  if (opts.date) { where.push('ts LIKE ?'); params.push(String(opts.date) + '%'); }
-  if (!where.length) return { ok: false, error: '必须指定删除范围（ids/会话/关键词/发送人/日期）' };
-  const whereSql = ` WHERE ${where.join(' AND ')}`;
-  try {
-    const info = db.prepare(`DELETE FROM chat_messages${whereSql}`).run(...params);
-    return { ok: true, deleted: Number(info.changes) || 0 };
-  } catch (error) {
-    log(`[chat-history] 删除失败: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error) };
-  }
-}
-
-export function clearChatHistory(convKey = '') {
-  const db = initMemoryDb();
-  if (!db) return { ok: false, error: '记忆库不可用' };
-  try {
-    const info = convKey
-      ? db.prepare('DELETE FROM chat_messages WHERE conv_key = ?').run(String(convKey))
-      : db.prepare('DELETE FROM chat_messages').run();
-    return { ok: true, deleted: Number(info.changes) || 0 };
-  } catch (error) {
-    log(`[chat-history] 清空失败: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error) };
-  }
-}
+/* ── 聊天记录（已迁到独立库 state/chat.db，实现见 core/chat-db.js）───────────────
+ * 这里 re-export 保持调用方零改动：mux / social-flow / wake-send / crosschat /
+ * message-cache / console-server 全都继续从 './memory.js' import 这些函数。
+ * 末尾三个（chatCounters / chatConvList / chatDbStats）是管理端「聊天记录」页要的总量计数。 */
+export {
+  persistChatMessage, markMessagesRead, markChatRecalled, markOutboundRecalled,
+  fetchUnreadChatMessages, recentChatMessages, recentMessagesAcrossSessions,
+  searchChatMessages, deleteChatMessages, clearChatHistory, loadGroupChatMessagesForLearning,
+  chatCounters, chatConvList, chatDbStats, tokenUsageSummary, recountChatCounters,
+  // rebuildChatFts 也要透出：控制台的 /api/social/chat-reindex 与测试从 './memory.js' import 它
+  // （曾经漏出过一次，症状是 ESM 直接 "does not provide an export named 'rebuildChatFts'"，
+  //  整个 console-server 模块加载失败、桥跟着起不来 —— 所以这里宁可多透一个，别漏）。
+  rebuildChatFts,
+} from './chat-db.js';
 
 // ── 会话记忆格式化/写入 ─────────
 import { redactKnownTokensOnly } from '../lib/outbound-text.js';
@@ -790,88 +499,8 @@ export function appendMemory(st, category, content, extra = {}) {
   saveSocialState();
 }
 
-// ── 群消息黑话学习批量读取（夜间定时 / /slang learn 共用；仅追加导出，未改动既有函数） ──
-// 只学“别人的话”：direction='in' AND is_self=0 AND kind IN('text','qqface') AND content 非空；
-// 过滤：以 / 开头、纯 CQ 码、[转发 前缀、角色扮演开关句（与 slang.js feedSlangWindow 过滤一致）。
-// 一次可传多个群 conv_key（群格式 group:群号，来自 cfg.allow.groups）；不传则自动发现区间内活跃群。
-// 单群超量按时间均匀抽样（ROW_NUMBER 等差取号），保证全天覆盖而非只取头部。
-
-const LEARN_ROLEPLAY_SWITCH_RE = /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/;
-const LEARN_CQ_TOKEN_RE = /\[CQ:[^\]]*\]/g;
-
-/**
- * 批量读取多群增量入向消息供黑话学习。
- * opts: { convKeys?, fromTsMs, toTsMs, maxTotalMsgs=2400, perGroupCapMax=800 }
- * 返回 { ok, messages:[{convKey,senderUid,senderName,content,tsMs}], groups, sampledGroups }；
- * messages 已按 ts_ms 升序；content 截断至 200 字符且已过滤。
- */
-export function loadGroupChatMessagesForLearning(opts = {}) {
-  const db = initMemoryDb();
-  if (!db) return { ok: false, error: '记忆库不可用', messages: [], groups: 0, sampledGroups: 0 };
-  try {
-    const convKeys = Array.isArray(opts.convKeys) ? opts.convKeys.map((k) => String(k).trim()).filter(Boolean) : [];
-    const fromTsMs = Math.max(0, Number(opts.fromTsMs) || 0);
-    const toTsMs = Math.max(fromTsMs, Number(opts.toTsMs) || Date.now());
-    const maxTotalMsgs = Math.max(1, Math.min(20000, Number(opts.maxTotalMsgs) || 2400));
-    const perGroupCapMax = Math.max(1, Math.min(2000, Number(opts.perGroupCapMax) || 800));
-    const baseConds = "direction = 'in' AND is_self = 0 AND kind IN ('text','qqface') AND content <> '' AND ts_ms >= ? AND ts_ms <= ? AND content NOT LIKE '/%' AND content NOT LIKE '[CQ:%' AND content NOT LIKE '[转发%'";
-    const condParams = [fromTsMs, toTsMs];
-    let groupSql = "conv_key LIKE 'group:%'";
-    const groupParams = condParams.slice();
-    if (convKeys.length) {
-      groupSql += ` AND conv_key IN (${convKeys.map(() => '?').join(',')})`;
-      groupParams.push(...convKeys);
-    }
-    const active = db.prepare(`SELECT conv_key AS ck, COUNT(*) AS c FROM chat_messages WHERE ${baseConds} AND ${groupSql} GROUP BY conv_key ORDER BY conv_key`).all(...groupParams);
-    if (!active.length) return { ok: true, messages: [], groups: 0, sampledGroups: 0 };
-    // 多群均分预算：每个群一个均等 cap（再叠加 perGroupCapMax 上限）
-    const perCap = Math.max(1, Math.min(perGroupCapMax, Math.floor(maxTotalMsgs / active.length)));
-    const messages = [];
-    let sampledGroups = 0;
-    const pickSql = `SELECT conv_key AS ck, sender_uid AS su, sender_name AS sn, content AS ct, ts_ms AS t FROM chat_messages WHERE ${baseConds} AND conv_key = ?`;
-    for (const row of active) {
-      const ck = String(row.ck ?? '');
-      const total = Number(row.c) || 0;
-      const cap = Math.min(perCap, total);
-      const args = [...condParams, ck];
-      let rows;
-      if (total <= perCap) {
-        rows = db.prepare(`${pickSql} ORDER BY ts_ms ASC, id ASC`).all(...args);
-      } else {
-        // 单群超量：按时间均匀抽样（rn % step = 1 等差取号）
-        sampledGroups += 1;
-        const step = Math.max(2, Math.ceil(total / cap));
-        rows = db.prepare(
-          `SELECT ck, su, sn, ct, t FROM (
-             SELECT conv_key AS ck, sender_uid AS su, sender_name AS sn, content AS ct, ts_ms AS t,
-                    ROW_NUMBER() OVER (ORDER BY ts_ms ASC, id ASC) AS rn
-             FROM chat_messages WHERE ${baseConds} AND conv_key = ?
-           ) WHERE rn % ? = 1 ORDER BY rn ASC`
-        ).all(...args, step);
-      }
-      for (const r of rows) {
-        const original = String(r.ct ?? '');
-        if (!original) continue;
-        const cleaned = original.replace(LEARN_CQ_TOKEN_RE, ' ').trim();
-        if (!cleaned) continue;                      // 纯 CQ 码（去码后无内容）
-        if (cleaned.startsWith('/')) continue;       // 斜杠指令（SQL 前缀已兜底）
-        if (LEARN_ROLEPLAY_SWITCH_RE.test(cleaned)) continue; // 角色扮演开关句（与 feedSlangWindow 一致）
-        messages.push({
-          convKey: ck,
-          senderUid: String(r.su ?? ''),
-          senderName: String(r.sn ?? ''),
-          content: cleaned.slice(0, 200),           // 与 feedSlangWindow 相同截断
-          tsMs: Number(r.t) || 0
-        });
-      }
-    }
-    messages.sort((a, b) => (a.tsMs || 0) - (b.tsMs || 0) || String(a.convKey).localeCompare(String(b.convKey)));
-    return { ok: true, messages, groups: active.length, sampledGroups };
-  } catch (error) {
-    log(`[chat-history] 批量读取学习消息失败: ${error?.message ?? error}`);
-    return { ok: false, error: error?.message ?? String(error), messages: [], groups: 0, sampledGroups: 0 };
-  }
-}
+/* 群消息黑话学习的批量聊天读取（loadGroupChatMessagesForLearning）已随聊天记录搬去
+ * core/chat-db.js，对外仍从本模块 re-export（见上面的 export 块）。 */
 
 /* ══════════════════════════════════════════════════════════════════════════
  * 分层记忆 API（v1.3.0）—— 永久 / 长期 / 短期 + 相关性检索
@@ -894,8 +523,8 @@ function rowToMemoryEntry(r) {
     content: r.content || '',
     createdAt: Number(r.created_at) || 0,
     updatedAt: Number(r.updated_at) || Number(r.created_at) || 0,
-    /* 【2026-09-22 修 M14】有的写入路径是**裸 INSERT**（qzone.js / persona-learn.js 直接往表里插行），
-     * 那些行 tier 是空串；以前 `r.tier || 'durable'` 会在读出时**谎报**成 durable，而 listMemoryEntries 的
+    /* 2026-09-22 修 M14：有的写入路径是裸 INSERT（qzone.js / persona-learn.js 直接往表里插行），
+     * 那些行 tier 是空串；以前 `r.tier || 'durable'` 会在读出时谎报成 durable，而 listMemoryEntries 的
      * `tier=?` 过滤又不归一化 → 同一批数据两处口径不一致。现在读出即归一（空串/未知值一律当 durable），
      * 与 server/index.js 的 COALESCE(NULLIF(tier,''),'durable') 对齐。 */
     tier: (() => { const s = String(r.tier ?? '').trim(); return MEMORY_TIERS[s] !== undefined ? s : 'durable'; })(),
@@ -939,9 +568,9 @@ export function rememberEntry(o = {}) {
     const hit = db.prepare('SELECT id, hits FROM memory_entries WHERE uid = ? AND category = ? AND content = ? LIMIT 1')
       .get(row.uid, row.category, row.content);
     if (hit) {
-      /* 【2026-09-22 修 M12】去重时**不能拿本次调用的值覆盖更强的旧值**：旧写法直接把 tier/pinned/
+      /* 2026-09-22 修 M12：去重时不能拿本次调用的值覆盖更强的旧值：旧写法直接把 tier/pinned/
        * expires_at 写成这次归一化的结果，于是"把同一句话再记一遍"会把一条 permanent（永不过期、每轮
-       * 都进 [Recall]）**降级成 durable（90 天）**。现在三个字段都取"更强的那一边"：
+       * 都进 [Recall]）降级成 durable（90 天）。现在三个字段都取"更强的那一边"：
        *   tier：任一边 permanent 就是 permanent；pinned 取 MAX；
        *   expires_at：0 = 永不过期 → 任一边为 0 就是 0，否则取更晚的那个（绝不缩短寿命）。 */
       db.prepare(`UPDATE memory_entries SET hits = hits + 1, updated_at = ?, last_used_at = ?,
@@ -971,7 +600,7 @@ export function setMemoryPinned(id, pinned = true) {
   const db = initMemoryDb();
   if (!db) return { ok: false, error: '记忆库不可用' };
   try {
-    /* 【2026-09-22 修 M13】取消置顶时必须**把 tier 也降回来**：旧写法 `ELSE tier` 会把 permanent 层留着，
+    /* 2026-09-22 修 M13：取消置顶时必须把 tier 也降回来：旧写法 `ELSE tier` 会把 permanent 层留着，
      * 于是"取消置顶"之后这条记忆仍然每轮进 [Recall] 摘要，而且 pruneExpiredMemory 明确排除
      * tier='permanent' → 永远清不掉（界面动作与库内语义不一致）。现在取消置顶 = 回到 durable 层，
      * 并给它一个正常的过期时间（TTL 取 durable 档）。 */
@@ -1050,10 +679,10 @@ export function pruneExpiredMemory() {
 }
 
 /**
- * 每轮注入的**记忆摘要**（永久层 + 与该会话/该人相关的高重要度条目）。
+ * 每轮注入的记忆摘要（永久层 + 与该会话/该人相关的高重要度条目）。
  *
- * 为什么是"摘要"而不是"全部"：系统提示词/唤醒正文里的每一个字符都是**每一步**都要付钱重读的。
- * 把永久记忆压到几百字符、并且**内容稳定**（同样输入 → 逐字节相同的输出），既能保证"永远记得"，
+ * 为什么是"摘要"而不是"全部"：系统提示词/唤醒正文里的每一个字符都是每一步都要付钱重读的。
+ * 把永久记忆压到几百字符、并且内容稳定（同样输入 → 逐字节相同的输出），既能保证"永远记得"，
  * 又不破坏前缀缓存。排序完全确定（pinned → importance → 时间），不掺随机数。
  *
  * @param {{uid?:string, convKey?:string, limit?:number, maxChars?:number}} o
@@ -1061,7 +690,7 @@ export function pruneExpiredMemory() {
 export function memoryDigest(o = {}) {
   const db = initMemoryDb();
   if (!db) return '';
-  /* 【2026-09-22 修 M15】过期行以前**永远不会被删**：pruneExpiredMemory 全仓只有 import、没有调用点。
+  /* 2026-09-22 修 M15：过期行以前永远不会被删：pruneExpiredMemory 全仓只有 import、没有调用点。
    * 这里顺手清一次就够（摘要本来就每轮唤醒都会跑），但按小时节流，别每次唤醒都扫一遍表。 */
   try {
     const last = Number(memoryDigest._lastPruneAt) || 0;
@@ -1122,8 +751,10 @@ export function memoryStats() {
     profiles: one('SELECT COUNT(*) AS c FROM profiles'),
     entries: one('SELECT COUNT(*) AS c FROM memory_entries'),
     permanent: one("SELECT COUNT(*) AS c FROM memory_entries WHERE pinned = 1 OR tier = 'permanent'"),
-    chat: one('SELECT COUNT(*) AS c FROM chat_messages'),
-    ftsChat: ftsUsable(db, 'chat_fts') ? one('SELECT COUNT(*) AS c FROM chat_fts') : -1,
+    // 聊天记录在 state/chat.db：条数与索引状态都从那边取（本库里已经没有那张表了）
+    chat: Number(chatCounters()?.total) || 0,
+    ftsChat: (() => { const cs = chatDbStats(); return cs?.fts?.ok ? Number(cs.fts.indexed) : -1; })(),
+    chatDbBytes: Number(chatDbStats()?.dbBytes) || 0,
     ftsMem: ftsUsable(db, 'mem_fts') ? one('SELECT COUNT(*) AS c FROM mem_fts') : -1,
     ftsVersion: meta('fts_version'),
     ftsRebuiltAt: Number(meta('fts_rebuilt_at')) || 0,

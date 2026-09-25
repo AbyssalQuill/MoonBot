@@ -2,7 +2,7 @@
 // 断言（按"一个角色 = 一个角色包目录"的真实结构）：
 //   1) 四个 qq_character_* 工具确实注册给 MCP 客户端（名字 / 英文描述 / 参数 schema / 只读）；
 //   2) 真调一次（list 包清单 / list 单个包 / read 拒穿越 / read 不存在 / pack 真读一个包 / search）；
-//   3) 开关与现有机制一致：social.tools.characterCards=false → 四个工具**根本不注册**；
+//   3) 开关与现有机制一致：social.tools.characterCards=false → 四个工具根本不注册；
 //      slimTools.deny 命中单个名字 → 只少那一个（用临时 src 副本跑，不碰真实 config.json）。
 // 跑法：cd qq-bridge && node tests/character-tools-mcp.test.js
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-/* 【2026-09-22】多了 qq_character_switch（唯一的**写入者**：把角色库里的一张卡合成成 persona.md，
+/* 2026-09-22：多了 qq_character_switch（唯一的写入者：把角色库里的一张卡合成成 persona.md，
  * 见 lib/persona-switch.js）；它和四个只读工具同属 characterCards 这一组开关，所以一起断言注册/不注册。 */
 const WANTED = ['qq_character_list', 'qq_character_read', 'qq_character_pack', 'qq_character_search', 'qq_character_switch'];
 const failures = [];
@@ -84,12 +84,12 @@ try {
       const t = tools.find((x) => x.name === name);
       assert.ok(t, `${name} 没注册`);
       assert.ok(t.description && t.description.length > 40, `${name} 描述太短`);
-      // 描述主体必须是英文；中文只允许出现在引号里的"主人原话"举例（主人明确要求举例贴合中文说法）
+      // 描述主体必须是英文；中文只允许出现在引号里的"使用者原话"举例（约定：举例要贴合中文说法）
       const outsideQuotes = String(t.description).replace(/"[^"]*"/g, '""');
       assert.ok(!/[\u4e00-\u9fff]/.test(outsideQuotes), `${name} 描述除引号内的中文举例外必须全英文`);
       assert.ok(/Use (when|this)/i.test(t.description), `${name} 描述没写"什么时候用它"`);
-      /* 【2026-09-22】"只读"这条只对四个读取工具成立：新增的 qq_character_switch 是唯一的写入者
-       * （把角色卡合成 persona.md），它当然不是 read-only，而且必须带 key/token 做主人校验。 */
+      /* 2026-09-22："只读"这条只对四个读取工具成立：新增的 qq_character_switch 是唯一的写入者
+       * （把角色卡合成 persona.md），它当然不是 read-only，而且必须带 key/token 做 owner 校验。 */
       if (name !== 'qq_character_switch') {
         assert.ok(/read-only/i.test(t.description), `${name} 描述没说清是只读`);
       } else {

@@ -140,12 +140,12 @@ function streamPipe(srcConn, srcCmd, dstConn, dstCmd, timeoutMs = 1800000) {
 }
 
 /* ---------------- 目标机环境自愈（2026-09-12） --------------------------------
- * 主人实测反馈：目标机上没有 npm 时，部署**直接失败并把安装留给他**。原有实现有两个硬伤：
+ * 实测反馈：目标机上没有 npm 时，部署直接失败，安装只能留给用户手动补。原有实现有两个硬伤：
  *   ① 整段环境安装被 `if (needNode || needDocker)` 包着 —— node 已是 22 但缺 npm 时，
  *      这一整段根本不跑，后面 `npm install` 必然 command-not-found；
  *   ② 每一步都是"一次机会 + 失败就 throw"，apt 慢/源不通/网络抖动都会让整场部署中止。
  * 现在改成「探测 → 缺什么装什么 → 装完复核 → 还不行就换下一种装法」：
- *   node  : nodesource 22 → apt nodejs → **nodejs.org 官方 tarball 解到 /usr/local**（不依赖 apt/npm）
+ *   node  : nodesource 22 → apt nodejs → nodejs.org 官方 tarball 解到 /usr/local（不依赖 apt/npm）
  *   npm   : 随 official tarball 自带；否则 apt npm；再否则 tarball 里的 npm 做软链
  *   docker: apt docker.io → get.docker.com 脚本 → 兜底 dockerd 后台拉起
  *   python3/pip: apt python3-pip → python3 -m ensurepip
@@ -288,7 +288,7 @@ export async function ensureTargetEnv(conn, task) {
   taskLine(task, `目标机探测:\n${env.raw}`);
 
   // 1) 基础工具（tar/gzip 是解包必需；curl/ca-certificates 是后续所有下载的前提）
-  //    只装**确实缺的**：都齐了就不碰 apt（避免每次都跑一次 apt-get update）
+  //    只装确实缺的：都齐了就不碰 apt（避免每次都跑一次 apt-get update）
   const missingBase = [];
   if (env.curl === 'none') missingBase.push('curl');
   if (env.tar === 'none') missingBase.push('tar');
@@ -344,21 +344,21 @@ export async function ensureTargetEnv(conn, task) {
 
 /* ---------------- 需要从源机带走的目录清单 ---------------- */
 /**
- * 部署到目标机时**保住目标机自己那份能力**的收尾脚本（2026-09-22 主人要求"确保 SSH 部署可以完美保能力"）。
+ * 部署到目标机时保住目标机自己那份能力的收尾脚本（2026-09-22：确保 SSH 部署可以完美保能力）。
  *
  * 为什么要它：bridge 那个包是"整套"打的（代码 + config.json + state/），解包前只把目标机的
- * config.json / voice-config.json **备份**到 /root/qqbridge-prev-<TS>/，**从来没有放回去** ——
+ * config.json / voice-config.json 只备份到 /root/qqbridge-prev-<TS>/，从来没有放回去 ——
  * 于是"更新一次代码"会顺带把目标机上配好的东西整片覆盖：
- *   · config.json：pixiv 登录 cookie、语音 TTS key、白名单/拉黑、主人 QQ、napcat 路径与容器映射、
- *     工具档位 / 打字节拍 / 压缩阈值这些**主人调过的旋钮**（本机 150ms/字 vs 服务器 650ms/字 就是这么来的）；
- *   · state/：memory.db（记住的东西）、social-state.json、stickers/slang/画像、token 用量账本；
+ *   · config.json：pixiv 登录 cookie、语音 TTS key、白名单/拉黑、机主 QQ、napcat 路径与容器映射、
+ *     工具档位 / 打字节拍 / 压缩阈值这些机主在界面上调过的旋钮（本机 150ms/字 vs 服务器 650ms/字 就是这么来的）；
+ *   · state/：memory.db（记住的东西）与 chat.db（聊天记录，2026-09-24 起独立成库）、social-state.json、stickers/slang/画像、token 用量账本；
  *   · persona.md：当前角色。
- * 现在的语义是 **"部署 = 换代码，不换身份与记忆"**：
+ * 现在的语义是"部署 = 换代码，不换身份与记忆"：
  *   ① 解包前把目标机的 config.json / persona.md / state/ 存到 /root/qqbridge-keep-<TS>/；
  *   ② 解包（代码换成新的）；
  *   ③ 收尾脚本做三件事：
- *      - config.json **逐键合并**：目标机有的键一律以目标机为准（新版本新增的键才用包里的默认值）→
- *        既不吃掉主人调过的旋钮，也不会因为配置缺新键而少能力；
+ *      - config.json 逐键合并：目标机有的键一律以目标机为准（新版本新增的键才用包里的默认值）→
+ *        既不吃掉机主调过的旋钮，也不会因为配置缺新键而少能力；
  *      - state/ 与 persona.md 用目标机的覆盖回来（记忆/画像/贴纸库/角色不丢）；
  *      - 打印"保留了哪些键、补了哪些新键"，让这一步可见。
  * 想回到老的"整套复刻"语义（把源机的配置和记忆一起推过去）→ 目标机上 `QQB_DEPLOY_WHOLE_CLONE=1` 时跳过这套保护。
@@ -428,12 +428,12 @@ function buildStagePlan(task, src, opts) {
     name: 'bridge',
     stage: 'qq-bridge.tar.gz',
     pack: `tar czf /root/.qqbridge-clone/qq-bridge.tar.gz -C /root --exclude='qq-bridge/.git' --exclude='qq-bridge/node_modules' --exclude='qq-bridge/state/bridge.lock' --exclude='qq-bridge/state/bridge*.log' qq-bridge`,
-    /* 【2026-09-22 主人要求"确保 SSH 部署可以完美保能力"】
-     * 老行为：只把目标机的 config.json / voice-config.json **备份**到 /root/qqbridge-prev-<TS>/ 就删库重解包，
-     * **从不放回去** → "更新一次代码"会把目标机配好的东西整片覆盖（pixiv cookie、语音 key、白名单、
-     * 主人调过的工具档位/节拍/阈值，以及 state/ 里的记忆库与画像）。
+    /* 2026-09-22：确保 SSH 部署可以完美保能力。
+     * 老行为：只把目标机的 config.json / voice-config.json 备份到 /root/qqbridge-prev-<TS>/ 就删库重解包，
+     * 从不放回去 → "更新一次代码"会把目标机配好的东西整片覆盖（pixiv cookie、语音 key、白名单、
+     * 机主调过的工具档位/节拍/阈值，以及 state/ 里的记忆库与画像）。
      * 新行为：解包前把 config.json / persona.md / state/ 存到 /root/qqbridge-keep-<TS>/，
-     * 解包后由 buildDeployKeepScript() 做"逐键合并 + state 覆盖回来"，语义变成**部署=换代码，不换身份与记忆**。
+     * 解包后由 buildDeployKeepScript() 做"逐键合并 + state 覆盖回来"，语义变成部署=换代码，不换身份与记忆。
      * 要老的"整套复刻"就在目标机设 QQB_DEPLOY_WHOLE_CLONE=1。 */
     dst: `set -e; TS=$(date +%Y%m%d-%H%M%S); KEEP=/root/qqbridge-keep-$TS; if [ -d /root/qq-bridge ]; then mkdir -p $KEEP; cp -a /root/qq-bridge/config.json $KEEP/ 2>/dev/null || true; cp -a /root/qq-bridge/persona.md $KEEP/ 2>/dev/null || true; cp -a /root/qq-bridge/state $KEEP/state 2>/dev/null || true; echo "目标机的 config.json / persona.md / state 已存到 $KEEP（解包后会以目标机为准恢复）"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf - -C /root; ${buildDeployKeepScript().replace(/\n/g, '; ')}`,
     restart: '', // bridge 单独管理
@@ -446,7 +446,7 @@ function buildStagePlan(task, src, opts) {
     dst: 'rm -rf /root/.dsh && mkdir -p /root/.dsh && tar xzf - -C /root/.dsh',
     restart: '',
   });
-  // 3. NapCat 配置目录：**原生跑法在 /opt/napcat/config，容器跑法在 /root/napcat/config（bind 挂载）**。
+  // 3. NapCat 配置目录：原生跑法在 /opt/napcat/config，容器跑法在 /root/napcat/config（bind 挂载）。
   //    模板机与目标机跑法可能不同（就是要从容器迁到原生），所以打包/解包各自认自己的路径。
   plan.push({
     name: 'napcat-config',
@@ -456,7 +456,7 @@ function buildStagePlan(task, src, opts) {
     restart: '',
   });
   // 3b. NapCat 应用本体（原生跑法）：把模板机的 /opt/napcat 原样带过去 ——
-  //     目标机于是拿到**同一个 napcat.mjs 与 native 二进制**（模板机上那份是我们自己编译的、
+  //     目标机于是拿到同一个 napcat.mjs 与 native 二进制（模板机上那份是我们自己编译的、
   //     带防掉线补丁），不必去 GitHub 拉。cache/config/数据库都排除（配置有单独的包，数据库是运行时状态）。
   plan.push({
     name: 'napcat-app',
@@ -500,21 +500,21 @@ function buildStagePlan(task, src, opts) {
 }
 
 /* ---------------- NapCat 跑法：原生优先、docker 兜底（2026-09-19） ----------------
- * 【为什么改】本机这台服务器上的 NapCat 早就从容器改成**原生**跑了（官方 Linux QQ deb +
+ * 【为什么改】本机这台服务器上的 NapCat 早就从容器改成原生跑了（官方 Linux QQ deb +
  * `/opt/napcat` 应用 + systemd unit `napcat.service` + Xvfb + 非 root 用户 `qq`），
- * `server/index.js` 的**控制**路径（启停/状态）上一轮也已经改成"先看有没有 napcat.service，
- * 有就走 systemd，没有才回退 docker"。但 `deploy.js` 这条**部署/克隆**路径还整体写死在 docker 上：
+ * `server/index.js` 的控制路径（启停/状态）上一轮也已经改成"先看有没有 napcat.service，
+ * 有就走 systemd，没有才回退 docker"。但 `deploy.js` 这条部署/克隆路径还整体写死在 docker 上：
  *   拉 `mlikiowa/napcat-docker:latest`、`docker create --name napcat …`、QQ 登录态灌进
  *   docker 卷 `napcat-qq`、启动用 `docker start napcat` —— 往这样克隆出来的机器上跑，
- *   得到的是**旧跑法**，和模板机不一致（而且那台机器上 docker 数据早就清掉腾磁盘了）。
+ *   得到的是旧跑法，和模板机不一致（而且那台机器上 docker 数据早就清掉腾磁盘了）。
  *
- * 【现在的形状】和控制的路径保持同一个形状：**探测 → 原生优先 → docker 兜底**。
+ * 【现在的形状】和控制的路径保持同一个形状：探测 → 原生优先 → docker 兜底。
  *   · `napcatModeCmd()` 探针：有 napcat.service = native，有 napcat 容器 = docker，都没有 = none；
  *   · `napcatCtlCmd(act)` 启停：按探针结果走 systemctl 或 docker；
  *   · `installNapcatNative()` 在目标机上装原生那一套（官方 deb + 应用 + 接线 + unit + Xvfb + qq 用户），
- *     里面每一步都用模板机上**现在正在跑**的那份实现（unit 文件、run-napcat.sh、接线方式逐字照抄）；
- *   · 任何一步失败都**不致命**：退回 docker 路径（老机器/老模板照样能克隆）。
- * ⚠️ 原生模式没有 dockerPathMap 这回事：图片/语音/表情的路径就是宿主机路径，直接写就行。 */
+ *     里面每一步都用模板机上现在正在跑的那份实现（unit 文件、run-napcat.sh、接线方式逐字照抄）；
+ *   · 任何一步失败都不致命：退回 docker 路径（老机器/老模板照样能克隆）。
+ * 原生模式没有 dockerPathMap 这回事：图片/语音/表情的路径就是宿主机路径，直接写就行。 */
 
 /** 探测某台机器上 NapCat 是怎么跑的。 */
 const NAPCAT_MODE_CMD = 'if systemctl cat napcat.service >/dev/null 2>&1; then echo native; elif docker ps -a --filter name=^napcat$ --format "{{.Names}}" 2>/dev/null | grep -q napcat; then echo docker; else echo none; fi';
@@ -571,9 +571,9 @@ export function buildNapcatInstallScript(o = {}) {
     'Documentation=https://github.com/NapNeko/NapCatQQ',
     'After=network-online.target',
     'Wants=network-online.target',
-    // 【2026-09-19】StartLimit* 属于 [Unit] 段：线上那份写在 [Service] 里，
+    // 2026-09-19：StartLimit* 属于 [Unit] 段：线上那份写在 [Service] 里，
     // systemd 每次都报 `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring`
-    // （等于"掉线风暴时不要疯狂重启"这条**根本没生效**）。新装的机器放到正确位置。
+    // （等于"掉线风暴时不要疯狂重启"这条根本没生效）。新装的机器放到正确位置。
     '# 掉线风暴时不要疯狂重启',
     'StartLimitIntervalSec=300',
     'StartLimitBurst=10',
@@ -590,10 +590,10 @@ export function buildNapcatInstallScript(o = {}) {
     'StandardError=append:/var/log/napcat-native.log',
     'Environment=HOME=/home/qq',
     'KillMode=mixed',
-    // 【2026-09-19】线上实测：停服务时 QQ（/opt/QQ/qq，Electron 主进程）**不响应 SIGTERM**，
+    // 2026-09-19：线上实测：停服务时 QQ（/opt/QQ/qq，Electron 主进程）不响应 SIGTERM，
     // 45 秒到点后被 systemd SIGKILL（journal：`napcat.service: Killing process … (qq) with signal SIGKILL`）。
     // 硬杀意味着这次登录的会话状态来不及落盘 —— 再叠加设备身份漂移，QQ 服务端就会判"新设备/设备异常"。
-    // 所以把宽限放到 120s：**能给优雅退出的机会就不硬杀**（真不退出也只是多等一会儿，代价可控）。
+    // 所以把宽限放到 120s：能给优雅退出的机会就不硬杀（真不退出也只是多等一会儿，代价可控）。
     'TimeoutStopSec=120',
     '',
     '[Install]',
@@ -625,11 +625,11 @@ export function buildNapcatInstallScript(o = {}) {
     'echo "[4/7] 运行用户 qq（非 root 才能用 chrome-sandbox）"',
     'id qq >/dev/null 2>&1 || useradd -m -s /bin/bash qq',
     'usermod -aG audio,video qq >/dev/null 2>&1 || true',
-    // 【2026-09-19 钉设备身份】反复出现「掉线后报检测到设备异常 / 新设备登录，必须扫码」。
+    // 2026-09-19 钉设备身份：反复出现「掉线后报检测到设备异常 / 新设备登录，必须扫码」。
     // QQ 判断"是不是同一台设备"靠它从机器上读到的一组标识；目标机多是 LXC 容器
     // （hostnamectl 显示 Virtualization: lxc，DMI 的 product_uuid / board_serial 读不到），
     // 于是能用的就剩 machine-id 与 hostname —— 而很多容器里 hostname 是一串随容器变化的 UUID。
-    // 这里在**装 QQ 之前**把这两个钉死，QQ 第一次启动看到的身份就是稳定的。
+    // 这里在装 QQ 之前把这两个钉死，QQ 第一次启动看到的身份就是稳定的。
     // （eth0 的 MAC 由宿主机分配，容器内改它可能断网，所以只记录不动，见 device-pin.json。）
     'echo "[4b/7] 钉死设备身份（machine-id + hostname）—— 免得 QQ 每次重启都当成新设备要扫码"',
     'if [ ! -s /etc/machine-id ]; then tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id; echo "   machine-id 原本是空的 → 已生成"; fi',
@@ -677,15 +677,15 @@ async function installNapcatNative(conn, task, o = {}) {
 
 /* ---------------- 主执行 ---------------- */
 /* ---------------- 本机作为源（"从本机复刻"） ----------------
- * 需求（2026-09-12 主人）：克隆整套不再必须"两台服务器"，直接拿**本机当前运行中的这套**做模板。
+ * 需求（2026-09-12）：克隆整套不再必须"两台服务器"，直接拿本机当前运行中的这套做模板。
  *
  * 与"模板服务器→目标"的差别只有三处，其余远端步骤完全复用：
  *   ① 打包在本机做（Windows 上的 tar = bsdtar），不再连源服务器、也不需要源机停机；
  *   ② 传输走"本机文件 → 远端 stdin"，而不是"源机 → 本机 → 目标机"两段中转；
- *   ③ 源机特有的 systemd unit / .bashrc 环境变量，本机没有 → 在目标机**生成** unit，
+ *   ③ 源机特有的 systemd unit / .bashrc 环境变量，本机没有 → 在目标机生成 unit，
  *      凭据则靠随包带过去的 .credentials.yaml（DSH 自己读，绝不猜着导出成环境变量，导错就把 key 写坏了）。
  *
- * 说明：Windows 的 QQ 客户端数据目录（NTQQ 本体数据）与 Linux 不通用，所以本机复刻**不带**容器卷那份
+ * 说明：Windows 的 QQ 客户端数据目录（NTQQ 本体数据）与 Linux 不通用，所以本机复刻不带容器卷那份
  * qqdata；真正可移植的是 NapCat 的登录令牌文件 napcat_<qq>.json（在 napcat/config 里），
  * 它随 napcat-config 包一起过去，目标机通常可以免扫码快速登录（不行就扫一次）。
  */
@@ -706,11 +706,11 @@ export function buildLocalStagePlan(task, opts = {}) {  const p = opts.localPath
         `${basename(p.bridgeDir)}/state/*.log`,
         `${basename(p.bridgeDir)}/state/agents/*/node_modules`,
         `${basename(p.bridgeDir)}/tests`,
-        /* 【2026-09-23】本机历史备份不要带走 —— 实测这里躺着 **41.4 MB**：
+        /* 2026-09-23：本机历史备份不要带走 —— 实测这里躺着 41.4 MB：
          *   · `state.bak-* / state.old-* / state.merge-stage-*`（6 个目录，各 6~7 MB）是本机
-         *     历次 state 迁移的旧拷贝，里面是**旧的会话/社交状态**；
-         *   · `config.json.bak-*` 有 30 多个，**每一个都带着主人 QQ、NapCat 令牌、服务器地址**。
-         * 目标机是"全新部署"，这些既没用、又白白把主人的隐私多复制一份过去。
+         *     历次 state 迁移的旧拷贝，里面是旧的会话/社交状态；
+         *   · `config.json.bak-*` 有 30 多个，每一个都带着机主 QQ、NapCat 令牌、服务器地址。
+         * 目标机是"全新部署"，这些既没用、又白白把机主的隐私多复制一份过去。
          * 新机器不需要它们：真正要迁的是当前那份 config.json / state/ / persona.md。 */
         `${basename(p.bridgeDir)}/*.bak`,
         `${basename(p.bridgeDir)}/*.bak-*`,
@@ -718,8 +718,8 @@ export function buildLocalStagePlan(task, opts = {}) {  const p = opts.localPath
         `${basename(p.bridgeDir)}/state.old-*`,
         `${basename(p.bridgeDir)}/state.merge-stage-*`,
       ],
-      /* 【2026-09-19】解包前先把目标机**原有的** config.json 与 state/voice-config.json 备份出来：
-       * 这条路径是"整套复刻"，会把本机的 config 覆盖上去；如果主人是在服务端那侧配的（pixiv 登录 cookie、
+      /* 2026-09-19：解包前先把目标机原有的 config.json 与 state/voice-config.json 备份出来：
+       * 这条路径是"整套复刻"，会把本机的 config 覆盖上去；如果机主是在服务端那侧配的（pixiv 登录 cookie、
        * 语音 TTS key、白名单…），覆盖后就再也找不回来了。备份目录名会打进部署日志。 */
       dstFile: `set -e; TS=$(date +%Y%m%d-%H%M%S); if [ -d /root/qq-bridge ]; then mkdir -p /root/qqbridge-prev-$TS; cp -a /root/qq-bridge/config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; cp -a /root/qq-bridge/state/voice-config.json /root/qqbridge-prev-$TS/ 2>/dev/null || true; echo "目标机原配置已备份: /root/qqbridge-prev-$TS"; fi; rm -rf /root/qq-bridge && mkdir -p /root && tar xzf ${stageDir}/qq-bridge.tar.gz -C /root`,
     });
@@ -741,7 +741,7 @@ export function buildLocalStagePlan(task, opts = {}) {  const p = opts.localPath
       cwd: dirname(p.napcatConfigDir),
       members: [basename(p.napcatConfigDir)],
       excludes: [`${basename(p.napcatConfigDir)}/cache`, `${basename(p.napcatConfigDir)}/*.log`],
-      // 【2026-09-19】目标机若是原生跑法，配置该落 /opt/napcat/config 而不是容器的 /root/napcat/config。
+      // 2026-09-19：目标机若是原生跑法，配置该落 /opt/napcat/config 而不是容器的 /root/napcat/config。
       // 形态由主流程写下的 <stageDir>/napcat-mode 标记决定（见 deploy 主流程第 4 步）。
       dstFile: `M=$(cat ${stageDir}/napcat-mode 2>/dev/null); if [ "$M" = "native" ]; then rm -rf /opt/napcat/config && mkdir -p /opt/napcat && tar xzf ${stageDir}/napcat-config.tar.gz -C /opt/napcat; else rm -rf /root/napcat/config && mkdir -p /root/napcat && tar xzf ${stageDir}/napcat-config.tar.gz -C /root/napcat; fi`,
     });
@@ -766,23 +766,23 @@ export function packLocalStage(task, item, outDir) {
   const args = ['czf', out, ...(item.excludes || []).map((e) => `--exclude=${e}`), '-C', item.cwd, ...item.members];
   const r = spawnSync('tar', args, { encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
   if (r.error) return { ok: false, error: r.error.message };
-  /* 【2026-09-23 修「从本机复刻在新服务器上一键部署失败」——打包 dsh-home 必挂】
+  /* 2026-09-23 修「从本机复刻在新服务器上一键部署失败」——打包 dsh-home 必挂
    * 现场：`tar czf dsh-home.tar.gz -C <isolatedHome> .` 退出码 1，stderr 全是
    *   `tar: ./profiles/node_modules/@deepseek-ai/dsh: Cannot stat: No such file or directory`
-   * 成因：pnpm 装的 `profiles/node_modules` 是一整片 **junction**，而它们指向的
+   * 成因：pnpm 装的 `profiles/node_modules` 是一整片 junction，而它们指向的
    *   `%APPDATA%\npm\node_modules\@deepseek-ai\dsh\node_modules\...` 在本机已经不存在
-   *   （全局 dsh 被卸载/搬走过）。于是本机实测 **489 条链接里 484 条是悬空的**。
-   * Windows 的 bsdtar 遇到悬空 junction 会报 Cannot stat 并让**整个 tar 以非 0 退出**，
+   *   （全局 dsh 被卸载/搬走过）。于是本机实测 489 条链接里 484 条是悬空的。
+   * Windows 的 bsdtar 遇到悬空 junction 会报 Cannot stat 并让整个 tar 以非 0 退出，
    * 而 `--exclude` 拦不住它（排除只影响归档内容，stat 照样发生 —— 实测加不加排除都一样）。
-   * 由于 dsh-home 不是可选包，这一条非 0 就 `throw` → **整场部署在打包阶段就中断**，
+   * 由于 dsh-home 不是可选包，这一条非 0 就 `throw` → 整场部署在打包阶段就中断，
    * 根本走不到传输。这就是"一键部署不好使"的真正原因。
    *
    * 判据收得很紧，避免掩盖真错误：
-   *   ① 归档文件**确实生成了**且非空（说明 tar 主体是成功的）；
-   *   ② stderr 里**每一行**都是 `Cannot stat`（悬空链接/被删文件的警告），
+   *   ① 归档文件确实生成了且非空（说明 tar 主体是成功的）；
+   *   ② stderr 里每一行都是 `Cannot stat`（悬空链接/被删文件的警告），
    *      出现任何别种错误（I/O、权限、磁盘满…）仍然照常判失败；
-   *   ③ 这种情况如实写进部署日志（主人能在界面上看到"跳过了 N 条悬空链接"）。
-   * 这些悬空链接指向本机已不存在的路径，**对目标机毫无用处**，且 buildTargetDshHealScript
+   *   ③ 这种情况如实写进部署日志（机主能在界面上看到"跳过了 N 条悬空链接"）。
+   * 这些悬空链接指向本机已不存在的路径，对目标机毫无用处，且 buildTargetDshHealScript
    * 会在目标机重建 profiles/plugins 的链接 —— 所以跳过它们不影响"全部能力"。 */
   const stderrText = String(r.stderr || '').trim();
   const stderrLines = stderrText ? stderrText.split('\n').map((s) => s.trim()).filter(Boolean) : [];
@@ -943,8 +943,13 @@ function buildTargetDshHealScript() {
     'done',
     'echo "plugin-links=$links"',
     'if [ -f /root/.dsh/.credentials.yaml ]; then chmod 600 /root/.dsh/.credentials.yaml; echo "credentials-mode=$(stat -c %a /root/.dsh/.credentials.yaml)"; fi',
-    'for d in /root/whale-fanart-001 /root/meme/whale-fanart-001 /root/dsh-meme/whale-fanart-001; do',
-    '  if [ -d "$d" ]; then mkdir -p /root/.dsh/meme-packs; ln -sfn "$d" "/root/.dsh/meme-packs/$(basename "$d")"; echo "meme-link=$d"; break; fi',
+    'for root in /root/meme /root/meme-packs /root/dsh-meme; do',
+    '  [ -d "$root" ] || continue',
+    '  mkdir -p /root/.dsh/meme-packs',
+    '  for d in "$root"/*; do',
+    '    [ -d "$d" ] || continue',
+    '    ln -sfn "$d" "/root/.dsh/meme-packs/$(basename "$d")"; echo "meme-link=$d"',
+    '  done',
     'done',
     "cat > /tmp/qbm-heal-dsh.js <<'HEALEOF'",
     healJs,
@@ -957,11 +962,11 @@ function buildTargetDshHealScript() {
 /**
  * 部署后「能力与配置核对」脚本（在目标机上跑，打印一份清单）。
  *
- * 起因（2026-09-19 主人要求）："SSH 配置界面部署要能把所有能力和配置都部署到，包括 pixiv 那些"。
- * 部署本身是"整套复刻"（bridge 的代码 + config.json + state/ 都在同一个包里），但**没有一处告诉用户
- * 到底哪些能力真的到了**：pixiv 登录 cookie、语音 TTS key、白名单、记忆库、表情库、黑话库、画像……
+ * 起因（2026-09-19）："SSH 配置界面部署要能把所有能力和配置都部署到，包括 pixiv 那些"。
+ * 部署本身是"整套复刻"（bridge 的代码 + config.json + state/ 都在同一个包里），但没有一处告诉用户
+ * 到底哪些能力真的到了：pixiv 登录 cookie、语音 TTS key、白名单、记忆库、表情库、黑话库、画像……
  * 任何一项缺失都不会报错，只会在用的时候表现为"某个功能不好使"。
- * 所以这里在部署末尾逐项核对并如实打印 ✅/⚠️/❌ + 该去哪儿补。
+ * 所以这里在部署末尾逐项核对并如实打印 ok/warn/bad 三档结果 + 该去哪儿补。
  */
 export function buildTargetCapabilityCheckScript() {
   const js = [
@@ -991,7 +996,8 @@ export function buildTargetCapabilityCheckScript() {
     "add('拉黑名单', 'info', '群 ' + (((cfg.deny || {}).groups) || []).length + ' 个 / 私聊 ' + (((cfg.deny || {}).private) || []).length + ' 个');",
     "add('主人 QQ', cfg.ownerQQ ? 'ok' : 'warn', cfg.ownerQQ ? String(cfg.ownerQQ) : '未设置 → 没有主人权限识别');",
     "// —— 数据 / 记忆 ——",
-    "add('记忆库 memory.db', size(BR + '/state/memory.db') > 0 ? 'ok' : 'warn', size(BR + '/state/memory.db') > 0 ? (Math.round(size(BR + '/state/memory.db') / 1024) + ' KB') : '不存在或为空');",
+    "add('记忆档案库 memory.db', size(BR + '/state/memory.db') > 0 ? 'ok' : 'warn', size(BR + '/state/memory.db') > 0 ? (Math.round(size(BR + '/state/memory.db') / 1024) + ' KB') : '不存在或为空');",
+    "add('聊天记录库 chat.db', size(BR + '/state/chat.db') > 0 ? 'ok' : 'info', size(BR + '/state/chat.db') > 0 ? (Math.round(size(BR + '/state/chat.db') / 1024) + ' KB') : (size(BR + '/state/memory.db') > 0 ? '还没分家：老 memory.db 里的 chat_messages 会在桥下次启动时自动搬到 chat.db' : '不存在（桥还没在这台机器上跑过）'));",
     "add('黑话库 slang.json', size(BR + '/state/slang.json') > 0 ? 'ok' : 'info', (size(BR + '/state/slang.json') > 0 ? Math.round(size(BR + '/state/slang.json') / 1024) + ' KB' : '还没学到（正常）'));",
     "add('表情库 stickers.json', size(BR + '/state/stickers.json') > 0 ? 'ok' : 'info', (size(BR + '/state/stickers.json') > 0 ? Math.round(size(BR + '/state/stickers.json') / 1024) + ' KB' : '还没同步'));",
     "add('内置表情包目录', exists('/root/.dsh/meme-packs') || exists(BR + '/../meme') ? 'ok' : 'warn', exists('/root/.dsh/meme-packs') ? '/root/.dsh/meme-packs' : (exists(BR + '/../meme') ? BR + '/../meme' : '没找到 meme 包 → qq_send_meme 不可用'));",
@@ -1045,9 +1051,9 @@ export async function runDeploy(taskId, source, target, opts = {}) {
   const plan = isLocal ? buildLocalStagePlan(task, opts) : buildStagePlan(task, source, opts);
   let srcConn = null;
   let dstConn = null;
-  // ⚠️ 必须声明在 try **之外**：catch/finally 里要用它清理本机临时目录。
+  // 必须声明在 try 之外：catch/finally 里要用它清理本机临时目录。
   // 之前声明在 try 里面，catch 引用它就抛 ReferenceError —— 而这层 catch 之外的异常会变成
-  // unhandledRejection 把**整个管理器进程**带崩（2026-09-12 dry-run 实测：部署一失败，管理器就没了）。
+  // unhandledRejection 把整个管理器进程带崩（2026-09-12 dry-run 实测：部署一失败，管理器就没了）。
   let localStageDir = null;
 
   const step = async (label, fn) => {
@@ -1093,8 +1099,8 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     }
 
     /* 1. 目标机基础环境：探测 → 缺什么装什么（多装法兜底）→ 复核
-     * 【2026-09-12 主人要求】"自动检测服务器缺失环境，比如 npm/node，没有就自动安装别报错停止，
-     * 别留我安装"。旧实现只在 `needNode || needDocker` 时才跑这一步，node 已是 22 但**缺 npm**
+     * 2026-09-12：要求"自动检测服务器缺失环境，比如 npm/node，没有就自动安装别报错停止，
+     * 别留我安装"。旧实现只在 `needNode || needDocker` 时才跑这一步，node 已是 22 但缺 npm
      * 时这一步被整个跳过 → 后面 `npm install` 直接失败。现在改成无条件自愈，
      * 并且每一步都只写日志、换下一种装法，不再单点失败即中止。 */
     const envRes = await ensureTargetEnv(dstConn, task);
@@ -1107,7 +1113,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       taskLine(task, '  ⚠ docker 不可用：仍会继续（后面拉镜像/建容器会再次尝试并报出具体原因）');
     }
     await step('安装全局 DSH CLI(@deepseek-ai/dsh)', async () => {
-      /* 【2026-09-23 修 P3】原来非本机源**硬写 '0.1.1-rc.2'**：目标机上已经装着别的版本时
+      /* 2026-09-23 修 P3：原来非本机源硬写 '0.1.1-rc.2'：目标机上已经装着别的版本时
        * （实测这台服务器与本机都是 0.1.2-rc.1），`npm ls -g @deepseek-ai/dsh@0.1.1-rc.2` 必然不匹配
        * → 又装一份甚至降级 → preset/插件/MCP 版本全对不上，典型症状就是"部署完 DSH 起不来 / 工具全丢"。
        * 而且本机源那条路本来就有同样的注释说别硬写 —— 这条分支被漏掉了。
@@ -1126,8 +1132,8 @@ export async function runDeploy(taskId, source, target, opts = {}) {
           : '  目标机没有 dsh → 将安装 latest（没拿到模板机版本，建议随后核对）');
       }
       const spec = dshVer ? `@deepseek-ai/dsh@${dshVer}` : '@deepseek-ai/dsh';
-      // 【2026-09-12】多给一次机会 + 装完用真实可执行复核（原来一次 npm i -g 失败就 throw）。
-      // 【2026-09-13 修「dsh 明明装上了却报未装上」】实测：npm 全局装完（/usr/lib/node_modules 里已有包）
+      // 2026-09-12：多给一次机会 + 装完用真实可执行复核（原来一次 npm i -g 失败就 throw）。
+      // 2026-09-13 修「dsh 明明装上了却报未装上」：实测：npm 全局装完（/usr/lib/node_modules 里已有包）
       // 但 bin 链接晚一两秒才出现，紧跟其后的 `command -v dsh` 当场判定失败。现在：
       //   ① 装完后最多重试 5 次（每次间隔 2s）等 bin 出现；
       //   ② 还没有就直接写一个包装脚本 /usr/bin/dsh → <prefix>/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
@@ -1147,14 +1153,14 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       const ok = (r.out || '').includes('DSH_OK');
       taskLine(task, `  dsh: ${ok ? '已安装' : '未装上'}${isLocal ? `（跟随本机 ${dshVer || '默认'}）` : ''} ${r.out.split('\n').filter(Boolean).slice(-1)[0] || ''}`);
     });
-    /* 【2026-09-21 事实核查后的诚实说明】这一步只是**把 pip 包装上**，仓库里没有任何代码调用它。
+    /* 2026-09-21 事实核查后的说明：这一步只是把 pip 包装上，仓库里没有任何代码调用它。
      * 全面搜过一遍（qq-bridge/ 含 config*.json、src/、dsh/、scripts/、tools/、plugins/，以及
      * server/、dsh-runtime/、dist/、release/ 与各 .yml/.json）：`mcp-compressor` 只在本文件出现，
      * 既不是 CLI、也不是 MCP proxy、也没有被任何进程 import；MCP server 是 DSH 直接
      * `node src/mcp-napcat-safe.js` 起的（lib/dsh-side.js 的 mcpBlock），中间没有包装进程。
-     * 也就是说：**它跟"工具描述压缩"这件事无关**。真正的工具压缩是 social.slimTools 那套
+     * 也就是说：它跟"工具描述压缩"这件事无关。真正的工具压缩是 social.slimTools 那套
      * （注册期按档位根本不注册 → 描述从请求里彻底消失，见 lib/tool-tiers.js 与 mcp-napcat-safe.js）。
-     * 那为什么还留着这一步：主人可能在**仓库之外**自己用它（把一堆 MCP 工具包成更少的工具）。
+     * 那为什么还留着这一步：机主可能在仓库之外自己用它（把一堆 MCP 工具包成更少的工具）。
      * 所以不删，但把原来那句错误的失败提示改对 —— 原来写"仅 napcat MCP 压缩不可用"会让人以为
      * 仓库里有运行时 MCP 压缩，进而去排查一个不存在的东西（本文件顶上那句"安装 mcp-compressor"同理）。 */
     await step('安装 mcp-compressor (pip 工具；仓库内无调用，仅供仓库外自用)', async () => {
@@ -1212,7 +1218,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
         /* 优先用随代码包同步过去的 restart-bridge.sh（它会先停旧桥再起，并回报 new/old pid）；
          * 老写法 `nohup bash start-bridge.sh` 不杀旧桥 → 旧桥继续占着 3100，新实例 EADDRINUSE 自退，
          * 而判据只看 pgrep 命中 → 永远"bridge-up"其实没重启（2026-09-19 实测）。全新机器上脚本还可能
-         * 不存在（这次是首次部署），那种情况退回落步骤 —— 同样**先杀旧桥**、并用"pid 变了"当判据
+         * 不存在（这次是首次部署），那种情况退回落步骤 —— 同样先杀旧桥、并用"pid 变了"当判据
          * （2026-09-23：原来这里的回步骤还是老形状，机器上没脚本时会静默走回老毛病）。 */
         const r = await runCmd(srcConn, [
           'cd /root/qq-bridge || exit 1',
@@ -1233,7 +1239,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       });
     }
 
-    /* 4. NapCat 在目标机上怎么跑：**原生优先、docker 兜底**（2026-09-19，见文件上方那段的说明）。
+    /* 4. NapCat 在目标机上怎么跑：原生优先、docker 兜底（2026-09-19，见文件上方那段的说明）。
      *    这里只做"定形态 + 留标记"，装机和建容器分别在 4b 之后 / 这里做；
      *    标记文件 <stageDir>/napcat-mode 给后面的解包步骤认路径用（原生 /opt/napcat vs 容器 /root/napcat）。 */
     taskLine(task, '—— 目标机 NapCat 形态');
@@ -1278,8 +1284,8 @@ export async function runDeploy(taskId, source, target, opts = {}) {
           await runCmd(dstConn, `mkdir -p ${stageDir}`, 20000);
           const remoteFile = `${stageDir}/${item.stage}`;
           /* 传 + 解包作为一个整体重试一次。
-           * 【2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」】
-           * 那次是上传**只传了一部分**却回了成功，远端 cat 正常退出，直到解包才炸。
+           * 2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」
+           * 那次是上传只传了一部分却回了成功，远端 cat 正常退出，直到解包才炸。
            * 现在 uploadFile 会用远端字节数复核（传不全直接报错），这里再补一次重试：慢链路偶发截断
            * 不该让整场部署重来（前面已经装好的环境、拉过的镜像都要重跑）。 */
           let lastErr = null;
@@ -1310,7 +1316,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     //       也必须放在 4c 之前：QQ 登录态要解到 /home/qq/.config/QQ（这里会把它建出来）。
     if (napcatMode === 'native') {
       await step('安装原生 NapCat（官方 Linux QQ + /opt/napcat + systemd）', async () => {
-        // 机器人 QQ 号与免扫码回退口令：从**模板机**的 run-napcat.sh 里读（模板机上正在跑的那份就是准的）
+        // 机器人 QQ 号与免扫码回退口令：从模板机的 run-napcat.sh 里读（模板机上正在跑的那份就是准的）
         let account = '';
         let quickMd5 = '';
         try {
@@ -1353,7 +1359,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       });
     }
     // 4d. 桥依赖装到目标机(原生模块按目标平台编译)
-    // 【2026-09-12】失败不再只说"npm install 未完成"：先自动补上编译链（build-essential/python3/make/g++）
+    // 2026-09-12：失败不再只说"npm install 未完成"：先自动补上编译链（build-essential/python3/make/g++）
     // 再重试一次，最后才如实报错（原生模块 sharp 在裸 Ubuntu 上缺 make/g++ 时编译会失败）。
     await step('安装桥依赖(npm install, 需要一点时间)', async () => {
       const script = [
@@ -1375,7 +1381,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       taskLine(task, '  桥依赖已就绪 /root/qq-bridge/node_modules');
     });
 
-    // 4e. 桥的 config.json 指向**本机**的隔离 DSH 端口（本机是 10721，目标机上 DSH 跑在 3080）——
+    // 4e. 桥的 config.json 指向本机的隔离 DSH 端口（本机是 10721，目标机上 DSH 跑在 3080）——
     //     不改这一处，目标机的桥会一直连不上 DSH（表现：桥起来了但机器人不说话）。
     await step('调整桥配置指向目标机 DSH 端口', async () => {
       const patch = [
@@ -1395,8 +1401,8 @@ export async function runDeploy(taskId, source, target, opts = {}) {
       taskLine(task, (r.out || '').trim().split('\n').filter(Boolean).map((l) => `  ${l}`).join('\n'));
     });
 
-    /* 4g. 能力与配置核对（2026-09-19 主人要求"确保所有能力和配置都部署到，包括 pixiv 那些"）：
-     * 部署是"整套复刻"，但**没有一处告诉用户到底哪些能力真的到了**。这一步逐项核对并如实打印，
+    /* 4g. 能力与配置核对（2026-09-19：确保所有能力和配置都部署到，包括 pixiv 那些）：
+     * 部署是"整套复刻"，但没有一处告诉用户到底哪些能力真的到了。这一步逐项核对并如实打印，
      * 缺什么、去哪儿补都写在行里（缺项不会让部署失败——它是"核对"，不是闸门）。 */
     await step('核对能力与配置是否到齐（pixiv / 语音 / 白名单 / 记忆 / 表情库 / 画像）', async () => {
       const r = await runCmd(dstConn, buildTargetCapabilityCheckScript(), 90000);
@@ -1422,7 +1428,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
           `ExecStart=${dshBinPath} --profile web --port 3080 --no-open --trusted-host 127.0.0.1:3080`,
           'Restart=always',
           'RestartSec=3',
-          // 【2026-09-14】把 DSH 的启动日志落到文件：桥要用里面的 `?token=` 换鉴权 cookie
+          // 2026-09-14：把 DSH 的启动日志落到文件：桥要用里面的 `?token=` 换鉴权 cookie
           // （qq-bridge/src/dsh-client.js 的 readLatestToken，路径由 DSH_ISOLATED_LOG_FILE 指定）。
           // 只进 journald 的话桥读不到 token，表现就是每 3 秒刷 `remote.mux WebSocket 连接失败`、
           // 3080 明明活着却永远连不上。
@@ -1472,13 +1478,13 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     });
 
     // 5c. 启动系统服务 + 容器 + 桥
-    // 【2026-09-14】不再无条件 start dsh-polyfill：本机复刻路径**不生成** polyfill unit（本机源没有），
+    // 2026-09-14：不再无条件 start dsh-polyfill：本机复刻路径不生成 polyfill unit（本机源没有），
     // 老命令会打印 "Failed to start dsh-polyfill.service: Unit not found." 并回 rc=5 —— 看着像失败、
     // 其实 dsh-web 照样起来了（实测）。改成"有 unit 才启"。
     await step('启动 DSH Web', async () => {
-      /* 【2026-09-23 修 P2】原来只有 `systemctl enable --now dsh-web`：对**已经在 active 的 unit**
+      /* 2026-09-23 修 P2：原来只有 `systemctl enable --now dsh-web`：对已经在 active 的 unit
        * 它不会重启（start 对 running unit 是 no-op），而前面第 4 步刚刚 `rm -rf /root/.dsh` 并解包了
-       * 一份新的（settings.yaml / .credentials.yaml / profiles/web / plugins 全换）。dsh 只在**启动时**
+       * 一份新的（settings.yaml / .credentials.yaml / profiles/web / plugins 全换）。dsh 只在启动时
        * 读这些 → 症状是"部署完了，但新配置 / 新插件 / 新 key 一律不生效"，而且老进程还攥着已被删掉的
        * inode 继续写，数据面处于混合状态。现在显式 restart，并当场确认 is-active + 3080 真有应答。 */
       const r = await runCmd(dstConn, [
@@ -1496,14 +1502,14 @@ export async function runDeploy(taskId, source, target, opts = {}) {
     });
     let bridgePidAfter = '';
     await step('启动桥', async () => {
-      /* 【2026-09-23 修 · 与 server/index.js:4999「重启远端桥」同源的那次事故】
+      /* 2026-09-23 修 · 与 server/index.js:4999「重启远端桥」同源的那次事故
        * 原来这里是内联 `nohup bash start-bridge.sh … & sleep 5; pgrep -f 'node src/bridge.js' && echo bridge-up`：
-       *   ① start-bridge.sh **不杀旧桥** → 旧桥继续占着 3100，新实例 EADDRINUSE 自退；
-       *   ② 判据 pgrep 命中的正是**旧进程** → 永远回 "bridge-up"。
+       *   ① start-bridge.sh 不杀旧桥 → 旧桥继续占着 3100，新实例 EADDRINUSE 自退；
+       *   ② 判据 pgrep 命中的正是旧进程 → 永远回 "bridge-up"。
        * 结果：部署报成功、界面全绿，而服务器上跑的还是旧代码（别人的"部署完打不进 QQ / 旧进程还占着"
        * 就是这个现场）。现在优先走随代码包同步过去的 tools/restart-bridge.sh（停旧桥 → 等它退出 →
        * 超时才 -9 → 起新桥 → 回报 `pid= old= napcat-conn= console-listen=`）；只有机器上还没有那个脚本
-       * （首次克隆）时才走兜底，而兜底也**必须先杀旧桥**，并用"pid 变了"当判据。 */
+       * （首次克隆）时才走兜底，而兜底也必须先杀旧桥，并用"pid 变了"当判据。 */
       const r = await runCmd(dstConn, [
         'cd /root/qq-bridge || exit 1',
         'OLD=$(pgrep -f "node src/bridge[.]js" | head -1)',
@@ -1544,8 +1550,8 @@ export async function runDeploy(taskId, source, target, opts = {}) {
 
     /* 6. 自检 */
     taskLine(task, '—— 目标机自检');
-    /* 【2026-09-23】Bridge 那一项原来只看"3100 上有没有人应答 + 有没有桥进程"——
-     * 旧桥应答、旧桥进程，两项都绿。现在比对**进程号**：必须等于刚才 restart-bridge.sh 回报的新 pid，
+    /* 2026-09-23：Bridge 那一项原来只看"3100 上有没有人应答 + 有没有桥进程"——
+     * 旧桥应答、旧桥进程，两项都绿。现在比对进程号：必须等于刚才 restart-bridge.sh 回报的新 pid，
      * 否则这一步会指名道姓地说出来（而不是让用户以为部署成功了）。 */
     const checks = [
       ['DSH Web(3080)', `curl -s -o /dev/null -w '%{http_code}' -m 5 http://127.0.0.1:3080/ || echo down`],
@@ -1578,7 +1584,7 @@ export async function runDeploy(taskId, source, target, opts = {}) {
         await runCmd(srcConn, `rm -rf ${stageDir}`, 30000);
       });
     }
-    /* 【2026-09-23 修 P6】成功路径也要清**目标机**的 stage（默认 /root/.qqbridge-clone）：
+    /* 2026-09-23 修 P6：成功路径也要清目标机的 stage（默认 /root/.qqbridge-clone）：
      * 里面是 napcat-app / dsh-home / qq-bridge / meme 几个上百 MB 的 tar.gz。原来只有
      * "isLocal 清本机临时目录、远端源清源机" —— 目标机那坨没人清（实测服务器上留着约 119 MB，
      * 日期停在两次部署那几天）；失败路径（本文件末尾 catch）本来就清它，成功路径漏了。 */
@@ -1627,7 +1633,7 @@ export function deployApi() {
       const task = { lines: [], status: 'running', updatedAt: Date.now() };
       deployTasks.set(taskId, task);
     runDeploy(taskId, source, target, opts).catch((e) => {
-      // runDeploy 内部已有 try/catch，这里是最后一道保险：**部署任务异常绝不能把管理器带走**
+      // runDeploy 内部已有 try/catch，这里是最后一道保险：部署任务异常绝不能把管理器带走
       // （后台任务未处理的 rejection 在 Node 下会直接结束进程 —— 2026-09-12 实测过一次）。
       const t = deployTasks.get(taskId);
       if (t) { t.status = 'error'; taskLine(t, `!!!!! 部署任务异常退出: ${e?.message || e}`); t.finishedAt = Date.now(); }

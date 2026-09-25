@@ -1,22 +1,22 @@
 // Pixiv 官方 OAuth 登录态：一次性用 PHPSESSID 换长期 refresh_token → 之后 access_token 自动轮换。
-// （2026-09-20 新增，主人原话："脚本自动轮换 cookie/登录态""按名字搜画师要能一直用，不要再靠人手贴 PHPSESSID"。）
+// （2026-09-20 新增。需求："脚本自动轮换 cookie/登录态""按名字搜画师要能一直用，不要再靠人手贴 PHPSESSID"。）
 //
 // 为什么非做不可（现场）：
-//   · 桥原来只有一条路 —— 主人手贴 PHPSESSID 到 config.json，而 PHPSESSID 短命；一掉，
+//   · 桥原来只有一条路 —— 手动把 PHPSESSID 贴进 config.json，而 PHPSESSID 短命；一掉，
 //     「按名字搜画师」立刻瘫（pixiv 的 `/ajax/search/users` 匿名一律 400，2026-09-19 实测），
-//     每次都得回来找主人重贴一次。这是主人明确要根治的那件事。
-//   · 修法：借官方 Android 客户端那套 OAuth —— 用主人贴的那**一次** cookie 换一个长期
+//     每次都得回来重贴一次。这是本次要根治的那件事。
+//   · 修法：借官方 Android 客户端那套 OAuth —— 用手贴的那一次 cookie 换一个长期
 //     refresh_token，之后桥自己每小时换一次 access_token（且 pixiv 每次轮换都会给出新的
-//     refresh_token，要落盘），主人再也不用管登录态。
+//     refresh_token，要落盘），之后不用再管登录态。
 //
 // 公开 App 常量（官方 Android 客户端与 pixivpy 一直在用的公开值，硬编码在客户端里，不是账号密码）：
 //   client_id / client_secret ；hash_secret 用来算 X-Client-Hash = md5(X-Client-Time + hash_secret)
-//   （pixiv 用这一对头挡"裸脚本直连"，所以两个头必须**同时**正确）。
+//   （pixiv 用这一对头挡"裸脚本直连"，所以两个头必须同时正确）。
 //
 // 三条纪律（与 lib/pixiv.js 的 cookie 纪律同源）：
-//   ① refresh_token / access_token / PHPSESSID / code / code_verifier **绝不进日志、不进返回值、
-//      不进 QQ 消息**；对外只给长度与来源（如 `PHPSESSID(len=43)`）；
-//   ② 失败**绝不抛**（桥的定时器里抛出去会把整轮 tick 打断）——一律返回 `{ok:false, error, status, body}`；
+//   ① refresh_token / access_token / PHPSESSID / code / code_verifier 绝不进日志、不进返回值、
+//      不进 QQ 消息；对外只给长度与来源（如 `PHPSESSID(len=43)`）；
+//   ② 失败绝不抛（桥的定时器里抛出去会把整轮 tick 打断）——一律返回 `{ok:false, error, status, body}`；
 //   ③ 凭证只发给 pixiv 自己的域名：`oauth.secure.pixiv.net` / `app-api.pixiv.net`（见下面的白名单断言）。
 //
 // 令牌文件：<qq-bridge>/state/pixiv-token.json（原子写 tmp+rename，POSIX 下 0600）。
@@ -103,10 +103,10 @@ export function configPixivRefreshToken() {
 }
 
 /**
- * 当前生效的 refresh_token 与它的来源。优先级（2026-09-20 定，主人明确要求配置优先于文件）：
+ * 当前生效的 refresh_token 与它的来源。优先级（2026-09-20 定：配置优先于文件）：
  *   环境变量 QQBRIDGE_PIXIV_REFRESH_TOKEN > config.json 的 pixiv.refreshToken > 令牌文件。
  * 为什么环境变量最前：它是"临时覆盖/自动化自检"的唯一入口（测试也靠它把网络挡在外面）；
- * 为什么 config 高于文件：手写进配置的是**主人的意思**，机器轮换出来的只是最近一次结果。
+ * 为什么 config 高于文件：手写进配置的是人的意图，机器轮换出来的只是最近一次结果。
  */
 export function resolvePixivRefreshToken(fileToken = '') {
   const fromEnv = cleanToken(process.env.QQBRIDGE_PIXIV_REFRESH_TOKEN);
@@ -119,7 +119,7 @@ export function resolvePixivRefreshToken(fileToken = '') {
 }
 
 /**
- * 对外汇报登录态（**只给长度和来源，绝不给值**）。
+ * 对外汇报登录态（只给长度和来源，绝不给值）。
  * @returns {{hasRefreshToken:boolean, hasAccessToken:boolean, accessTokenValid:boolean, expiresAt:number,
  *            expired:boolean, userId:string, userName:string, lastError:string, lastRefreshAt:number,
  *            source:string, refreshTokenLen:number, accessTokenLen:number, tokenFile:string}}
@@ -221,7 +221,7 @@ function fail(message, status = 0, body = '') {
 async function doRefreshPixivToken() {
   const stored = readPixivToken();
   const { token: refreshToken, source } = resolvePixivRefreshToken(String(stored.refresh_token ?? '').trim());
-  // 没登录态不算"故障"（是没配），所以这里**不落盘 last_error**，也不建令牌文件。
+  // 没登录态不算"故障"（是没配），所以这里不落盘 last_error，也不建令牌文件。
   if (!refreshToken) return { ok: false, error: '没有 refresh_token：先跑 tools/pixiv-login.mjs --cookie 换一次', status: 0, body: '' };
 
   let res;
@@ -253,7 +253,7 @@ async function doRefreshPixivToken() {
 
   const expiresIn = Number(json.expires_in) || 3600;
   const expiresAt = Date.now() + Math.max(30, expiresIn - EXPIRES_SKEW_MS / 1000) * 1000;
-  // pixiv 每次轮换都会给一个**新的** refresh_token（旧的会失效），所以必须把新的写回去。
+  // pixiv 每次轮换都会给一个新的 refresh_token（旧的会失效），所以必须把新的写回去。
   const patch = {
     refresh_token: String(json.refresh_token || refreshToken),
     access_token: String(json.access_token),
@@ -290,7 +290,7 @@ async function doRefreshPixivToken() {
 let refreshInflight = null;
 
 /**
- * 换一次 access_token。**同进程内 single-flight**：并发调用共享同一次请求，绝不一起冲 pixiv
+ * 换一次 access_token。同进程内 single-flight：并发调用共享同一次请求，绝不一起冲 pixiv
  * （pixiv 的 refresh_token 每次轮换就作废，并发刷新会互相把对方的 token 顶掉 —— 这是必须串行的硬理由）。
  * @returns {Promise<{ok:boolean, accessToken?:string, expiresAt?:number, userId?:string, userName?:string,
  *                    refreshTokenRotated?:boolean, persisted?:boolean, error:string, status?:number, body?:string}>}
@@ -302,8 +302,8 @@ export function refreshPixivToken() {
 }
 
 /**
- * 拿一个**当前有效**的 access_token；快过期/已过期时先换。
- * 没登录态（没有 refresh_token 且本地也没有效 access_token）时返回 null **而不联网** ——
+ * 拿一个当前有效的 access_token；快过期/已过期时先换。
+ * 没登录态（没有 refresh_token 且本地也没有效 access_token）时返回 null 而不联网 ——
  * 调用方（lib/pixiv.js）靠 null 决定"跳过官方接口，直接走匿名可用的那条路"。
  * @returns {Promise<string|null>}
  */
@@ -338,7 +338,7 @@ export function savePixivRefreshToken(token) {
 let refreshLoop = null;
 
 /**
- * 启动自动轮换。**重复调用安全**：已有的循环直接返回它的停止函数，不会起第二个定时器。
+ * 启动自动轮换。重复调用安全：已有的循环直接返回它的停止函数，不会起第二个定时器。
  * 定时器 unref（不拖着进程不退出，与 core/pixiv-watch.js 同一套路）。
  * @param {{intervalMs?:number, logger?:Function}} opts
  * @returns {() => void} 停止函数
@@ -389,7 +389,7 @@ export function normalizePhpSessid(value) {
 }
 
 /** 从 302 的 Location（`pixiv://account/login?code=…`）或响应体（JSON/HTML）里抠登录 code。
- *  ⚠️ 只在**没报错**的响应体里找（见 loginWithPhpSessid 里的 okish 守卫）：pixiv 的错误体里也有
+ *  只在没报错的响应体里找（见 loginWithPhpSessid 里的 okish 守卫）：pixiv 的错误体里也有
  *  一个叫 `code` 的字段（`{"error":{"message":"不正确的请求。","code":"…"}}`），
  *  2026-09-20 自测就踩到了这个 —— 拿错误体里的 code 去换 token，报出来的错会完全指错方向。 */
 function extractLoginCode(text) {
@@ -456,13 +456,13 @@ async function exchangePixivCode(code, verifier) {
 }
 
 /**
- * **一次性引导**：拿主人贴的 PHPSESSID 换一个长期 refresh_token（之后就再也不需要 cookie 了）。
+ * 一次性引导：拿手贴的 PHPSESSID 换一个长期 refresh_token（之后就再也不需要 cookie 了）。
  *
  * 流程（2026-09-20 实现，两段都是"线上要能人工迭代"的写法）：
- *   ① 请求 app-api 的 web 登录口换 login code —— 先试 **GET 带 query 参数**（现代形状，pixiv web 版
+ *   ① 请求 app-api 的 web 登录口换 login code —— 先试 GET 带 query 参数（现代形状，pixiv web 版
  *      登录后 302 到 `pixiv://account/login?code=…`，所以必须 `redirect:'manual'` 自己看 Location，
- *      不让 fetch 替我们跟跳），再试 **POST JSON**（另一套被广泛记录的形状）。两段的 HTTP 状态 + 响应体
- *      （已脱敏、截断）**全部**原样返回，绝不吞 —— 真机上一次失败就能照着实测改。
+ *      不让 fetch 替我们跟跳），再试 POST JSON（另一套被广泛记录的形状）。两段的 HTTP 状态 + 响应体
+ *      （已脱敏、截断）全部原样返回，绝不吞 —— 真机上一次失败就能照着实测改。
  *   ② 拿 code + code_verifier 去 `oauth.secure.pixiv.net/auth/token` 换 refresh_token / access_token。
  *
  * 凭证只发往 app-api.pixiv.net 与 oauth.secure.pixiv.net（cookie 只加在 app-api 那次请求头上）。
@@ -481,7 +481,7 @@ export async function loginWithPhpSessid(cookieValue) {
   const bodyJson = JSON.stringify({ code_challenge: challenge, code_challenge_method: 'S256', client: 'pixiv-android' });
   const getUrl = `${PIXIV_WEB_LOGIN_URL}?${new URLSearchParams({ code_challenge: challenge, code_challenge_method: 'S256', client: 'pixiv-android' })}`;
 
-  // ⚠️ cookie 只加在这里（app-api.pixiv.net 的 web 登录口）；下面的 oauth 换 token 请求**不带** cookie。
+  // cookie 只加在这里（app-api.pixiv.net 的 web 登录口）；下面的 oauth 换 token 请求不带 cookie。
   const withCookie = (extra = {}) => ({ ...pixivAppHeaders(extra), cookie: `PHPSESSID=${sessid}` });
 
   const tries = [

@@ -5,15 +5,15 @@
  * 用法（工作目录：仓库根，或任意目录都可以，导入用相对本文件的路径）：
  *   node qq-bridge/tools/test-card-parse.mjs
  *
- * 夹具是**线上抓到的真卡**（主人从手机 QQ 分享进来的原样 Ark JSON），只把
+ * 夹具是线上抓到的真卡（从手机 QQ 分享进来的原样 Ark JSON），只把
  * `token` / 昵称这类无意义字段做了脱敏，占位符（如 "<真正的视频标题>"）换成了等长的真实文案：
- *   1) 小程序卡 B站视频 app=com.tencent.miniapp_01 —— title 是**应用名**，真标题在 desc，
+ *   1) 小程序卡 B站视频 app=com.tencent.miniapp_01 —— title 是应用名，真标题在 desc，
  *      真链接是 qqdocurl，url 是 QQ 服务端 hash 短链（必须被过滤掉）；
  *   2) 图文卡 高德位置 app=com.tencent.tuwen.lua —— 真标题 title、来源 desc/tag、真链接 jumpUrl；
  *   3) 音乐卡 app=com.tencent.music.lua view=music —— 既有「平台 歌名 歌手 链接」格式不能退化；
  *   4) 没有可用字段的压缩卡（只剩 prompt）—— 必须退回老兜底，且不抛异常。
  *
- * 断言重点：解析结果**包含**真标题与真链接，**不包含** m.q.qq.com hash 短链。
+ * 断言重点：解析结果包含真标题与真链接，不包含 m.q.qq.com hash 短链。
  */
 import { parseJsonCardText } from '../src/lib/message-parse.js';
 

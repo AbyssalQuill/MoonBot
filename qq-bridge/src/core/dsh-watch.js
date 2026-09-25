@@ -68,7 +68,7 @@ import { SILENT_MARKER, isSilentMarker, SEND_TOOL_RE, isSendToolName, SPACE_SPLI
 import { state, loadConfig, loadState, saveState } from './config.js';
 import { acquireLock, releaseLock } from './runtime.js';
 import { enqueueSend, currentSendChain } from './send-chain.js';
-import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
+import { sendToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
 import { redactKnownTokensOnly, sweepMessageArtifacts, stripMessageArtifacts, cleanOutboundText } from '../lib/outbound-text.js';
 import { planSocialTimeline, isDirectedAtAi, withTimeText, findCjkSpaceWarning, findSplitBoundaryWarning } from '../lib/social-timeline.js';
 import { createMediaDomain } from './media.js';
@@ -168,7 +168,7 @@ import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder,
 } from './scheduler.js';
 import {
-  pushCrossDigest, addCrossMail, unreadCrossMails, markCrossMailsRead,
+  addCrossMail, unreadCrossMails, markCrossMailsRead,
   buildCrossChatBlock, initCrossChatCore,
 } from './crosschat.js';
 import {
@@ -269,7 +269,7 @@ const checkDsh = async () => {
         const qp = cfgRef.social?.qzone ?? {};
         const qMin = Math.max(2 * 60 * 60 * 1000, Number(qp.postIntervalMinMs) || 6 * 60 * 60 * 1000);
         const qMax = Math.max(qMin, Number(qp.postIntervalMaxMs) || 12 * 60 * 60 * 1000);
-        /* 【2026-09-22 修 M5】`Number(undefined)` 是 NaN，而 `??` 拦不住 NaN（它判的是 null/undefined，
+        /* 2026-09-22 修 M5：`Number(undefined)` 是 NaN，而 `??` 拦不住 NaN（它判的是 null/undefined，
          * 这里是 Number() 的结果）→ 后面 `Math.random() < NaN` 恒 false：**主动发说说永远不触发**，
          * 日志却照打"已安排主动发说说"。同类坑 wake-send.js 已踩过一次，统一用 Number.isFinite 判。 */
         const qProb = (() => { const v = Number(qp.postProbability); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.6; })();

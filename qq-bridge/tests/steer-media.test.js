@@ -1,23 +1,23 @@
-// 回归测试：【在途回合里的图片必须真的附给模型，不许只剩 "[图片] [image]" 一行占位文本】
-//（2026-09-22 主人报"附图片好像有问题，修复"；只覆盖 qq-bridge/**，不动 src/**、server/**）
+// 回归测试：在途回合里的图片必须真的附给模型，不许只剩 "[图片] [image]" 一行占位文本。
+//（2026-09-22 报障"附图片好像有问题，修复"；只覆盖 qq-bridge/**，不动 src/**、server/**）
 //
 // 现场（线上 state/social-state.json + DSH 会话日志一起对出来的）：
-//   · 主人在模型正跑着那一步时发了一张图：`seq=279 … media=[image]`（消息本身把图记下来了）；
+//   · 模型正跑着那一步时收到一张图：`seq=279 … media=[image]`（消息本身把图记下来了）；
 //   · 可投出去的那条 [Mid-turn] 正文只有 `owner(id:…): [图片] [image]` 一行纯文本，
-//     会话日志里 `mediaType` 出现 **0 次**（这个会话从来没收到过任何图像块）；
-//   · 模型回「那张真没传过来 只有个[图片]占位」，主人再发一次还是看不见 → 主人判定"附图片坏了"。
-// 根因：图片附件原来只挂在**唤醒**那条路（sendWakePrompt → deliverRef(..., {media})），
-//   而在途注入（steerIntoRunningTurn）是自己直接调 apiRef.sessions.prompt 的，content 里**只有一个 text 块**；
+//     会话日志里 `mediaType` 出现 0 次（这个会话从来没收到过任何图像块）；
+//   · 模型回「那张真没传过来 只有个[图片]占位」，再发一次还是看不见 → 判定"附图片坏了"。
+// 根因：图片附件原来只挂在唤醒那条路（sendWakePrompt → deliverRef(..., {media})），
+//   而在途注入（steerIntoRunningTurn）是自己直接调 apiRef.sessions.prompt 的，content 里只有一个 text 块；
 //   偏偏"忙时把消息塞进在途回合"是主路径（steer 默认开、turn-hold 又把回合吊得很长），
-//   于是主人平时聊天时发的图**从来进不了模型的眼睛**。
+//   于是平时聊天时发的图从来进不了模型的眼睛。
 //
 // 本测试用 mock 的 DSH api 驱动真实的 src/core 模块（绝不动真配置/真状态），断言六件事：
 //   ⓪ 挑选规则（pickAttachableMedia）只认 image/face、跳过自己发的与已附图水位以下的、有上限；
-//   ① 带图的那批消息注入时，content 里**必须有 image 块**（不只文本），并推进"已附图水位"；
+//   ① 带图的那批消息注入时，content 里必须有 image 块（不只文本），并推进"已附图水位"；
 //   ② 同一张图绝不重复附（下一批、甚至把同一条重新塞回未读，都不再附）；
-//   ③ 取图解不出来时**照旧投文本**（消息绝不被图拖死），且占位文本如实告诉模型"图没到你手上"；
-//   ④ 带图被 DSH 拒（attachment-error）→ **自动回退纯文本重投**，且水位**不推进**（下一轮还能再试）；
-//   ⑤ 没有图时 content 结构与改造前**一字不差**（只有一个 text 块）。
+//   ③ 取图解不出来时照旧投文本（消息绝不被图拖死），且占位文本如实告诉模型"图没到你手上"；
+//   ④ 带图被 DSH 拒（attachment-error）→ 自动回退纯文本重投，且水位不推进（下一轮还能再试）；
+//   ⑤ 没有图时 content 结构与改造前一字不差（只有一个 text 块）。
 //
 // 用法：node tests/steer-media.test.js
 import assert from 'node:assert/strict';
@@ -70,7 +70,7 @@ const check = (name, ok, extra = '') => {
   origLog(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  ' + extra : ''}`);
 };
 
-// ── mock DSH：记录每一次 prompt 的**完整 content**（这才看得出图有没有附上），可按需拒绝 ──
+// ── mock DSH：记录每一次 prompt 的完整 content（这才看得出图有没有附上），可按需拒绝 ──
 const sent = [];
 let refuseWithImage = false;      // true → 带图的注入被拒（DSH attachment-error）
 wakeMod.setWakeApi({
@@ -121,7 +121,7 @@ cfgMod.state.sessions[KEY] = SID;
 stateMod.reverse.set(SID, KEY);
 
 let seqNo = 0;
-/** 造一条"主人发来的消息"；withImage=true 时带上 media（与 social-flow.appendSocialMessage 同形） */
+/** 造一条"对方发来的消息"；withImage=true 时带上 media（与 social-flow.appendSocialMessage 同形） */
 const push = (text, withImage = false, images = 1) => {
   seqNo += 1;
   const media = withImage

@@ -44,6 +44,15 @@ const SAFE_PREFIXES = [
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
+// 【2026-09-12 实测更正】这两个工具（共 2678 字符 ≈ 840 tokens/步）已从**源头**去掉 ——
+//   办法是在 `agent.cordis.yml` 里**不再挂载** `dsh-tool-ask-user` / `dsh-tool-todo` 两个插件，
+//   而不是在这里 deny。原因是实测发现：**`ctx.tools.restrict({deny})` 只认全局层（mcp__* 那一批）的工具**，
+//   对 preset 自己挂载的 scoped 工具会抛
+//   `tools.restrict() names unknown global tool "todo_write"; known global tools: mcp__napcat__...`
+//   —— deny 在这里是个静默无效的动作（错误被下面的 catch 吞掉）。想让它们彻底消失只能卸载插件。
+//   顺带一条更重要的结论：下面这份 KNOWN_DANGEROUS_GLOBAL_TOOLS 名单**从来没有生效过**
+//   （dev_* 那些名字在当前 DSH 里根本不在全局工具表里，每次启动都只是被 catch 吞掉），
+//   真正兜底的是第 2 步的**执行期白名单 guard**。名单保留只为将来 DSH 真注册了这些工具。
 const SAFE_EXACT = new Set([
   'ask_user_question',
   'todo_write',

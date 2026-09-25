@@ -50,7 +50,7 @@
 
    脚本会完成：
 
-   - 安装 agent preset：`~/.dsh/.agent-presets/qq-chat`、`~/.dsh/.agent-presets/default`
+   - 安装 agent preset：`~/.dsh/.agent-presets/qq-chat`
    - 在 `~/.dsh/profiles/web/cordis.patch.yml` 挂载：
      - `mcp-napcat`（`src/mcp-napcat-safe.js`）
      - `mcp-napcat-host`（`src/mcp-host-server.js`）
@@ -83,7 +83,7 @@
 
 - **看不到 `qq-mode` 设置卡片**：确认 `setup-dsh.mjs` 已把 `qq-mode-console` 加入 profile 的 `package.json` bundles，并重启 DSH。
 - **MCP 工具没有出现**：确认 `cordis.patch.yml` 中三个 MCP 条目的路径指向当前仓库，并重启 DSH。
-- **preset 没有出现**：确认 `~/.dsh/.agent-presets/qq-chat` 和 `~/.dsh/.agent-presets/default` 存在，并重启 DSH。
+- **preset 没有出现**：确认 `~/.dsh/.agent-presets/qq-chat` 存在，并重启 DSH。
 - **启动 DSH 报 `failed to parse overlay cordis.patch.yml: YAMLException`**：多为历史版脚本残留的空数组 `[]` 引发。重新运行最新版脚本（会自动剥离）即可，或手动删除该文件里独立成行的 `[]` 后重启 DSH。
 - **启动 DSH 报 `cannot resolve profile bundle "qq-mode-console"`**：profile 的 bundle 依赖尚未安装。运行 `dsh plugin --profile web install`（`web` 换成你的实际 profile 名）后重启 DSH；新版脚本会尝试自动执行这一步。
 - **发送消息报 `unauthorized` / HTTP 401**：`config.json` 的 `napcat.accessToken` 与 NapCat 的 OneBot 实例 token 不一致。将 NapCat WebUI 中 HTTP 与 WebSocket 两端的 accessToken 设为相同，再填入 `config.json`，然后重启桥。

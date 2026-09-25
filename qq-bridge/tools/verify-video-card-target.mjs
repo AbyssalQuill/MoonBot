@@ -62,7 +62,7 @@ const shortUrl = `https://b23.tv/${bvid}`;
 console.log(`样本视频：${bvid}  ${picked.title}\n`);
 
 /* ── 1. 跑真实函数 fetchMiniAppArk ────────────────────────────────────────── */
-/* 【2026-09-18 第十九批】这份 info 的字段要**和 `resolveBilibili` 的返回值同形**，
+/* 2026-09-18 第十九批：这份 info 的字段要**和 `resolveBilibili` 的返回值同形**，
  * 尤其 `cardUrl` —— 它是卡片的点击目标（抗 `.html` 的 av 形态）。
  * 原来这里没给 aid/cardUrl，于是自检跑的是"降级路径"，跟实发的形态对不上。 */
 const info = {
@@ -92,7 +92,7 @@ if (!ark) {
   console.log(`   detail_1.url      = ${d1.url}`);
   console.log(`   detail_1.qqdocurl = ${d1.qqdocurl ?? '(无)'}`);
   ok(!!d1.qqdocurl, 'Ark 带 qqdocurl（卡片点开才知道进哪个视频页）');
-  /* 【2026-09-18 第十九批】qqdocurl 的契约换成了"**抗 `.html`** 的形态"：
+  /* 2026-09-18 第十九批：qqdocurl 的契约换成了"**抗 `.html`** 的形态"：
    * 用户点卡片时落到的地址是 `https://b23.tv/<短码>.html`（b23.tv 回 `{"code":-404,"message":"啥都木有"}`），
    * 而补这个后缀的是 QQ 侧、不是我们 —— 拦不住，只能挑一个"补了照样进视频页"的 URL。
    * `tools/probe-bili-html-forms.mjs` 在家宽上实测（3 个视频 × 2 种 UA × 4 种后缀变体，判据是页面 <title>）：
@@ -109,7 +109,7 @@ if (!ark) {
 
 /* ── 2. 两条链接的重定向链 ──────────────────────────────────────────────── */
 console.log('\n── 2) 重定向链（卡片实际带的 qqdocurl / 文案里的 b23.tv 短链）');
-/* 【2026-09-18 第十九批】被跟的**必须是卡片里那个 qqdocurl 本身**，不能再用本地拼的 longUrl ——
+/* 2026-09-18 第十九批：被跟的**必须是卡片里那个 qqdocurl 本身**，不能再用本地拼的 longUrl ——
  * 否则"自检跟的是 A、线上发的是 B"这种错位会一直躲过自检。 */
 const cardTarget = String(ark ? JSON.parse(ark.data.data)?.meta?.detail_1?.qqdocurl ?? '' : '') || longUrl;
 const aidFromTarget = Number(/\/video\/av(\d+)\.html/.exec(cardTarget)?.[1] || 0);
@@ -138,7 +138,7 @@ const sharePlan = buildVideoCard({ ...info }, { style: 'share' });
 ok(sharePlan.primary === null && sharePlan.link.includes(shortUrl), '默认 share 形态仍是"标题 + b23.tv 短链"');
 
 /* ── 4. 真解析必须拿得到封面 ─────────────────────────────────────────────
- * 【2026-09-18 第十六批补的这一步】上面第 1 节的 info 是**手工拼的**，封面还带了个兜底假 URL
+ * 2026-09-18 第十六批补的这一步：上面第 1 节的 info 是**手工拼的**，封面还带了个兜底假 URL
  * （`picked.cover || 'https://i0.hdslb.com/bfs/archive/0d3b…jpg'`），所以它**永远测不到**
  * "风控拿不到封面"这条真实失败路径 —— 线上连着两轮"自检全绿、实发还是纯链接"正是这么来的：
  *   resolveVideo 的 cover 是空串 → fetchMiniAppArk 当时要求必须有封面 → 返回 null

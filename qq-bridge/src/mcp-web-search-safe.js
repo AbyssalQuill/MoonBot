@@ -46,15 +46,15 @@ function decodeHtml(s) {
     .trim();
 }
 
-/* ───────────────────────── 多平台聚合搜索（2026-09-16 主人要求）─────────────────────────
+/* ───────────────────────── 多平台聚合搜索（2026-09-16）─────────────────────────
  * 原来只有一个后端（cn.bing.com）、15 秒超时、最多 8 条，而且工具描述写着"仅用于理解词义"——
- * 于是模型遇到不懂的东西要么少搜、要么问主人。现在：
- *   · **多平台并行**：Bing / DuckDuckGo / 百度 / 搜狗 / Mojeek 同时发（谁先回谁先用）；
- *   · **快速返回**：每个后端 7 秒硬超时；只要 2 个平台回来了、去重后够 maxResults 条就立刻返回，
+ * 于是模型遇到不懂的东西要么少搜、要么去问用户。现在：
+ *   · 多平台并行：Bing / DuckDuckGo / 百度 / 搜狗 / Mojeek 同时发（谁先回谁先用）；
+ *   · 快速返回：每个后端 7 秒硬超时；只要 2 个平台回来了、去重后够 maxResults 条就立刻返回，
  *     不等最慢的那个（整体耗时 ≈ 最快那个平台，而不是五个串起来）；
- *   · **合并去重**：按规范化 URL（去掉 utm_/spm 等跟踪参数）去重，多平台命中同一条只留一次；
- *   · **没有条数/次数限制**：调用次数不限，返回条数由 maxResults 决定（默认 12，最多 30）；
- *   · **5 分钟缓存**：同一查询 + 同样参数直接命中缓存（秒回），避免重复联网。
+ *   · 合并去重：按规范化 URL（去掉 utm_/spm 等跟踪参数）去重，多平台命中同一条只留一次；
+ *   · 没有条数/次数限制：调用次数不限，返回条数由 maxResults 决定（默认 12，最多 30）；
+ *   · 5 分钟缓存：同一查询 + 同样参数直接命中缓存（秒回），避免重复联网。
  */
 const SEARCH_TIMEOUT_MS = 7000;
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -225,7 +225,7 @@ const zhwikiSearch = (q) => wikiSearch(q, 'zh');
 const enwikiSearch = (q) => wikiSearch(q, 'en');
 
 /**
- * Google News RSS（**实测从境外 VPS 唯一稳定的中文检索源**：2026-09-16 查「宁芙奖」得 52 条、
+ * Google News RSS（实测从境外 VPS 唯一稳定的中文检索源：2026-09-16 查「宁芙奖」得 52 条、
  * 354ms，全是第五人格「宁芙奖」相关报道；同一时刻 Bing 从该 IP 返回的是完全无关的结果、
  * 百度/搜狗/360/searx 是验证码或 429）。普通 HTML 搜索页对机房 IP 基本都不友好，RSS 没事。
  */
@@ -370,7 +370,7 @@ async function mojeekSearch(query) {
  *   ② 视频（B 站）—— 直接接官方搜索 API，比让模型拿网页搜索去猜准得多；
  *   ③ 技术资料（GitHub / Stack Overflow）—— 用官方 JSON API，稳且不占配额。
  *
- * 所有新平台都遵守同一个契约：**失败就抛错，由 searchAll() 收进 failures 并继续**，
+ * 所有新平台都遵守同一个契约：失败就抛错，由 searchAll() 收进 failures 并继续，
  * 绝不因为一个平台挂了让整次搜索失败。返回行统一 { title, url, snippet }。
  * ========================================================================== */
 
@@ -524,7 +524,7 @@ async function bilibiliPlatformSearch(query) {
 }
 
 /* ----------------------------------------------------------------------------
- * 平台清单 —— 2026-09-17 在**线上那台机器**上逐引擎实测后定稿（中英各一个查询，各跑两次）
+ * 平台清单 —— 2026-09-17 在线上那台机器上逐引擎实测后定稿（中英各一个查询，各跑两次）
  *
  *   可用：gnews(14/14) zhwiki(6/6) enwiki(0/6) moegirl(8/8) bing(10/7)
  *         bilibili(8/8) github(5/8) stackoverflow(0/8)
@@ -532,7 +532,7 @@ async function bilibiliPlatformSearch(query) {
  *   结构上不通（每次都硬报错，留着只是噪声）：
  *         yahoo(HTTP 500) brave(HTTP 429) ecosia(HTTP 403) marginalia(fetch failed)
  *
- * 所以下面只挂"实测过得去"的平台；那几个不通的**函数保留**（网络环境变了随时能启用），
+ * 所以下面只挂"实测过得去"的平台；那几个不通的函数保留（网络环境变了随时能启用），
  * 用环境变量挂回来即可：QQBRIDGE_SEARCH_EXTRA=yahoo,brave,ecosia,marginalia,yandex
  * -------------------------------------------------------------------------- */
 const EXTRA_PLATFORMS = String(process.env.QQBRIDGE_SEARCH_EXTRA ?? '')
@@ -580,7 +580,7 @@ export const SEARCH_PLATFORMS = {
   bilibili: bilibiliPlatformSearch,
   github: githubSearch,
   stackoverflow: stackSearch,
-  // 2026-09-18 新增（主人要求"拓展谷歌搜索引擎"；机房 IP 常被验证码拦，失败会如实进 failures）
+  // 2026-09-18 新增（"拓展谷歌搜索引擎"；机房 IP 常被验证码拦，失败会如实进 failures）
   google: googleSearch,
 };
 
@@ -630,7 +630,7 @@ function interleave(bySource, maxResults) {
  */
 /**
  * "核心平台"：实测从机房 IP 稳定可用的那几个（Google 新闻 RSS、维基、萌娘、DDG）。
- * 早退只在**它们都回来之后**才允许 —— 否则会拿着 Bing 的垃圾结果提前收工
+ * 早退只在它们都回来之后才允许 —— 否则会拿着 Bing 的垃圾结果提前收工
  * （2026-09-16 实测：bing 从这台 VPS 返回的是完全无关的页面，且它 150ms 就回，
  *  比 gnews/维基都早，于是"2 个平台够数就早退"直接把好结果挡在门外）。
  */

@@ -12,8 +12,8 @@ let cfgRef = null;
 export function initSocialFlowCore(cfg) { cfgRef = cfg; }
 
 export function appendSocialMessage(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, files = [], quoteTargetId = null) {
-  /* 【2026-09-23 修「群聊的人的 QQ 号昵称无法识别」】顺手把这个人的昵称补进通讯录。
-   * 为什么放在这里：这是**每条入站消息都必经**的唯一收口，而 `sender` 已经是解析好的
+  /* 2026-09-23：修「群聊的人的 QQ 号昵称无法识别」。顺手把这个人的昵称补进通讯录。
+   * 为什么放在这里：这是每条入站消息都必经的唯一收口，而 `sender` 已经是解析好的
    * 群名片/昵称（mux 传的是 event.sender.card || nickname），QQ 号在 userId —— 两样都现成。
    * 只在 profiles.name 为空时写（见 rememberContactName），不会覆盖画像学习的结果。
    * 失败绝不影响消息入库，所以整段吞异常。 */
@@ -52,8 +52,8 @@ export function appendSocialMessage(key, sender, textContent, plainContent, quot
     plain: String(plainContent ?? textContent).slice(0, 200),
     tail: String(plainContent ?? textContent).slice(-200),
     quoteTargetIsSelf: !!quoteTargetIsSelf,
-    /* 【2026-09-22】把被引用那条消息的 id 一并记住：主人"引用着自己的图 + 让我转进群"时，
-     * 图在**被引用的那条**里，而模型手上只有当前这条的 id —— 找不到 id 就只能联网搜一张差不多的。
+    /* 2026-09-22：把被引用那条消息的 id 一并记住：用户"引用着自己的图 + 让我转进群"时，
+     * 图在被引用的那条里，而模型手上只有当前这条的 id —— 找不到 id 就只能联网搜一张差不多的。
      * findMessageMedia 会沿这个 id 往下找一层（见该函数注释）。 */
     quoteTarget: quoteTargetId != null && String(quoteTargetId).trim() !== '' ? String(quoteTargetId) : '',
     atSelf: !!atSelf,
@@ -70,7 +70,7 @@ export function appendSocialMessage(key, sender, textContent, plainContent, quot
   };
   st.lastUnreadSeq = msg.seq;
   st.lastIncomingAt = Date.now();
-  // 【2026-09-15 主人要求「不停打字发消息，打字状态应该是不断的」】
+  // 2026-09-15 需求「不停打字发消息，打字状态应该是不断的」
   // QQ 的 input_status 事件并不可靠（有时只在开始/结束各来一次，中间一直打字也不重发），
   // 所以这里用"消息本身"续上打字窗口：收到对方一条消息 = ta 刚才在打字，很可能还在接着打。
   // 私聊才这么做（群里多人说话不代表某一个人在连续打字，误续会把群聊唤醒拖慢）。
@@ -320,10 +320,10 @@ export function findMessageMedia(key, ref, opts = {}) {
     return null;
   };
 
-  /* 【2026-09-22 第三轮修 · 之二】跨会话转发时传进来的 `key` 是**目的地**（例如 group:1072393236），
-   * 而那张图明明躺在**发起会话**（private:…）的记忆窗口里 —— 只按 key 找必然找不到，
+  /* 2026-09-22 第三轮修 · 之二：跨会话转发时传进来的 `key` 是目的地（例如 group:1072393236），
+   * 而那张图明明躺在发起会话（private:…）的记忆窗口里 —— 只按 key 找必然找不到，
    * 模型于是又退回"联网搜一张差不多的"。QQ 的 message_id 是全局唯一的，所以这里按序找：
-   * 先目的地、再**所有已存在的会话**，并回报到底在哪个会话里找到的。 */
+   * 先目的地、再所有已存在的会话，并回报到底在哪个会话里找到的。 */
   const lookupEntry = (r) => {
     const hit = lookupIn(key, r);
     if (hit) return { entry: hit, foundIn: key };
@@ -349,9 +349,9 @@ export function findMessageMedia(key, ref, opts = {}) {
   }
 
   /* 本身没图 → 沿"被引用的那条"往下找一层。
-   * 现场：主人在私聊里**引用着自己刚发的那张图**说"现在把我这张图转发到实验群"，
+   * 现场：用户在私聊里引用着自己刚发的那张图说"现在把我这张图转发到实验群"，
    * 图在被引用的那条消息里；模型只拿得到当前这条的 id，于是只能联网搜一张差不多的
-   * （主人看到的就是"我要代码图，群里来了张鲸鱼图"）。 */
+   * （看到的就是"我要代码图，群里来了张鲸鱼图"）。 */
   const quoteRef = String(hit0?.entry?.quoteTarget ?? '').trim();
   if (quoteRef && quoteRef !== refStr) {
     const qHit = lookupEntry(quoteRef);

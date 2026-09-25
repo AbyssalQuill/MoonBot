@@ -210,7 +210,7 @@ if (-not $live) {
     if ($m.Success) { return $text.Remove($m.Index, $m.Length) }
     return $text
   }
-  $presetRel = 'dsh\agent-presets\default\agent.cordis.yml'
+  $presetRel = 'dsh\agent-presets\qq-chat\agent.cordis.yml'
   $presetSrc = Hash8 (Join-Path $srcBridge $presetRel)
   $livePresetFile = Join-Path $live $presetRel
   if (Test-Path $livePresetFile) {

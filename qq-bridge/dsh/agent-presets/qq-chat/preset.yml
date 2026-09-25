@@ -1,3 +1,3 @@
-﻿name: QQ 聊天角色
-description: 桥接到 QQ 群的聊天智能体。性格/说话方式在 agent.cordis.yml 的 persona 段自定义。
+name: QQ 聊天角色
+description: QQ 群聊机器人：文本不自动转发，由模型通过工具自主决定何时查看、是否回复、何时潜水。人设与说话方式在 agent.cordis.yml 的 persona 段合成。
 order: 10

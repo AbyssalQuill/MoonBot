@@ -11,7 +11,7 @@ const buf = fs.readFileSync(FILE);
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
 let text = '';
-// ⚠️ 这个文件是**多帧 zstd**：整包 zstdDecompressSync 只会解出第一帧（实测只得到 1 行），
+// 这个文件是**多帧 zstd**：整包 zstdDecompressSync 只会解出第一帧（实测只得到 1 行），
 // 必须按魔数 28 b5 2f fd 切帧、逐帧解。所以这里**始终**走切帧路径。
 {
   const idx = [];

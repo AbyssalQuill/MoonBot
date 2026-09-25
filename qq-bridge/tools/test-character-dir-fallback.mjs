@@ -1,15 +1,15 @@
 /**
- * 角色库**目录回落**的真调用测试（MCP over stdio，不是"看代码像不像"）。
+ * 角色库目录回落的真调用测试（MCP over stdio，不是"看代码像不像"）。
  *
- * 【这条测的是哪个事故】出厂角色库随安装包进了 `<qq-bridge>/characters`（21 个角色包）以后，
+ * 这条测的是哪个事故：出厂角色库随安装包进了 `<qq-bridge>/characters`（21 个角色包）以后，
  * `resolveCharactersDir()` 以前"没配 social.charactersDir 就固定返回 ~/Downloads/characters/characters" ——
- * 全新机器上那个目录**根本不存在**（那是"主人自己放角色库的地方"），于是四个角色工具一起报
+ * 全新机器上那个目录根本不存在（那是"用户自己放角色库的地方"），于是四个角色工具一起报
  * "角色库目录不存在"：装了 21 个包，一个都读不到。
  * 现在按"存在即用"回落：用户库 → 出厂库 → 老默认；配了 social.charactersDir 就完全以它为准。
  *
- * 做法：把 src 复制进沙箱当桥目录（顺带造一份假出厂库），`USERPROFILE` 指向一个**没有 Downloads** 的
+ * 做法：把 src 复制进沙箱当桥目录（顺带造一份假出厂库），`USERPROFILE` 指向一个没有 Downloads 的
  * 假 home，这样 DEFAULT 一定不存在 —— 正是新装机器的样子。然后真跑 MCP 调 qq_character_list：
- *   ① 没配 charactersDir → 必须读到**出厂库**里的包（修复前这里是"一个都读不到"）；
+ *   ① 没配 charactersDir → 必须读到出厂库里的包（修复前这里是"一个都读不到"）；
  *   ② 配了 charactersDir   → 必须改读那份，且出场库的包不再出现（证明配置优先）；
  *   ③ 配的路劲不存在       → 如实报错，不假装成功。
  *

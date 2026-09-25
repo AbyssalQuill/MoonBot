@@ -6,7 +6,6 @@ import { mdToPlain } from '../md-to-plain.js';
 import { state, saveState } from './config.js';
 import { cancelKeyedSends } from './send-chain.js';
 import { getSocialState, saveSocialState, scheduleWake } from './social-state.js';
-import { pushCrossDigest } from './crosschat.js';
 import {
   pendingWakeKeys, pendingWakeLeaseTimers, turnTimeoutTimers, turnTotalTimers,
   loopRepeatState, loopRecoverTimes, activeAiTurns, pendingTurnOutbound,
@@ -126,7 +125,11 @@ export function finishTurnLoopGuard(key, sessionId, ended) {
   }
   const joined = [aiText, ...outbound].filter((t) => t && String(t).trim()).join('\n').trim();
   if (!joined) { loopRepeatState.delete(key); return; }
-  try { pushCrossDigest(key, joined.slice(0, 70)); } catch {}
+  /* 2026-09-30：这里原本是 `pushCrossDigest(key, joined.slice(0, 70))`：把本会话刚说的话写一行
+   * ≤70 字摘要进 state/crosschat.json，供别的会话唤醒时读取。跨会话改成**直接从 SQLite 查消息**
+   * 之后这条路整条作废 —— 摘要只有 ≤70 字、还要额外写盘、只能按时间粗筛；而 chat_messages 里
+   * 本来就有原话、发送者和精确时间，按需查即可（memory.js 的 recentMessagesAcrossSessions）。
+   * 写入路径已删除；crosschat.json 仍保留给留言信箱（addCrossMail 等），留言行为不变。 */
   const sig = normalizeLoopSignature(joined);
   if (sig.length < LOOP_REPEAT_MIN_CHARS) { loopRepeatState.delete(key); return; }
   const now = Date.now();

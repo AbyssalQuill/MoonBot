@@ -1,8 +1,8 @@
 // Pixiv 图片：搜索（含本地筛选 + 自动翻页） + 拿可下载的图片地址。
 //
 // 为什么走第三方平替站（不想登录、也进不去官网）：
-//   · pixiv.net 的搜索/详情接口要**登录 cookie**，而且机房 IP 常被挡；
-//   · 主人给的 https://x.pixigraph.xyz 是一个平替站，2026-09-18 在线上 VPS 实测可用：
+//   · pixiv.net 的搜索/详情接口要登录 cookie，而且机房 IP 常被挡；
+//   · https://x.pixigraph.xyz 是一个平替站，2026-09-18 在线上 VPS 实测可用：
 //
 //       GET /api/search.php?keyword=<关键词>&page=1
 //         → {"error":false,"body":{"illustManga":{"data":[<一页 60 条>],"total":…,"lastPage":…}}}
@@ -11,104 +11,104 @@
 //
 //       GET /api/image.php?url=<encodeURIComponent(图片URL)>     ← 站内图床代理，绕开 i.pximg.net 的防盗链
 //
-// 图片地址怎么来（搜索结果只给 250×250 缩略图，但 URL 里带着**日期路径**，可以推出大图）：
+// 图片地址怎么来（搜索结果只给 250×250 缩略图，但 URL 里带着日期路径，可以推出大图）：
 //
 //   缩略图 https://i.pximg.net/c/250x250_80_a2/img-master/img/2026/09/18/01/37/08/149787938_p0_square1200.jpg
 //   master https://i.pximg.net/img-master/img/2026/09/18/01/37/08/149787938_p0_master1200.jpg   ← 实测直连 200 / 227KB
 //   原图   https://i.pximg.net/img-original/img/2026/09/18/01/37/08/149787938_p0.jpg            ← VPS 直连 404，走站内代理 200
 //
 // 档位与默认值（2026-09-21 更正，原文写着"默认发 master1200"，与实际行为不符）：
-//   `qq_send_pixiv` 的 `size` **默认 original**（2026-09-20 主人定调"发图默认原图，不要缩略图"，
+//   `qq_send_pixiv` 的 `size` 默认 original（2026-09-20 定调"发图默认原图，不要缩略图"，
 //   工具层实现见 mcp-napcat-safe.js 的 sizeEff）；master1200 只在"调用方显式要"或"原图确实拿不到"时用，
-//   而且**必须显式降级并如实回报**（见下面 pixivImageTier / planPixivSend）。
+//   而且必须显式降级并如实回报（见下面 pixivImageTier / planPixivSend）。
 //   本文件里 pixivImageCandidates / pixivImageSources 的 `size ?? 'master'` 只是给老调用方的兼容默认，
 //   工具层永远显式传 size —— 别把这两个默认值当成"产品行为"。
 // 注意 `custom-thumb` 那种缩略图（作者自定义封面）路径里同样有 `img/<日期>/<id>_pN_`，同一个正则能吃。
 //
-// ⚠️ 两条纪律（与 image-search.js 一致）：
-//   ① 只返回 URL，**不下载、不落盘** —— 下载由调用方走 SSRF 安全的 safeFetchBuffer；
-//   ② safeFetchBuffer 不能带自定义请求头，所以**所有候选都走站内代理**（i.pximg.net 需要 Referer 才给图）。
+// 两条纪律（与 image-search.js 一致）：
+//   ① 只返回 URL，不下载、不落盘 —— 下载由调用方走 SSRF 安全的 safeFetchBuffer；
+//   ② safeFetchBuffer 不能带自定义请求头，所以所有候选都走站内代理（i.pximg.net 需要 Referer 才给图）。
 //
 // ══════════════════════════════════════════════════════════════════════════════════════════
-// 【2026-09-18 实测：镜像站只认 keyword / page，所以筛选只能在本地做】
+// 2026-09-18 实测：镜像站只认 keyword / page，所以筛选只能在本地做。
 //   逐个试过 mode=safe/all/r18、s_mode=s_tag/s_tag_full/s_tc、order=date_d/popular_d、p、bl、
-//   type=illust/manga：**全部被忽略**（同一关键词 total 恒定、首条 id 恒定）；只有 page 让结果换了一批。
+//   type=illust/manga：全部被忽略（同一关键词 total 恒定、首条 id 恒定）；只有 page 让结果换了一批。
 //   前端那几个参数是浏览器里本地过滤的，没传给上游。⇒ 本文件里的 normalizePixivFilters /
 //   filterPixivItems 就是"在已抓回来的数据上自己筛"，这也是 scanPages 自动翻页存在的原因。
 //
-// 【2026-09-18 实测：返回体里没有收藏数 —— 按人气/收藏排序做不到，别假装支持】
+// 2026-09-18 实测：返回体里没有收藏数 —— 按人气/收藏排序做不到，别假装支持。
 //   逐条核对了第 1 页 60 条 item 的全部键：aiType / alt / bookmarkData / createDate / description /
 //   height / id / illustType / isBookmarkable / isMasked / isOriginal / isUnlisted / is_howto /
 //   pageCount / profileImageUrl / restrict / sl / tags / title / titleCaptionTranslation /
 //   updateDate / url / userId / userName / visibilityScope / width / xRestrict。
-//   其中 bookmarkData 是"**当前登录用户**有没有收藏"（未登录恒为 null），isBookmarkable 只是"能不能收藏"；
+//   其中 bookmarkData 是"当前登录用户有没有收藏"（未登录恒为 null），isBookmarkable 只是"能不能收藏"；
 //   把整个返回体当字符串数过：bookmarkCount = 0 次、like = 0 次、view = 0 次。
-//   ⇒ 收藏数/浏览数这类热度指标**根本没返回**，所以 sort 只能按 createDate（投稿时间），
+//   ⇒ 收藏数/浏览数这类热度指标根本没返回，所以 sort 只能按 createDate（投稿时间），
 //     调用方若传 sort=popular/hot 会被回落成 date_desc 并在 warnings 里写明原因。
 //
-// 【2026-09-18 实测：aiType 到底是什么值 —— 不能写成 aiType !== 0】
+// 2026-09-18 实测：aiType 到底是什么值 —— 不能写成 aiType !== 0。
 //   · 关键词「AIイラスト」→ 60/60 条 aiType=2；「AI生成」→ 60/60 条 aiType=2；
 //   · 关键词「手描き」→ 60/60 条 aiType=1（手绘，几乎不可能是 AI）；「アナログ」1=57 / 2=3。
-//   ⇒ **aiType=2 = AI 生成，aiType=1 = 非 AI**（0 在实测样本里没出现过，按"未标注"处理）。
+//   ⇒ aiType=2 = AI 生成，aiType=1 = 非 AI（0 在实测样本里没出现过，按"未标注"处理）。
 //     如果按"!=0 就算 AI"来写，会把整页作品全过滤光——这是本次实测最容易踩的坑。
 //
-// 【2026-09-18 实测：xRestrict（R-18）在本镜像站默认搜索里恒为 0】
-//   「初音ミク」「エロ」「R-18」「巨乳」「オリジナル」各 60 条，xRestrict **全是 0**：
+// 2026-09-18 实测：xRestrict（R-18）在本镜像站默认搜索里恒为 0。
+//   「初音ミク」「エロ」「R-18」「巨乳」「オリジナル」各 60 条，xRestrict 全是 0：
 //   本站只搜全年龄库（这也是它不认 mode=r18 的同一个原因）。
 //   ⇒ r18='only' 实测恒为空；'exclude'（默认）和 'include' 拿到的是同一批数据。
 //   过滤逻辑仍然保留（xRestrict !== 0 + R-18/R-18G 标签兜底）：上游随时可能变，
 //   而且标签兜底确实能挡住"关键词本身就是 R-18 标签"的作品。
 //
-// 【2026-09-18 实测：illustType 有 0/1/2 三种，2 是动图】
+// 2026-09-18 实测：illustType 有 0/1/2 三种，2 是动图。
 //   0=插画、1=漫画、2=动图(ugoira)；实测「初音ミク」60 条里有 1 条 illustType=2。
 //   ⇒ illustType='illust'|'manga' 只认 0/1；2 不属于任何一类，被这两条筛选中任意一条排除。
 //
-// 【2026-09-18 实测：翻页与边界】
+// 2026-09-18 实测：翻页与边界。
 //   · 相邻页 id 不重叠（p1∩p2=p1∩p3=p2∩p3=0），每页 60 条，lastPage 恒为 10；
-//   · page 超出 lastPage（试过 page=11）**仍然返回 60 条**，明显是兜底/循环 —— 不可采信，
+//   · page 超出 lastPage（试过 page=11）仍然返回 60 条，明显是兜底/循环 —— 不可采信，
 //     所以自动翻页一律卡在 lastPage 内，不会去扫越界页。
 // ══════════════════════════════════════════════════════════════════════════════════════════
 //
-// 【本地筛选 + 自动翻页的设计（2026-09-18 主人确认走"方案 A"：不登录、不用会员、不加部署）】
+// 本地筛选 + 自动翻页的设计（2026-09-18 定为"方案 A"：不登录、不用会员、不加部署）
 //   筛选全在本地对已抓回来的数据做，只筛一页结果会很少（一页 60 条），所以支持 scanPages 自动往后翻，
-//   直到筛够 limit 或扫到 lastPage；默认 3 页、上限 10 页。返回里的 scan / scanNotice 会**如实**告诉
+//   直到筛够 limit 或扫到 lastPage；默认 3 页、上限 10 页。返回里的 scan / scanNotice 会如实告诉
 //   调用方"只扫了 N 页 / 全站共 total 条 / lastPage 多少"，免得模型以为自己筛了全站。
 //
-//   ⚠️ 硬要求：**不传任何新参数时，结果必须与改动前逐字段一致**。
+//   硬要求：不传任何新参数时，结果必须与改动前逐字段一致。
 //   做法：把"调用方有没有用新参数"当开关 ——
 //     · 一个筛选参数都没给 → 完全走旧路径：只抓 1 页、不排序、只过滤 R-18（与旧版逐字段一致）；
 //     · 给了任意一个（包括显式 scanPages）→ 启用扫描引擎：默认排序 date_desc、默认扫 3 页。
 //   这样"已经能用的搜索"不可能被改坏（回归测试见 tools/test-pixiv-filters.mjs）。
 //
-// 【镜像站地址可改（2026-09-18）】优先级 config.json 的 pixiv.base > 环境变量 QQBRIDGE_PIXIV_BASE
+// 镜像站地址可改（2026-09-18）：优先级 config.json 的 pixiv.base > 环境变量 QQBRIDGE_PIXIV_BASE
 //   > 内置默认 —— 与 core/config.js 里 dsh.baseUrl 的"配置文件覆盖环境变量"同一套路。
 //   为什么要接配置：桥打包给别人装好后，用户没法方便地改环境变量，而镜像站是第三方、随时可能换域名/挂掉；
 //   改 config.json 一处即可，不用改代码（见 qq-bridge/config.example.json 的 pixiv 段）。
 //
 // ══════════════════════════════════════════════════════════════════════════════════════════
-// 【2026-09-18 实测更正：官网并不需要登录，机房 IP 也没被挡（至少在线上那台 VPS 上）】
-//   上面"官网要登录、机房 IP 常被挡"是本文件最初写的理由，**实测不成立**，逐条留证：
+// 2026-09-18 实测更正：官网并不需要登录，机房 IP 也没被挡（至少在线上那台 VPS 上）。
+//   上面"官网要登录、机房 IP 常被挡"是本文件最初写的理由，实测不成立，逐条留证：
 //     · GET https://www.pixiv.net/ajax/illust/<id>?lang=zh        → 200，带完整 title/userName/tags/xRestrict/aiType
 //     · GET https://www.pixiv.net/ajax/illust/<id>/pages?lang=zh  → 200，逐页给出 urls.original（原图直链）
 //     · GET https://www.pixiv.net/ajax/search/artworks/<kw>?lang=zh → 200，illustManga.data 60 条
 //     · GET https://www.pixiv.net/ajax/user/<uid>/profile/all?lang=zh → 200，body.illusts 是 id→null 的表
-//   **全部不需要 cookie，也不需要 Referer**（带不带 referer 都 200；UA 用 'Mozilla/5.0' 就行）。
+//   全部不需要 cookie，也不需要 Referer（带不带 referer 都 200；UA 用 'Mozilla/5.0' 就行）。
 //   唯一真需要 Referer 的是图床 i.pximg.net：不带 `referer: https://www.pixiv.net/` 一律 403 nginx，
 //   带上就 200 —— 所以取图那条路要给 safeFetchBuffer 传 referer（见下面 pixivImageSources）。
-//   ⇒ 现在的分工：**元数据与地址直联官网**（快：100~400ms），**镜像站只当兜底**
+//   ⇒ 现在的分工：元数据与地址直联官网（快：100~400ms），镜像站只当兜底
 //     （它的 search.php 实测就是 pixiv search 的透传，detail.php 则是它拿自己登录态换来的同一份
 //      ajax 响应；它慢得多：同一张图 2.7~5.7s，还出现过 25s 超时，所以只能兜底）。
 // ══════════════════════════════════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════════════════════════
-// 【2026-09-20 主人定调：官方 pixiv API 优先，镜像站只做兜底】
-//   原话："官方 pixiv API 优先，镜像站只做兜底"（此前本文件是**镜像站优先**，判断依据是
+// 2026-09-20：官方 pixiv API 优先，镜像站只做兜底。
+//   约定："官方 pixiv API 优先，镜像站只做兜底"（此前本文件是镜像站优先，判断依据是
 //   2026-09-18 那会儿以为官网要登录；2026-09-18 晚实测更正过一半，2026-09-19 又加了 cookie 段）。
-//   现在每个能力都按同一套顺序试，并**如实报出这次是谁供的数据**（结果里的 source / sourcesTried）：
+//   现在每个能力都按同一套顺序试，并如实报出这次是谁供的数据（结果里的 source / sourcesTried）：
 //     ① app-api.pixiv.net（Bearer token，见 lib/pixiv-auth.js）—— 形状最规整，能拿到 meta_pages
-//        原图直链（逐页、不用猜扩展名）；**没登录态时直接跳过**（实测匿名必 400，白等一次超时）。
+//        原图直链（逐页、不用猜扩展名）；没登录态时直接跳过（实测匿名必 400，白等一次超时）。
 //     ② www.pixiv.net/ajax（匿名就能用，2026-09-18 实测四类接口全 200）—— 没配登录态时的主力。
 //     ③ 第三方镜像站（pixivBase()）—— 最慢（同一张图 2.7~5.7s，出现过 25s 超时），只能垫底。
-//   纪律：**cookie 与 Bearer 只发给 pixiv 自己的域名**，镜像站永远看不到任何凭证（见 pixivRequestHeaders）。
+//   纪律：cookie 与 Bearer 只发给 pixiv 自己的域名，镜像站永远看不到任何凭证（见 pixivRequestHeaders）。
 //   每个来源最多重试 1 次、超时短、不空转（镜像站那次重试前等 1.2 秒，它偶发慢；官网是硬失败，等它没意义）。
 // ══════════════════════════════════════════════════════════════════════════════════════════
 import fs from 'node:fs';
@@ -159,18 +159,18 @@ export function pixivProxyUrl(imageUrl) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-21 新增：档位识别 + 候选分档 —— 修「用户要原图，收到的却是 720 档 + 半幅灰」】
+ * 2026-09-21 新增：档位识别 + 候选分档 —— 修「用户要原图，收到的却是 720 档 + 半幅灰」
  *
- * 现场（主人报的，证据是发到 QQ 的那个附件名）：`3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
- *   · (a) 分辨率不是原图：pixiv 的档位命名是确定性的 —— `<id>_pN.jpg/_pN.png` = **原图**、
+ * 现场（实测取证，证据是发到 QQ 的那个附件名）：`3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
+ *   · (a) 分辨率不是原图：pixiv 的档位命名是确定性的 —— `<id>_pN.jpg/_pN.png` = 原图、
  *     `<id>_pN_master1200.jpg` = 1200 档、`<id>_pN_square1200.jpg` = 250/540 缩略档，
- *     而 `_720` 是 720 档。用户没要过 720 档，代码里也没有任何一处会**拼**出 720 档地址
- *     （`pixivMasterUrl` 只会拼 `_master1200.jpg`）⇒ 这个地址只能来自**上游给的原图地址**，
- *     而此前全链路**没有任何一处校验"你给我的这个地址到底是不是原图档"**：
+ *     而 `_720` 是 720 档。用户没要过 720 档，代码里也没有任何一处会拼出 720 档地址
+ *     （`pixivMasterUrl` 只会拼 `_master1200.jpg`）⇒ 这个地址只能来自上游给的原图地址，
+ *     而此前全链路没有任何一处校验"你给我的这个地址到底是不是原图档"：
  *       · `normalizePixivIllustDetail`（本文件 1236 行）把镜像站 `urls.original` 原样收下；
  *       · `pixivIllustOriginals` 的 ③④ 兜底会拿这条地址去推别的页，并把它当"原图地址"回报；
- *       · `pixivImageSources` 1502 行 `upstream = ... : work.urls.original` 更是**直接用这条地址**，
- *         而且排在候选第一位 —— 于是 `size=original` 请求会**首选**一个 720 档地址发出去，
+ *       · `pixivImageSources` 1502 行 `upstream = ... : work.urls.original` 更是直接用这条地址，
+ *         而且排在候选第一位 —— 于是 `size=original` 请求会首选一个 720 档地址发出去，
  *         结果里还写着 `lossless: true / contentKind: 'pixiv-original'`（谎报无损）。
  *   · (b) 字节被截断：见 safe-fetch.js 的 verifyImageComplete。
  *   两道闸门一起补：这里管"地址属于哪一档"，safe-fetch 管"字节是不是完整"。
@@ -183,7 +183,7 @@ const PIXIV_RENDITION_NAME_RE = /_p\d+_(?:master1200|square1200|custom1200|\d{3,
 /** 原图文件名：`<id>_pN.jpg`（`/img-original/img/` 下、且没有档位后缀）。 */
 const PIXIV_ORIGINAL_NAME_RE = /\/\d+_p\d+\.(?:jpe?g|png|webp|gif)$/i;
 
-/** 把"镜像站代理地址"还原成它包着的 i.pximg 地址（档位要看**里层**那个地址才准）。 */
+/** 把"镜像站代理地址"还原成它包着的 i.pximg 地址（档位要看里层那个地址才准）。 */
 export function pixivImageInnerUrl(rawUrl) {
   const s = String(rawUrl ?? '').trim();
   if (!s) return '';
@@ -198,10 +198,10 @@ export function pixivImageInnerUrl(rawUrl) {
 }
 
 /**
- * 这个地址是**哪一档**图。**纯函数，离线可测**（自测见 tools/test-pixiv-tier-truncation.mjs）。
+ * 这个地址是哪一档图。纯函数，离线可测（自测见 tools/test-pixiv-tier-truncation.mjs）。
  *   · `original` —— `img-original/img/<日期>/<id>_pN.<ext>`，文件名上没有任何档位后缀；
  *   · `master`   —— 1200 档，或 `_720`/`_1080` 这类按边长命名的档（≥601 边长的显式降级档）；
- *   · `thumb`    —— 缩略/中图档（`_square1200` / `_custom1200` / `c/250x250` / `c/540x540`）：**永远不许当原图发**；
+ *   · `thumb`    —— 缩略/中图档（`_square1200` / `_custom1200` / `c/250x250` / `c/540x540`）：永远不许当原图发；
  *   · `unknown`  —— 认不出（第三方 CDN/新形状）：不拦，但下游不许据此谎称无损。
  */
 export function pixivImageTier(rawUrl) {
@@ -221,10 +221,10 @@ export function pixivImageTier(rawUrl) {
 
 /**
  * 候选分档：把 `pixivImageSources` 给的候选拆成"可以首选发的"和"只能显式降级发的"。
- * **纯函数，离线可测**（自测同上）。规矩：
+ * 纯函数，离线可测（自测同上）。规矩：
  *   · 缩略档任何情况下都不发（发出去就是用户看到的那张 250×250）；
- *   · `size=original` 时 1200 档**只能当 fallback**：只有真原图档的候选全部失败（体积超限 / 404 / 超时 /
- *     档位像素不符）才允许走到它，而且调用方必须**显式打日志 + 在结果里如实说明**；
+ *   · `size=original` 时 1200 档只能当 fallback：只有真原图档的候选全部失败（体积超限 / 404 / 超时 /
+ *     档位像素不符）才允许走到它，而且调用方必须显式打日志 + 在结果里如实说明；
  *   · `size=master` 时 1200 档就是正常首选（用户明确要的就是它）。
  * 返回顺序与传入顺序一致（不重排候选，只分桶），老行为因此不变。
  * @returns {{primary:object[], fallback:object[], skipped:object[]}}
@@ -256,11 +256,11 @@ export function planPixivSend(sources, opts = {}) {
 }
 
 /**
- * 档位 × 实际像素 的一致性判定。**纯函数，离线可测**。
+ * 档位 × 实际像素 的一致性判定。纯函数，离线可测。
  *
- * 为什么光校验"地址像不像原图"不够：镜像站（第三方代理）完全可能**拿着原图地址却给你一张缩过的图**
+ * 为什么光校验"地址像不像原图"不够：镜像站（第三方代理）完全可能拿着原图地址却给你一张缩过的图
  * （它的缓存/<md5>_720.jpg 就是这种产物），地址看着是原图、字节却是 720 档 —— 这次线上现场正是这样。
- * 所以再拿"作品的原图像素"（pixiv 详情里的 width/height，就是原图的尺寸）跟**实际拿到的像素**对一遍：
+ * 所以再拿"作品的原图像素"（pixiv 详情里的 width/height，就是原图的尺寸）跟实际拿到的像素对一遍：
  * 只有 `page=0` 才比（详情里的宽高就是第 0 页的；其它页拿不到权威尺寸，不瞎比）。
  * @param {'original'|'master'|'thumb'|'unknown'} tier
  * @param {{originalWidth?:number, originalHeight?:number, imageWidth?:number, imageHeight?:number, page?:number}} info
@@ -344,7 +344,7 @@ const NEW_KEYS = ['r18', 'tags', 'author', 'orientation', 'minWidth', 'minHeight
 
 /**
  * 把调用方给的筛选参数规范化成内部形状。
- * **非法值一律不抛错**（工具层要返回给模型看，不能炸）：回落到安全默认并记进 warnings，
+ * 非法值一律不抛错（工具层要返回给模型看，不能炸）：回落到安全默认并记进 warnings，
  * 尤其是 r18 —— 取值不认识时一定回落 'exclude'，绝不可能因为拼错就把 R-18 放行。
  * @returns {object} 含 engaged（调用方到底用没用新参数）
  */
@@ -470,7 +470,7 @@ function hitAuthor(item, want) {
 }
 
 /**
- * 对一批镜像站原始条目做本地筛选（**纯函数，离线可测**，见 tools/test-pixiv-filters.mjs）。
+ * 对一批镜像站原始条目做本地筛选（纯函数，离线可测，见 tools/test-pixiv-filters.mjs）。
  * @param {Array} items 原始条目
  * @param {object} f normalizePixivFilters 的结果
  * @param {Set<string>} seenIds 跨页去重用的已见 id（会被就地更新）
@@ -593,7 +593,7 @@ export async function pixivSearch(query, opts = {}) {
   const f = normalizePixivFilters(opts);
 
   /* ── 旧路径：调用方一个筛选参数都没用 → 与改动前逐字段一致（只抓 1 页、不排序、只过滤 R-18）──
-   * ⚠️ 这里**故意不加** source/sourcesTried：主人定的硬要求是"不传任何新参数时结果逐字段一致"，
+   * 这里故意不加 source/sourcesTried：硬要求是"不传任何新参数时结果逐字段一致"，
    *    多一个键就不再一致（离线自测 tools/test-pixiv-filters.mjs 第一段就是钉这件事的）。
    *    想知道这次是谁供的数据，要么带上任意筛选参数（走下面那条路），要么看 scan.source。 */
   if (!f.engaged) {
@@ -657,7 +657,7 @@ export async function pixivSearch(query, opts = {}) {
   /* 注意：这里**不**再额外塞一条"扫满上限仍不够"的警告 —— scan 里的 reachedLimit/exhausted
    * 和下面 scanNotice 的末句已经把这件事说清楚了，再塞一条会让模型的 JSON 里出现两遍同样的话。 */
 
-  // 排序只在**已扫到的页**内生效（镜像站不给服务端排序，而且我们要先凑够 limit 才能截断）
+  // 排序只在已扫到的页内生效（镜像站不给服务端排序，而且我们要先凑够 limit 才能截断）
   const ordered = f.sort === 'random' ? shuffle(kept)
     : f.sort === 'date_asc' ? sortByCreateDate(kept, 1)
       : sortByCreateDate(kept, -1);
@@ -710,7 +710,7 @@ export async function pixivSearch(query, opts = {}) {
 }
 
 /**
- * 由搜索结果推出可下载的大图地址（按可靠性排序，**全部走站内代理**）。
+ * 由搜索结果推出可下载的大图地址（按可靠性排序，全部走站内代理）。
  * @param {object} work pixivSearch 的 results 里的元素（或任何带 thumbUrl 的对象）
  * @param {{page?:number, size?:'master'|'original'}} opts
  * @returns {string[]} 候选 URL，按优先级从高到低
@@ -740,27 +740,27 @@ export function pixivImageCandidates(work, opts = {}) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-18 新增：按作品号取图 —— 修「给了 illustId 却试了 0 个地址」】
+ * 2026-09-18 新增：按作品号取图 —— 修「给了 illustId 却试了 0 个地址」
  *
- * 现场（主人报的）：`qq_send_pixiv {illustId:"80643572", size:"original"}` 返回
- *   `Pixiv 图片下载失败（试了 0 个地址）`，**一个候选都没生成**。
+ * 现场（实测取证）：`qq_send_pixiv {illustId:"80643572", size:"original"}` 返回
+ *   `Pixiv 图片下载失败（试了 0 个地址）`，一个候选都没生成。
  * 根因：换 illustId 的那条路只会拼 `work = {id, thumbUrl:''}`（当时注释写着"没有按号取详情的免登录接口"），
- *   而 `pixivImageCandidates` 是从 **thumbUrl 里的日期路径**推大图地址的 —— thumbUrl 是空串，
+ *   而 `pixivImageCandidates` 是从 thumbUrl 里的日期路径推大图地址的 —— thumbUrl 是空串，
  *   日期路径推不出来，于是 out 里只剩"再兜一次空 thumb"= 0 个候选。
- *   ⇒ 这条路等于**从来没通过**：不是被风控、也不是地址过期，是压根没地址可试。
+ *   ⇒ 这条路等于从来没通过：不是被风控、也不是地址过期，是压根没地址可试。
  *
  * 修法：先按作品号把"下游地址"问出来，再交给 `pixivImageSources` 拼候选。实测可用的来源：
- *   ① pixiv 直联（首选）：`ajax/illust/{id}` 取元数据、`ajax/illust/{id}/pages` 取**逐页原图直链**。
+ *   ① pixiv 直联（首选）：`ajax/illust/{id}` 取元数据、`ajax/illust/{id}/pages` 取逐页原图直链。
  *      实测 `pages` 给出的就是 `https://i.pximg.net/img-original/img/<日期>_p<N>.<ext>` —— 真原图，
  *      拿它拼地址不用猜日期、也不用猜扩展名（同一作品各页扩展名实测一致，但不同作品有 jpg 也有 png）。
- *      注意 `ajax/illust/{id}` 的 `urls` 字段**可能整组为 null**（实测：80643572 全 null，
- *      149807268 齐全），所以**不要**只依赖它 —— 原图地址以 `pages` 为准。
+ *      注意 `ajax/illust/{id}` 的 `urls` 字段可能整组为 null（实测：80643572 全 null，
+ *      149807268 齐全），所以不要只依赖它 —— 原图地址以 `pages` 为准。
  *   ② 镜像站兜底：`api/detail.php?id=`（形状与 pixiv 的 ajax 一致，它用自己的登录态取），
  *      慢（实测 0.9~14s）且偶发超时，只在 ① 失败时用。
  * 取字节：`i.pximg.net` 需要 `referer: https://www.pixiv.net/`（不带 403），所以直联优先、镜像代理兜底；
- *   两者返回的字节实测**逐字节相同**（jpg 1,886,996B sha 536c4aeb… / png 696,829B sha c792e5ce…）。
+ *   两者返回的字节实测逐字节相同（jpg 1,886,996B sha 536c4aeb… / png 696,829B sha c792e5ce…）。
  *
- * R-18 闸门：按号取图**不会**经过搜索的本地筛选，所以这里必须自己判 —— 用同一个 `isAdult` 规则
+ * R-18 闸门：按号取图不会经过搜索的本地筛选，所以这里必须自己判 —— 用同一个 `isAdult` 规则
  *   （xRestrict 缺失/非 0 一律当 R-18）。实测 R-18 作品 `ajax/illust` 仍会 200 且 `xRestrict:1`
  *   （例：110000000），所以"官网会替我挡"是错的；倒是 `pages` 对 R-18 会 404。
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
@@ -776,12 +776,12 @@ const PIXIV_APP_PAGE_SIZE = 30;
 const PIXIV_USER_WORKS_MAX_PAGES = 10;
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-20 新增：三个来源 + 统一行形状】
- * 关键约束：**不管哪一家供的数据，进筛选之前必须是同一个形状**（web ajax / 镜像站那套 camelCase）——
+ * 2026-09-20 新增：三个来源 + 统一行形状。
+ * 关键约束：不管哪一家供的数据，进筛选之前必须是同一个形状（web ajax / 镜像站那套 camelCase）——
  *   ① 筛选函数（filterPixivItems 那一串）是纯函数、被离线自测钉死了，不能为来源分叉；
- *   ② 老路径"不传新参数时结果逐字段一致"是硬要求，web ajax / 镜像站的行**原样透传**才算一致。
+ *   ② 老路径"不传新参数时结果逐字段一致"是硬要求，web ajax / 镜像站的行原样透传才算一致。
  * 所以 app-api 的 snake_case 行在这里一次性翻译成 camelCase，之后全流程不再提"来源"二字。
- * ⚠️ xRestrict：app-api 缺这个键时**不能补 0** —— isAdult 是 fail-closed（键缺失一律当 R-18），
+ * xRestrict：app-api 缺这个键时不能补 0 —— isAdult 是 fail-closed（键缺失一律当 R-18），
  *   补 0 会把 R-18 放行。所以只在原字段存在时才写。
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
 
@@ -884,9 +884,9 @@ async function webAjaxSearchPage(keyword, page) {
 }
 
 /**
- * ③ 第三方镜像站 search.php（形状与 web ajax 一致，只是慢）。**不带任何凭证**。
+ * ③ 第三方镜像站 search.php（形状与 web ajax 一致，只是慢）。不带任何凭证。
  *
- * 为什么这一条要重试 1 次（2026-09-18 的现场记录，原注释移到这里）：这个平替站**偶发**慢/超时
+ * 为什么这一条要重试 1 次（2026-09-18 的现场记录，原注释移到这里）：这个平替站偶发慢/超时
  * （实测同一条请求 0.4s 正常，偶尔直接挂到 12s 超时），重试一次再放弃 —— 否则一次抖动模型就会
  * 以为"Pixiv 搜不到"。官网那两条路是硬失败（400/404 立刻回），重试没意义，所以等待只留给这里。
  */
@@ -909,7 +909,7 @@ async function mirrorSearchPage(keyword, page) {
   };
 }
 
-/** 来源顺序（主人 2026-09-20 定的"官方优先"）。第 3 项是"重试前等多少毫秒"。 */
+/** 来源顺序（2026-09-20 定的"官方优先"）。第 3 项是"重试前等多少毫秒"。 */
 const PIXIV_SEARCH_SOURCES = [
   ['app-api', appApiSearchPage, 0],
   ['web-ajax', webAjaxSearchPage, 0],
@@ -939,31 +939,31 @@ async function fetchPixivSearchPage(keyword, page) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-19 新增：pixiv 登录态（cookie）—— 只为"按名字搜画师"这一件事】
+ * 2026-09-19 新增：pixiv 登录态（cookie）—— 只为"按名字搜画师"这一件事。
  *
- * 为什么需要：pixiv 的**用户搜索**接口对匿名请求一律拒绝。实测（线上 VPS，未登录）：
+ * 为什么需要：pixiv 的用户搜索接口对匿名请求一律拒绝。实测（线上 VPS，未登录）：
  *   · GET /ajax/search/users?word=米山舞[&s_mode=s_usr][&p=1][&type=user] → 400「不正确的请求。」
- *     （注意**不是 404**：路由存在，只是不接受匿名请求）
+ *     （注意不是 404：路由存在，只是不接受匿名请求）
  *   · GET /ajax/search/users/米山舞 → 404；/ajax/search/users/米山舞?s_mode=s_usr → 404
- *   · 作品关键词搜索替不了它：搜「米山舞」全站 173 条里，作者名含"米山舞"的**0 条**
+ *   · 作品关键词搜索替不了它：搜「米山舞」全站 173 条里，作者名含"米山舞"的0 条
  *     （那些是打了她名字标签的粉丝图）。所以"找某人本人的作品"没法靠关键词搜。
  *   · 镜像站 x.pixigraph.xyz 也没有用户搜索（猜的 5 条路由全 404，search.php 忽略 type/mode/s_mode，
  *     native.php 代拉 pixiv 的用户搜索返回空）。
- *   ⇒ 想按名字找人，只能自己带登录态。**免费号就够**（会员只管人气排序/多标签检索这类玩法）。
+ *   ⇒ 想按名字找人，只能自己带登录态。免费号就够（会员只管人气排序/多标签检索这类玩法）。
  *
  * 三条纪律：
- *   ① **只在 pixiv 域名上带 cookie**（见 pixivRequestHeaders）—— 绝不能把登录凭证发给第三方镜像站；
- *   ② cookie 只从本地配置读（config.json 的 pixiv.cookie / 环境变量），**永不写进任何返回值、日志或 QQ 消息**；
- *   ③ 没配 cookie 时"按名字搜"要**明确说不支持**，不许悄悄退化成"关键词搜"（那会给出错误的答案）。
+ *   ① 只在 pixiv 域名上带 cookie（见 pixivRequestHeaders）—— 绝不能把登录凭证发给第三方镜像站；
+ *   ② cookie 只从本地配置读（config.json 的 pixiv.cookie / 环境变量），永不写进任何返回值、日志或 QQ 消息；
+ *   ③ 没配 cookie 时"按名字搜"要明确说不支持，不许悄悄退化成"关键词搜"（那会给出错误的答案）。
  *
- * 【2026-09-20 更新】cookie 从"日常必需"降级为"**只在引导时用一次**"：主人贴一次 PHPSESSID，
- * 桥拿它换长期 refresh_token（lib/pixiv-auth.js），之后 app-api 用 Bearer、自动轮换，主人再也不用管。
+ * 2026-09-20 更新：cookie 从"日常必需"降级为"只在引导时用一次"：手动贴一次 PHPSESSID，
+ * 桥拿它换长期 refresh_token（lib/pixiv-auth.js），之后 app-api 用 Bearer、自动轮换，不用再管。
  * 这一段（config.json 的 pixiv.cookie）留着不删：它是旧安装的兼容路径、也是令牌彻底坏掉时的应急手段。
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
 
 /**
  * 纯函数：把用户给的东西规整成一条能用的 Cookie 头。
- * 容忍三种写法（主人不一定会照抄格式）：整条 cookie 串、`PHPSESSID=xxx`、光秃秃的会话值。
+ * 容忍三种写法（不一定会照抄格式）：整条 cookie 串、`PHPSESSID=xxx`、光秃秃的会话值。
  * 空/含换行（有人会连回车一起复制）都要处理干净 —— 换行进请求头会直接把请求弄坏。
  * @returns {string} 可用则返回 cookie 串，否则空串
  */
@@ -992,7 +992,7 @@ export function configPixivCookie() {
 }
 
 /**
- * 当前生效的 pixiv 登录 cookie。**每次现读** config.json：贴完新 cookie 不用重启 MCP 子进程。
+ * 当前生效的 pixiv 登录 cookie。每次现读 config.json：贴完新 cookie 不用重启 MCP 子进程。
  * `QQBRIDGE_PIXIV_COOKIE_OFF=1` 可以强制"没有登录态"（自检/验证缓存兜底时用，也方便临时停用而不删配置）。
  */
 export function pixivCookie() {
@@ -1006,8 +1006,8 @@ export function pixivLoggedIn() {
 }
 
 /* ── 「名字 → 画师号」本地缓存（2026-09-19）────────────────────────────────────────────
- * 主人只愿意配合一次，而登录态总有失效的时候（2026-09-20 起已经是自动轮换的长期令牌，见
- * lib/pixiv-auth.js，但令牌也可能被 pixiv 吊销/网络不可达）。而它其实**只在解析名字时需要**：
+ * 手写 cookie 只愿意配合一次，而登录态总有失效的时候（2026-09-20 起已经是自动轮换的长期令牌，见
+ * lib/pixiv-auth.js，但令牌也可能被 pixiv 吊销/网络不可达）。而它其实只在解析名字时需要：
  * 解出来之后，按画师号发作品、取原图全都不需要登录态。
  * 所以把每次成功解出的候选表按名字落盘 —— 登录态掉了，已经查过的名字照样能用。
  * 文件：<qq-bridge>/state/pixiv-artists.json（原子写；最多留 500 条，超出按时间淘汰最旧的）。 */
@@ -1063,8 +1063,8 @@ export function artistCacheSize() {
 }
 
 /**
- * pixiv 请求头。**cookie 只发给 pixiv 自己的域名** —— 镜像站是第三方，把登录凭证发过去等于泄露账号。
- * 【2026-09-20 加固】非 pixiv 主机上，调用方塞进来的 cookie / authorization 也会被**摘掉**：
+ * pixiv 请求头。cookie 只发给 pixiv 自己的域名 —— 镜像站是第三方，把登录凭证发过去等于泄露账号。
+ * 2026-09-20 加固：非 pixiv 主机上，调用方塞进来的 cookie / authorization 也会被摘掉：
  *   以前只有"本函数自己不加"这一层，万一哪天上面多传个头（比如 Bearer），镜像站就白拿一个凭证。
  * @param {string} url 目标地址
  */
@@ -1085,7 +1085,7 @@ export function pixivRequestHeaders(url, extra = {}) {
 }
 
 /**
- * app-api（官方 App 接口）的请求头：**Bearer 换 cookie**。
+ * app-api（官方 App 接口）的请求头：Bearer 换 cookie。
  * 为什么这里不带 cookie：app-api 认 Bearer；cookie 那套只对 www.pixiv.net 的 ajax 有用，
  * 少带一处凭证就少一处泄露面（2026-09-20）。
  */
@@ -1126,12 +1126,12 @@ export function normalizeArtistName(s) {
 }
 
 /**
- * 纯函数：解析"用户搜索"的返回体（形状**已实测**，见下）。
+ * 纯函数：解析"用户搜索"的返回体（形状已实测，见下）。
  * 实测返回（`/ajax/search/users?nick=米山舞&s_mode=s_usr&p=1&i=0`，HTTP 200）：
  *   body 有 data/page/tagTranslation/thumbnails/users/zoneConfig 等键，其中
  *   `users[] = { userId, name, comment, image, imageBig, premium, partial, isFollowed, isMypixiv, isBlocking, background, commission }`
- *   —— **没有作品数**（要另外补，见 enrichArtistWorks），`comment` 是签名（消歧很有用）。
- * 【2026-09-20 扩展】还要吃 app-api `/v1/search/user` 的 `user_previews[]`：那里用户**包在 `user` 字段里**
+ *   —— 没有作品数（要另外补，见 enrichArtistWorks），`comment` 是签名（消歧很有用）。
+ * 2026-09-20 扩展：还要吃 app-api `/v1/search/user` 的 `user_previews[]`：那里用户包在 `user` 字段里
  *   （`{user:{id,name,account,profile_image_urls,is_premium}, illusts:[…该用户的公开作品预览], novels:[…]}`），
  *   所以 `illusts` 是数组 —— 数组长度当作品数用（`partial` 只代表"这个预览不全"）。
  * 仍做宽容解析（认 body.users / body.user_previews / body.list / body.data / 裸数组；认 userId|id、name|userName、illusts|works）。
@@ -1167,16 +1167,16 @@ export function parsePixivUserSearch(json) {
 }
 
 /**
- * 把"按画师名搜"的返回体排序/挑选（**纯函数，离线可测**）。
+ * 把"按画师名搜"的返回体排序/挑选（纯函数，离线可测）。
  *
  * 排序：名字完全相等 → 作品数多 → 其余。作品数是"这个号是不是活跃画师"的唯一可用信号（要另外补）。
  *
- * 什么时候**才敢**直接定号（unique）：**恰好有一个同名号名下真有作品**（works>0），并且
- *   · 其它同名号都是 0 作品（实测：搜「米山舞」会带出 7 个 0 作品的同名/近似小号），**且**
+ * 什么时候才敢直接定号（unique）：恰好有一个同名号名下真有作品（works>0），并且
+ *   · 其它同名号都是 0 作品（实测：搜「米山舞」会带出 7 个 0 作品的同名/近似小号），且
  *   · 所有近似号（"米山舞です"这种）的作品数都没有超过它。
- * 为什么不用"作品数最多"来定号：实测搜「ちーのすけ」会出 3 个**完全同名**的活跃画师（20 / 49 / 82 件），
- * 而主人真正要的那个是 20 件的那位 —— "作品最多"会把号认错。这种情况下只能列候选让人挑：
- * **发错人比不发出去更糟**。
+ * 为什么不用"作品数最多"来定号：实测搜「ちーのすけ」会出 3 个完全同名的活跃画师（20 / 49 / 82 件），
+ * 而要找的那个是 20 件的那位 —— "作品最多"会把号认错。这种情况下只能列候选让人挑：
+ * 发错人比不发出去更糟。
  * @returns {{exact:object[], partial:object[], others:object[], candidates:object[], unique:object|null}}
  */
 export function rankArtistCandidates(users, name) {
@@ -1202,7 +1202,7 @@ export function rankArtistCandidates(users, name) {
 }
 
 /** GET 一个 pixiv/mirror 的 JSON 端点。**不抛 HTTP 状态错**（404 的 JSON 体也要能读到，才能给准话）。
- *  第三个参数用于 app-api：那一路要 Bearer 头（auth 头**只在这里显式传**，绝不下发给镜像站）。 */
+ *  第三个参数用于 app-api：那一路要 Bearer 头（auth 头只在这里显式传，绝不下发给镜像站）。 */
 async function fetchPixivJson(url, timeoutMs = PIXIV_DIRECT_TIMEOUT_MS, headers = null) {
   const res = await fetch(url, {
     headers: headers ?? pixivRequestHeaders(url),
@@ -1255,7 +1255,7 @@ export function normalizePixivIllustDetail(body, source = 'pixiv') {
 
 /**
  * 按作品号取详情（元数据 + 可能的原图地址）。
- * 顺序（2026-09-20 主人定"官方优先"）：app-api `/v1/illust/detail`（Bearer）→
+ * 顺序（2026-09-20 定"官方优先"）：app-api `/v1/illust/detail`（Bearer）→
  * pixiv web ajax `ajax/illust/<id>` → 镜像站 detail.php。三个都失败才抛错，并把三家各自的原话都带上。
  */
 export async function pixivIllustDetail(id) {
@@ -1313,7 +1313,7 @@ export function deriveOriginalPageUrls(p0, pageCount) {
 }
 
 /** 原图直链 → master1200 直链。**纯函数，离线可测**。
- *  实测：master **一律是 .jpg**（png 原图的作品，`..._p0_master1200.png` 是 404，`.jpg` 才是 200/740KB）。 */
+ *  实测：master 一律是 .jpg（png 原图的作品，`..._p0_master1200.png` 是 404，`.jpg` 才是 200/740KB）。 */
 export function pixivMasterUrl(originalUrl) {
   return String(originalUrl ?? '').trim()
     .replace('/img-original/img/', '/img-master/img/')
@@ -1321,10 +1321,10 @@ export function pixivMasterUrl(originalUrl) {
 }
 
 /**
- * 取一个作品的**逐页原图直链**。
- * 顺序（2026-09-20 主人定"官方优先"，且"按作品/画师发送时优先 app-api 的 meta_pages"）：
+ * 取一个作品的逐页原图直链。
+ * 顺序（2026-09-20 定"官方优先"，且"按作品/画师发送时优先 app-api 的 meta_pages"）：
  * ① app-api `/v1/illust/detail` 的 `meta_pages[].image_urls.original`（最准：逐页给真原图，不用猜扩展名）；
- *    详情本身就是 app-api 取的、已经带着 metaPages 时**直接复用**，不再多发一次请求；
+ *    详情本身就是 app-api 取的、已经带着 metaPages 时直接复用，不再多发一次请求；
  * ② 官网 `ajax/illust/{id}/pages`（匿名可用，实测 100~400ms，逐页给 urls.original）；
  * ③ 镜像站 detail.php 的 urls.original（或它的 meta_pages）→ 用 `deriveOriginalPageUrls` 推页；
  * 都没成时再用详情里的 urls.original 推（老的 'derived' 兜底，行为不变）。
@@ -1393,17 +1393,17 @@ export async function pixivIllustOriginals(detail) {
 }
 
 /**
- * 取一个画师（userId）的公开作品号列表，**新→旧**。
+ * 取一个画师（userId）的公开作品号列表，新→旧。
  *
- * 为什么需要它：关键词搜索搜的是"标签/标题里出现这个词的作品"，所以搜「米山舞」搜到的是**别人画的、
- * 打了她名字标签的**图，找不到她本人的作品（主人 2026-09-18 报的正是这件事）。
+ * 为什么需要它：关键词搜索搜的是"标签/标题里出现这个词的作品"，所以搜「米山舞」搜到的是别人画的、
+ * 打了她名字标签的图，找不到她本人的作品（2026-09-18 报的正是这件事）。
  * 找"某人本人的作品"必须走 user 接口：`ajax/user/{uid}/profile/all` 的 `body.illusts` 是 `{id: null}` 表。
  * 实测：uid=26249081 → 29 条；uid=52021072 → 20 条；uid=533797 → 0 条（该号叫 "Kana"，本来就没作品）。
- * pixiv 作品号全局递增，所以**按号倒序 = 按投稿时间新→旧**（这里没有 createDate 可用，只能这么排）。
+ * pixiv 作品号全局递增，所以按号倒序 = 按投稿时间新→旧（这里没有 createDate 可用，只能这么排）。
  *
  * 顺序（2026-09-20）：app-api `/v1/user/illusts`（Bearer，每页 30 件、跟 next_url 往后翻，上限 10 页）
  *   → 官网 `profile/all`（一次给全，原来的唯一实现）→ 镜像站 native.php 代拉同一个 profile/all。
- * ⚠️ app-api 若返回 0 件，**不当作结论**，继续往下试：app-api 那个 type=illust 可能不含某些投稿类型，
+ * app-api 若返回 0 件，不当作结论，继续往下试：app-api 那个 type=illust 可能不含某些投稿类型，
  *    而 profile/all 是"这个人一共投了什么"的权威答案，兜底一遍成本很低。
  * @returns {Promise<{userId:string, ids:string[], source:string, note:string}>}
  */
@@ -1466,15 +1466,15 @@ export function isAdultWork(item) {
 }
 
 /**
- * 拼出"这张图的字节从哪几个地址能拿到"，**按可靠性排序**（工具层逐个试）。
+ * 拼出"这张图的字节从哪几个地址能拿到"，按可靠性排序（工具层逐个试）。
  *
- * 每条是 `{url, referer?, tier}`：带 referer 的走**直联**（要传给 safeFetchBuffer 的第三个参数），
+ * 每条是 `{url, referer?, tier}`：带 referer 的走直联（要传给 safeFetchBuffer 的第三个参数），
  * 不带的走镜像站代理。直联在前是因为实测它快一个数量级（60~400ms vs 2.7~5.7s）且字节完全一致；
  * 镜像代理想吐超时时直联早就成功了。
  * 最后仍会追加 `pixivImageCandidates` 的老候选（从缩略图推的日期路径），保证"搜索路径"行为不变。
  *
- * ⚠️ `tier`（2026-09-21 补）是**如实标注每条候选属于哪一档**（见 pixivImageTier）：老候选里既有原图猜测、
- *   也有 `_master1200` 和 250×250 的 `_square1200` 缩略图，而 `upstream` 还可能是**上游给的 720 档地址**。
+ * `tier`（2026-09-21 补）是如实标注每条候选属于哪一档（见 pixivImageTier）：老候选里既有原图猜测、
+ *   也有 `_master1200` 和 250×250 的 `_square1200` 缩略图，而 `upstream` 还可能是上游给的 720 档地址。
  *   以前这三类混在一个数组里且没有任何标注，调用方（qq_send_pixiv）逐个试、谁先成功就发谁，
  *   于是"默认原图"实际上经常发的是 720/1200/缩略档，结果里却写着 lossless:true（现场见文件头）。
  *   现在标注齐全，发什么档由 `planPixivSend` 按 tier 决定，降级必须显式。
@@ -1518,15 +1518,15 @@ export function pixivImageSources(work, opts = {}) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-19 新增：按画师名字找号（要登录 cookie；见本文件上方 cookie 段）】
+ * 2026-09-19 新增：按画师名字找号（要登录 cookie；见本文件上方 cookie 段）
  *
  * 调用方给的"画师"入参可能是三种东西，这里统一收口：
  *   · 画师号 / pixiv.net/users/<数字> 链接 → 直接用；
  *   · 画师名（不含数字）→ 走登录态的用户搜索；
  *   · 什么都没给 → none。
- * 名字搜出来**不保证唯一**（同名号在 pixiv 上很常见），所以：
+ * 名字搜出来不保证唯一（同名号在 pixiv 上很常见），所以：
  *   · 只有一个名字完全相等、且没有包含关系的候选 → 敢直接定（unique）；
- *   · 否则**返回候选列表让用户挑**，绝不瞎猜一个发出去 —— 发错人比不发更糟。
+ *   · 否则返回候选列表让用户挑，绝不瞎猜一个发出去 —— 发错人比不发更糟。
  *   （web 搜索引擎那条路实测不可靠：这台 VPS 上 bing 候选恒 0、duckduckgo 时好时坏 202，
  *    且"七菜"这种常见名会捞出 3 个同名号而真号不在前列；所以只做候选，不做自动定号。）
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
@@ -1572,18 +1572,18 @@ async function enrichArtistWorks(users, limit = 8) {
 }
 
 /**
- * 按名字搜画师（**需要登录态**；没登录态就直接说清楚，不退化成关键词搜）。
+ * 按名字搜画师（需要登录态；没登录态就直接说清楚，不退化成关键词搜）。
  *
- * 路由是怎么找到的（留证，免得下次又从头试）：`/ajax/search/users` 这条路由**一直都在**，
- * 之前一直 400「不正确的请求」是因为参数名给错了 —— 它要的是 **`nick`**，不是 `word`。
+ * 路由是怎么找到的（留证，免得下次又从头试）：`/ajax/search/users` 这条路由一直都在，
+ * 之前一直 400「不正确的请求」是因为参数名给错了 —— 它要的是 `nick`，不是 `word`。
  * 证据：pixiv 用户搜索页自己的 chunk `s.pximg.net/soy/pixiv-web-next/.../chunks/users-*.js` 里写着
  *   `e.get("/ajax/search/users", {}, { nick: t.nick, s_mode: t.sMode, p: t.page, i: t.onlyCreator ? "1" : "0" })`
  * 实测（带 cookie）：`nick=米山舞` → 1 条命中 `1554775:米山舞`；`nick=七菜` → 10 条同名候选；
- * `nick=<纯数字>`、`nick=自己的英文 ID` → 0 条（它只按**昵称**搜，不按号、不按 @ID）。
+ * `nick=<纯数字>`、`nick=自己的英文 ID` → 0 条（它只按昵称搜，不按号、不按 @ID）。
  * 匿名（不带 cookie）时同一条请求是 400「不正しいリクエストです。」/「不正确的请求。」
- * —— 这正是「按名字搜画师」过去要靠主人手贴 cookie 的原因，也是本次做 OAuth 长期令牌的动机。
+ * —— 这正是「按名字搜画师」过去要靠手贴 cookie 的原因，也是本次做 OAuth 长期令牌的动机。
  *
- * 顺序（2026-09-20 主人要的"官方优先"，也是"能一直用"的关键）：
+ * 顺序（2026-09-20 要求的"官方优先"，也是"能一直用"的关键）：
  *   ① app-api `/v1/search/user?word=`（Bearer，见 lib/pixiv-auth.js —— 长期令牌自动轮换，不再依赖 cookie）；
  *   ② 官网 `ajax/search/users?nick=`（cookie；就是原来的唯一实现，保留当兜底）；
  *   ③ 镜像站 native.php 代拉同一个地址（实测它自己没有用户搜索路由，能认就认）。
@@ -1635,7 +1635,7 @@ export async function pixivSearchUsersByName(name) {
       const users = parsePixivUserSearch(r.json);
       if (users.length) {
         await enrichArtistWorks(users);
-        artistCacheSet(w, users);   // 解开一次就记住：登录态掉了也能用（主人只给一次的意思）
+        artistCacheSet(w, users);   // 解开一次就记住：登录态掉了也能用（cookie 只给一次的意思）
         return { query: w, endpoint: url.replace(`${PIXIV_AJAX}/`, '/ajax/'), users, cached: false, source: 'web-ajax' };
       }
       const why = r.json?.error ? `error=${String(r.json.message ?? '').slice(0, 40)}` : '无 users 字段';

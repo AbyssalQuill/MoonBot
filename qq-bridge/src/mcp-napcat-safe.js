@@ -1,7 +1,7 @@
 // 安全版 QQ MCP server（stdio）。由 DSH 的 MCP 客户端 spawn。
 //
 // 安全设计：
-// - 只暴露聊天所需的**安全动作子集**（查状态/查群/查消息/发消息），
+// - 只暴露聊天所需的安全动作子集（查状态/查群/查消息/发消息），
 //   不暴露任何管理类动作（禁言、踢人、改群设置、文件上传下载等）。
 // - 发送类工具强制校验白名单：目标群/私聊必须命中 config.json 的
 //   allow.groups / allow.private，否则拒绝 —— agent 只能往被允许的地方发消息。
@@ -16,7 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
 import { napcatImageFileArg } from './lib/napcat-file.js';
-// 【2026-09-18】联网找图：图片搜索引擎（Bing/百度）+ SSRF 安全下载。
+// 2026-09-18：联网找图：图片搜索引擎（Bing/百度）+ SSRF 安全下载。
 // 两者都是纯函数模块，直接 import；下载复用 safe-fetch（禁内网、限字节、校验真是图片）。
 import { searchImages } from './lib/image-search.js';
 import {
@@ -28,43 +28,46 @@ import {
 import { safeFetchBuffer, MAX_IMAGE_FETCH_BYTES, verifyImageComplete } from './safe-fetch.js';
 // 发送前要拿"实际拿到的像素"跟档位对账（见 qq_send_pixiv 的档位闸门）：只用它的头部嗅探，纯函数、无副作用。
 import { sniffImageInfo } from './lib/image-compress.js';
-// 【2026-09-21】说说配图：取图 + 体检 + 变成 NapCat `images` 收得下的参数（零落盘优先）。
+// 2026-09-24：get_time 工具用 —— 北京时间、分钟精度（fmtBeijing 就是唤醒正文里给模型看的同一种格式，
+// 保证"工具拿到的现在"与"消息行上的时间"口径完全一致，模型不会算错时区）。
+import { fmtBeijing, beijingDateKey, BJ_WEEK } from './lib/time.js';
+// 2026-09-21：说说配图 —— 取图 + 体检 + 变成 NapCat `images` 收得下的参数（零落盘优先）。
 // 为什么单独一个模块：发布链路的证据（NapCat 只认 images、base64 会被它自己落盘又自己删）全写在那份文件头注释里。
 import {
   qzoneImageTmpDir, sweepQzoneImageTmp, prepareQzoneImageArg, collectQzoneImages,
 } from './lib/qzone-image.js';
 import { isDeliveredUnconfirmed, deliveredUnconfirmedResult, onebotErrText } from './lib/onebot-delivery.js';
 import { resolveToolTier, toolAllowedByTier, measureSchemaShare, TOOL_TIERS } from './lib/tool-tiers.js';
-// 【2026-09-21】工具 schema 的「描述压缩档」：照搬 mcp-compressor 的档位语义（medium=只留第一句 / high=不发描述）
+// 2026-09-21：工具 schema 的「描述压缩档」—— 照搬 mcp-compressor 的档位语义（medium=只留第一句 / high=不发描述）
 import { normalizeSchemaLevel, applyDesc, slimShape, SCHEMA_LEVEL_INFO } from './lib/tool-schema-compress.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-// 内置表情包（meme packs）：**多包**发现 + 角色专属包绑定，全部运行时探测，禁止写死。
+// 内置表情包（meme packs）：多包发现 + 角色专属包绑定，全部运行时探测，禁止写死。
 //
-// 【2026-09-20 从"单包"改成"多包"】此前这里只认一个写死的 pack id（whale-fanart-001），
-// 于是：主人再传一份表情包进来，模型根本看不见它；角色卡里配的"这个角色用这套表情"也无处落地。
+// 2026-09-20 从"单包"改成"多包"：此前这里只认一个写死的 pack id（whale-fanart-001），
+// 于是：再传一份表情包进来，模型根本看不见它；角色卡里配的"这个角色用这套表情"也无处落地。
 // 现在一份 pack 的形态固定为：
 //     <包目录>/{manifest.json, index.db, memes/<tag>/<文件名>.<ext>}
 //   · index.db 表 memes(path 主键, file_name, tag, caption, keywords[, file_hash, mtime, captioned_at])
-//   · path 是相对包根的路径（'/' 分隔），**发图靠它**；file_name 只是文件名（包内唯一），搜索靠它。
+//   · path 是相对包根的路径（'/' 分隔），发图靠它；file_name 只是文件名（包内唯一），搜索靠它。
 // 包出现在三类位置（都认，顺序即优先级）：
-//   1) 出厂包      <runtimeRoot>/meme/<packId>/          —— 随安装包分发（鲸鱼包就在这里）
+//   1) 随程序分发 <runtimeRoot>/meme/<packId>/          —— 兼容位置（产品本身不再附带任何包，通常为空）
 //   2) 后装/上传包 <runtimeRoot>/meme-packs/<packId>/    —— 管理端上传的新包落点
 //   3) 角色专属包  <角色库根>/<角色slug>/meme-packs/<packId>/ —— 跟着角色走
 //
-// 【2026-09-15 改名】工具从 qq_whale_meme_search / qq_send_whale_meme 改成 qq_meme_search / qq_send_meme：
-// 旧名字带开发初版「鲸鱼娘人设」的味道，工具本身跟人设无关（就是"从内置表情包里挑一张发"）。
-// **pack 目录名 whale-fanart-001 保持不变**：那是已分发到本机 runtime 与安装包 payload 里的真实
-// 磁盘路径，改名会让所有已装好的机器找不到表情包；id 由 manifest.id 决定，目录名不再等于 id。
+// 2026-09-15 改名：工具从 qq_whale_meme_search / qq_send_whale_meme 改成 qq_meme_search / qq_send_meme：
+// 旧名字带开发初版「鲸鱼娘人设」的味道，工具本身跟人设无关（就是"从表情包里挑一张发"）。
+// MEME_LEGACY_PACK_ID 保留：老机器上还留着当年随包分发的 `whale-fanart-001` 目录，这个 id
+// 只用于认出并兼容它；id 一律以 manifest.json 的 id 为准，目录名不再等于 id。
 //
-// 【2026-09-13 修「表情包图库搜索失败」】现网 <安装目录>\resources\runtime 与所有安装包 payload
+// 2026-09-13 修「表情包图库搜索失败」：现网 <安装目录>\resources\runtime 与所有安装包 payload
 // 都漏装了 meme/ 表情包 → 解析为 null → 工具直接回"本机没装表情包"，
-// 而且是**静默降级**（只在被调用时才暴露）。现在：
+// 而且是静默降级（只在被调用时才暴露）。现在：
 //   1) 候选表补上隔离 DSH home / 桌面端 DSH home 下的 meme-packs 与 plugins 形态；
-//   2) 启动时一个都找不到就必打**一行 stderr**，把尝试过的每条路径都列出来；
-//   3) 运行期补装（sync-to-live.ps1 拷进 runtime）或管理端上传新包后，**无需重启桥即自愈**（5 秒缓存）。
+//   2) 启动时一个都找不到就必打一行 stderr，把尝试过的每条路径都列出来；
+//   3) 运行期补装（sync-to-live.ps1 拷进 runtime）或管理端上传新包后，无需重启桥即自愈（5 秒缓存）。
 const MEME_LEGACY_PACK_ID = 'whale-fanart-001';
 /** 发现结果缓存：管理端刚传完包就能搜到，不用等重启；但也不至于每次搜索都全盘 readdir */
 const MEME_RESCAN_MS = 5000;
@@ -95,7 +98,7 @@ function dshHomeCandidates() {
 }
 
 /** 全部候选根（顺序即优先级）；解析与启动日志共用同一张表，日志里列的就是真正试过的那些。
- *  每条候选**既可能是包本身**（目录里有 index.db），也可能是**包根**（下面一层的子目录才是各个包）——
+ *  每条候选既可能是包本身（目录里有 index.db），也可能是包根（下面一层的子目录才是各个包）——
  *  两种形态都认，这样"出厂单包目录"与"上传的多包目录"共用同一套代码。 */
 function memeRootCandidates() {
   const list = [];
@@ -110,7 +113,7 @@ function memeRootCandidates() {
   add(path.join(ROOT, 'meme'));
   add(path.join(ROOT, 'meme-packs'));
   add(path.join(ROOT, '.runtime', 'meme-packs'));
-  // 【2026-09-13 补】"从本机复刻到服务器"那条路把表情包放在 <源机 qq-bridge 的父目录>/dsh-meme ——
+  // 2026-09-13 补充："从本机复刻到服务器"那条路把表情包放在 <源机 qq-bridge 的父目录>/dsh-meme ——
   // 目标机上就是 /root/dsh-meme/<pack>。原来候选表里没有这一条，克隆过去的服务器会重演
   // "表情包图库搜索失败"。这里补上两种形态（与部署脚本 buildLocalStagePlan 的 dsh-meme 目录一致）。
   add(path.join(ROOT, '..', 'dsh-meme'));
@@ -179,8 +182,8 @@ function collectMemePacks(candidate, character, out) {
   try { ents = fs.readdirSync(candidate, { withFileTypes: true }); } catch { return out; }
   for (const e of ents) {
     if (e.name.startsWith('.')) continue;                       // .dedup / .upload-* / 隐藏目录都不算包
-    /* 【2026-09-20 修「服务器上一份包都找不到」】这里以前用 `e.isDirectory()` 过滤 ——
-     * 而 readdir 的 Dirent **不跟随符号链接**：服务器上的 `/root/.dsh/meme-packs/whale-fanart-001`
+    /* 2026-09-20 修「服务器上一份包都找不到」：这里以前用 `e.isDirectory()` 过滤 ——
+     * 而 readdir 的 Dirent 不跟随符号链接：服务器上的 `/root/.dsh/meme-packs/whale-fanart-001`
      * 正是指向 `/root/whale-fanart-001` 的软链，isDirectory() 为 false → 整份包被跳过 → 工具回
      * "本机没装内置表情包"。改用 statSync 判目录（跟随链接），与 hasMemePack 的口径一致。 */
     let st = null;
@@ -278,7 +281,7 @@ function activeMemePersona(cfg) {
 
 /**
  * 一次搜索要考虑的包，按优先级排序：
- *   ① 当前角色的专属包（social.meme.personaPacks[角色]）→ ② 该角色自己的目录包 → ③ 主人点名的包（social.meme.packs）
+ *   ① 当前角色的专属包（social.meme.personaPacks[角色]）→ ② 该角色自己的目录包 → ③ 显式指定的包（social.meme.packs）
  *   → ④ 出厂包 → ⑤ 其余。social.meme.packs 非空时只在这些包 + 角色包里搜（空 = 全都搜）。
  */
 function orderedMemePacks(cfg) {
@@ -310,7 +313,7 @@ function queryMemePath(db, fileName) {
 
 /**
  * 按"情绪/内容描述"在一批包里挑第一张表情（qq_meme_search 同一套 SQL，只是只取第一条）。
- * 【2026-09-22】给 `qq_send_meme` 在没有 `file` 时兜底：主人看到的报错是
+ * 2026-09-22：给 `qq_send_meme` 在没有 `file` 时兜底：现场报错是
  * `-32602: missing required tool_input fields: file` —— 模型只给了描述没给文件名，参数校验层就把整次
  * 调用打回来了。现在 `file` 变成可选，给了 query/tag 就自己挑一张，并把挑中的名字回报给它。
  * @returns {{file:string, tag:string, caption:string, packId:string}|null}
@@ -376,7 +379,7 @@ function getOneBotConfig() {
 }
 
 // 与 bridge.allowed 保持一致：allow 列表为空时看"放行开关"。
-// 【2026-09-19】第 5 个参数改名为 allowAll：调用方按类传 `allowAllXxx || allowAllWhenEmpty`
+// 2026-09-19：第 5 个参数改名为 allowAll：调用方按类传 `allowAllXxx || allowAllWhenEmpty`
 // （分侧开关与全局开关是"或"关系，名单非空时两者都不生效——口径与 lib/config.js 的 allowed() 完全一致）。
 function isAllowed(allowList, denyList, id, allowAll) {
   const s = String(id);
@@ -487,15 +490,15 @@ async function authorizeRead(key, token) {
 
 const server = new McpServer({ name: 'napcat-safe', version: '0.1.0' });
 
-/* 【2026-09-15 省额度】重复失败短路：同一个工具 + 完全相同的参数，如果刚刚（90s 内）已经失败过，
+/* 2026-09-15 省额度：重复失败短路：同一个工具 + 完全相同的参数，如果刚刚（90s 内）已经失败过，
  * 就不再真的执行一次，直接把上次的失败原因回给它，并明确叫它别用同样的参数重试。
  *
  * 为什么值得单独做一层：线上实测（2026-09-14 22:52-22:53 的私聊）模型一次并列调了 3 个
  * qq_send_sticker（同一个 stickerId 连失败 3 次），下一步又同样地重试 —— 每一次失败都要付
- * **一整个模型步**的上下文重发（该会话实测 ≈34k tokens/步），3 次重试≈10 万 tokens 白花。
+ * 一整个模型步的上下文重发（该会话实测 ≈34k tokens/步），3 次重试≈10 万 tokens 白花。
  * 这一层把重复失败挡在桥内：相同参数第二次进来直接短路，模型不会再为同一件失败的事反复烧额度。
  *
- * 只对**确定性错误**生效（找不到表情 / 参数非法 / 文件处理失败 …）；
+ * 只对确定性错误生效（找不到表情 / 参数非法 / 文件处理失败 …）；
  * 超时、网络、限频这类"再试一次可能就好了"的错误不记，免得挡住合理的重试。 */
 const recentFailures = new Map();          // key -> { at, text }
 const FAIL_MEMO_MS = 90_000;
@@ -508,16 +511,16 @@ const pruneFailures = () => {
   const now = Date.now();
   for (const [k, v] of recentFailures) if (now - v.at > FAIL_MEMO_MS) recentFailures.delete(k);
 };
-/* 【2026-09-15 修「缺 key/token 直接 -32602」】模型偶尔漏传 key/token（正文里 [Token] 行离得远、
- * 或者它把参数名写成了别的），而全部会话级工具的 zod schema 把两者声明成**必填** —— 于是请求在
- * **进任何处理器之前**就被 MCP SDK 以 `-32602 Invalid input: expected string, received undefined at key`
+/* 2026-09-15 修「缺 key/token 直接 -32602」：模型偶尔漏传 key/token（正文里 [Token] 行离得远、
+ * 或者它把参数名写成了别的），而全部会话级工具的 zod schema 把两者声明成必填 —— 于是请求在
+ * 进任何处理器之前就被 MCP SDK 以 `-32602 Invalid input: expected string, received undefined at key`
  * 打回：模型拿不到任何可执行提示，答不上人，还白烧一整个模型步（线上该会话实测 ≈34k tokens/步）。
  *
  * 现在两层兜底：
  *   ① schema 里把 key/token 放宽成 optional（描述照旧，模型仍会正常传）；
  *   ② 处理器入口把缺的补上：传了 key 就按 key 取该会话的 agent token；只缺 key 就问桥
  *      "当前唯一在途回合"是哪个会话（/api/social/current-turn，本机可信通道）；
- *   ③ 实在补不上，回一句**能照着做**的提示，而不是一句 JSON schema 校验失败。
+ *   ③ 实在补不上，回一句能照着做的提示，而不是一句 JSON schema 校验失败。
  */
 let sessionFallback = null;                    // { key, token, at }
 const SESSION_FALLBACK_TTL_MS = 5000;
@@ -577,22 +580,22 @@ const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>
       rest[i] = async (...args) => {
         // ② 补齐缺的 key/token
         const callArgs = (args[0] && typeof args[0] === 'object') ? args[0] : {};
-        /* 【2026-09-18 修「qq_schedule_message 明明传了 key 还报缺 key/token」】
-         * 旧写法把两个字段**绑在一起**判断（`hasKeyField || hasTokenField`），于是对
+        /* 2026-09-18 修「qq_schedule_message 明明传了 key 还报缺 key/token」
+         * 旧写法把两个字段绑在一起判断（`hasKeyField || hasTokenField`），于是对
          * "只声明 token、不声明 key"的工具（qq_schedule_message / qq_schedule_list / qq_schedule_cancel
          * 这些用 targetKey 的）会得出 `missingKey = true` —— 因为 zod 解析会把 schema 里
-         * **没声明的 `key` 字段直接剥掉**，处理器拿到的 args[0].key 永远是 undefined。
+         * 没声明的 `key` 字段直接剥掉，处理器拿到的 args[0].key 永远是 undefined。
          * 结果：模型照提示传了 key，包装层却认为它没传 → 去问桥"当前在途会话" → 手动测试时没有
          * 在途回合 → 回一句"缺 key/token"，调用整个失败。
-         * 现在**两个字段各判各的**：没声明 key 的工具根本不检查 key，只检查 token。 */
+         * 现在两个字段各判各的：没声明 key 的工具根本不检查 key，只检查 token。 */
         const missingKey = hasKeyField && (callArgs.key === undefined || callArgs.key === null || callArgs.key === '');
         const missingToken = hasTokenField && (callArgs.token === undefined || callArgs.token === null || callArgs.token === '');
-        /* 【2026-09-20 根因修复：桥**不再替模型猜 key**（修「pixiv 发图发错群」）】
+        /* 2026-09-20 根因修复：桥不再替模型猜 key（修「pixiv 发图发错群」）
          * 旧写法在缺 key 时问桥 `/api/social/current-turn`，把"当前在途会话"的 key 填进去 ——
          * 而多会话同时有在途回合时，桥会按"最近活动"挑一个（console-server 的 PICKED-newest-of-N）。
-         * 于是：群 A 的人要一张图，模型漏传 key，图就被发进了当时更活跃的群 B / 主人的私聊。
+         * 于是：群 A 的人要一张图，模型漏传 key，图就被发进了当时更活跃的群 B / 私聊。
          * 现在唤醒正文每一轮都带 `[Session] group:<群号>` 行（wake-send.js 的 sessionLine），
-         * 模型手上一直有确切答案；所以这里**缺 key 直接拒绝并指回那一行**，绝不猜。
+         * 模型手上一直有确切答案；所以这里缺 key 直接拒绝并指回那一行，绝不猜。
          * 只缺 token 仍然照旧补齐（token 不决定发到哪个会话，补错最多是鉴权失败，不会误导目标）。 */
         if (missingKey) {
           console.error(`[napcat-safe] ${name} 缺 key，按新规矩拒绝（不猜会话）`);
@@ -633,9 +636,9 @@ const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>
         try {
           if (res && res.isError) {
             const text = String(res.content?.[0]?.text ?? '').replace(/\s+/g, ' ').slice(0, 200);
-            /* 【2026-09-18】参数类错误**不记进"重复失败短路"**。
-             * 主人踩到的：位置卡片第一次漏传 lat/lon → 报"位置卡片需要 lat（纬度）"→ 被记成重复失败 →
-             * 第二次**改对了参数**也被短路拦住，回一句"这个调用刚刚已经失败过…别用完全相同参数再试"。
+            /* 2026-09-18：参数类错误不记进"重复失败短路"。
+             * 现场：位置卡片第一次漏传 lat/lon → 报"位置卡片需要 lat（纬度）"→ 被记成重复失败 →
+             * 第二次改对了参数也被短路拦住，回一句"这个调用刚刚已经失败过…别用完全相同参数再试"。
              * 参数错本来就是"改一下就能过"的，挡住重试纯属帮倒忙。 */
             const paramErr = /不能为空|需要 lat|需要 lon|缺少|必须|格式应为|格式错误|仅支持|不支持|不是合法|too (?:small|big)/i.test(text);
             if (!TRANSIENT_RE.test(text) && !paramErr) { recentFailures.set(key, { at: Date.now(), text }); pruneFailures(); }
@@ -652,38 +655,38 @@ const MISSING_ARG_HINT = '缺 token：唤醒正文第一行就是 `[Token] <值>
 }
 
 // ── 工具 schema 精简（2026-09-12 起；2026-09-21 升级成「压缩档」）─────────────────────
-// 实测（QQ 主会话的 request/header）：tools **72,692 字符 ≈ 22.7k tokens**、system 13.1k 字符 ≈ 3.3k，
-// 单次请求合计 ≈ 26k tokens —— 也就是说**每一分钱里 87% 是工具 JSON schema**，
-// 而且**每一步都会把这整包重发一次**（靠前缀缓存按缓存读计价，占账单约 61%）。
+// 实测（QQ 主会话的 request/header）：tools 72,692 字符 ≈ 22.7k tokens、system 13.1k 字符 ≈ 3.3k，
+// 单次请求合计 ≈ 26k tokens —— 也就是说每一分钱里 87% 是工具 JSON schema，
+// 而且每一步都会把这整包重发一次（靠前缀缓存按缓存读计价，占账单约 61%）。
 // 所以"少注册一个用不到的工具"比"把提示词写短几个字"重要两个数量级。
 // 复算工具：`node tools/tool-schema-meter.mjs`（会真的起一次本文件、逐个量 schema 尺寸）。
 //
-// ⚠️ 一个必须记住的事实：`config.json` 里的 `social.tools.*` 开关**根本省不了 schema**。
-//    console-server.js 的 `ToolEnabled()` 只在**调用时**返回 403（"工具未启用"），
-//    工具描述照样每次全量下发。要真的省，只能**根本不注册** —— 就是这里做的。
+// 一个必须记住的事实：`config.json` 里的 `social.tools.*` 开关根本省不了 schema。
+//    console-server.js 的 `ToolEnabled()` 只在调用时返回 403（"工具未启用"），
+//    工具描述照样每次全量下发。要真的省，只能根本不注册 —— 就是这里做的。
 //    （交接文档 §4.7b.3 曾写"关掉 = schema 整段消失"，那是错的；本文件是更正。）
 //
-// 2026-09-21 主人要求「MCP 压缩工具调到 high 档、压缩到 8.6%、并支持管理端切换」：
+// 2026-09-21：MCP 压缩工具调到 high 档、压缩到 8.6%、并支持管理端切换 ——
 //   · 档位定义在 lib/tool-tiers.js（off / low / medium / high / custom，含实测百分比与名单）；
-//   · 本文件按档位决定**注册哪些**（白名单语义 = 名单外根本不注册）；
-//   · 注册完把**实测**结果写 state/tool-schema-stats.json 并打到 stderr ——
+//   · 本文件按档位决定注册哪些（白名单语义 = 名单外根本不注册）；
+//   · 注册完把实测结果写 state/tool-schema-stats.json 并打到 stderr ——
 //     管理端「工具 schema 精简」卡直接读它显示"当前档位实际留了多少字符、占百分之几"，
 //     这样"省了多少"是可验证的数，而不是配置里的一句承诺。
 // 开关语义（可一键回退）：
-//   `social.slimTools.enabled !== true` → **全部注册**，行为与改动之前**完全一致**；
+//   `social.slimTools.enabled !== true` → 全部注册，行为与改动之前完全一致；
 //   `social.slimTools.level` = off/low/medium/high → 按该档名单；
 //   `social.slimTools.level` = custom（或老配置只有 allow/deny）→ 走手写名单：
-//        · `deny` 里的工具 **不注册**（黑名单；名单以外的照常注册 → 将来新增工具默认可见，不会"忘了加白名单"）；
-//        · `allow` 非空时改成**只注册 allow 里的**（白名单，最省，但新增工具要手动加）。
+//        · `deny` 里的工具不注册（黑名单；名单以外的照常注册 → 将来新增工具默认可见，不会"忘了加白名单"）；
+//        · `allow` 非空时改成只注册 allow 里的（白名单，最省，但新增工具要手动加）。
 // 改动这份名单只需要重启隔离 DSH（DSH 启动时向 MCP server 取一次工具表），不用改别的地方。
-// 名单里的工具名**允许带或不带 MCP server 前缀**（`mcp__napcat__qq_x` 与 `qq_x` 等价）。
-// 踩过的坑：管理端「出厂默认名单」写的是**带前缀**的全名，而这里注册用的是裸名 →
+// 名单里的工具名允许带或不带 MCP server 前缀（`mcp__napcat__qq_x` 与 `qq_x` 等价）。
+// 踩过的坑：管理端「出厂默认名单」写的是带前缀的全名，而这里注册用的是裸名 →
 // deny 名单一条都匹配不上 → 实际裁剪 0 个、"省 schema" 静默失效（实测：77 个工具一个没少）。
 // 现在两边都归一化，谁写都能生效；`qq_status` 用裸 server.tool 注册，本来就不参与裁剪。
 const bareToolName = (n) => String(n).replace(/^mcp__[A-Za-z0-9_-]+__/, '');
 /* QQB_SLIM_TOOLS_OFF=1 = 本次启动忽略压缩档、全部注册。
- * 只给**实测工具**用（tools/tool-schema-meter.mjs）：要算"占不裁剪时的百分之几"，
- * 分母必须是**服务端定义的全部工具**，而注册过的工具表里没有没注册那些的尺寸。
+ * 只给实测工具用（tools/tool-schema-meter.mjs）：要算"占不裁剪时的百分之几"，
+ * 分母必须是服务端定义的全部工具，而注册过的工具表里没有没注册那些的尺寸。
  * DSH 启动时不设它，行为与改动前完全一致。 */
 const TIER = process.env.QQB_SLIM_TOOLS_OFF === '1'
   ? { level: 'off', keep: null, allow: null, deny: null, source: 'env-off' }
@@ -711,8 +714,8 @@ if (SLIM_ON) {
   console.error(`[napcat-safe] 工具 schema 精简已启用：档位=${TIER.level}（${TIER.source}）`
     + `${TIER.keep ? ` 白名单 ${TIER.keep.size} 个` : TIER.allow ? ` 白名单 ${TIER.allow.size} 个` : TIER.deny ? ` 黑名单 ${TIER.deny.size} 个` : ''}`);
 }
-/* 【2026-09-21】描述压缩档（与上面的"名单档位"是两个正交的旋钮）：
- *   名单档位 = 注册**哪些**工具；描述档位 = 注册了的那份**写多长**。
+/* 2026-09-21：描述压缩档（与上面的"名单档位"是两个正交的旋钮）：
+ *   名单档位 = 注册哪些工具；描述档位 = 注册了的那份写多长。
  * 环境变量 QQB_SCHEMA_LEVEL 可临时覆盖（实测脚本用），正式生效值来自 config.json 的
  * social.slimTools.schemaLevel（管理端「工具 schema 精简」卡里选）。 */
 const SCHEMA_LEVEL = normalizeSchemaLevel(
@@ -722,10 +725,10 @@ if (SCHEMA_LEVEL !== 'off') {
   console.error(`[napcat-safe] 工具描述压缩档=${SCHEMA_LEVEL}（${SCHEMA_LEVEL_INFO[SCHEMA_LEVEL]?.label ?? ''}）`);
 }
 
-/** 注册工具；精简模式下被排除的**直接不注册** —— 它的 JSON schema 从此不出现在任何一次请求里。
+/** 注册工具；精简模式下被排除的直接不注册 —— 它的 JSON schema 从此不出现在任何一次请求里。
  *  同时把尺寸记进 schemaMeter：注册完写一份实测统计给管理端读。
  *
- *  【2026-09-21 描述压缩档】`social.slimTools.schemaLevel` 按 mcp-compressor 的档位语义压**描述文字**：
+ *  2026-09-21 描述压缩档：`social.slimTools.schemaLevel` 按 mcp-compressor 的档位语义压描述文字：
  *  工具一个不少、参数一个不少（名字/类型/枚举/必填都照旧），只是工具描述与每个参数的描述被压短或去掉。
  *  两档一起算账：list 档位决定"注册哪些"，schema 档位决定"注册了的那份写多长"。 */
 function registerTool(name, ...rest) {
@@ -749,7 +752,7 @@ function registerTool(name, ...rest) {
 function flushSchemaStats() {
   /* QQB_SCHEMA_STATS_ONLY=1 = 只加载、不落盘。给 tools/tool-schema-meter.mjs 用：
    * 它会把 QQB_SLIM_TOOLS_OFF 和这个变量一起打开去量"不裁剪的全量"，
-   * 如果照样落盘，就会把**真实生效档位**的那份实测统计覆盖成"off/100%"——
+   * 如果照样落盘，就会把真实生效档位的那份实测统计覆盖成"off/100%"——
    * 管理端那张卡读到的就成了一个并不生效的数字（实测踩到过，所以这里加了这个开关）。 */
   if (process.env.QQB_SCHEMA_STATS_ONLY === '1') return;
   try {
@@ -757,7 +760,7 @@ function flushSchemaStats() {
     const payload = {
       at: Date.now(),
       level: TIER.level,
-      // 【2026-09-21】描述压缩档（与名单档位正交）：管理端同一张卡上一起显示、一起切换
+      // 2026-09-21：描述压缩档（与名单档位正交）：管理端同一张卡上一起显示、一起切换
       schemaLevel: SCHEMA_LEVEL,
       schemaLevelInfo: SCHEMA_LEVEL_INFO,
       enabled: SLIM_ON,
@@ -770,7 +773,7 @@ function flushSchemaStats() {
       savedChars: schemaMeter.totalChars - schemaMeter.keptChars,
       approxTokensPerStep: Math.round(schemaMeter.keptChars / 3.2),
       // 各档位若切过去会是多少（同一份尺寸表算出来的，管理端可以并列显示做选择）
-      // 【2026-09-22】带上**被砍掉的具体工具名 + 各自字符数**：主人要求"那个裁剪的也标出来别让别人猜"，
+      // 2026-09-22：带上被砍掉的具体工具名 + 各自字符数 —— "那个裁剪的也标出来别让别人猜"，
       // 管理端因此能直接列出这一档砍了哪些、省了多少字符 —— 名单与桥真正注册的那份同源（同一个账本）。
       tiers: Object.fromEntries(Object.entries(TOOL_TIERS).map(([id, def]) => {
         const keep = Array.isArray(def?.keep) ? new Set(def.keep.map(bareToolName)) : null;
@@ -802,7 +805,7 @@ process.on('exit', flushSchemaStats);
 
 /* qq_status 走 registerTool（原来直接 server.tool，不进账本）：
  * 它是自检通道、体积只 198 字符，lib/tool-tiers.js 里写死"任何档位都保留"，
- * 但**必须被记进 schemaMeter** —— 否则管理端看到的"全量字符数"少一个工具，百分比就不准。 */
+ * 但必须被记进 schemaMeter —— 否则管理端看到的"全量字符数"少一个工具，百分比就不准。 */
 registerTool(
   'qq_status',
   'Query the QQ bot\'s login status and account info (read-only).',
@@ -816,6 +819,35 @@ registerTool(
     } catch (error) {
       return { content: [{ type: 'text', text: `查询失败：${error?.message ?? error}` }], isError: true };
     }
+  }
+);
+
+/* 2026-09-24：get_time：有人问"现在几点/今天几号/星期几"时拿精确时间（到分钟）。
+ *
+ * 为什么必须是工具而不是把时间塞进提示词：唤醒正文里的时间只有消息发生的那一刻，
+ * 模型醒来回答"现在几点"时那行已经旧了（中间还隔着思考/工具调用，可能差几分钟）；
+ * 让它自己"加一加"必然出错。这里现取现给，返回北京时间 —— 与桥内所有时间同一口径（UTC+8）。
+ *
+ * 零副作用、零网络、零 NapCat 调用：只读系统时钟，纯字符串格式化，可以放心被频繁调用。 */
+registerTool(
+  'get_time',
+  'Get the CURRENT date and time in Beijing time (UTC+8), accurate to the minute. Call it whenever someone asks what time it is, what day/date it is, how long until or since something, or whenever you need "now" — never guess from message timestamps, they are from the past.',
+  {},
+  async () => {
+    const nowMs = Date.now();
+    const d = new Date(nowMs + 8 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    const payload = {
+      beijing: fmtBeijing(nowMs),                       // "2026-09-24 周四 19:19"
+      date: beijingDateKey(),                           // "2026-09-24"
+      weekday: BJ_WEEK[d.getUTCDay()],                  // "周三"
+      time: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`, // "17:42"（到分钟）
+      hour: d.getUTCHours(),
+      timezone: 'Asia/Shanghai (UTC+8)',
+      epochMs: nowMs,
+      note: 'All times in this system (message lists, [Status], tool results) are Beijing time in the same format, so this value is directly comparable.',
+    };
+    return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
   }
 );
 
@@ -1020,16 +1052,17 @@ registerTool(
 
 registerTool(
   'qq_get_recent_messages',
-  'View recent messages of a session (read-only); offset widens the range to earlier messages.',
+  'View recent messages of a session (read-only) - the bridge\'s IN-MEMORY recent window for that session: what has just been said, with live markers (recalled/media) and always the newest. `limit` = how many (default 20, max 100), `offset` = skip the newest N to move further back WITHIN that window (a small window is normal right after a restart - the window is not the archive). For the real chat history / anything older / reading another session back, use qq_memory_search instead: it reads the stored transcript, needs no keyword (key + limit, add offset to page back), and qq_get_recent_messages is deliberately not that. Each row: `userId` = the speaker\'s OWN QQ number (stable for that person - this is the identity to compare with a wake line\'s `[QQ=...]` tag), `isOwner`/`ownerLabel` = whether the bridge has that person as the manager/owner, `messageId` = that one message (quoting/withdrawing only). `messageId` is NOT a person and NOT evidence about who someone is: it differs for every message, so never compare message ids across rows to judge identity and never tell someone their id does not match.',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token (from wake prompt)'),
-    limit: z.number().optional().describe('Max results, default 20, max 100'),
-    offset: z.number().optional().describe('Skip the newest N messages to page back further; default 0')
+    limit: z.number().optional().describe('Max results, default 20, max 100 (within the recent window)'),
+    offset: z.number().optional().describe('Skip the newest N messages inside the recent window; default 0. Past the window you get nothing - page through history with qq_memory_search instead')
   },
   async ({ key, token, limit, offset }) => {
     try {
-      const data = await agentApi(`/api/social/recent?key=${encodeURIComponent(key)}&limit=${limit ?? 20}&offset=${offset ?? 0}`, { headers: { 'x-agent-token': token } });
+      const q = new URLSearchParams({ key, limit: String(limit ?? 20), offset: String(offset ?? 0) });
+      const data = await agentApi(`/api/social/recent?${q.toString()}`, { headers: { 'x-agent-token': token } });
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `获取最近消息失败：${error?.message ?? error}` }], isError: true };
@@ -1165,7 +1198,7 @@ registerTool(
 
 registerTool(
   'qq_get_system_config',
-  'Verbal-adjustable system config (read-only): each item key, value and meaning (proactive on/off and interval, proactive probability, reply-check interval, model provider/main/vision model, reasoning tier). Check first when the owner asks how often you are proactive, which model, or your config, and before any change.',
+  'Verbal-adjustable system config (read-only): each item key, value, allowed range (min/max) and meaning. Covers proactive on/off and interval, proactive probability, reply-check interval, model provider/main/vision model, reasoning tier, AND the send-pace group: sendLinearEnabled, sendPerCharMs (typing ms per character, 60-1000), sendLinearMin, sendLinearCap (max wait per bubble, 800-6000), sendLinearJitter. Check first when the owner asks how often you are proactive, which model, how fast you type, or your config, and before any change.',
   { token: z.string().describe('Session token (from wake prompt)') },
   async ({ token }) => {
     try {
@@ -1179,7 +1212,7 @@ registerTool(
 
 registerTool(
   'qq_set_system_config',
-  'Modify system run config (owner or admin; works in any chat they are speaking in). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model), visionBaseUrl (OpenAI-compatible endpoint for a SEPARATE vision model; empty = images are sent to the main model as attachments), visionApiKey (key for that endpoint), permanentSession (true = never rotate the DSH session; context is kept bounded by DSH compaction instead, which saves the first-turn tokens of every new session), compactionEnabled (true = prune oversized tool results before summarizing), compactionThresholdRatio (fraction of the model context window that triggers cleanup, default 0.06), compactionToolResultChars (per tool result character budget, default 1500) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. Tell the owner the applied value; sessions where neither the owner nor an admin just spoke are rejected.',
+  'Modify system run config (owner or admin; works in any chat they are speaking in). Keys: proactiveEnabled; privateProactiveMin / privateProactiveMax (private proactive interval, e.g. 120min or ms) and privateProbability (0 = never proactive in private); groupProactiveMin / groupProactiveMax and groupProbability; idleThresholdMs (dead-air threshold); replyCheckMs (reply-check interval); SEND PACE (how fast your bubbles come out): sendLinearEnabled (true/false), sendPerCharMs (typing time per character in ms, allowed 60-1000; the owner asking for slower typing = raise this, e.g. 500), sendLinearMin (min gap between bubbles), sendLinearCap (hard max wait for one bubble, allowed 800-6000), sendLinearJitter (0-0.9 random spread); modelProvider (default xiaomi-token-plan-cn = Xiaomi MiMo), model (e.g. mimo-v2.5, mimo-v2-pro), reasoningEffort (auto/low/medium/high), visionModel (empty = follows the main model), visionBaseUrl (OpenAI-compatible endpoint for a SEPARATE vision model; empty = images are sent to the main model as attachments), visionApiKey (key for that endpoint), permanentSession (true = never rotate the DSH session; context is kept bounded by DSH compaction instead, which saves the first-turn tokens of every new session), compactionEnabled (true = prune oversized tool results before summarizing), compactionThresholdRatio (fraction of the model context window that triggers cleanup, default 0.06), compactionToolResultChars (per tool result character budget, default 1500) - model keys auto-sync, isolated from the DSH default model. value = number or duration string like 30min, 2h. The reply carries the applied value and, when your number was outside the allowed range, clamped:true plus a note - in that case tell the owner the value that actually took effect instead of claiming success; sessions where neither the owner nor an admin just spoke are rejected.',
   {
     key: z.string().describe('Config key: privateProbability / privateProactiveMin / proactiveEnabled etc. (see qq_get_system_config)'),
     value: z.union([z.string(), z.number(), z.boolean()]).describe('New value: probability/interval etc.; intervals accept ms numbers or 30min, 2h, 30分钟'),
@@ -1274,48 +1307,6 @@ registerTool(
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `设置唤醒配置失败：${error?.message ?? error}` }], isError: true };
-    }
-  }
-);
-
-registerTool(
-  'qq_send_burst',
-  'Send several messages to a QQ group in one burst (default mode only), at randomized human-like intervals. No quoting - use qq_reply. Each array element is one QQ message: for several messages use separate elements, and never pad short Chinese phrases with spaces or split one sentence across elements; each must read complete.',
-  {
-    groupId: z.union([z.number(), z.string()]).describe('Group id (must be whitelisted)'),
-    token: z.string().describe('Session token (from the wake prompt)'),
-    messages: z.union([z.array(z.string()).min(1), z.string()]).describe('Messages to send, each plain text; a JSON array string is also accepted')
-  },
-  async ({ groupId, token, messages }) => {
-    try {
-      const key = `group:${groupId}`;
-      let finalMessages = messages;
-      if (typeof finalMessages === 'string') {
-        const trimmed = finalMessages.trim();
-        // 兼容模型把数组序列化成 JSON 字符串传入的情况，例如 "[...]"。
-        if (trimmed.startsWith('[')) {
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (Array.isArray(parsed)) finalMessages = parsed.map(String);
-          } catch {}
-        } else if (trimmed.startsWith('"')) {
-          // 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (typeof parsed === 'string') finalMessages = parsed;
-            else if (Array.isArray(parsed)) finalMessages = parsed.map(String);
-          } catch {}
-        }
-      }
-      const data = await agentApi('/api/social/send-burst', {
-        method: 'POST',
-        body: JSON.stringify({ key, messages: finalMessages }),
-        headers: { 'x-agent-token': token },
-        timeoutMs: 300000
-      });
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: 'text', text: `分条发送失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );
@@ -1461,7 +1452,7 @@ registerTool(
         method: 'POST',
         body: JSON.stringify({ key, timeoutMs, minNewMessages, quietMs }),
         headers: { 'x-agent-token': token },
-        // 【2026-09-11 23:35】老写法 `Math.min(725000, …)` 把等待**硬顶在 12 分钟**，
+        // 2026-09-11 23:35：老写法 `Math.min(725000, …)` 把等待硬顶在 12 分钟，
         // 即使传 24 小时也会被截到 725000 —— 长轮询永远挂不住。放到 25 小时。
         timeoutMs: Math.min(90000000, (Number(timeoutMs) || 30000) + Math.max(Number(quietMs) || 0, 10000) + 20000)
       });
@@ -1497,7 +1488,7 @@ registerTool(
 
 registerTool(
   'qq_get_my_recent_messages',
-  'View your own recent messages (read-only), to avoid repeating yourself and stay in character.',
+  'View your own recent messages (read-only), to avoid repeating yourself and stay in character. This is the in-memory recent window of the session, so right after a restart it can be short; for older things you said, use qq_memory_search(direction=out).',
   {
     key: z.string().describe('Session key: group:ID or private:QQ'),
     token: z.string().describe('Session token (from the wake prompt)'),
@@ -2179,10 +2170,10 @@ if (cfg.social?.meme?.enabled !== false) {
         const otherPacks = hits.slice(1).map((h) => h.pack.id);
         const filePath = path.join(hit.pack.dir, hit.rel.replace(/\\/g, '/'));
         if (!fs.existsSync(filePath)) return { content: [{ type: 'text', text: `图片文件不存在：${filePath}（包 ${hit.pack.id} 的表里有它，磁盘上没有）` }], isError: true };
-        // NapCat 需读它**自己能读到**的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
+        // NapCat 需读它自己能读到的路径：先复制到配置的临时目录（服务器指向 NapCat 容器的
         // 宿主挂载目录），再用 napcatImageFileArg 按 dockerPathMap 换成容器内路径 / base64。
-        // 【2026-09-15】此前直接把宿主绝对路径交给 NapCat，服务器（Docker）报
-        // 「文件处理失败: 识别URL失败」→ 主人看到的是"表情包一张都发不出去"。
+        // 2026-09-15：此前直接把宿主绝对路径交给 NapCat，服务器（Docker）报
+        // 「文件处理失败: 识别URL失败」→ 用户看到的是"表情包一张都发不出去"。
         const tmpDir = path.join(ROOT, 'state', 'sticker-tmp');
         const cfgMeme = getConfig();
         const wantTmpDir = String(cfgMeme?.napcat?.tmpDir ?? '').trim() || tmpDir;
@@ -2222,7 +2213,7 @@ if (cfg.social?.meme?.enabled !== false) {
         try {
           data = await onebot(action, params);
         } catch (eSend) {
-          // 【2026-09-15 自愈】NapCat 读不到图片路径（Docker 容器读不到宿主路径）→ 换 base64 重发一次。
+          // 2026-09-15 自愈：NapCat 读不到图片路径（Docker 容器读不到宿主路径）→ 换 base64 重发一次。
           // 该错误 = 整条消息没发出去，重发不会重复（服务器实测报「文件处理失败: 识别URL失败」）。
           const em = String(eSend?.message ?? eSend);
           if (!/文件处理失败|识别URL失败|ENOENT|no such file/i.test(em)) throw eSend;
@@ -2342,7 +2333,7 @@ registerTool(
   }
 );
 
-// 注：`qq_learning_submit` **故意不放在这里**。它属于学习会话的落库工具，而学习会话
+// 注：`qq_learning_submit` 故意不放在这里。它属于学习会话的落库工具，而学习会话
 // 只加载 mcp__napcat-host__ 那一组 MCP（实测：学习者调 mcp__napcat__qq_learning_submit
 // 会得到 ToolNotFoundError / UNKNOWN_TOOL），放在这里学习者根本调不到；放在这边还会
 // 顺手把「写人格档案」的能力交给 QQ 群聊会话，属于不该给的面。它现在的家在
@@ -2429,8 +2420,8 @@ registerTool(
 
 // ── QZone 共享鉴权与 HTTP（看/评/赞都走空间网页 API；cookie 由 NapCat get_cookies 中转）────────
 /* 统一开关：config.json → social.tools.qzone（评论/回复/点赞/查看/发说说；默认开）。管理端可关。
- * 【2026-09-22 修 M16】以前写成 `qzone === false || qzoneView === false` —— 于是只想关掉"看空间"这一项，
- * 会**连带把 qq_send_qzone（发说说）/评论/回复/点赞全禁掉**（这些是各自独立的能力，主人在用）。
+ * 2026-09-22 修 M16：以前写成 `qzone === false || qzoneView === false` —— 于是只想关掉"看空间"这一项，
+ * 会连带把 qq_send_qzone（发说说）/评论/回复/点赞全禁掉（这些是各自独立的能力，实际在用）。
  * 现在只认总开关 qzone；qzoneView 只影响"看空间"这一个工具自己的注册与启用。 */
 const QZONE_TOOL_DISABLED = cfg.social?.tools?.qzone === false;
 const QZONE_VIEW_DISABLED = QZONE_TOOL_DISABLED || cfg.social?.tools?.qzoneView === false;
@@ -2440,7 +2431,7 @@ function qzoneDisabledNote() {
 const QZONE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 // QZone 网页端实际在用的三个 CGI（真机实测确认）：
 //  - 说说列表：taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6
-//  - 评论/回复：taotao.qq.com/cgi-bin/emotion_cgi_re_feeds，参数名是 topicId=「主人QQ_说说tid__评论tid」(新评论用 __1)
+//  - 评论/回复：taotao.qq.com/cgi-bin/emotion_cgi_re_feeds，参数名是 topicId=「<空间主QQ>_说说tid__评论tid」(新评论用 __1)
 //  - 点赞：w.qzone.qq.com/cgi-bin/likes/internal_dolike_app（POST，返回纯 JSON，不是 JSONP）
 // 旧写法 taotao.qq.com/cgi-bin/emotion_cgi_comment_v6（tid 参数）恒返回 code=-3 参数错误；
 // 旧写法 emotion_cgi_do_like_v6 直接 HTTP 500 空响应 → 解析不出 code，就是日志里的 code=undefined。
@@ -2448,10 +2439,10 @@ const QZONE_MSG_LIST = 'https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi
 const QZONE_RE_FEEDS = 'https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_re_feeds';
 const QZONE_DOLIKE = 'https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app';
 
-/* 【2026-09-21】说说配图临时文件的**启动清扫**。
+/* 2026-09-21：说说配图临时文件的启动清扫。
  * 配图走"零落盘优先"（见 lib/qzone-image.js 顶部）：只有字节超过 base64 上限（10MB）才会写临时文件，
  * 而且是 try/finally 立刻删。万一进程在写盘之后、finally 之前被杀（崩溃/被 kill），残留会一直躺着 ——
- * 启动时扫一次、只删 **3 小时前的、我们自己命名的** 文件（tmpDir 可能是与表情/文档共用的容器挂载目录，
+ * 启动时扫一次、只删「3 小时前的、我们自己命名的」文件（tmpDir 可能是与表情/文档共用的容器挂载目录，
  * 按目录清空会误删别人的东西）。与 core/sticker.js:439 / core/docx.js:76 同一套做法。 */
 try {
   const primary = qzoneImageTmpDir(getConfig(), ROOT);
@@ -2553,7 +2544,7 @@ registerTool(
   },
   async ({ key, token, uid, num }) => {
     try {
-      // 【2026-09-22 修 M16】只有"看空间"这一项受 qzoneView 影响；评论/回复/点赞/发说说只受总开关 qzone 管
+      // 2026-09-22 修 M16：只有"看空间"这一项受 qzoneView 影响；评论/回复/点赞/发说说只受总开关 qzone 管
       if (QZONE_VIEW_DISABLED) return { content: [{ type: 'text', text: qzoneDisabledNote() }], isError: true };
       const cleanUid = String(uid).trim().replace(/^o/i, '').replace(/\D/g, '') || String(uid).trim();
       const count = Math.min(20, Math.max(1, Number(num) || 10));
@@ -2599,7 +2590,7 @@ registerTool(
       if (QZONE_TOOL_DISABLED) return { content: [{ type: 'text', text: qzoneDisabledNote() }], isError: true };
       const { cookies, uin, gtk } = await getQzoneAuth();
       // QZone 现行评论接口：emotion_cgi_re_feeds，用 topicId 而不是 tid。
-      // topicId 结构 =「说说主人QQ_说说tid__被回复评论tid」，发表新评论时固定用 __1。
+      // topicId 结构 =「空间主QQ_说说tid__被回复评论tid」，发表新评论时固定用 __1。
       const topicId = `${hostUid}_${tid}__1`;
       const body = new URLSearchParams({
         topicId, uin: String(uin), hostUin: String(hostUid),
@@ -2731,7 +2722,7 @@ registerTool(
     try {
       const text = String(content ?? '');
       /* 取图：collectQzoneImages 自己吞掉所有失败（拿不到图 → 空 items + notes），
-       * 所以这里永远不会因为"图挂了"而把整条说说发不出去（主人要的边界）。 */
+       * 所以这里永远不会因为"图挂了"而把整条说说发不出去（约定的边界）。 */
       const picked = await collectQzoneImages({
         file, imageUrl, imageQuery, pixivIllustId, pixivQuery, pixivSize, imageIndex, imageCount,
         cfg: getConfig(),
@@ -2742,14 +2733,14 @@ registerTool(
         for (const it of picked.items) {
           /* 一律走 prepareQzoneImageArg（零落盘优先）—— 本地 file 那条路**不能**直接把原路径交给 helper：
            * 干跑实测（stub OneBot，见工作区 _qzone_dryrun.mjs）：11MB 的本地图在 auto 模式下 helper 只会
-           * 原样返回**宿主路径**（超过 base64 上限 → 返回 mapped||p），容器里的 NapCat 读不到，正是 docx
+           * 原样返回宿主路径（超过 base64 上限 → 返回 mapped||p），容器里的 NapCat 读不到，正是 docx
            * 那次「识别URL失败」的同一形状。现在大图会先复制进 napcat.tmpDir（容器挂载目录）再由 helper
            * 映射成容器路径，发完即删。 */
           const p = prepareQzoneImageArg(it.buffer, getConfig(), { root: ROOT });
           prepared.push({ ...p, meta: it });
         }
         /* NapCat 的 send_qzone_msg 只读 `images`（napcat.mjs 的 SendQzoneMsg._handle：`e.images ?? []`）——
-         * 旧代码传的 `file` 一直被**静默忽略**（配了图也发不出来、还不报错）。这里换成 images 数组。 */
+         * 旧代码传的 `file` 一直被静默忽略（配了图也发不出来、还不报错）。这里换成 images 数组。 */
         const body = { content: text };
         if (prepared.length) body.images = prepared.map((p) => p.arg);
         const data = await onebot('send_qzone_msg', body);
@@ -2832,7 +2823,7 @@ if (cfg.social?.tools?.sendQqFace !== false) {
 if (cfg.social?.tools?.memorySearch !== false) {
   registerTool(
     'qq_memory_search',
-    'Search the full chat history (SQLite): filter by session key, keyword, sender, date (YYYY-MM-DD) or direction (in=received, out=sent by you); omit key to search all sessions. Returns timestamps, session, sender and content. Results are trimmed (lines truncated, total capped) - narrow with query/date when you need detail.',
+    'Search the full chat history (SQLite): filter by session key, keyword, sender, date (YYYY-MM-DD) or direction (in=received, out=sent by you); omit key to search all sessions. A keyword is NOT required: pass only `key` and you get that chat\'s newest messages (the way to read the transcript back without knowing any word) - add query/date when you want to narrow. Returns timestamps, session, sender and content. Results are trimmed (lines truncated, total capped) - narrow with query/date when you need detail.',
     {
       key: z.string().optional().describe('Session key (group:<gid> or private:<qq>); omit to search all sessions'),
       token: z.string().describe('Session token'),
@@ -2864,13 +2855,13 @@ if (cfg.social?.tools?.memorySearch !== false) {
 }
 
 if (cfg.social?.tools?.memoryRemember !== false) {
-  /* 【2026-09-21 记忆架构升级】长期记忆的**写入**入口。
+  /* 2026-09-21 记忆架构升级：长期记忆的写入入口。
    * 与 qq_profile_set（结构化档案）分工：档案是"这个人是什么样"，这里是"我必须一直记得的一件事"
-   * （主人定的规矩、承诺、重要事件）。tier=permanent 的条目会**每一轮**出现在唤醒正文的 [Recall] 里，
+   * （用户定下的规矩、承诺、重要事件）。tier=permanent 的条目会每一轮出现在唤醒正文的 [Recall] 里，
    * 所以写进去的必须是"值得每轮都读一遍"的一句话 —— 提示词里写死了这条纪律。 */
   registerTool(
     'qq_memory_remember',
-    'Write ONE durable long-term memory (rule / fact / promise about a person) so it survives context rotation. Use when the owner states a standing rule ("以后都这样" / "别再…" / "记住…"), corrects you, or a lesson cost real pain. tier: permanent = never fades and shows in every wake (use for owner rules/identity); durable = default, fades after ~90 idle days; working = short-lived. Never store secrets, tokens or private/intimate content, never a chat log. One sentence per call.',
+    'Write ONE durable long-term memory (rule / fact / promise about a person) so it survives context rotation. Use when the owner states a standing rule ("以后都这样" / "别再…" / "记住…"), corrects you, or a lesson cost real pain. tier: permanent = never fades and shows in every wake (use for owner rules/identity); durable = default, fades after ~90 idle days; working = short-lived. Never store secrets, tokens or private/intimate content, never a chat log. One sentence per call. scope=global puts the entry in the shared memory every chat can recall (use it whenever the rule is about YOU or the owner rather than about this one room); scope=here (default) keeps it tied to the current chat.',
     {
       content: z.string().describe('ONE sentence, concrete and self-contained (no pronouns like "he" without a name)'),
       token: z.string().describe('Session token'),
@@ -2878,9 +2869,10 @@ if (cfg.social?.tools?.memoryRemember !== false) {
       tier: z.enum(['permanent', 'durable', 'working']).optional().describe('permanent = never fades + injected every wake; durable = default; working = fades in ~7 days'),
       category: z.string().optional().describe('Short label: rule / owner / identity / fact / event / note (default note)'),
       pin: z.boolean().optional().describe('true = pin it (same effect as tier=permanent: never fades, injected every wake)'),
-      tags: z.string().optional().describe('A few keywords for later recall, comma separated')
+      tags: z.string().optional().describe('A few keywords for later recall, comma separated'),
+      scope: z.enum(['here', 'global']).optional().describe('here (default) = tied to this chat (private = that person, group = the owner); global = shared by EVERY session - use for standing rules about yourself or the owner that must hold everywhere, so all chats stay the same person')
     },
-    async ({ content, token, key, tier, category, pin, tags }) => {
+    async ({ content, token, key, tier, category, pin, tags, scope }) => {
       try {
         const q = new URLSearchParams({ content });
         if (key) q.set('key', key);
@@ -2888,6 +2880,7 @@ if (cfg.social?.tools?.memoryRemember !== false) {
         if (category) q.set('category', category);
         if (pin) q.set('pin', '1');
         if (tags) q.set('tags', tags);
+        if (scope) q.set('scope', scope);
         const data = await agentApi(`/api/social/memory-remember?${q.toString()}`, { headers: { 'x-agent-token': token }, timeoutMs: 15000 });
         return { content: [{ type: 'text', text: JSON.stringify(data) }] };
       } catch (error) {
@@ -3024,16 +3017,17 @@ if (cfg.social?.tools?.sendForward !== false) {
 if (cfg.social?.tools?.sendRich !== false) {
   registerTool(
     'qq_send_rich',
-    'Send native rich interactive cards: music, video (B站/抖音… link card), contact (contact card), dice/rps (dice / rock-paper-scissors). MUSIC: pass ONLY type=music + musicType=163 + musicId=<the NetEase song id from qq_music_search> - the bridge resolves title/artist/cover/audio itself and builds the whole card (https cover + 300x300 thumbnail, the shape that renders on mobile QQ as well); if the card cannot be sent the bridge automatically falls back to the official song link and the result says music.card=link. NEVER hand-write card fields (image/title/audio/url): a hand-written cover is exactly what makes mobile QQ show a blank card. musicType=qq (QQ Music) is also built by the bridge now: pass type=music + musicType=qq + musicId=<songmid from qq_music_search> + title=<song name> (and content=<artist> if you have it) - the bridge resolves the playable link/cover itself and sends a real music card; if it cannot resolve them it automatically sends the official share link instead and the result says music.card=link. VIDEO: pass ONLY type=video + videoUrl=<the bilibili/douyin link or a bare BV id> - the bridge resolves title/uploader/cover/duration/play-count; for bilibili/weibo it asks NapCat for a real mini-program Ark (com.tencent.miniapp_01, QQ-server-signed) so the result is the same 哔哩哔哩 card a human gets when sharing from B站, and only if that fails does it fall back to cover-image + share text (video.card=native/cover+link); other platforms send cover + share text. If resolving fails it still sends the link as text and the result says video.card=link, so never send both the card and the link yourself.',
+    'Send native rich interactive cards: music, video (B站/抖音… link card), contact (contact card), dice/rps (dice / rock-paper-scissors). MUSIC: pass ONLY type=music + musicType=163 + musicId=<the NetEase song id from qq_music_search> - the bridge resolves title/artist/cover/audio itself and builds the whole card (https cover + 300x300 thumbnail, the shape that renders on mobile QQ as well); if the card cannot be sent the bridge automatically falls back to the official song link and the result says music.card=link. NEVER hand-write card fields (image/title/audio/url): a hand-written cover is exactly what makes mobile QQ show a blank card. musicType=qq (QQ Music) is also built by the bridge now: pass type=music + musicType=qq + musicId=<songmid from qq_music_search> + title=<song name> (and content=<artist> if you have it) - the bridge resolves the playable link/cover itself and sends a real music card; if it cannot resolve them it automatically sends the official share link instead and the result says music.card=link. VIDEO: pass ONLY type=video + videoUrl=<the bilibili/douyin link or a bare BV id> - the bridge resolves title/uploader/cover/duration/play-count; for bilibili/weibo it asks NapCat for a real mini-program Ark (com.tencent.miniapp_01, QQ-server-signed) so the result is the same 哔哩哔哩 card a human gets when sharing from B站, and only if that fails does it fall back to cover-image + share text (video.card=native/cover+link); other platforms send cover + share text. If resolving fails it still sends the link as text and the result says video.card=link, so never send both the card and the link yourself. MUSIC CARD SHAPE: musicStyle=share|music|native is OPTIONAL (default share). share = mobile QQ shows the cover but tapping opens QQ\'s 「将要访问」 interstitial; music = plays inside QQ with no interstitial but no cover on mobile; native = the platform\'s own id card. Pick by what the owner complains about, and the result echoes music.style.',
     {
       key: z.string().describe('Session key: group:ID or private:QQ'),
       token: z.string().describe('Session token'),
       type: z.enum(['music', 'video', 'contact', 'location', 'dice', 'rps']).describe('Card type: music (NetEase real card / QQ Music real card built by the bridge), video (bilibili/weibo = a REAL mini-program card the bridge asks QQ to sign; douyin/YouTube/X = cover + share link), contact=contact card, location=share a place (needs lat+lon, locTitle/locContent optional) - sent as an AMap rich-text card (the same com.tencent.tuwen.lua card a human gets when sharing a place from 高德地图) plus a text line with the place name and a 高德 map link, dice, rps=rock-paper-scissors'),
       musicType: z.enum(['qq', '163', 'kugou', 'migu', 'kuwo', 'custom']).optional().describe('musicType: 163=NetEase (real music card, built by the bridge), qq=QQ Music (also built by the bridge; needs title, falls back to the official share link), kugou/kuwo/migu/custom=other platforms (custom needs musicUrl+image, last resort)'),
-    // 【2026-09-19 主人定稿·硬规则】封面必须由调用方传进来 —— 实测同一个 musicId，传了 image 封面就正常、
+    // 2026-09-19 定稿·硬规则：封面必须由调用方传进来 —— 实测同一个 musicId，传了 image 封面就正常、
     // 不传就空白（手机端尤其明显）。所以音乐卡一律要带 image（用 qq_music_search 返回的 cover 原样传）。
       musicId: z.union([z.number(), z.string()]).optional().describe('Platform music id: 163=song id from qq_music_search, qq=songmid. This is the ONLY music field you normally pass.'),
       musicUrl: z.string().optional().describe('Only for musicType=custom/kugou/kuwo/migu: the click-through song URL.'),
+      musicStyle: z.enum(['share', 'music', 'native']).optional().describe('OPTIONAL card shape for musicType=163/qq. Leave it out normally. share (default) = the tuwen/news card WITH cover: mobile QQ draws the cover, but tapping the card opens the song page through QQ\'s 「将要访问」 interstitial page. music = music.lua card carrying a playable direct link: it plays INSIDE QQ with no interstitial, but mobile QQ does not draw the cover. native = the platform\'s own id card (163/qq, the bridge lets the sign service resolve every field). Use music/native when the owner says the card "点开是中转页/将要访问"; use share when the owner says "没有封面". The result echoes music.style so you can tell the owner which one actually went out.'),
       audio: z.string().optional().describe('Only for custom platforms - leave empty for 163 (the bridge resolves it).'),
       title: z.string().optional().describe('LEAVE EMPTY for 163/qq - the bridge reads the real title itself. Only for custom platforms.'),
       image: z.string().optional().describe('Cover URL - OPTIONAL and normally LEAVE IT OUT. The bridge resolves the cover itself for 163/qq (matched to the song id, and it checks the image actually loads before using it), which is the only reliable way to get the RIGHT cover. Only pass this when the bridge cannot resolve one at all, and copy it verbatim from the cover field of the SAME song in qq_music_search - NEVER reuse a cover URL that appears in another message or an earlier card (that is how a card ends up showing a different song\'s cover).'),
@@ -3044,12 +3038,13 @@ if (cfg.social?.tools?.sendRich !== false) {
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('Message id to quote (optional)'),
       atUserId: z.union([z.number(), z.string()]).optional().describe('QQ number of group member to @ (optional; group chats)')
     },
-    async ({ key, token, type, musicType, musicId, musicUrl, audio, title, image, content, videoUrl, contactType, contactId, lat, lon, locTitle, locContent, data, result, replyToMessageId, atUserId }) => {
+    async ({ key, token, type, musicType, musicId, musicUrl, musicStyle, audio, title, image, content, videoUrl, contactType, contactId, lat, lon, locTitle, locContent, data, result, replyToMessageId, atUserId }) => {
       try {
         const body = { key, type };
         if (musicType) body.musicType = musicType;
         if (musicId !== undefined && musicId !== null) body.musicId = musicId;
         if (musicUrl) body.musicUrl = musicUrl;
+        if (musicStyle) body.musicStyle = musicStyle;
         if (videoUrl) body.videoUrl = videoUrl;
         if (audio) body.audio = audio;
         if (title) body.title = title;
@@ -3147,11 +3142,11 @@ if (cfg.social?.tools?.videoSearch !== false) {
   );
 }
 
-/* ── 联网找图 / 发图（2026-09-18 主人要求："支持联网找图并发图"）──────────────
+/* ── 联网找图 / 发图（2026-09-18："支持联网找图并发图"）──────────────
  * 分工：qq_image_search 只查不发（把候选 URL 摆给模型看）；qq_send_image 负责真发。
  * qq_send_image 可以只给 query（自己搜第一张就发），也可以给 imageUrl（直接发这个链接）。
  * 下载走 safeFetchBuffer：禁内网/本机地址、限制 15MB（MAX_IMAGE_FETCH_BYTES，原为写死的 8MB，
- * 定标依据见 safe-fetch.js 顶部注释）、并且**验证确实是图片**（不是伪装成图片的 HTML）。
+ * 定标依据见 safe-fetch.js 顶部注释）、并且验证确实是图片（不是伪装成图片的 HTML）。
  * 落盘落到 napcat 的 tmpDir（就是 NapCat 容器/进程能读到的那份），再走桥的统一发送端点。 */
 if (cfg.social?.tools?.imageSearch !== false) {
   registerTool(
@@ -3207,9 +3202,9 @@ function stageImageBytes(buf, cfg, tag) {
     },
     async ({ key, token, file, messageId, imageIndex, query, imageUrl, index, replyToMessageId, crossSession }) => {
       try {
-        /* 【2026-09-22 修「不能转发图片」】qimage 这条工具原来只有 query / imageUrl 两条路 ——
+        /* 2026-09-22 修「不能转发图片」：qimage 这条工具原来只有 query / imageUrl 两条路 ——
          * 模型手上有"别人发来的那张图"（DSH 把它存成附件对象 /root/.dsh/attachments/v1/objects/…）时
-         * 无路可走：它只能把那个**本地路径**当参数传进来，而 schema 里没有 file 这个字段
+         * 无路可走：它只能把那个本地路径当参数传进来，而 schema 里没有 file 这个字段
          * （日志现场：`qq_send_image {file: /root/.dsh/attachments/v1/objects/73/7359…}`，用户端什么都没收到）。
          * 现在补上 file：直接读宿主机上的字节 → 同一道完整性闸门 → 交给 NapCat 前先过路径映射
          * （napcatImageFileArg：容器部署时把宿主路径换成容器内路径）。 */
@@ -3228,10 +3223,10 @@ function stageImageBytes(buf, cfg, tag) {
           if (!check.ok) {
             return { content: [{ type: 'text', text: `这张图字节不完整（${check.reason}），没有发出去。` }], isError: true };
           }
-          /* 【2026-09-22 二次修】上一版把宿主路径丢给 napcatImageFileArg 映射就发 —— 生产上仍旧发不出去：
+          /* 2026-09-22 二次修：上一版把宿主路径丢给 napcatImageFileArg 映射就发 —— 生产上仍旧发不出去：
            * NapCat 跑在容器里，DSH 附件目录 /root/.dsh/attachments/… 不在 dockerPathMap 的挂载里，
            * 宿主路径它读不到（用户端什么都没收到，模型只能回"接不了你上传的图"）。
-           * 现在走**和「联网搜图」完全同一条已跑通的路**：字节 → 同一道完整性闸门 → 落到
+           * 现在走和「联网搜图」完全同一条已跑通的路：字节 → 同一道完整性闸门 → 落到
            * cfg.napcat.tmpDir（这个目录就是挂进容器的那份）→ 把该目录里的路径交给发送端点。
            * 顺带把 crossSession 接上：本工具原来没声明它，跨会话发图会被闸门永久拒绝（现场：
            * 模型带 crossSession:true 连试四次都被要求"把 crossSession 设为 true 再发一次"）。 */
@@ -3267,9 +3262,9 @@ function stageImageBytes(buf, cfg, tag) {
             }],
           };
         }
-        /* 【2026-09-22 第三轮修】"我自己发的那张图"还有第二个来路：图是**走 QQ 进来的**（不是 DSH 附件），
+        /* 2026-09-22 第三轮修："我自己发的那张图"还有第二个来路：图是走 QQ 进来的（不是 DSH 附件），
          * 模型手上只有消息 id，没有任何本地路径 —— 于是它一律退化成"联网搜一张差不多的"，
-         * 主人看到的就是"我要的代码图，群里来了一张鲸鱼图"。现在给 messageId：
+         * 现场表现就是"我要的代码图，群里来了一张鲸鱼图"。现在给 messageId：
          * 按 id 把那图取回来（同一个 /api/images/message 端点，qq_get_message_images 用的就是它）
          * → 同一道完整性闸门 → 落盘 → 发送（照样支持 crossSession）。 */
         const fromMsg = String(messageId ?? '').trim();
@@ -3278,7 +3273,7 @@ function stageImageBytes(buf, cfg, tag) {
           let viaQuote = false;
           let quoteMessageId = '';
           try {
-            /* raw=1：主人要求「默认转发原图，别压缩」—— 取图这条腿必须走原图模式。
+            /* raw=1：约定「默认转发原图，别压缩」—— 取图这条腿必须走原图模式。
              * 不带这个参数时端点会把图缩到 1280px 内并重编码（那是喂模型用的副本），
              * 转发出去就成了二次压缩的糊图。 */
             const qm = new URLSearchParams({ key, messageId: fromMsg, raw: '1' });
@@ -3399,16 +3394,16 @@ function stageImageBytes(buf, cfg, tag) {
   );
 }
 
-/* ── Pixiv 找图 / 发图（2026-09-18 主人要求："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
- * 【2026-09-20 主人定调：官方 pixiv API 优先，第三方镜像站 x.pixigraph.xyz 只做兜底】
+/* ── Pixiv 找图 / 发图（2026-09-18："支持搜索和下载 Pixiv 的图片，不用到官网"）──────
+ * 2026-09-20 定调：官方 pixiv API 优先，第三方镜像站 x.pixigraph.xyz 只做兜底
  *   每条能力都按 app-api（OAuth 长期令牌，见 lib/pixiv-auth.js）→ pixiv web ajax → 镜像站 的顺序试；
  *   结果里如实报出这次是谁供的数据（搜索的 source/sourcesTried、详情的 source）。细节见 lib/pixiv.js 顶部。
  * 分工与"联网找图"完全同构：qq_pixiv_search 只查不发，qq_send_pixiv 负责真发。
  * 下载仍走 safeFetchBuffer（禁内网、限 15MB、校验确实是图片），落盘到 napcat.tmpDir 再走统一发送端点。
  *
- * 【2026-09-18 加本地筛选 + 自动翻页（方案 A：不登录、不用会员、不加部署）】
+ * 2026-09-18 加本地筛选 + 自动翻页（方案 A：不登录、不用会员、不加部署）
  *   实测镜像站只认 keyword / page（mode=s_mode=order=bl=type= 全部被忽略），所以标签/构图/尺寸/AI/
- *   时间排序这些筛选**只能在桥本地做**（三个来源先归一成同一行形状再筛，见 lib/pixiv.js）；
+ *   时间排序这些筛选只能在桥本地做（三个来源先归一成同一行形状再筛，见 lib/pixiv.js）；
  *   本地筛就要多翻几页才凑得齐 → 有 scanPages。
  *   参数含义、取值与"做不到"的边界全写在每个 .describe() 里（工具描述是模型唯一的说明书），
  *   实现细节与实测依据见 lib/pixiv.js；回归自测见 tools/test-pixiv-filters.mjs。 */
@@ -3481,8 +3476,8 @@ if (cfg.social?.tools?.pixiv !== false) {
       try {
         const wantId = parsePixivId(illustId);
         const wantAuthor = String(authorId ?? '').trim();
-        /* size 的默认值（2026-09-20 主人定："发图默认原图，不要缩略图"）：三条路都默认 original。
-         * 以前只有"给了 illustId/authorId"才默认原图，只给 query 时回落 master —— 主人明确要改掉这一点；
+        /* size 的默认值（2026-09-20 定："发图默认原图，不要缩略图"）：三条路都默认 original。
+         * 以前只有"给了 illustId/authorId"才默认原图，只给 query 时回落 master —— 这一点明确要改掉；
          * 显式传 size 时永远以调用方为准，怕超 15MB 就传 master。 */
         const sizeEff = String(size ?? 'original').toLowerCase() === 'master' ? 'master' : 'original';
 
@@ -3493,7 +3488,7 @@ if (cfg.social?.tools?.pixiv !== false) {
 
         if (wantId || wantAuthor) {
           /* ── 按作品号 / 按画师号取图（2026-09-18 修「试了 0 个地址」）────────────────
-           * 旧写法在这里造了个 thumbUrl 为空的对象就往下走，而候选是**从缩略图推日期路径**的，
+           * 旧写法在这里造了个 thumbUrl 为空的对象就往下走，而候选是从缩略图推日期路径的，
            * 于是 0 个候选 —— 这条路从来没通过。现在先按号把详情和原图直链问出来（2026-09-20 起
            * 官方 app-api 优先，web ajax 次之，镜像站兜底），见 lib/pixiv.js 顶部【按作品号取图】。 */
           if (wantId) {
@@ -3589,14 +3584,14 @@ if (cfg.social?.tools?.pixiv !== false) {
          * ③ 老候选（从缩略图推日期路径，搜索路径一直在用）。
          * 逐个试而不是只试一个：原图扩展名不定（jpg/png）、大图可能超体积上限、兜底链路可能同时抖动。
          *
-         * 【2026-09-21 档位闸门 —— 修「用户要原图，收到的附件却叫 <md5>_720.jpg，且下半幅是灰的」】
-         *   现场：主人要的是原图，QQ 里收到的文件是 `3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
+         * 2026-09-21 档位闸门 —— 修「用户要原图，收到的附件却叫 <md5>_720.jpg，且下半幅是灰的」
+         *   现场：要的是原图，QQ 里收到的文件是 `3bbd4e1d0c3c1308c4d6fbf2ca3493bc_720.jpg`
          *   —— (a) 720 档不是原图、(b) 下半幅 60~70% 纯 #808080（截断的渐进 JPEG）。
-         *   根因：候选数组里**混着三种档位**（原图 / `_master1200` / 250×250 的 `_square1200`，
-         *   甚至上游（镜像站）给回来的"原图地址"本身就是 720 档），而旧代码**谁先成功就发谁**，
+         *   根因：候选数组里混着三种档位（原图 / `_master1200` / 250×250 的 `_square1200`，
+         *   甚至上游（镜像站）给回来的"原图地址"本身就是 720 档），而旧代码谁先成功就发谁，
          *   发完还在结果里写 `size:'original', lossless:true, contentKind:'pixiv-original'` —— 谎报无损。
          *   现在：① 用 planPixivSend 按档位分桶 —— 缩略档一律不发（发了就是缩略图）；
-         *        ② size=original 时 1200 档**只能当显式降级**：原图档全失败才允许，并且打日志 + 结果里写明；
+         *        ② size=original 时 1200 档只能当显式降级：原图档全失败才允许，并且打日志 + 结果里写明；
          *        ③ 每次都拿"实际像素"跟该档应有的像素对一遍（第三方代理可能拿着原图地址给你一张缩过的图，
          *           光看地址认不出来）；④ 字节完整性由 safeFetchBuffer 保证（截断的图直接抛错换下一个候选）。 */
         const sources = pixivImageSources(work, { page: pageIdx, size: sizeEff, originals });
@@ -3648,7 +3643,7 @@ if (cfg.social?.tools?.pixiv !== false) {
         }
         await tryList(plan.primary, false);
         if (!got && plan.fallback.length) {
-          /* 降级必须显式（主人的要求：原图是默认，缩小只能因为"原图真的拿不到"这个具体原因）。
+          /* 降级必须显式（约定：原图是默认，缩小只能因为"原图真的拿不到"这个具体原因）。
            * 打两处：stderr 一行（运维能 grep），以及结果里的 tierFallback（模型/用户看得到真话）。 */
           console.error(`[napcat-safe] qq_send_pixiv ${work.id} p${pageIdx}：原图档 ${plan.primary.length} 个候选全部失败 → 显式降级到 ${plan.fallback.map((s) => s.tier).join('/')} 档；失败原因：${tried.slice(0, 3).join(' | ') || '(无)'}`);
           await tryList(plan.fallback, true);
@@ -3707,8 +3702,8 @@ if (cfg.social?.tools?.pixiv !== false) {
               pageUrl: work.pageUrl,
               size: sizeEff,
               /* 无损保证（2026-09-21 改成"按实际发出去的档位"来说，而不是"按调用方想要的"）：
-               * 旧写法是 `lossless: sizeEff === 'original'` —— 于是**降级发了 720/1200 档、甚至缩略图，
-               * 结果里照样写 lossless:true**（线上现场：附件名 <md5>_720.jpg，返回却说自己无损）。
+               * 旧写法是 `lossless: sizeEff === 'original'` —— 于是降级发了 720/1200 档、甚至缩略图，
+               * 结果里照样写 lossless:true（线上现场：附件名 <md5>_720.jpg，返回却说自己无损）。
                * 现在只有在"要的就是原图 且 真正发出去的是原图档 且 没发生降级"时才敢说 true。 */
               lossless: sizeEff === 'original' && gotTier === 'original' && !tierFallback,
               bytes: buf.length,
@@ -3836,17 +3831,17 @@ registerTool(
 );
 
 // ── 角色库（角色包）只读工具组（2026-09-14 新增）：qq_character_list / qq_character_read / qq_character_pack / qq_character_search ──
-// 为什么需要：管理器「角色库导入」只把**一张**角色卡写进 qq-bridge/persona.md，再由
+// 为什么需要：管理器「角色库导入」只把一张角色卡写进 qq-bridge/persona.md，再由
 // core/wake-send.js::buildRuntimeOverrideBlock 作为 [PERSONA] 整段注入 —— 于是角色库里
-// **其它角色卡的提示词根本不会被注入**：模型既不知道库里还有什么，也读不到别的卡。
+// 其它角色卡的提示词根本不会被注入：模型既不知道库里还有什么，也读不到别的卡。
 // 这组工具让模型自己按需去读本机那份角色库（纯只读，不写任何人设文件、不发任何 QQ 消息）。
 //
-// ⚠️ 真实结构（本机实测，别当成"一堆 .md"）：**一个角色 = 一个子目录 = 一个"角色包"**，例如
+// 真实结构（本机实测，别当成"一堆 .md"）：一个角色 = 一个子目录 = 一个"角色包"，例如
 //   characters/arihara-nanami/{SKILL.md, ULTIMATE_ROLEPLAY_PROMPT.md, personality.md, profile.md,
 //     interaction.md, relations.md, memory.md, conflicts.md, manifest.json, sources/wiki.md}
-//   characters/ATRI_MAIN_PROMPT.md                      ← 库根下**散装**的卡片文件（列出时标 (loose file)）
+//   characters/ATRI_MAIN_PROMPT.md                      ← 库根下散装的卡片文件（列出时标 (loose file)）
 //   本机规模：21 个角色包 + 1 个散装文件 = 211 个文件（含每包的 manifest.json）。
-//   所以：list 列的是**包**；read 读包里的**一份**（默认 SKILL.md）；pack 一次把核心几份拼回来。
+//   所以：list 列的是包；read 读包里的一份（默认 SKILL.md）；pack 一次把核心几份拼回来。
 //
 // 目录：config.json → social.charactersDir（见 config.example.json；空/缺失 → DEFAULT_CHARACTERS_DIR）。
 // 开关：config.json → social.tools.characterCards（!== false 即注册；默认开。理由：纯只读、只碰本机文件、
@@ -3855,8 +3850,8 @@ registerTool(
 // 安全边界（全部落在下面的纯函数里，工具只是薄壳）：
 //   1) 只认 .md / .txt / .json（.json 只有 manifest.json 这类元信息）；
 //   2) 拒绝绝对路径/盘符/UNC、`.`、`..`、NUL、Windows 非法文件名字符；
-//      `character` 只允许**单段**（包名或散装文件名），包内 file 最多 CHARACTER_PACK_MAX_FILE_DEPTH 层；
-//   3) 每个真实路径都做 realpath **库根包含性**校验：符号链接/junction 指到库外一律当"不存在"；
+//      `character` 只允许单段（包名或散装文件名），包内 file 最多 CHARACTER_PACK_MAX_FILE_DEPTH 层；
+//   3) 每个真实路径都做 realpath 库根包含性校验：符号链接/junction 指到库外一律当"不存在"；
 //   4) 单文件 > CHARACTER_MAX_FILE_BYTES 直接不读；read 默认截断到 32KB、pack 封顶 24KB，超了如实说明；
 //   5) 正文只出现在工具返回值里 —— 这段代码不新增任何含正文的日志（console.* 只打路径/计数）。
 const DEFAULT_CHARACTERS_DIR = path.join(os.homedir(), 'Downloads', 'characters', 'characters');
@@ -3881,7 +3876,7 @@ const CHARACTER_SNIPPET_MAX_CHARS = 200;
 const CHARACTER_TITLE_MAX_CHARS = 80;
 const CHARACTER_TITLE_HEAD_BYTES = 4096;
 const CHARACTER_SUMMARY_MAX_CHARS = 120;
-// qq_character_pack 的正文顺序：主人点名的"核心几份"在前，memory/conflicts 次之，主提示词与其余在后
+// qq_character_pack 的正文顺序：显式点名的"核心几份"在前，memory/conflicts 次之，主提示词与其余在后
 const CHARACTER_FILE_ORDER = [
   /^skill\.md$/i, /^personality\./i, /^profile\./i, /^interaction\./i, /^relations\./i,
   /^memory\./i, /^conflicts\./i, /^ultimate_roleplay_prompt/i, /^main_prompt/i
@@ -3896,11 +3891,11 @@ function isCharacterDir(p) {
 
 /**
  * 角色库根目录：config.json → social.charactersDir 优先；没配就按"存在即用"回落：
- *   ① 用户自己的 `~/Downloads/characters/characters`（老默认，主人自己的库）
+ *   ① 用户自己的 `~/Downloads/characters/characters`（老默认，用户自备的库）
  *   ② 出厂库 `<qq-bridge>/characters`（随安装包分发的那 21 个角色包）
  *
- * 【2026-09-20 修「装了一堆角色包却一个都读不到」】以前没配就直接返回 ① —— 出厂库装上以后，
- * 全新机器上 ① 往往根本不存在（那是"主人自己放角色库的地方"），于是四个角色工具一起报
+ * 2026-09-20 修「装了一堆角色包却一个都读不到」：以前没配就直接返回 ① —— 出厂库装上以后，
+ * 全新机器上 ① 往往根本不存在（那是"用户自己放角色库的地方"），于是四个角色工具一起报
  * "角色库目录不存在"，而真正装着 21 个包的出厂库就在旁边没人看。现在按存在性回落；
  * 两个都不在时仍然返回 ①，让报错里出现的是那个熟悉的路径。
  */
@@ -4294,7 +4289,7 @@ function resolveCharacterEntry(opened, character) {
 }
 
 /**
- * 读角色包里**一份**文件（或库根下散装的一张卡）。
+ * 读角色包里一份文件（或库根下散装的一张卡）。
  * character = 角色包名 / 散装文件名；file 省略时按 SKILL.md → manifest.json → ULTIMATE_ROLEPLAY_PROMPT* → personality.md 挑一份。
  * 包内允许最多 CHARACTER_PACK_MAX_FILE_DEPTH 层（sources/wiki.md = 1 层）。内容按 maxBytes（默认 32KB，上限 128KB）截断并如实回报。
  */
@@ -4353,7 +4348,7 @@ function readCharacterFile(rootDir, character, file, opts = {}) {
 }
 
 /**
- * 一次读回某个角色包的**核心几份**并拼起来（"扮演/参考这个角色"最有用的一次调用）：
+ * 一次读回某个角色包的核心几份并拼起来（"扮演/参考这个角色"最有用的一次调用）：
  * SKILL.md → personality.md → profile.md → interaction.md → relations.md → memory.md → conflicts.md
  * → ULTIMATE_ROLEPLAY_PROMPT* → 其余；总长默认封顶 CHARACTER_PACK_DEFAULT_BYTES（24KB），
  * 超了如实说明截断在哪一份、还剩哪些没装下。manifest.json 只当元信息（进表头），不进正文。
@@ -4739,10 +4734,10 @@ export {
 // 启动 MCP stdio server（修复: 缺少 connect 导致进程静默退出）
 // QQB_MCP_NO_LISTEN=1 时只加载模块、不连 stdio：给 tests/character-library.test.js 直接用纯函数。
 // DSH spawn 时不设这个变量，启动行为与改动前完全一致。
-/* 【2026-09-21 工具 schema 实测统计必须在这里落盘，不能只挂 process.on('exit')】
- * 上面挂的 exit 钩子是**兜底**：Windows 上被 TerminateProcess 结束的进程不会跑 exit 处理器
+/* 2026-09-21：工具 schema 实测统计必须在这里落盘，不能只挂 process.on('exit')
+ * 上面挂的 exit 钩子是兜底：Windows 上被 TerminateProcess 结束的进程不会跑 exit 处理器
  * （实测 tools/tool-schema-meter.mjs 杀掉子进程后 state/tool-schema-stats.json 根本没生成）。
- * 工具注册是自顶向下同步完成的，走到这一行时账本已经齐了 —— 所以**在这里主动写一次**，
+ * 工具注册是自顶向下同步完成的，走到这一行时账本已经齐了 —— 所以在这里主动写一次，
  * 保证管理端那张卡在任何情况下都读得到实测值；exit 钩子留着只是为了覆盖"中途异常退出"。 */
 flushSchemaStats();
 if (process.env.QQB_MCP_NO_LISTEN !== '1') {

@@ -26,8 +26,18 @@ const BRIDGE = path.join(SANDBOX, 'qq-bridge');
 const CFG = path.join(BRIDGE, 'config.json');
 const FACTORY_PACK = path.join(SANDBOX, 'meme', 'factory-demo');
 const UPLOAD_ROOT = path.join(SANDBOX, 'meme-packs');
-/** 出厂包（真仓库里那份）在测试前后的指纹：用来证明这次自测没碰它 */
-const REAL_FACTORY = path.join(REPO, 'meme', 'whale-fanart-001');
+/** 随程序分发的包（若存在）在测试前后的指纹：用来证明这次自测没碰它。
+ * 2026-09-24：产品不再附带任何包（原 whale-fanart-001 已移除），此处改为"扫到哪份就盯哪份"，
+ * 一份都没有时跳过该断言，不再写死包名。 */
+const FACTORY_ROOT = path.join(REPO, 'meme');
+const REAL_FACTORY = (() => {
+  try {
+    const names = fs.readdirSync(FACTORY_ROOT, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(FACTORY_ROOT, e.name, 'index.db')))
+      .map((e) => e.name);
+    return names.length ? path.join(FACTORY_ROOT, names[0]) : null;
+  } catch { return null; }
+})();
 
 let fails = 0;
 let steps = 0;
@@ -90,7 +100,7 @@ function makeZip(entries) {
 const fingerprint = (p) => {
   try { const st = fs.statSync(p); return `${st.size}:${Math.round(st.mtimeMs)}`; } catch { return '-'; }
 };
-const realFactoryBefore = fingerprint(path.join(REAL_FACTORY, 'index.db'));
+const realFactoryBefore = REAL_FACTORY ? fingerprint(path.join(REAL_FACTORY, 'index.db')) : null;
 
 fs.mkdirSync(SANDBOX, { recursive: true });
 fs.mkdirSync(HOME, { recursive: true });

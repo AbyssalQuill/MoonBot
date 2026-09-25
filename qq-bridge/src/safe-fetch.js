@@ -244,31 +244,31 @@ export function looksLikeImageBuffer(buf) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
- * 【2026-09-21 新增：图片字节完整性校验 —— 修「半幅纯 #808080 的图被当成合法图片发出去」】
+ * 2026-09-21 新增：图片字节完整性校验 —— 修「半幅纯 #808080 的图被当成合法图片发出去」
  *
- * 现场（主人报的）：qq_send_pixiv 发到 QQ 的那张 pixiv 图，**下面 60~70% 是纯 #808080 平色、边界干净、
- * 没有 JPEG 块状噪声**。这个形状不是画的内容，是**渐进式 JPEG 被截断**的教科书特征：
+ * 现场（实测取证）：qq_send_pixiv 发到 QQ 的那张 pixiv 图，下面 60~70% 是纯 #808080 平色、边界干净、
+ * 没有 JPEG 块状噪声。这个形状不是画的内容，是渐进式 JPEG 被截断的教科书特征：
  * 解码器对"从没收到的系数"只能填 DC 均值，于是整片区域变成一片平色。
  *
  * 「截断发生在哪」的取证（不是猜）：
- *   · **不是** MAX_IMAGE_FETCH_BYTES 造成的：超限那条路（requestOnceBuffer 里 `size > maxBytes`）是
- *     `settled=true; res.destroy(); reject(...)` —— 是**拒绝**，不是"截一半留下"。上限不会产生半截图。
- *   · **不是**我们的传输层"静默收半截"：本地实测（node v24.13.0，探针：服务端声明 Content-Length=1000
- *     只发 400 字节后 destroy socket；以及 chunked 发 400 字节后 destroy）两种形状**都**触发
+ *   · 不是 MAX_IMAGE_FETCH_BYTES 造成的：超限那条路（requestOnceBuffer 里 `size > maxBytes`）是
+ *     `settled=true; res.destroy(); reject(...)` —— 是拒绝，不是"截一半留下"。上限不会产生半截图。
+ *   · 不是我们的传输层"静默收半截"：本地实测（node v24.13.0，探针：服务端声明 Content-Length=1000
+ *     只发 400 字节后 destroy socket；以及 chunked 发 400 字节后 destroy）两种形状都触发
  *     `res.on('error') → "aborted"`，也就是走到 reject。真·断链不会静默变成"完整响应"。
- *   · **是**"没有校验就收下"：`res.on('end')`（requestOnceBuffer 末尾）把收到的 chunk 直接 concat 就 resolve，
- *     而唯一的体检是 `looksLikeImageBuffer`（上面这个函数）——**只认开头 3 个字节**。
- *     于是只要**上游自己给的字节就是残的**（第三方代理把"没拉完就被掐断的原图"缓存下来、再带正确的
+ *   · 是"没有校验就收下"：`res.on('end')`（requestOnceBuffer 末尾）把收到的 chunk 直接 concat 就 resolve，
+ *     而唯一的体检是 `looksLikeImageBuffer`（上面这个函数）——只认开头 3 个字节。
+ *     于是只要上游自己给的字节就是残的（第三方代理把"没拉完就被掐断的原图"缓存下来、再带正确的
  *     Content-Length 完整吐给我们；这正是镜像站常见形态，也是我们唯一会拿到 720 档 + 半幅灰的来源），
- *     我们就会**原样写盘、原样发给 NapCat**，文件看着是合法 JPEG、尺寸也对，用户看到半张灰。
- *   · 对照口径：`content-length` 这个头**在改动前一次都没被读过**（全文件 grep 无命中），
+ *     我们就会原样写盘、原样发给 NapCat，文件看着是合法 JPEG、尺寸也对，用户看到半张灰。
+ *   · 对照口径：`content-length` 这个头在改动前一次都没被读过（全文件 grep 无命中），
  *     JPEG 的 EOI（FFD9）也从没检查过。
  *
  * 修法：把"完整性"变成一道独立闸门，任何调用方（qq_send_pixiv / 联网找图 / 卡片封面 …）取图都过它：
  *   ① 字节尾标记：JPEG 必须以 FFD9 收尾、PNG 必须以 IEND 块收尾、GIF 必须以 0x3B 收尾、
  *      WebP 的 RIFF 长度字段必须与实际字节数一致；
  *   ② 有 content-length 且没被编码压缩时，实际字节数必须与之相等；
- *   ③ 不通过 → 抛「图片字节不完整」→ 调用方**换下一个候选**或如实报错，绝不发半截图。
+ *   ③ 不通过 → 抛「图片字节不完整」→ 调用方换下一个候选或如实报错，绝不发半截图。
  * ══════════════════════════════════════════════════════════════════════════════════════════ */
 
 /** JPEG 的 EOI（End Of Image）标记：截断的 JPEG 一定缺它。 */
@@ -277,7 +277,7 @@ const JPEG_EOI = Buffer.from([0xff, 0xd9]);
 const PNG_IEND_TAIL = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
 
 /**
- * 校验"这份字节是**完整**的一张图"。**纯函数，离线可测**。
+ * 校验"这份字节是完整的一张图"。纯函数，离线可测。
  * @param {Buffer} buf 图片字节
  * @param {number|string|null} [contentLength] 响应的 content-length（没有就传 null）
  * @param {string|null} [contentEncoding] 响应的 content-encoding（有压缩时长度对不上属正常，跳过长度比对）
@@ -330,7 +330,7 @@ export function verifyImageComplete(buf, contentLength = null, contentEncoding =
 /**
  * 读图（下载图片字节）的默认字节上限 = 15MB。
  *
- * 【2026-09-18 定标：4MB → 15MB，并把散落的 8MB 一并收拢到这里】
+ * 2026-09-18 定标：4MB → 15MB，并把散落的 8MB 一并收拢到这里。
  * 改之前全桥有三个互不相干的上限：本函数默认 4MB、qq_image_search/qq_send_image 8MB、
  * qq_send_pixiv 8MB —— 同一张图走不同入口结论不同，也没有任何一处说明依据是什么。
  * 现在统一成这一个常量，改上限只需改一行。
@@ -352,11 +352,11 @@ export const MAX_IMAGE_FETCH_BYTES = 15 * 1024 * 1024;
  *
  * @param {string} urlString
  * @param {number} [maxBytes]
- * @param {Record<string,string>|null} [extraHeaders] 追加的请求头。**默认不带**（老调用行为一字不变）。
+ * @param {Record<string,string>|null} [extraHeaders] 追加的请求头。默认不带（老调用行为一字不变）。
  *   存在的唯一理由：有些图床按 Referer 防盗链，不给这个头就一律 403 —— 典型是 i.pximg.net
  *   （Pixiv 原图站）：实测带 `referer: https://www.pixiv.net/` 是 200，不带是 403 nginx。
  *   之前 pixiv 取图只能全走第三方镜像站代理，就是因为这里不能带头；现在补上，
- *   `qq_send_pixiv` 才能直联 pximg 拿**逐字节一致**的原图（见 lib/pixiv.js 顶部）。
+ *   `qq_send_pixiv` 才能直联 pximg 拿逐字节一致的原图（见 lib/pixiv.js 顶部）。
  *   `host` 由本函数自己按 URL 设置，调用方传进来也会被丢掉（防止把 host 改成别的域名）。
  */
 export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTES, extraHeaders = null) {
@@ -376,14 +376,14 @@ export async function safeFetchBuffer(urlString, maxBytes = MAX_IMAGE_FETCH_BYTE
     if (!looksLikeImageBuffer(result.buffer)) {
       throw new Error(`抓取内容不是有效图片（PNG/JPEG/GIF/WebP）`);
     }
-    /* 【2026-09-21】完整性强校验：只看开头 3 个字节是不够的 —— 被截断的 JPEG 同样是合法开头，
+    /* 2026-09-21：完整性强校验：只看开头 3 个字节是不够的 —— 被截断的 JPEG 同样是合法开头，
      * 解码出来就是那半幅 #808080（线上现场，见 verifyImageComplete 上方那段取证）。
-     * 这里抛错而不是返回，是为了让调用方（qq_send_pixiv）**换下一个候选**或如实报错，绝不发半截图。 */
+     * 这里抛错而不是返回，是为了让调用方（qq_send_pixiv）换下一个候选或如实报错，绝不发半截图。 */
     const complete = verifyImageComplete(result.buffer, result.contentLength, result.contentEncoding);
     if (!complete.ok) {
       throw new Error(`图片字节不完整（${complete.format || '未知格式'}，实际 ${complete.actualBytes}B${complete.declaredBytes ? `／声明 ${complete.declaredBytes}B` : ''}）：${complete.reason}`);
     }
-    /* 【2026-09-22 修 M4】以前这里漏了 contentEncoding，而 qzone-image.js 明确要它：
+    /* 2026-09-22 修 M4：以前这里漏了 contentEncoding，而 qzone-image.js 明确要它：
      * 缺了就会把「带 gzip/br 的图片响应」按压缩前的字节长度去比解压后的字节数 → 好图被判不完整、
      * 说说降级成纯文字还写个误导原因。第一道闸门 (verifyImageComplete) 用的是正确值，两道结论会相反。 */
     return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer, contentLength: result.contentLength ?? null, contentEncoding: result.contentEncoding ?? null, complete };

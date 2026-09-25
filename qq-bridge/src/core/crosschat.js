@@ -1,16 +1,23 @@
 // 跨会话互知 / 留言信箱
-// 各 QQ 会话仍各自保有独立上下文（这是省 token 的关键），通过"活动摘要 + 留言信箱"实现会话间感知与转达：
-//   · 回合收尾时把本会话刚做的事记一行简短摘要（state/crosschat.json，每会话最多 12 行）；
-//   · 留言信箱：某会话可给另一会话留言（qq_crosschat_send），目标会话下次唤醒自动收到并标记已读；
-//   · 唤醒注入策略（省 token）：平时不注入；只有【本会话有未读留言】或【最近对话明确提到别的会话/熟人】时，
-//     才注入最多 2 行他处动态摘要。绝不给每个唤醒回合增加固定开销。
+// 各 QQ 会话仍各自保有独立上下文（这是省 token 的关键），通过"他处消息 + 留言信箱"实现会话间感知与转达：
+//   · 他处动态：直接从 SQLite 查（memory.js 的 recentMessagesAcrossSessions），不再维护摘要文件；
+//   · 留言信箱：某会话可给另一会话留言（qq_crosschat_send），目标会话下次唤醒自动收到并标记已读
+//     （信箱仍落在 state/crosschat.json：留言是"主动转达"，与"查消息"是两件事，行为不变）；
+//   · 唤醒注入策略：本会话有未读留言 → 先注入留言；再注入最多 2 行"他处刚发生的事"（1 小时内、
+//     单行正文 ≤80 字、整行不超过旧实现的同标签长度）。没有新鲜内容就完全不注入。
+// 2026-09-30 需求「跨会话架构改为直接从 sqlite 查消息」：
+// 旧实现（文件摘要）：turn-guard 回合收尾把本会话做过的事写成一行 ≤70 字存进 crosschat.json，
+// 唤醒时读该文件、按"最近一小时"粗筛后注入。毛病是：每回合都要额外写盘；摘要是二次加工的文本，
+// 谁说的、对谁说的全丢了；只能按时间粗筛，没法按人/按会话过滤；且摘要数组要自己维护上限。
+// 现在改为直接查 chat_messages（已有 idx_chat_ts 索引）：不写盘、拿到的是原文与发送者，
+// 需要时还能按会话/发送者过滤。老的 state/crosschat.json 里可能还留着历史 digests ——
+// 不做迁移，查库路径根本不读它，那些老数据就此被忽略（文件里仍原样躺着，只是没人再看）。
 import crypto from 'node:crypto';
 import { CROSSCHAT_FILE } from '../lib/paths.js';
 import { readJsonSafe, atomicWriteJson } from '../lib/json-fs.js';
 import { log } from '../lib/log.js';
-import { profileDisplayName } from './memory.js';
+import { profileDisplayName, recentMessagesAcrossSessions } from './memory.js';
 import { getGroupDisplayName } from './group-cache.js';
-import { getSocialState } from './social-state.js';
 
 let crossChatCache = null;
 let cfgRef = null;
@@ -20,24 +27,15 @@ export function initCrossChatCore(cfg) {
 }
 
 function loadCrossChat() {
-  if (!crossChatCache) crossChatCache = readJsonSafe(CROSSCHAT_FILE, { digests: {}, mail: {} });
+  /* 默认形状里只有 mail：digests 已随摘要写入路径一起作废。老文件里可能还留着 digests，
+   * 读进来的对象会原样带着它（saveCrossChat 写回时也原样带着），但没有任何代码再去看它 ——
+   * 这就是"不做迁移、老数据直接被忽略"的实现方式。 */
+  if (!crossChatCache) crossChatCache = readJsonSafe(CROSSCHAT_FILE, { mail: {} });
   return crossChatCache;
 }
 function saveCrossChat(cc) { crossChatCache = cc; atomicWriteJson(CROSSCHAT_FILE, cc); }
 
-export function pushCrossDigest(key, line) {
-  if (!key || !line || !String(line).trim()) return;
-  try {
-    const cc = loadCrossChat();
-    const arr = cc.digests[key] ?? [];
-    arr.push({ t: Date.now(), line: String(line).slice(0, 70) });
-    cc.digests[key] = arr.slice(-12);
-    cc.digests = Object.fromEntries(Object.entries(cc.digests || {}).filter(([, v]) => Array.isArray(v) && v.length > 0));
-    saveCrossChat(cc);
-  } catch {}
-}
-
-/** 会话 key -> 可读来源标签（privately: 主人特判 / 联系人档案名；群：群名）。导出供控制台端点复用，
+/** 会话 key -> 可读来源标签（privately: 账号所有者特判 / 联系人档案名；群：群名）。导出供控制台端点复用，
  *  避免各调用方各写一份同样的标签规则。内部只用到本模块作用域的 cfgRef 与已导入的档案/群名工具。 */
 export function describeCrossKey(key) {
   try {
@@ -89,7 +87,18 @@ export function markCrossMailsRead(key, ids = null) {
   } catch {}
 }
 
-// 唤醒时按需组装"他处动态"块：仅当有未读留言，或最近对话提及别的会话/熟人时才注入（省 token）
+// 唤醒时按需组装"他处动态"块：仅当有未读留言，或库里有别处的 1 小时内消息时才注入（省 token）。
+// 每行长度硬约束 = 旧实现同一标签下的行长（前缀 + 标签 + ': ' + 80 字正文 + 后缀），因此每行
+// 都不长于改动前、整块自然也不更长；正文本身仍 ≤80 字。
+const CROSS_HEAD = '[Other sessions] ';
+const CROSS_SUFFIX = ' - already handled; do not re-act unless asked or new.';
+const CROSS_BODY_MAX = 80;      // 单行正文上限（与旧实现一致）
+const CROSS_LABEL_MAX = 40;     // 来源标签上限：群名可以很长，不设限会把正文挤没
+const CROSS_WHO_MAX = 16;       // 发送者名上限（同理由）
+const CROSS_HOUR_MS = 60 * 60 * 1000;
+/** 旧实现在同一标签下的行长上限（用作本实现的硬天花板）。 */
+const legacyLineMax = (label) => CROSS_HEAD.length + label.length + 2 + CROSS_BODY_MAX + CROSS_SUFFIX.length;
+
 export function buildCrossChatBlock(key) {
   try {
     const parts = [];
@@ -100,21 +109,26 @@ export function buildCrossChatBlock(key) {
     // 只标记真正注入过的这几条：原实现是无条件把该会话全部未读留言标已读，队列里第 3 条及以后
     // （addCrossMail 每会话最多留 10 条）永远不会被注入却已被标记已读 → 静默丢留言。
     if (mails.length) markCrossMailsRead(key, mails.map((m) => m.id));
-    const stX = getSocialState(key);
-    const recentX = Array.isArray(stX?.recentMessages) ? stX.recentMessages.slice(-3) : [];
-    const mentionsOthers = recentX.some((m) => m && !m.isSelf && /(别的会话|另一个会话|其他会话|别处|那边|另一个群|别的群|其他群|在群里|去群里|AbyssalQuill)/.test(String(m.text || m.plain || '')));
-    if (mentionsOthers && parts.length < 3) {
-      const cc = loadCrossChat();
-      const cutoff = Date.now() - 60 * 60 * 1000;
-      const rows = [];
-      for (const [k, arr] of Object.entries(cc.digests || {})) {
-        if (k === key || !Array.isArray(arr)) continue;
-        for (const d of arr) if (d && Number(d.t) >= cutoff) rows.push({ k, line: d.line, t: Number(d.t) || 0 });
+    /* 2026-09-30 需求「跨会话架构改为直接从 sqlite 查消息」：
+     * 这一段原来是读 state/crosschat.json 的 digests（每会话最多 12 行、只取 1 小时内、每行 ≤70 字），
+     * 现在换成 memory.js 的 recentMessagesAcrossSessions(key, …) —— 直接按时间窗从 chat_messages 里
+     * 取"别的会话最近的消息"。省 token 的口径不变：最多 2 条、单行不得长于旧实现的同标签行长、
+     * 没有新鲜内容就完全不注入、绝不注入别的会话全文。
+     * 明确不做的事：不改回复台账（台账仍严格按会话区分，否则会把 A 里回过的话在 B 里当成"已回过"而漏回）；
+     * 不引入迁移逻辑（老的 digests 被忽略，见文件头）。 */
+    for (const r of recentMessagesAcrossSessions(key, { windowMs: CROSS_HOUR_MS, limit: 2 })) {
+      const label = describeCrossKey(r.key).slice(0, CROSS_LABEL_MAX);
+      const who = (r.isSelf ? 'you' : String(r.sender || '').trim().slice(0, CROSS_WHO_MAX)) || r.key;
+      const head = `${CROSS_HEAD}${label}: ${who}: `;
+      const body = String(r.text ?? '').replace(/\s+/g, ' ').slice(0, CROSS_BODY_MAX);
+      const cap = Math.min(legacyLineMax(label), 170);
+      let line = head + body + CROSS_SUFFIX;
+      if (line.length > cap) {
+        // 标签/发送者名偏长时只压缩正文，正文永远不超过 80 字（cap 只可能更小）。
+        line = head + body.slice(0, Math.max(0, cap - head.length - CROSS_SUFFIX.length)) + CROSS_SUFFIX;
+        if (line.length > cap) line = line.slice(0, cap);   // 极端长标签才走这里
       }
-      rows.sort((a, b) => b.t - a.t);
-      for (const r of rows.slice(0, 2)) {
-        parts.push(`[Other sessions] ${describeCrossKey(r.k)}: ${String(r.line).slice(0, 80)} - already handled; do not re-act unless asked or new.`);
-      }
+      parts.push(line);
     }
     return parts.length ? '\n' + parts.join('\n') : '';
   } catch (error) {

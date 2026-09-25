@@ -7,7 +7,7 @@ const groupInfoCache = new Map(); // groupId -> { ownerId, ownerName, adminIds, 
 const GROUP_INFO_TTL_MS = 10 * 60 * 1000;
 // 群名缓存：groupId -> { name, ts }，用于唤醒提示的【群清单】，避免 AI 记不住群号↔群名对应关系发错群
 const groupNameCache = new Map();
-// 【2026-09-16 修】get_group_info（NapCat 内部走 NodeIKernelGroupService/getGroupDetailInfo）在部分
+// 2026-09-16 修：get_group_info（NapCat 内部走 NodeIKernelGroupService/getGroupDetailInfo）在部分
 // QQ 版本/账号缓存上会稳定失败，实测报 `EventChecker Failed … "errMsg":"inner_error"`：
 // 一失败群名就永久缺失，桥日志与唤醒提示里的群名全变成光秃秃的群号（看着像坏了，其实只是名字没拿到）。
 // 这里补一条**回退**：改用 get_group_list 拉全量群列表（同环境实测可用），建「群号 → 群名」映射并缓存。

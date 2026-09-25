@@ -1,22 +1,22 @@
 /**
  * 「这批消息交给 next-step 之后，模型到底跑没跑那一步」的记账。
  *
- * 【2026-09-22 修「私聊 4 分半不回复」，线上现场】
+ * 2026-09-22 修「私聊 4 分半不回复」，线上现场：
  *   11:21:39 模型跑完 step 2（会话日志 step/end），回合没关，保持循环进入 `agent/turn-stopping` 钩子；
- *   11:21:57 主人第一条新消息由 wake-send 的 steer **塞进 next-step**（会话日志 agent/inbox/spliced）；
+ *   11:21:57 用户第一条新消息由 wake-send 的 steer 塞进 next-step（会话日志 agent/inbox/spliced）；
  *   11:23:5x 第二条到达，保持循环自己那几次 steer 全被"对方还在打字"挡住（typing-defer 退避）；
  *   11:24:17 第二条也被 steer 塞进 next-step（同一个 next-step 里两条都在）；
- *   11:24:24 保持循环 55s 预算到期：它看 `collectMidTurnBatch` 已经空了（批次被**别的路径**投出去了），
+ *   11:24:24 保持循环 55s 预算到期：它看 `collectMidTurnBatch` 已经空了（批次被别的路径投出去了），
  *            于是走"继续持有"分支，回 `{close:false, again:true}`；插件照做再问一次、再等 55s……
  *   之后每 55s 重复一次（11:25:19、11:26:14…），而 DSH 的 `agent/turn-stopping` 钩子一直被这个循环占着
  *   —— 钩子不返回，DSH 就走不到 `next-step 非空 → target = "next-step"`（见 turn-hold.js 顶部引的
  *   dsh-agent-loop 源码），那两条消息静静躺在会话里没人回答，直到 30 分钟空闲放行（`idleCloseMs`）。
  *
- *   本质：**把批次"交进 next-step"被当成了"已经给模型了"**（wake-send 的 turnSteeredSeqs/lastDeliveredSeq
+ *   本质：把批次"交进 next-step"被当成了"已经给模型了"（wake-send 的 turnSteeredSeqs/lastDeliveredSeq
  *   都记上了），但真正被模型读到要等下一步跑起来；保持循环不返回，那一步就永远跑不起来。
  *
  * 判据：交付时的"步结束计数" == 当前的"步结束计数" → 交了但还没跑过新的模型步 → 立刻放行。
- *   用**计数**而不是时间戳：`flushStepBatch` 就是在 step/end 那一刻发车的，两个时间戳常常同一毫秒，
+ *   用计数而不是时间戳：`flushStepBatch` 就是在 step/end 那一刻发车的，两个时间戳常常同一毫秒，
  *   用 `delivered > stepEnd` 判会漏掉这一整类（正是需要放行的那一类）。模型跑完下一步会再加一次计数，
  *   关系自动恢复正常，保持循环照常工作；turn/end 清账，避免影响下一回合。
  */

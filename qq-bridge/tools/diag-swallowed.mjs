@@ -1,4 +1,4 @@
-// 找"吞消息"：逐条列出主人私聊最近的往来，标出「对方说了但后面没有任何 AI 回复」的条目。
+// 找"吞消息"：逐条列出 owner 私聊最近的往来，标出「对方说了但后面没有任何 AI 回复」的条目。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

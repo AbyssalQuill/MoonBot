@@ -5,7 +5,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { forwardIdFromData } from '../forward.js';
 import { safeFetchBuffer } from '../safe-fetch.js';
-// 【2026-09-21 表情包理解】原生表情渲染成 `[表情:名字(id)]`，让模型读到情绪而不是一个数字
+// 2026-09-21 表情包理解：原生表情渲染成 `[表情:名字(id)]`，让模型读到情绪而不是一个数字
 import { faceNameById } from '../qq-faces.js';
 
 export async function segmentsToText(segments, options = {}) {
@@ -28,7 +28,7 @@ export async function segmentsToText(segments, options = {}) {
         }
         break;
       }
-      /* 【2026-09-21 表情包理解】原生表情原来渲染成 `[表情123]`：模型只看到一个数字，读不出情绪。
+      /* 2026-09-21 表情包理解：原生表情原来渲染成 `[表情123]`：模型只看到一个数字，读不出情绪。
        * 本地 id→中文名表里有 123 = 什么心情，于是渲染成 `[表情:偷笑(123)]` ——
        * 这个格式本来就是 lib/qq-face-parse.js 明确支持的反解格式（发回来照样能翻成真表情），
        * 所以既让模型"读得懂"，又不会在转述时变成纯文本。查不到名字时保持原样（`[表情123]`）。 */
@@ -52,8 +52,8 @@ export async function segmentsToText(segments, options = {}) {
             const info = await resolveReply(String(d.id));
             if (info?.sender || info?.text) {
               const parts = [];
-              /* 【2026-09-22】被引用的内容里带图片/表情时，把**被引用那条的 message id 一并报出来**
-               * （`[引用 某某#123456：[图片]]`）：主人"引用着自己的图 + 让我转进群"的场景里，
+              /* 2026-09-22：被引用的内容里带图片/表情时，把被引用那条的 message id 一并报出来
+               * （`[引用 某某#123456：[图片]]`）：用户"引用着自己的图 + 让模型转进群"的场景里，
                * 图在被引用那条里，模型只有当前这条的 id —— 没有这个 id 就只能联网搜一张差不多的。
                * 普通引用（纯文字）格式一字不变，避免影响既有判据与用例。 */
               const quotedHasMedia = /\[(图片|表情|视频|语音|文件)/.test(String(info.text ?? ''));
@@ -69,7 +69,7 @@ export async function segmentsToText(segments, options = {}) {
       case 'json': {
         // 富文本卡片（网易云音乐/B站/链接分享/群聊邀请/个人名片等）：解析出可读内容
         const cardText = parseJsonCardText(d.data ?? d.content ?? '');
-        // 【2026-09-18】顺手把原始卡片 JSON 存下来（取证用，见 noteIncomingCard 注释）
+        // 2026-09-18：顺手把原始卡片 JSON 存下来（取证用，见 noteIncomingCard 注释）
         try { noteIncomingCard(seg, cardText); } catch { /* ignore */ }
         out.push(cardText ? `[${cardText}]` : '[卡片消息]');
         break;
@@ -141,19 +141,19 @@ export async function segmentsToText(segments, options = {}) {
 // 【为什么改成"按字段名扫全部子对象"——三张线上真卡踩出来的坑】
 // 1) 不能按 app 写死，也不能只扫 meta 的第一个子对象：子对象名五花八门
 //    （小程序卡是 detail_1、图文/位置卡是 news、音乐卡是 music、还有 multi_1…），
-//    所以下面遍历 meta 下**所有**子对象，按“字段名语义”分桶收集后再按优先级挑。
-// 2) 小程序卡（app=com.tencent.miniapp_01，meta.detail_1）里 `title` 是**应用名**（"哔哩哔哩"），
+//    所以下面遍历 meta 下所有子对象，按“字段名语义”分桶收集后再按优先级挑。
+// 2) 小程序卡（app=com.tencent.miniapp_01，meta.detail_1）里 `title` 是应用名（"哔哩哔哩"），
 //    真正的内容标题在 `desc`（视频标题）。照通用规则把 title 当标题，模型就只能看到应用名。
 // 3) 同一张卡里 `url` 是 QQ 服务端的 hash 短链（m.q.qq.com/a/s/93777ccbcc6d9423b5670af29890d82d），
 //    模型既打不开也看不懂，纯噪声；真正能点开的是 `qqdocurl`（https://b23.tv/WZVnINP）。
 //    所以链接按 qqdocurl > jumpUrl > url > href 取，并显式丢掉 m.q.qq.com/a/s/ 这类 hash 短链。
 // 4) 封面在 `preview`；但只有“卡片形态”（小程序卡）才把封面写进正文，
 //    否则 icon/tagIcon 这类应用小图标会混进普通卡片的文案里变成噪声。
-/* 【2026-09-18 取证用】把收到的原始卡片 JSON 落一份盘。
+/* 2026-09-18 取证用：把收到的原始卡片 JSON 落一份盘。
  *
- * 为什么需要：主人要机器人发"B站那种卡片"，但手写的 structmsg/news 在 QQ 上显示成
- * "该消息类型暂不支持查看" —— 我们**没有**真卡的原始 JSON 可参照（桥只存解析后的文本，
- * 日志里也没有）。而主人自己从 B 站分享进 QQ 的那张卡是**真卡**，它的 Ark JSON 就是标准答案。
+ * 为什么需要：机器人要发"B站那种卡片"，但手写的 structmsg/news 在 QQ 上显示成
+ * "该消息类型暂不支持查看" —— 我们没有真卡的原始 JSON 可参照（桥只存解析后的文本，
+ * 日志里也没有）。而从 B 站分享进 QQ 的那张卡是真卡，它的 Ark JSON 就是标准答案。
  * 这里把每张收到的卡片原样追加到 state/incoming-cards.jsonl（一行一条 JSON，含时间/来源/原始段），
  * 之后照它复刻即可。纯取证，不参与任何解析逻辑，失败也不影响消息处理。 */
 function noteIncomingCard(rawSeg, parsedText) {
@@ -359,10 +359,10 @@ export function extractMediaFromSegments(segments) {
   return media;
 }
 
-/* ── 文件段渲染（2026-09-22 主人要求：「[文件] [file] 这种文件类型也标出来吧，要模型不知道发的是图片」）──
+/* ── 文件段渲染（2026-09-22：把 [文件] [file] 这种文件类型也标出来，否则模型不知道发来的是文件而不是图片）──
  * 以前文件段只渲染成 `[文件名字]`，没有名字时就是光秃秃的 `[文件]`；唤醒正文里另加一个 ` [file]` 标记。
- * 模型看到"文件 + file"时读不出**这是什么类型的东西**，容易当成图片去调识图工具（现场就是这种误判）。
- * 现在统一成 `[文件:报告.pdf · PDF · 1.2 MB]`：名字、类型、大小都在，且**永远不是 `[图片]`**。
+ * 模型看到"文件 + file"时读不出这是什么类型的东西，容易当成图片去调识图工具（现场就是这种误判）。
+ * 现在统一成 `[文件:报告.pdf · PDF · 1.2 MB]`：名字、类型、大小都在，且永远不是 `[图片]`。
  * 三个调用点共用这里的实现（segmentsToText / forward.js / wake-send 的 [Unread] 行），避免各写一份漂移。 */
 const FILE_KIND_BY_EXT = {
   pdf: 'PDF',
@@ -421,7 +421,7 @@ export function extractFilesFromSegments(segments) {
       fileId: String(d.file ?? ''),
       url: String(d.url ?? ''),
       size: d.size != null ? Number(d.size) : null,
-      /* 【2026-09-22】类型也随消息一起记下来：唤醒正文的 `[file:…]` 标记要用它，
+      /* 2026-09-22：类型也随消息一起记下来：唤醒正文的 `[file:…]` 标记要用它，
        * 免得模型把"发过来的一个 PDF"当成图片（kind/ext 都在这里，老状态里没有时按名字现算）。 */
       ext: (/\.([A-Za-z0-9]{1,8})$/.exec(name)?.[1] || '').toLowerCase(),
       kind: fileKindLabel(name),

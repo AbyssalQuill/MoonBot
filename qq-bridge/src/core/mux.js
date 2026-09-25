@@ -58,7 +58,7 @@ import { isSafeLocalMediaPath, isProbablySafeImageFileRef } from '../lib/media-g
 import { KNOWN_AGENT_TOKENS, redactSensitiveText, SENSITIVE_ARG_KEYS, redactSensitive, sanitizeToolArgs, extractToolTargetKey, escapeCqText, unquoteJsonString } from '../lib/text-safe.js';
 import { normalizeOwnerQQ, normalizeIdList, allowed } from '../lib/config.js';
 import { readRoleState, writeRoleState, sanitizeRoleName, listRoles } from '../lib/role-access.js';
-// 【2026-09-22】人设切换：从角色库合成 → 原子写 persona.md（斜杠命令 /role 与模型侧工具共用这一份实现）
+// 2026-09-22：人设切换：从角色库合成 → 原子写 persona.md（斜杠命令 /role 与模型侧工具共用这一份实现）
 import { switchPersona, listCharacterPacks } from '../lib/persona-switch.js';
 import { sleep, withTimeout } from '../lib/async.js';
 import { convKey, canonicalKey } from '../lib/keys.js';
@@ -83,7 +83,7 @@ import {
 } from './sticker.js';
 import { resolveNameToUid } from './memory.js';
 import { markMessagesRead } from './memory.js';
-/* 【2026-09-21 主人要求】/token：自动发出今日 token 总量与花费（口径与管理端实测区一致）。 */
+/* 2026-09-21 需求：/token 自动发出今日 token 总量与花费（口径与管理端实测区一致）。 */
 import { buildTokenReportText } from './token-report.js';
 import {
   cancelPendingEntry, handlePendingAnswer, handlePokeNotice, handleInputStatusNotice,
@@ -115,16 +115,16 @@ import {
   queued, queuedHintAt, queueRetries, pending, visionModelAppliedSessions,
   messageMediaStore, activityWakeCooldown, MAX_MEDIA_COUNT, silentTurnQueue,
 } from './session-state.js';
-/* 【2026-09-20】"漏引号"的工具调用：原始参数串按 callId 暂存，等它真失败后由桥兜底发送。 */
+/* 2026-09-20："漏引号"的工具调用：原始参数串按 callId 暂存，等它真失败后由桥兜底发送。 */
 const unquotedArgsByCall = new Map();
 
-/* ── 【2026-09-21】mcp-compressor 代理模式：把包装工具还原成真实工具名 ──────────────
+/* ── 2026-09-21：mcp-compressor 代理模式：把包装工具还原成真实工具名 ──────────────
  * 代理打开时，DSH 看到的工具表只有 `<server>_invoke_tool` 与 `<server>_get_tool_schema`
  * 两个（工具清单被压进前者的描述里）。模型实际发起的是：
  *     napcat_invoke_tool { tool_name: 'qq_send_message', tool_input: { key, messages, token } }
- * 桥里几十处判断都按真实工具名走，所以在**事件入口**统一解包一次，后面全都不用改。
+ * 桥里几十处判断都按真实工具名走，所以在事件入口统一解包一次，后面全都不用改。
  * 认不出来（名字不像包装工具、参数不是对象、没有 tool_name）就原样返回 ——
- * 非代理模式下行为与以前**完全一致**。 */
+ * 非代理模式下行为与以前完全一致。 */
 const COMPRESSOR_WRAPPER_RE = /(?:^|__)(?:[A-Za-z0-9_-]+_)?(?:invoke_tool|get_tool_schema)$/;
 export function unwrapCompressedToolName(name, rawArgs) {
   const n = String(name ?? '');
@@ -192,7 +192,7 @@ import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder,
 } from './scheduler.js';
 import {
-  pushCrossDigest, addCrossMail, unreadCrossMails, markCrossMailsRead,
+  addCrossMail, unreadCrossMails, markCrossMailsRead,
   buildCrossChatBlock, initCrossChatCore,
 } from './crosschat.js';
 import {
@@ -205,10 +205,10 @@ import {
   getCachedGroupInfo, formatGroupInfoLine, initGroupCacheCore, setGroupCacheBot,
 } from './group-cache.js';
 
-/* ── /set active|diving [HH:MM-HH:MM] 的解析（2026-09-19 主人要求：英文指令 + 可选时段）──
+/* ── /set active|diving [HH:MM-HH:MM] 的解析（2026-09-19 约定：英文指令 + 可选时段）──
  * 时段表（activity-windows.json）存的本来就是"什么时候活跃"，所以：
  *   /set active 09:00-01:00 → 活跃 09:00-01:00，其余时间只回 @ / 点名
- *   /set diving 00:00-21:00 → 潜水 00:00-21:00（只回 @ / 点名），其余时间活跃（写的是区间**补集**）
+ *   /set diving 00:00-21:00 → 潜水 00:00-21:00（只回 @ / 点名），其余时间活跃（写的是区间补集）
  * 不带时段 = 全天（改的是会话自己的模式）。跨午夜（end <= start）按 +1440 归一。 */
 const fmtClockMin = (m) => {
   const v = ((Number(m) % 1440) + 1440) % 1440;
@@ -232,7 +232,7 @@ function complementWindows(range) {
   return out;
 }
 /** 解析 /set active|diving [时段]；不匹配返回 null，时段格式非法返回 { invalid:true }
- *  【2026-09-23 主人要求】老写法 `/set mode active` / `/set mode diving` **已删除**：
+ *  2026-09-23：老写法 `/set mode active` / `/set mode diving` 已删除：
  *  它和 `/set active` 完全等价、只是多打了 "mode" 四个字母，留着两套写法只会让文档和排错都变复杂。
  *  现在只认 `/set active|diving`（可带时段）。发了老写法的会被当普通文本放给模型，由它自然回应。 */
 function parseSetModeCommand(text) {
@@ -249,9 +249,9 @@ function parseSetModeCommand(text) {
 // 供 tests/wake-trigger.test.js 直接 import（纯函数，不依赖任何运行期状态）
 export { parseSetModeCommand, parseClockRange, complementWindows, fmtClockMin };
 
-// 【2026-09-15 合并注入】步边界 = 模型每一步的末尾（`step/end`）：
+// 2026-09-15 合并注入：步边界 = 模型每一步的末尾（`step/end`）：
 //   · markSteerCycleStart / clearSteerPending：复位"本周期已注入"闸门、收掉跨回合的攒批记账；
-//   · flushStepBatch：把这一步里攒下的消息**合成一个** [Mid-turn] 块注入（理由见 turn-hold.js 的注释）。
+//   · flushStepBatch：把这一步里攒下的消息合成一个 [Mid-turn] 块注入（理由见 turn-hold.js 的注释）。
 // mux → turn-hold → wake-send 是单向的（这两个模块都不 import mux），不会形成循环依赖。
 import { markSteerCycleStart, clearSteerPending } from './wake-send.js';
 import { flushStepBatch } from './turn-hold.js';
@@ -312,7 +312,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
   // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
   const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
   const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
-  // 自动好友守卫：私聊里非主人/非受信任者发来违法/诈骗营销内容时，自动删除好友并拉黑
+  // 自动好友守卫：私聊里非管理员/非受信任者发来违法/诈骗营销内容时，自动删除好友并拉黑
   if (kind === 'private' && cfgRef.social?.autoFriendGuard !== false) {
     const uidS = String(event.user_id ?? '');
     const isTrusted = uidS === String(cfgRef.ownerQQ) || (Array.isArray(cfgRef.social?.trustedCrossSessionUids) && cfgRef.social.trustedCrossSessionUids.map(String).includes(uidS));
@@ -388,7 +388,8 @@ export async function handleIncoming(kind, id, event, cfgRef) {
     log('人格学习指令处理出错:', error?.message ?? error);
   }
 
-  // 群友画像学习指令（/portrait learn|stop|status、画像学习…）：同样只认管理员，即时响应
+  // 群友画像学习指令：只认英文 `/portrait learn|stop|status`（2026-09-24：斜杠指令只支持英文，
+  // 删掉中文别名与历史简写，中文别名「画像学习」「群友画像学习」已从识别分支里删掉）——同样只认管理员，即时响应
   try {
     const pc = await handlePortraitLearnCommand(plainContent, { key, kind, isOwner, senderUid: String(event.user_id ?? '') });
     if (pc?.handled) {
@@ -401,7 +402,9 @@ export async function handleIncoming(kind, id, event, cfgRef) {
   }
 
   // 管理命令：仅管理员（ownerQQ）可用，且由桥接直接执行（硬性，不经过模型）。
-  // 只识别 / 斜杠(含英文)指令(如 /active /silent /wake /start /deepsleep /set mode active)。
+  // 只识别英文 / 斜杠指令(如 /active /silent /wake /start /deepsleep /set active)。
+  // 2026-09-24：斜杠指令只支持英文，删掉中文别名与历史简写 —— 下面这些分支一律只比对
+  // 英文规范写法；中文说法(如「画像学习」)与历史简写(如 /slanglearn)都不再拦截。
   // 自然语言说法(转活跃/潜水吧/别理群了…)一律放给模型自然调用——由 AI 自己决定并走
   // qq_set_wake_config / qq_set_activity_hours 等工具完成, 桥不硬性截胡、不回模板话。
   if (plainContent.startsWith('/')) {
@@ -422,7 +425,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       await sendToQQ(key, '管理命令仅管理员可用。');
       return;
     }
-    // 【2026-09-13 主人要求】删掉 /help（原来是发《小鲸鱼能力概览》docx）：
+    // 2026-09-13 需求：删掉 /help（原来是发《小鲸鱼能力概览》docx）：
     // 该指令不再拦截，会按"其它 /xxx"的通用规则交给模型，由它正常回应。
     if (plainContent === '/reset' || plainContent === '/new') {
       const old = state.sessions[key];
@@ -458,7 +461,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
         wakeConfigMissCount.delete(key);
         const removed = social.conversations.get(key);
         if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-        // 【2026-09-16 /reset · /new 也是 reset 家族】原来直接 delete 会把「已回复账本」
+        // 2026-09-16 /reset · /new 也是 reset 家族：原来直接 delete 会把「已回复账本」
         // （answeredMessageIds / lastDeliveredSeq / _wakeIntendedSeq / lastUnreadSeq）一起抹掉，
         // 重置后刚回过的内容可能又被回一遍（真机事故「reset 之后重复回复」）。
         // 改成"清会话、留账本"，见 social-state.resetConversationKeepingLedger。
@@ -478,7 +481,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       return;
     }
     /* ── /token [天数]：今日 token 消耗总量 + 花费（桥侧直接算，不经过模型）───────────
-     * 【2026-09-21 主人要求】"加一个 /token 指令，输入自动发送今日的 token 消耗总量与钱数消耗"。
+     * 2026-09-21 需求："加一个 /token 指令，输入自动发送今日的 token 消耗总量与钱数消耗"。
      * 口径与管理端「学习」页的实测区逐字一致（见 core/token-report.js 顶部注释）；
      * 单价可在 config.json 的 tokenCost 段覆盖。回复是多行短句，sendToQQ 会按行发成多个气泡。 */
     if (plainContent === '/token' || /^\/token\s+\d{1,2}$/.test(plainContent)) {
@@ -493,7 +496,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       }
       return;
     }
-    // ── /op [del] <QQ号|昵称>：设置/取消管理员（仅主人）──────────────────
+    // ── /op [del] <QQ号|昵称>：设置/取消管理员（仅账号所有者）──────────────────
     if (plainContent === '/op' || plainContent.startsWith('/op ')) {
       const rest = plainContent.slice(3).trim();
       if (!rest) {
@@ -526,14 +529,17 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       return;
     }
     if (plainContent === '/role' || plainContent.startsWith('/role ')) {
-      /* 【2026-09-22 修「不能切换人设 / skill」】原来这条命令走的是旧机制：读 <bridge>/roles/<名字>.md
-       * 再写 current-role.json —— 而项目里 `roles/` 目录根本不存在，主人说"换成 XX 角色 / /role atri"
+      /* 2026-09-22 修「不能切换人设 / skill」：原来这条命令走的是旧机制：读 <bridge>/roles/<名字>.md
+       * 再写 current-role.json —— 而项目里 `roles/` 目录根本不存在，用户说"换成 XX 角色 / /role atri"
        * 永远只听到"角色不存在"，而且即使写成功那套也不再进提示词。
-       * 现在直接接**角色库**（characters/，与 qq_character_list 同一套解析）：合成整张卡 → 原子写 persona.md
+       * 现在直接接角色库（characters/，与 qq_character_list 同一套解析）：合成整张卡 → 原子写 persona.md
        * （带备份）→ 下一条唤醒就重注入，不需要重启、不打断在跑回合。斜杠命令本来就不分群/私聊
-       * （上面的 isOwner 闸门是唯一权限判据），所以主人在群里也能切。 */
+       * （上面的 isOwner 闸门是唯一权限判据），所以管理端在群里也能切。 */
       const want = plainContent.slice(5).trim();
-      const isClear = /^(clear|off|none|default|默认|清除|关闭)$/i.test(want);
+      /* 2026-09-24：斜杠指令只支持英文，删掉中文别名与历史简写 ——
+       * 原来这条还认 `/role 默认` / `/role 清除` / `/role 关闭` 三个中文子命令别名，已全部删除；
+       * 清除角色只认英文 `clear|off|none|default`（`/role clear` 是文档里的规范写法）。 */
+      const isClear = /^(clear|off|none|default)$/i.test(want);
       if (!want || want === '?') {
         const { root, packs, loose } = listCharacterPacks(cfgRef);
         const names = [...packs, ...loose].slice(0, 40);
@@ -601,8 +607,8 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       return;
     }
     /* ── /set active [HH:MM-HH:MM] / /set diving [HH:MM-HH:MM] ─────────────
-     * 【2026-09-19 主人要求】用英文指令设"特定时段活跃 / 潜水"，不带时段 = 全天。
-     * 【2026-09-23 主人要求】删掉老写法 `/set mode active` / `/set mode diving`
+     * 2026-09-19 需求：用英文指令设"特定时段活跃 / 潜水"，不带时段 = 全天。
+     * 2026-09-23：删掉老写法 `/set mode active` / `/set mode diving`
      * （与 /set active、/set diving 完全等价，多写 "mode" 而已）。
      * 中英混写的旧写法（/set mode 活跃、/set mode 潜水）此前已按"去除中英混杂指令"删掉。 */
     const setMode = parseSetModeCommand(plainContent);
@@ -613,7 +619,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       }
       const stm = getSocialState(key);
       const win = setMode.range;
-      /* 带时段时模式一律设成 active：时段**内**活跃，时段**外**由睡眠窗口收紧成"只回 @"；
+      /* 带时段时模式一律设成 active：时段内活跃，时段外由睡眠窗口收紧成"只回 @"；
        * 不带时段才改模式本身（active = 全天活跃；diving = 全天潜水）。 */
       const wantMode = win ? 'active' : setMode.mode;
       if (stm.wakeConfig) {
@@ -713,8 +719,8 @@ export async function handleIncoming(kind, id, event, cfgRef) {
 
   // default模式（default）：唤醒调度
   if (currentMode === 'default') {
-    // 【2026-09-12 定稿：deepsleep **只静默群聊**，私聊照常（主人确认）】
-    // 中途曾按"不读取任何消息"改成全会话静默，主人随后纠回"只静默群聊"，所以这里恢复原来的**群聊范围**。
+    // 2026-09-12 定稿：deepsleep 只静默群聊，私聊照常。
+    // 中途曾按"不读取任何消息"改成全会话静默，之后纠回"只静默群聊"，所以这里恢复原来的群聊范围。
     // 保留的只是两处"堵漏"（都只对群生效，见 events-aux.js 的拍一拍 与 console-server.js 的等待路由）：
     // 改之前拍一拍能绕过本函数的守卫直接 scheduleWake，deepsleep 期间群里被拍一下照样会醒 —— 那是漏洞，不是设计。
     const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
@@ -728,7 +734,7 @@ export async function handleIncoming(kind, id, event, cfgRef) {
       feedSlangWindow(key, sender, plainContent);
       const gpId = String((key || '').split(':')[1] || '');
       const silentGroups = Array.isArray(cfgRef.social?.deepsleepGroups) ? cfgRef.social.deepsleepGroups.map(String) : [];
-      // deepsleep（群总开关）或「单群静默名单」：群消息入库但**不唤醒、不回复**（私聊不受影响）
+      // deepsleep（群总开关）或「单群静默名单」：群消息入库但不唤醒、不回复（私聊不受影响）
       if (cfgRef.social?.deepsleep || silentGroups.includes(gpId)) {
         appendActivity(key + ' [' + (cfgRef.social?.deepsleep ? 'deepsleep' : '群静默') + '] 群聊消息已静默跳过：' + textContent.slice(0, 60));
         return;
@@ -798,7 +804,7 @@ export async function pumpMux() {
             sendToolSucceededSessions.delete(frame.sessionId);
             pendingSendToolCalls.delete(frame.sessionId);
             TurnStartAt.set(frame.sessionId, Date.now());
-            // 【2026-09-15 合并注入】回合边界同样是注入周期边界：新回合的第一步就是一个全新的周期。
+            // 2026-09-15 合并注入：回合边界同样是注入周期边界：新回合的第一步就是一个全新的周期。
             markSteerCycleStart(key, 'turn/start');
             armTurnTotalTimer(frame.sessionId); // 回合总时长兜底：防模型无限重复输出卡死
             activeAiTurns.add(key);          // 循环复读监测：标记本会话处于 AI 回合
@@ -815,12 +821,12 @@ export async function pumpMux() {
             }
           }
           if (frame.event.type === 'tool/call') {
-            /* 【2026-09-21 接了 mcp-compressor 代理之后，先把真实工具名解包出来】
+            /* 2026-09-21 接了 mcp-compressor 代理之后，先把真实工具名解包出来：
              * 代理模式下面向模型只有两个包装工具（`<server>_invoke_tool` / `<server>_get_tool_schema`），
              * 真正要调的工具名藏在 `invoke_tool` 的参数里（args.tool_name）。而桥下面这一整段
-             * （发送类判定、漏引号兜底、幂等账本、抽签登记、回合收尾）**全是按真实工具名做判断的**（49 处），
+             * （发送类判定、漏引号兜底、幂等账本、抽签登记、回合收尾）全是按真实工具名做判断的（49 处），
              * 不解包就等于全部失灵：消息发出去了不记账、引用/收尾逻辑认不出来。
-             * 所以这里统一还原一次：拿到的 toolName 一律是**后端真实工具名**。 */
+             * 所以这里统一还原一次：拿到的 toolName 一律是后端真实工具名。 */
             const rawToolName = String(frame.event.data?.name ?? '');
             const rawArgsForName = frame.event.data?.arguments ?? frame.event.data?.input ?? frame.event.data;
             const toolName = unwrapCompressedToolName(rawToolName, rawArgsForName);
@@ -828,10 +834,10 @@ export async function pumpMux() {
             const rawArgs = rawArgsForName;
             const args = sanitizeToolArgs(rawArgs);
             appendToolLog({ type: 'call', time: new Date().toISOString(), key, sessionId: frame.sessionId, tool: toolName, args, target: extractToolTargetKey(rawArgs) || undefined });
-            /* 【2026-09-20 根治「模型漏引号 → 消息发不出去」】
-             * 现场：`{"key":"…","messages": 主人这么直接啊 我脸都热了,"token":"…"}` 不是合法 JSON，
+            /* 2026-09-20 根治「模型漏引号 → 消息发不出去」：
+             * 现场：`{"key":"…","messages": 今天挺热的啊,"token":"…"}` 不是合法 JSON，
              * DSH 的宽松解析把这个字段整个丢掉 → 发送端点只看到 messages 为空 → 模型看到报错、原样重试。
-             * 参数解析在 DSH 里，桥改不了它，但**桥在事件流里拿得到原始参数串** —— 所以这里先把可疑的
+             * 参数解析在 DSH 里，桥改不了它，但桥在事件流里拿得到原始参数串 —— 所以这里先把可疑的
              * 原始串按 callId 存下来；等这次调用真的因为"messages 为空"失败时（tool/result 分支），
              * 再把裸文本捞回来由桥自己发出去（走同一条发送端点，额度/幂等/脱敏都不绕过），
              * 并把这一批记进幂等账本 —— 模型随后的"重发"会被判成"已经发过了"。
@@ -878,7 +884,7 @@ export async function pumpMux() {
             });
             if (callId != null) {
               toolCallNames.get(frame.sessionId)?.delete(String(callId));
-              /* 【2026-09-20 根治】这次调用是不是"漏引号导致 messages 被丢掉"？
+              /* 2026-09-20 根治：这次调用是不是"漏引号导致 messages 被丢掉"？
                * 是 → 桥把那段裸文本捞回来自己发（见 tool/call 分支的说明）。 */
               const stashed = unquotedArgsByCall.get(String(callId));
               if (stashed) {
@@ -899,14 +905,14 @@ export async function pumpMux() {
             }
             touchTurnTotalTimer(frame.sessionId); // 工具结果到达：回合仍活跃
           }
-          // 【2026-09-15 合并注入】模型**步边界**（dsh-agent-loop/lib/index.js:558 每个模型步末尾 append）：
-          //   ① 复位"本周期已注入"闸门 —— 注入闸门从此以**真实步边界**为准，而不是一个拍脑袋的计时窗口
+          // 2026-09-15 合并注入：模型步边界（dsh-agent-loop/lib/index.js:558 每个模型步末尾 append）：
+          //   ① 复位"本周期已注入"闸门 —— 注入闸门从此以真实步边界为准，而不是一个拍脑袋的计时窗口
           //      （旧实现只在 turn-stopping 钩子里复位，而那个钩子在"模型正在调工具"的步里有条件不执行）；
-          //   ② 把这一步里攒下的消息**合成一个** [Mid-turn] 块注入（turn-hold.js:flushStepBatch）。
+          //   ② 把这一步里攒下的消息合成一个 [Mid-turn] 块注入（turn-hold.js:flushStepBatch）。
           // 为什么必须在这里发车：保持循环只活在 agent/turn-stopping 钩子里，而那个钩子只在
           // `turnEnds && nextStep.length === 0` 时才被 await（dsh-agent-loop:564）—— 模型连调几个工具的
           // 那种步走不到钩子，只靠保持循环就会把消息拖到整个回复跑完。`step/end` 每一步都有，且正好在
-          // **下一个 step 的 claim 之前**，所以在这里注入与"消息一到就投"送达时刻完全一致。
+          // 下一个 step 的 claim 之前，所以在这里注入与"消息一到就投"送达时刻完全一致。
           // 必须 void + catch：这里不能阻塞事件流处理，更不能静默失败（本功能吃过四次静默失败的亏）。
           if (frame.event.type === 'step/end') {
             markSteerCycleStart(key, 'step/end');
@@ -916,7 +922,7 @@ export async function pumpMux() {
           // 回合结束：攒批记账收尾（消息留在 unread 里，由补发/看门狗接管，绝不在这里吞掉）。
           if (frame.event.type === 'turn/end') {
             clearSteerPending(key, 'turn/end');
-            // 【2026-09-22】"交给 next-step 但还没跑过模型步"的记账也一起清：新回合重新记，
+            // 2026-09-22："交给 next-step 但还没跑过模型步"的记账也一起清：新回合重新记，
             // 免得上一回合的残留让下一次保持循环一进来就以为有待消费批次而立刻放行（inbox-marks.js）。
             clearInboxMarks(frame.sessionId);
           }
@@ -962,11 +968,11 @@ export async function pumpMux() {
               // 本轮展示给 AI 的未读消息视为已处理：AI 成功回复后清掉，避免补发/重复回复同一批旧消息
               try {
                 const stSent = getSocialState(key);
-                // 【2026-09-11 turn-hold 地基①】本回合"负责"的消息 = 唤醒时展示的 + 回合中途 steer 进来的。
+                // 2026-09-11 turn-hold 地基①：本回合"负责"的消息 = 唤醒时展示的 + 回合中途 steer 进来的。
                 // 少算后半截会出现这个致命循环：steer 进来的消息 seq 不在 turnSeenUnread 里 →
                 // ①永远进不了 answeredMessageIds（下一轮又被当成新消息 → 重复回复）
                 // ②永远不会从 unread 里清掉（永久未读 → 下一轮又展示一遍 → 再重复回复一遍）。
-                // 注意：这里只影响"回合结束时怎么算账"，**不影响 mark_read 的判定**——
+                // 注意：这里只影响"回合结束时怎么算账"，不影响 mark_read 的判定——
                 // mark_read 仍按 turnSeenUnread 快照（seq > snapMax 一律保留），
                 // 所以 steer 进来的消息在回合结束前一直留在 unread 里，回合中途被 abort 也不会丢。
                 const seenSeqs = new Set(Array.isArray(stSent.turnSeenUnread) ? stSent.turnSeenUnread : []);
@@ -979,7 +985,7 @@ export async function pumpMux() {
                   // ① 记下"这一轮确实被回复过"的消息 id（按 QQ messageId，跨会话轮换稳定）。
                   //    回合结束时判断被暂存的唤醒是否被吞就查这个集合，不再比时间戳——
                   //    时间戳判不出"看过但没回"（吞消息），也分不清"回过但又被重播"（重复回复，今天两次翻车都在这）。
-                  //    ⚠️ 必须从 `recentMessages` 里找，**不能遍历 `stSent.unread`**：AI 在回合内调 mark_read 时
+                  //    必须从 `recentMessages` 里找，不能遍历 `stSent.unread`：AI 在回合内调 mark_read 时
                   //    就已经把"本轮展示过的"未读从 unread 里摘掉了（console-server.js 的 mark_read 快照逻辑），
                   //    等到回合结束再读 unread 是空的 → 集合永远攒不起来（第一版就是这么写的，实测 0 条）。
                   try {
@@ -1000,19 +1006,19 @@ export async function pumpMux() {
                   stSent.unread = stSent.unread.filter((m) => m && !seenSeqs.has(Number(m.seq)));
                   if (stSent.unread.length !== before) dirty = true;
                 }
-                // 【2026-09-11 撤回 lazy-park（主人抓到"一条消息注入两次"）】
-                // 这里曾经加过一段"lazy-park"：把本回合 steer 进来、但到回合结束**仍不在
-                // answeredMessageIds 里**的消息重新塞回 pendingWakeReasons，走一次补发兜底。
-                // 实测它是**有害的**：
+                // 2026-09-11 撤回 lazy-park（线上抓到"一条消息注入两次"）：
+                // 这里曾经加过一段"lazy-park"：把本回合 steer 进来、但到回合结束仍不在
+                // answeredMessageIds 里的消息重新塞回 pendingWakeReasons，走一次补发兜底。
+                // 实测它是有害的：
                 //   14:28:39 steer「贴贴」→ 14:28:48 steer「小笨蛋」→ 14:28:55 它把 seq61
-                //   判定成"没被处理"重新入队 → 补发轮又唤醒一次 → **同一条消息被注入两遍**。
+                //   判定成"没被处理"重新入队 → 补发轮又唤醒一次 → 同一条消息被注入两遍。
                 // 为什么它本来就是多余的：
-                //   · 若消息**成功 steer 过**，模型就确实看到了它；此后它不说话是**有意识的决定**
-                //     （主人已选 B：短消息允许不回）—— 不该因此再喂一遍。
-                //   · 若模型**真没看到**（回合被 abort / 注入失败），那条消息根本没被 mark_read，
+                //   · 若消息成功 steer 过，模型就确实看到了它；此后它不说话是有意识的决定
+                //     （已选 B：短消息允许不回）—— 不该因此再喂一遍。
+                //   · 若模型真没看到（回合被 abort / 注入失败），那条消息根本没被 mark_read，
                 //     仍然留在 `unread` 里，下一次唤醒正文的 `[Unread n]` 自然会带上它。
                 //     所以不需要也不该在这里补存。
-                // 保留的只有 scheduleWake 那条真正的兜底：**steer 失败**时才暂存（那时消息确实没送达）。
+                // 保留的只有 scheduleWake 那条真正的兜底：steer 失败时才暂存（那时消息确实没送达）。
                 stSent.turnSeenUnread = [];
                 stSent.turnSteeredSeqs = [];
                 // 被"注入周期闸"推迟过的那批（wake-send.js 写、mark_read 用来防吞）也随回合结束清掉：
@@ -1101,7 +1107,7 @@ export async function pumpMux() {
                   if (!stillRelevant && /^(private|atMention|question|speaker|nameMention|poke|keyword)/.test(String(r.reason))) {
                     const parkedMsg = [...(Array.isArray(stEnd.recentMessages) ? stEnd.recentMessages : [])].reverse().find((m) => m && Number(m.seq) === Number(r.seq));
                     const mid = parkedMsg?.messageId ? String(parkedMsg.messageId) : '';
-                    // 判定口径：**按 messageId 查「确实被回复过」集合**。
+                    // 判定口径：按 messageId 查「确实被回复过」集合。
                     //   - 集合里没有它 → 从没被任何一次"成功发送"的回合覆盖过 → 判被吞 → 补发一次（解决吞消息）；
                     //   - 集合里有它   → 已经回过 → 跳过补发，绝不再把已回内容摆给模型（解决重复回复）。
                     // 这比原来的 `max(lastReplyAt, lastSeenAt)` 时间戳比较准：时间戳既判不出"看过但没回"（吞），
@@ -1109,10 +1115,10 @@ export async function pumpMux() {
                     const answeredSet = new Set(Array.isArray(stEnd.answeredMessageIds) ? stEnd.answeredMessageIds.map(String) : []);
                     const wasAnswered = !!mid && answeredSet.has(mid);
                     if (!wasAnswered) {
-                      // 【2026-09-11 修「补发轮也吞」】光标记 swallowed 不够：这条消息**已经被标读**、
+                      // 2026-09-11 修「补发轮也吞」：光标记 swallowed 不够：这条消息已经被标读、
                       // 早从 `unread` 里摘掉了，于是补发轮的唤醒正文是 `[Unread 0]` —— 模型根本看不到
                       // 要回什么，只能写一句"没什么可回的 / OK"又不调发送工具（实测 22:03:52、22:04:32 连续两次）。
-                      // 所以补发前把它**塞回 unread**，让唤醒正文带上原文，模型才有东西可回。
+                      // 所以补发前把它塞回 unread，让唤醒正文带上原文，模型才有东西可回。
                       // 有次数上限（3 次）：避免模型铁了心不回时无限补发烧 token。
                       stEnd._swallowRetry = (stEnd._swallowRetry && typeof stEnd._swallowRetry === 'object') ? stEnd._swallowRetry : {};
                       const retryKey = String(r.seq);
@@ -1183,7 +1189,7 @@ export async function pumpMux() {
               // —— 发送主通道：回复只走发送工具（persona 硬纪律）——
               // 引擎顺序保证：模型若在本回合调用了发送工具并成功（tool/result 先于 turn/end 到达），
               // sendToolSucceeded=true → 正文按思考忽略，绝不重复发 → 同回合不会双发。
-              // 模型没调任何发送工具（sendToolSucceeded=false）但正文非空时：**不再兜底自动转发**——
+              // 模型没调任何发送工具（sendToolSucceeded=false）但正文非空时：不再兜底自动转发——
               // 2026-09-06 起彻底移除兜底：正文只是思考草稿，绝不代表"要发给对方的话"。
               // 若该正文确是想回复的话，模型应在上文用发送工具发出；这里只暂存提示，让模型下一轮
               // 自己用工具补发（根治"模型不调工具只写正文→桥接乱发思考文本"的循环）。
@@ -1196,7 +1202,7 @@ export async function pumpMux() {
                 log(`[rateLimit] ${key} 限流已恢复，取消静默`);
               }
               const undelivered = plain.slice(0, 500);
-              /* 【2026-09-20】裸 `OK` 是**控制令牌**，不是草稿：系统提示词里明确允许"这一轮不需要说话"时
+              /* 2026-09-20：裸 `OK` 是控制令牌，不是草稿：系统提示词里明确允许"这一轮不需要说话"时
                * 只输出一个 `OK`（[Preheat] 轮、或已经用工具把话都发完之后收尾）。以前这里不认它，
                * 于是每一轮裸 OK 都会被记成"写了正文没调发送工具"的未交付草稿，下一轮还往正文里塞一句
                * `[Undelivered draft] Last round ended with drafted text ("OK…")` —— 又蠢又费 token。 */
@@ -1232,8 +1238,8 @@ export async function pumpMux() {
                   globalThis._rateLimitMuted[key] = true;
                   log(`[rateLimit] 模型限流 (${key}): ${msg.slice(0, 200)}`);
                   appendActivity(`[rateLimit] ${key} 模型限流，静默等待恢复`);
-                  // 【2026-09-15 去人设化】原来发的是"🐟 小鲸鱼饿了，需要主人喂饭～"——
-                  // 那是开发初版鲸鱼人设的口吻，且不说清发生了什么。现在只讲事实给主人看。
+                  // 2026-09-15 去人设化：原来发的是"小鲸鱼饿了，需要投喂～"——
+                  // 那是开发初版鲸鱼人设的口吻，且不说清发生了什么。现在只讲事实给用户看。
                   void sendToQQ(key, '⚠️ 模型通道被限流（429），我这边先停一下；额度恢复后重启桥就能继续。').catch(() => {}); // 泵内不阻塞: 发送走链异步完成
                 } else {
                   log(`[rateLimit] ${key} 限流中，静默跳过`);
@@ -1294,7 +1300,7 @@ export async function pumpMux() {
             }
           }
         } else if (frame.type === 'host/session-status') {
-          // 【turn-hold 补完】DSH 的**权威**运行状态帧（dsh-host-apiproxy/lib/index.js:3699：
+          // turn-hold 补完：DSH 的权威运行状态帧（dsh-host-apiproxy/lib/index.js:3699：
           // ctx.on('agent/status') → frame({ type:'host/session-status', sessionId, running })）。
           // 桥以前只能靠 turn/start、turn/end 推断"回合在不在跑"，这正是当初 steer 吞消息的根因；
           // 这个帧直接给 running:true/false，是"能不能即时 steer"的唯一可信依据。

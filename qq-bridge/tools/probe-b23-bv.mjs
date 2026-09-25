@@ -1,7 +1,7 @@
-/* 抽样验证 `https://b23.tv/<BV号>` 是不是**真能**跳到那个 BV。
+/* 抽样验证 `https://b23.tv/<BV号>` 是不是真能跳到那个 BV。
  *
- * 为什么必须抽样：全仓库只有主人手测过 1 个 BV（BV1GJ411x7h7）就写进了注释，
- * 而 b23.tv 的路径位本来是**短码**（如 /WZVnINP）。要判断"点进去不是那个视频"
+ * 为什么必须抽样：全仓库只有 1 个 BV（BV1GJ411x7h7）被手测过并写进了注释，
+ * 而 b23.tv 的路径位本来是短码（如 /WZVnINP）。要判断"点进去不是那个视频"
  * 是不是短链被当短码解析，唯一办法就是拿一批真实 BV 逐个跑重定向链。
  *
  * 用法：node probe-b23-bv.mjs [个数]
@@ -9,7 +9,7 @@
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const n = Math.min(12, Math.max(1, Number(process.argv[2] || 6)));
 
-/* 取一批**真实且互不相同**的 BV：用 bilibili 排行榜（不需要登录、不是搜索风控那条路） */
+/* 取一批真实且互不相同的 BV：用 bilibili 排行榜（不需要登录、不是搜索风控那条路） */
 async function fetchBvids() {
   const out = [];
   const endpoints = [
@@ -57,7 +57,7 @@ let bad = 0;
 for (const { bvid, title } of items) {
   const shortUrl = `https://b23.tv/${bvid}`;
   const hops = await chain(shortUrl);
-  /* 判据：**302 那一跳的 Location** 里必须出现同一个 BV。
+  /* 判据：302 那一跳的 Location 里必须出现同一个 BV。
    * 不能拿最后一跳比 —— 终点页在机房 IP 上恒为 412（风控），URL 里当然没有 BV。 */
   const locHop = hops.find((h) => /^3\d\d → /.test(h)) ?? '';
   const ok = locHop.includes(bvid) && /\/video\/(BV[0-9A-Za-z]{10})/.exec(locHop)?.[1] === bvid;

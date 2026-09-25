@@ -1,16 +1,16 @@
-// tools/test-deploy-keep.mjs —— 证明"SSH 部署不会吃掉目标机的能力"（2026-09-22 主人要求）。
+// tools/test-deploy-keep.mjs —— 证明"SSH 部署不会吃掉目标机的能力"（2026-09-22：部署只换代码、不动目标机已配好的东西）。
 //
 // 背景：bridge 那个部署包是"整套"打的（代码 + config.json + state/）。老行为只把目标机的
-// config.json / voice-config.json **备份**一下就删库重解包，从不放回去 —— 于是"更新一次代码"会顺带
-// 把目标机上配好的东西整片覆盖：pixiv cookie、语音 TTS key、白名单、主人调过的工具档位/打字节拍/
+// config.json / voice-config.json 备份一下就删库重解包，从不放回去 —— 于是"更新一次代码"会顺带
+// 把目标机上配好的东西整片覆盖：pixiv cookie、语音 TTS key、白名单、用户调过的工具档位/打字节拍/
 // 压缩阈值，以及 state/ 里的记忆库、画像、贴纸库。
 //
-// 本测试在临时目录里**完整演一遍**部署流程（打包 → 删库 → 解包 → 跑保护脚本），断言：
+// 本测试在临时目录里完整演一遍部署流程（打包 → 删库 → 解包 → 跑保护脚本），断言：
 //   ① 新代码确实进去了（部署的本职）；
-//   ② 目标机 config.json 里**调过的键一个不丢**（含嵌套与数组）；
-//   ③ 新版本**新增的键**也进来了（不会因为"保配置"而少能力）；
+//   ② 目标机 config.json 里调过的键一个不丢（含嵌套与数组）；
+//   ③ 新版本新增的键也进来了（不会因为"保配置"而少能力）；
 //   ④ state/ 里的记忆库与 persona.md 还是目标机那一份；
-//   ⑤ QQB_DEPLOY_WHOLE_CLONE=1 时**完全不保护**（老的"整套复刻"语义仍可用）。
+//   ⑤ QQB_DEPLOY_WHOLE_CLONE=1 时完全不保护（老的"整套复刻"语义仍可用）。
 //
 // 用法：node tools/test-deploy-keep.mjs
 import assert from 'node:assert/strict';
@@ -30,7 +30,7 @@ const check = (name, fn) => {
 };
 const run = (cmd, args, cwd) => execFileSync(cmd, args, { cwd, stdio: 'pipe', encoding: 'utf8' });
 
-/** 造一份"目标机（服务器）"的桥目录：配置里有主人调过的值，state 里有记忆库，persona 是当前角色 */
+/** 造一份"目标机（服务器）"的桥目录：配置里有用户调过的值，state 里有记忆库，persona 是当前角色 */
 function makeTarget(dir) {
   const br = path.join(dir, 'qq-bridge');
   fs.mkdirSync(path.join(br, 'src', 'core'), { recursive: true });
@@ -41,8 +41,8 @@ function makeTarget(dir) {
     allow: { groups: ['1073589775'], private: [] },
     pixiv: { base: 'https://x.pixigraph.xyz', cookie: 'PHPSESSID=server-side-login' },
     social: {
-      slimTools: { enabled: true, level: 'low' },              // 主人调过的档位
-      send: { linearPerCharMs: 150, linearCapMs: 4000 },        // 主人调过的节拍
+      slimTools: { enabled: true, level: 'low' },              // 目标机上用户调过的档位
+      send: { linearPerCharMs: 150, linearCapMs: 4000 },        // 目标机上用户调过的节拍
       toolCompressor: { enabled: true, level: 'max', toonify: true },
     },
     dshCompaction: { thresholdRatio: 0.16, retainRatio: 0.02 },
@@ -54,14 +54,14 @@ function makeTarget(dir) {
   return br;
 }
 
-/** 造一份"源机（本机/新版本）"的桥目录：新代码 + 一份没有主人调过值的配置 + 源机自己的 state */
+/** 造一份"源机（本机/新版本）"的桥目录：新代码 + 一份没有用户调过值的配置 + 源机自己的 state */
 function makeSource(dir) {
   const br = path.join(dir, 'qq-bridge');
   fs.mkdirSync(path.join(br, 'src', 'core'), { recursive: true });
   fs.mkdirSync(path.join(br, 'state'), { recursive: true });
   fs.writeFileSync(path.join(br, 'src', 'core', 'bridge-new.js'), '// 新代码\n');
   fs.writeFileSync(path.join(br, 'config.json'), JSON.stringify({
-    ownerQQ: '',                                    // 出厂/本机的空值 —— 覆盖过去就等于丢了主人身份
+    ownerQQ: '',                                    // 出厂/本机的空值 —— 覆盖过去就等于丢了机主身份
     allow: { groups: [], private: [] },
     pixiv: { base: 'https://x.pixigraph.xyz', cookie: '' },
     social: {

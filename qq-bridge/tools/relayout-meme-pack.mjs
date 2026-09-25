@@ -8,7 +8,7 @@
  * 为什么必须重建 db：`qq_meme_search` 拿 index.db 搜、`qq_send_meme` 拿表里的 **path** 发图 ——
  * 改了文件名不同步改表，就会出现"搜得到、发不出"。所以本脚本把"改文件名 + 重写表 + 对账"做成原子的一步。
  *
- * 【2026-09-20 修三个上线级错误】
+ * 2026-09-20 修三个上线级错误：
  *   1) 旧版本建的表**没有 path 列**，还把 `memes/<tag>/xx.webp` 塞进 file_name —— 而 qq_send_meme 执行的是
  *      `SELECT path FROM memes WHERE file_name = ?`，重排完直接"搜得到、发不出"。现在 path 是主键（相对 pack 根，
  *      一律 '/' 分隔），并在结尾**真跑一遍桥侧的两条 SQL** 自检（不是"看着像对"）。

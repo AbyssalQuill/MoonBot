@@ -22,7 +22,7 @@
 
 .launcher-title { text-align: center; margin-top: 8px; }
 .typewriter {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   font-size: 38px; font-weight: 400; letter-spacing: .02em;
   color: var(--nc-primary-600); line-height: 1.1; min-height: 1.1em;
   white-space: nowrap; overflow: hidden; text-overflow: clip;
@@ -64,6 +64,108 @@
 
 /* 配置页 / 通用页面布局 */
 .page { height: 100%; display: flex; flex-direction: column; }
+/* ===================== 页面切换动效 v2（2026-09-24 主人要求重做） =====================
+ * 主人原话："给进入服务器配置界面和进入桥配置界面弄了切换动画你没弄……其他的也是，
+ *           所有界面切换都顺滑有动画"。
+ *
+ * 为什么上一版"看不见"：
+ *   ① 上一版把动画写在 `.page` 上，只有带这个类的页面才动；首页启动器、WebView、
+ *      NetCanvas 等根节点没有 `.page`，切过去是"啪"一下贴上去。
+ *   ② 320ms + 12px 位移 + blur(3px) 在整页尺度上太快，眼睛读成"闪一下"而不是"切过去"。
+ *   ③ 只有进场、没有过渡层，两页之间没有任何重叠，观感仍是硬切。
+ *
+ * 现在改成"入口唯一、覆盖面 100%"的做法：App.tsx 用一个 `<div class="view-swap">`
+ * 包住所有视图（服务器配置 / 桥配置 / 聊天记录 / 语音 / 人设 / 学习 / 实例 / WebView /
+ * 启动器），并按视图身份换 `key` —— 于是**任何**界面切换都必然重挂这一层并重放动画，
+ * 页面自己带不带 `.page` 都无所谓。原来写在 `.page` 上的那段动画已删除，避免同一元素
+ * 被两段动画同时驱动（会互相抢 opacity/transform）。
+ *
+ * 观感由三部分叠加而成：
+ *   · 进场：460ms 淡入 + 上浮 14px + 缩放 .992 + 去模糊（由虚到实），缓动先快后缓；
+ *   · 光带：一道斜向柔光（粉→浅黄→浅蓝，与界面主色同族）扫过整页后消失，把"换页"
+ *     这一瞬间读成"推过去"；
+ *   · 遮罩：一层近白柔光在切换瞬间盖住 55% 再 260ms 淡出，替代"双页交叉淡入"——
+ *     不做真正的旧页退场，是因为桥配置页有 29 万字节，同时挂两份代价太大。
+ * 动画只在挂载时跑一次，页面内部的状态刷新不会重放；prefers-reduced-motion 下整段关闭
+ * （见本文件末尾的同名媒体查询）。
+ * ================================================================================= */
+/* 用普通块盒而不是 flex 容器：包进这一层之前，各页的直接父级是 `#root`（块盒，height:100%），
+   块盒才能让页内 `height:100%` 的换算与改动前完全一致；换成 flex 列会让页面变 flex item 而可能被压缩。 */
+.view-swap {
+  position: relative;
+  display: block;
+  height: 100%;
+  min-height: 0;
+  animation: view-in .46s cubic-bezier(.16, .84, .28, 1) both;
+  /* 不写 will-change：常驻的 will-change/filter 会让整层一直留在合成层里，且 filter 会
+     变成 fixed 后代的包含块；动画本身已由浏览器在运行期自动提升，无需声明。 */
+}
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(14px) scale(.992); filter: blur(5px); }
+  55% { opacity: 1; filter: blur(0); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+/* 入场光带：伪元素铺满本层，只画一条斜向渐变色带，从右往左扫过一次即透明。
+   不设 overflow:hidden —— 下拉菜单等浮层不会被裁掉；背景本身受 inset 限制不会外溢。 */
+.view-swap::after {
+  content: '';
+  position: absolute; inset: 0; z-index: 3;
+  pointer-events: none;
+  background-image: linear-gradient(104deg,
+    transparent 22%,
+    hsl(330 100% 78% / .17) 42%,
+    hsl(52 100% 78% / .17) 55%,
+    hsl(199 100% 78% / .17) 68%,
+    transparent 86%);
+  background-size: 260% 100%;
+  background-repeat: no-repeat;
+  opacity: 0;   /* 与 .view-veil 同一条纪律：这层也是"靠动画把自己淡没"的，动画没跑时不能留下光带 */
+  animation: view-sheen .8s cubic-bezier(.3, .7, .3, 1) forwards;
+}
+@keyframes view-sheen {
+  from { background-position: 128% 0; opacity: .95; }
+  to { background-position: -55% 0; opacity: 0; }
+}
+/* 切换遮罩：随视图 key 一起重挂，从 55% 不透明度淡出到 0，替页面之间垫一层柔光过渡。
+   2026-10-01 修复「一层白色纱布盖住界面、消不掉」：这一层是"靠动画把自己淡没"的，
+   只要动画没跑，它就必须本来就看不见。原来写的是 `animation ... both` 且 base 没有 opacity，
+   于是动画一旦不执行（沙盒/RDP 会话里 Windows 关掉动画效果 → prefers-reduced-motion: reduce，
+   媒体查询把 animation 设为 none）它就停在满不透明度：一张 fixed 全屏近白径向渐变永久糊在界面上。
+   改成 base opacity:0 + fill-mode forwards —— 动画跑起来照旧闪一下淡出，不跑就彻底不可见，两种情形都不留白纱。 */
+.view-veil {
+  position: fixed; inset: 0; z-index: 60;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(120% 80% at 50% 0%, hsl(0 0% 100% / .9), hsl(0 0% 100% / .62));
+  animation: view-veil-out .26s ease-out forwards;
+}
+@keyframes view-veil-out { from { opacity: .55; } to { opacity: 0; } }
+/* 桥配置页的卡片错峰进场（同一段动画，每张晚 35ms 起步）：
+   整页不再"一起闪出来"，而是自上而下依次落位。第 1 个子节点是页签栏，故延迟从它开始算。
+   页签切换时新页签的内容节点是新建的，因此同一段动画会自然重放一次。 */
+.bridge-body > * { animation: view-in .5s cubic-bezier(.16, .84, .28, 1) both; }
+.bridge-body > :nth-child(2) { animation-delay: .045s; }
+.bridge-body > :nth-child(3) { animation-delay: .09s; }
+.bridge-body > :nth-child(4) { animation-delay: .135s; }
+.bridge-body > :nth-child(5) { animation-delay: .18s; }
+.bridge-body > :nth-child(6) { animation-delay: .225s; }
+.bridge-body > :nth-child(7) { animation-delay: .27s; }
+.bridge-body > :nth-child(n+8) { animation-delay: .3s; }
+/* 各页内的卡片/面板也用同一支进场：`.card-grid > *`、`.dp-grid > *` 等常见容器逐个错峰。
+   只作用于直接子节点，页面内部的每次状态刷新不会重放（元素没被重建）。 */
+.stagger-in > * { animation: view-in .46s cubic-bezier(.16, .84, .28, 1) both; }
+.stagger-in > :nth-child(2) { animation-delay: .05s; }
+.stagger-in > :nth-child(3) { animation-delay: .1s; }
+.stagger-in > :nth-child(4) { animation-delay: .15s; }
+.stagger-in > :nth-child(5) { animation-delay: .2s; }
+.stagger-in > :nth-child(n+6) { animation-delay: .25s; }
+@media (prefers-reduced-motion: reduce) {
+  .view-swap, .view-swap::after, .view-veil, .bridge-body > *, .stagger-in > * { animation: none !important; }
+  /* 遮罩与光带都是"由动画负责消失"的层：动画一关就得显式归零（.view-veil 的 base 现在也是 opacity:0，
+     这里再写 display:none 是第二道保险 —— 这条漏写过一次，代价是全屏白纱挂在界面上消不掉）。 */
+  .view-veil { display: none; }
+  .view-swap::after { opacity: 0; }
+}
 .page-header {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 14px 24px; border-bottom: 1px solid var(--nc-border); background: hsl(0 0% 100% / .8);
@@ -116,8 +218,8 @@
 .field-row { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field-row.full { grid-column: 1 / -1; }
 .field-row .f-label { font-size: 12px; font-weight: 700; color: var(--nc-foreground-600); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.field-row .input, .field-row .select { font-size: 14px; padding: 7px 11px; border-radius: 10px; height: auto; }
-.field-row .textarea { font-size: 13px; border-radius: 10px; }
+.field-row .input, .field-row .select { font-size: 14px; padding: 7px 11px; border-radius: var(--nc-radius-m); height: auto; }
+.field-row .textarea { font-size: 13px; border-radius: var(--nc-radius-m); }
 .nested { border: 1px dashed hsl(339.33 90% 80.39% / .7); border-radius: 10px; padding: 10px; background: hsl(339.13 92% 97% / .5); }
 .nested .f-label { color: var(--nc-primary-600); }
 
@@ -133,9 +235,11 @@
 
 /* 人设 / 上传 */
 .persona-text { font-size: 15px; line-height: 1.7; }
+/* 人设为空时框内显示的灰色占位词（You're a helpful assistant.）：只显示，不落盘、不注入模型 */
+.persona-text::placeholder { color: var(--nc-foreground-400); opacity: 1; }
 .upload-line { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .upload-hint { font-size: 13px; color: var(--nc-foreground-500); }
-.json-text { font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace; font-size: 13px; line-height: 1.6; }
+.json-text { font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6; }
 
 @media (max-width: 1180px) { .cfg-grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); } }
 @media (max-width: 900px) {
@@ -162,14 +266,14 @@
 /* ===== 启动器可爱化 + 亮色标题（v3.4）===== */
 .launcher-title .typewriter { color: var(--nc-primary-500); }
 .launcher-tag {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   color: var(--nc-primary-500);
 }
 .launcher .big-tile span,
 .launcher .big-tile button,
 .launcher .big-foot,
 .launcher .launcher-footer {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
 }
 .launcher .big-name { color: var(--nc-primary-600); font-size: 24px; letter-spacing: .02em; }
 .launcher .big-sub { color: var(--nc-foreground-500); font-size: 14px; }
@@ -184,11 +288,11 @@
 .cute-ui input,
 .cute-ui select,
 .cute-ui textarea {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   letter-spacing: 0.015em;
 }
 .cute-ui .page-title {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   font-size: 24px; color: var(--nc-primary-500);
 }
 .cute-ui .btn { font-weight: 400; }
@@ -206,7 +310,7 @@
 .cute-ui textarea.json-text,
 .cute-ui #bridge-json,
 .cute-ui code {
-  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace !important;
+  font-family: 'JetBrains Mono', monospace !important;
   font-size: 13px; letter-spacing: 0;
   background: hsl(240 6% 97.5%);
 }
@@ -258,7 +362,7 @@
 .tutorial-sec-body { font-size: 13px; line-height: 1.75; color: var(--nc-foreground-700); }
 .tutorial-sec-body ol, .tutorial-sec-body ul { margin: 0; padding-left: 20px; }
 .tutorial-sec-body li { margin: 4px 0; }
-.tutorial-sec-body code { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
+.tutorial-sec-body code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
 
 /* 说明文档弹窗（BridgeConfig JSON 旁「说明文档」）与 tabs 右对齐按钮 */
 .doc-open-btn { white-space: nowrap; margin-left: 8px; }
@@ -266,7 +370,7 @@
 /* 说明文档弹窗正文的列表与代码样式 */
 .doc-dialog-body ul, .doc-dialog-body ol { margin: 2px 0 6px; padding-left: 20px; }
 .doc-dialog-body li { margin: 4px 0; }
-.doc-dialog-body code { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
+.doc-dialog-body code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
 
 
 /* ===== v3.6：配置卡片 3 列等宽 · 纵向紧凑 · 列对齐 ===== */
@@ -322,8 +426,12 @@
 .launcher-title { width: 100%; display: flex; flex-direction: column; justify-content: flex-start; align-items: center; flex-shrink: 0; }
 .launcher .typewriter { font-size: 42px; line-height: 1.1; white-space: nowrap; }
 .launcher-title .launcher-tag { margin-top: 8px; flex-shrink: 0; white-space: nowrap; color: var(--nc-primary-500); }
-/* 隐藏 Home 的滚动条与缩放（触屏捏合） */
+/* 隐藏 Home 的滚动条与缩放（触屏捏合）。
+   2026-09-30：global.css 新增了全站 `html { scrollbar-width: thin; … }`（继承属性），
+   Chrome 121+ 起只要元素自己带 `scrollbar-width` 就改用标准属性、忽略 `::-webkit-scrollbar-*`，
+   所以这里必须同时写 `scrollbar-width: none`，否则首页那道隐藏的滚动条会重新冒出来。 */
 .launcher::-webkit-scrollbar { display: none; }
+.launcher { scrollbar-width: none; }
 /* 四个卡片的大标题（NapCat / DeepSeek Harness / QQ-Bridge / SSH 配置）字色 = 标语「让每一个孤独的灵魂拥有依靠」同色（primary 粉） */
 .launcher .big-tile .big-name { color: var(--nc-primary-500); }
 @media (max-height: 760px) {
@@ -332,13 +440,26 @@
 }
 /* 所有界面文本统一可爱圆体（JSON / 代码 / 日志区域保持等宽，见下例外） */
 body, body * {
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
   letter-spacing: 0.015em;
 }
+/* 等宽例外区（JetBrains Mono 现在也是自带字体，见 global.css 的 @font-face）：
+   `.log-viewer *` 一并列出 —— 子元素会被上面的 `body *` 通配规则命中，单靠父级继承不够。
+   注意：不把裸 `textarea` 加进来 —— 人设/关键词那类普通文本域要保持可爱圆体
+   （见上方 `.cute-ui .field-row .textarea:not(.json-text)`），只有 JSON 编辑器（.json-text / #bridge-json）等宽。 */
 body code, body pre, body .json-text, body #bridge-json, body .json-text *,
-body textarea.json-text, body .log-viewer, body .log-line {
-  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace !important;
+body textarea.json-text, body .log-viewer, body .log-viewer *, body .log-line {
+  font-family: 'JetBrains Mono', monospace !important;
   letter-spacing: 0;
+}
+/* 行内样式里写死的系统等宽字体，从 CSS 侧兜回来（本次不允许改 .tsx，只能在样式里压）：
+   BridgeConfig.tsx 2628 / 2667 / 2891 / 3116 的 4 处（工具名小字 span 与一个 textarea）、
+   SSHConfig.tsx 559 / 740 的 2 处（部署日志 .log-box、同步步骤日志）。
+   它们 `style={{ fontFamily: '…Cascadia/Consolas…' }}`，行内样式优先级高于普通规则，
+   故这里用属性选择器 + !important。`[style*="monospace"]` 只可能命中"行内写了等宽字体"的元素，
+   不会误伤别的控件；命中后就统一走自带的 JetBrains Mono。 */
+[style*="monospace"] {
+  font-family: 'JetBrains Mono', monospace !important;
 }
 
 /* ===== 学习与用量页（v3.8，nc_pink 粉色主题） ===== */
@@ -346,15 +467,15 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
 @media (max-width: 1080px) { .lrn-grid { grid-template-columns: 1fr; } }
 
-/* 右卡「人格学习状态」：内部拆成「人格学习 / 画像学习」上下两栏。
+/* 右卡「人格学习状态」内部拆成「人格学习 / 画像学习」上下两栏。
    等高靠 .lrn-grid 的 align-items: stretch（两栏都是 grid item）；这里负责"撑满 + 内部滚动 + 底部不留死空白"：
    卡片是 flex 列 → 正文区 flex: 1 + min-height: 0 → 滚动区自己 flex: 1 + min-height: 0。
    下面那一栏（画像学习 .lrn-status-block-fill）吃满卡片剩余高度，资料区一直铺到卡底。 */
-/* 【2026-09-19 定稿】**右卡不参与行高计算**，靠一层绝对定位的壳精确铺满左栏撑出的高度。
- * 主人要的两条同时成立：粉色板里的滚动区铺到板底（不留空粉色）＋ 整行不被拉长。
- * 光摘 max-height 只能做到前一条，会把行撑高（实测主人立刻反馈"拉长了，不要拉长"）。
+/* 2026-09-19 定稿：右卡不参与行高计算，靠一层绝对定位的壳精确铺满左栏撑出的高度。
+ * 需要同时成立的两条：粉色板里的滚动区铺到板底（不留空粉色）＋ 整行不被拉长。
+ * 光摘 max-height 只能做到前一条，会把行撑高（实测随即反馈"拉长了，不要拉长"）。
  * 做法：.lrn-status-col 是 position: relative 的 grid item（被 stretch 拉到行高），
- *       它唯一的孩子是绝对定位的卡 → 这个 grid item 的内容高度为 0 → **行高只由左栏决定**；
+ *       它唯一的孩子是绝对定位的卡 → 这个 grid item 的内容高度为 0 → 行高只由左栏决定；
  *       卡 inset: 0 于是精确等于该高度，内容再多也只在内部滚动，撑不到外面。 */
 .lrn-status-col { position: relative; min-height: 0; }
 .lrn-status-card { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; }
@@ -372,12 +493,12 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-status-hint { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--nc-foreground-400); }
 .lrn-block-refresh { margin-left: auto; }
 .lrn-status-scroll { flex: 1 1 auto; min-height: 0; max-height: 620px; overflow-y: auto; padding-right: 4px; }
-/* 【2026-09-16 主人要求】最下面那一栏（画像学习）**限高 + 内部纵向滚动**：
+/* 2026-09-16 变更要求：最下面那一栏（画像学习）限高 + 内部纵向滚动：
    以前这里是 max-height:none，群友档案一多就把这一栏（连带整张右卡，因为 .lrn-grid 是 stretch）
    无限拉高，页面得一路滚到底才能看到别的区块。现在内容区限高自己滚，
    标题「画像学习」和右上角「刷新」在滚动区之外，始终留在可见处（头部固定、内容区滚动）。
 
-   【2026-09-16 二次调整 · 主人要求"右边增高，和左边群友画像学习那块对齐"】
+   2026-09-16 二次调整 · 变更要求"右边增高，和左边群友画像学习那块对齐"：
    原来是 300px：右卡被左卡撑到等高后，下半栏（.lrn-status-block-fill，flex:1 吃满剩余高度）
    里那 300px 的列表下面会空出一大块粉色，看着就是"右边的资料区比左边矮一截"。
    左卡的「群友画像学习」块（开关 + 说明 + 5 个输入 + 按钮 + 它自己的状态区）按各控件的高度
@@ -385,16 +506,16 @@ body textarea.json-text, body .log-viewer, body .log-line {
    （与左侧块齐平），只有内容特别多时才由这个上限兜住：640 小于左卡自身的高度，
    右卡不会反过来把整张卡撑得比左边还高，页面整体也就不会被撑长。
    仍然保留内部纵向滚动（滚轮可滑），标题/刷新/摘要照旧留在滚动区外。 */
-/* 【2026-09-17 三次调整 · 主人要求"资料卡再高一点，和左边状态行底部对齐"】
+/* 2026-09-17 三次调整 · 变更要求"资料卡再高一点，和左边状态行底部对齐"：
    左卡底部那行状态文字（"上次自动学习：… · 进行中 N 个"）实际位置比 640px 上限还低一截，
    右卡资料区底边仍比它高。把上限从 640 提到 720px，让右卡滚动区向下延伸，
    底边与左栏状态行下沿大致齐平；仍然保留内部纵向滚动，标题/刷新/摘要照旧留在滚动区外。 */
-/* 【2026-09-19 主人澄清后定稿】**粉色板里的滚动区不再设上限**，它靠 `flex: 1 1 auto` 铺满
-   粉色板的剩余高度 —— 于是「粉色背景 / 滚动区」的分界处（也就是滚动区的底边）**永远落在板底**，
+/* 2026-09-19 澄清后定稿：粉色板里的滚动区不再设上限，它靠 `flex: 1 1 auto` 铺满
+   粉色板的剩余高度 —— 于是「粉色背景 / 滚动区」的分界处（也就是滚动区的底边）永远落在板底，
    不论左栏多高都不会在中途停住留出一截空粉色。
    原来那个 720px 是个手调的魔法数字（历史上 300→640→720 调过三次），
-   只要左栏比它高就会露馅 —— 这也是主人反复看到"没对齐"的根本原因。
-   代价（明说）：名单特别长时不再有上限兜着，右栏会被内容撑高；但主人要的是"分界处拉到底、
+   只要左栏比它高就会露馅 —— 这也是反复看到"没对齐"的根本原因。
+   代价（明说）：名单特别长时不再有上限兜着，右栏会被内容撑高；但既定要求是"分界处拉到底、
    不留空白"，这一条优先。真嫌长就自己滚轮往下滑（滚动区仍然是 overflow-y: auto）。 */
 .lrn-status-block-fill .lrn-status-scroll { max-height: none; }
 /* 画像学习栏固定头部（标题与刷新按钮之外的两行摘要）：不随下面档案区一起滚 */
@@ -406,7 +527,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .lrn-status-caret { margin-left: auto; font-size: 11.5px; color: var(--nc-foreground-400); white-space: nowrap; }
 .lrn-status-detail { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.65; color: var(--nc-foreground-600); }
 .lrn-dk { display: inline-block; min-width: 76px; color: var(--nc-foreground-400); }
-/* 展开后的资料是**完整**内容，绝不裁字：允许换行、按原文分段（成文画像里有换行习惯），
+/* 展开后的资料是完整内容，绝不裁字：允许换行、按原文分段（成文画像里有换行习惯），
    长段落左对齐打满整行 —— 旧的窄字段排布会让长介绍挤成一列，看着像被截断。 */
 .lrn-status-detail .lrn-wide { display: block; }
 .lrn-status-detail .lrn-prose {
@@ -460,7 +581,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
 }
 .lrn-slang-group-n { font-weight: 600; color: var(--nc-foreground-500); }
 .lrn-slang-group-hint { margin-left: auto; font-weight: 400; font-size: 11.5px; color: var(--nc-foreground-400); }
-/* 「已拒收」那组是可点的折叠头 */
+/* 「已拒收」：那组是可点的折叠头 */
 .lrn-slang-group-h-btn { cursor: pointer; border-radius: 8px; padding: 2px 4px 0; }
 .lrn-slang-group-h-btn:hover { background: hsl(339.13 92% 97% / .8); }
 .lrn-slang-group-h-btn:focus-visible { outline: 2px solid var(--nc-primary-500); outline-offset: 1px; }
@@ -555,7 +676,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
   --tb-azure-300: hsl(197 100% 76%);
   --tb-azure-100: hsl(199 100% 95%);
 }
-/* 「今日已用 / 近 7 日日均」两张卡：浅亮蓝；中间「今日预计」保持紫色 */
+/* 「今日已用 / 近 7 日日均」：两张卡：浅亮蓝；中间「今日预计」保持紫色 */
 .lrn-stat-azure {
   background: linear-gradient(180deg, hsl(199 100% 97% / .95), hsl(0 0% 100%));
   border-color: hsl(199 100% 72% / .75);
@@ -585,7 +706,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
   padding: 6px 11px; border-radius: 8px; margin-top: 8px;
 }
 .lrn-note-soft { background: hsl(339.13 92% 96.5% / .85); color: var(--nc-foreground-400); }
-/* 【2026-09-19 主人反馈"这段前端排版乱"】.lrn-note 是 flex 单行（一个图标 + 一句话），
+/* 2026-09-19 反馈"这段前端排版乱"：.lrn-note 是 flex 单行（一个图标 + 一句话），
  * 拿它装多行/多段内容时，每个文本节点和 <b> 都变成独立 flex 项、还按居中排列 ——
  * 于是句子里出现"今日 / 没有 / 发生过"这种被拆开的断行。多行说明一律加这个类改成块级。 */
 .lrn-note-block { display: block; align-items: initial; line-height: 1.7; }
@@ -618,7 +739,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .pg-owner-card .card-title .lrn-updated { margin-left: auto; }
 
 /* 聚焦弹层（点圆点弹开的那张卡）里的「学习档案」块：
-   说法与「学习」页的「人格学习状态」一致；完整介绍**就地内滚**（折叠 ~3 行、展开 240px 封顶），
+   说法与「学习」页的「人格学习状态」一致；完整介绍就地内滚（折叠 ~3 行、展开 240px 封顶），
    档案再长也只会滚，不会把弹窗拉长。 */
 .pv-prof { margin-bottom: 12px; }
 .pv-prof-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--nc-foreground-400); }
@@ -651,7 +772,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
   background: radial-gradient(circle at 32% 28%, #ffe0a8, #f9a2bd 58%, #e96f9e);
   color: #fff; font-size: 32px; font-weight: 800;
   box-shadow: 0 4px 14px hsl(339.2 90.36% 60% / .28), inset 0 0 0 3px hsl(0 0% 100% / .7);
-  font-family: 'AaCute', 'AaCute-full', 'Quicksand', sans-serif;
+  font-family: 'AaCute', 'AaCute-full', sans-serif;
 }
 .pg-owner-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .pg-owner-name { font-size: 19px; font-weight: 800; color: var(--nc-primary-600); line-height: 1.3; overflow: hidden; text-overflow: ellipsis; }
@@ -747,7 +868,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
   margin-top: 20px; padding-top: 16px;
   border-top: 1px dashed hsl(339.33 90% 90% / .8);
 }
-/* 【2026-09-12 二次修正】主人再次反馈"卡片高度要一样、也别粘在一起"。
+/* 2026-09-12 二次修正：再次反馈"卡片高度要一样、也别粘在一起"。
    上一版只统一了卡片内部（min-height + 副行贴底 + gap 14），但"实测计量"与"费用预算"两块
    自身不是卡片：它们只靠一条 2px 分隔线区分，中间只有 22px 边距，读数时两块像糊在一起；
    而且两块高度由各自内容决定（实测 293px、预算 320px），一眼看去就是"高矮不一"。
@@ -794,7 +915,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .cost-rate-split b { color: var(--tb-azure-600); }
 
 /* 今日费用 / 月预算（湛蓝，与本面板同色系）
-   【2026-09-12 排版修正】主人反馈：这一块的卡片高度不一致、而且互相"粘"在一起。原因是
+   2026-09-12 排版修正：反馈指出这一块的卡片高度不一致、而且互相"粘"在一起。原因是
    · 两张卡的副行（"谷时…·高峰…（N 小时 ×2）" 与 "按今日强度 ×30"）长度不同 → 行高由长的那张决定，
      短的那张底部留白、副行位置也对不齐，看上去就是"高度不一样"；
    · 窗口变窄时（<700px）列会塌成一列，卡片之间只剩默认贴合观感。
@@ -879,7 +1000,8 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .token-panel .lrn-stat-v.lrn-stat-proj { color: var(--nc-secondary); }
 
 .token-panel .btn { background: #fff; border-color: hsl(199 100% 74% / .8); color: var(--tb-azure-600); }
-.token-panel .btn:hover { background: var(--tb-azure-100); border-color: var(--tb-azure-500); color: var(--tb-azure-600); }
+/* 悬停保持纯白底（原为 --tb-azure-100 浅蓝底 → 不要变灰/变蓝），只抬亮边框 */
+.token-panel .btn:hover { background: #fff; border-color: var(--tb-azure-400); color: var(--tb-azure-600); }
 
 /* 纯输入框：去掉数字框自带的上下加减箭头，数字居中 */
 .token-panel input[type='number'] {
@@ -895,7 +1017,7 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .token-panel .tb-node-label, .token-panel .tb-bar-label { fill: var(--tb-azure-600); }
 
 /* 卡片高度统一 + 不再挤在一起
-   【2026-09-12 二次修正】统一到一个变量：面板内所有小卡片（三张数字卡 / 命中率条 /
+   2026-09-12 二次修正：统一到一个变量：面板内所有小卡片（三张数字卡 / 命中率条 /
    今日费用·本月合计 / 假设命中率·单价两栏）都按 --tb-card-h 对齐，间距一律 16px。 */
 .token-panel { --tb-card-h: 116px; }
 .token-panel .lrn-stat-row { gap: 16px; }
@@ -949,11 +1071,13 @@ body textarea.json-text, body .log-viewer, body .log-line {
   .token-panel .lrn-stat-row { gap: 12px; }
 }
 
-/* ===== 「方案」页签 + 方案面板：浅蓝，与 Token 用量面板同一支色（2026-09-12 主人要求） ===== */
+/* ===== 「方案」页签 + 方案面板：浅蓝，与 Token 用量面板同一支色（2026-09-12 变更要求） ===== */
 .btn-tb-soft { background: hsl(199 100% 95% / .95); border-color: hsl(199 100% 78% / .85); color: var(--tb-azure-600); }
-.btn-tb-soft:hover { background: var(--tb-azure-100); border-color: var(--tb-azure-500); color: var(--tb-azure-600); }
+/* 悬停只抬亮边框，底色不动（原为 --tb-azure-100，比常态底色更深 → 要求不要变暗） */
+.btn-tb-soft:hover { background: hsl(199 100% 95%); border-color: var(--tb-azure-400); color: var(--tb-azure-600); }
 .btn-tb-primary { background: var(--tb-azure-600); border-color: var(--tb-azure-600); color: #fff; }
-.btn-tb-primary:hover { background: hsl(203 100% 40%); border-color: hsl(203 100% 40%); color: #fff; }
+/* 悬停底色保持与常态同色（原为 hsl(203 100% 40%)，比 azure-600 更深），只抬亮边框 */
+.btn-tb-primary:hover { background: var(--tb-azure-600); border-color: var(--tb-azure-400); color: #fff; }
 
 .profile-panel {
   background: linear-gradient(180deg, hsl(199 100% 98.5% / .98), var(--nc-bg) 260px);
@@ -963,9 +1087,11 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .profile-panel, .profile-panel * { color: var(--tb-azure-600); }
 .profile-panel .card-title { color: var(--tb-azure-600); }
 .profile-panel .btn { background: #fff; border-color: hsl(199 100% 74% / .8); color: var(--tb-azure-600); }
-.profile-panel .btn:hover { background: var(--tb-azure-100); border-color: var(--tb-azure-500); color: var(--tb-azure-600); }
+/* 悬停保持纯白底（原为 --tb-azure-100 浅蓝底 → 要求："白色按钮改为纯白别灰色…鼠标悬停时边框带光效就行了"），只抬亮边框 */
+.profile-panel .btn:hover { background: #fff; border-color: var(--tb-azure-400); color: var(--tb-azure-600); }
 .profile-panel .btn-primary { background: var(--tb-azure-600); border-color: var(--tb-azure-600); color: #fff; }
-.profile-panel .btn-primary:hover { background: hsl(203 100% 40%); color: #fff; }
+/* 悬停底色保持 azure-600（原为 hsl(203 100% 40%)，更深 → 要求不要变暗），只抬亮边框 */
+.profile-panel .btn-primary:hover { background: var(--tb-azure-600); border-color: var(--tb-azure-400); color: #fff; }
 .profile-panel .input, .profile-panel .select { background: #fff; border: 1px solid hsl(199 100% 72% / .8); color: var(--tb-azure-600); }
 .profile-panel .input:focus, .profile-panel .select:focus { outline: none; border-color: var(--tb-azure-500); }
 .profile-panel .profile-note { background: hsl(199 100% 96% / .9); border-radius: var(--nc-radius-m); padding: 10px 13px; font-size: 12px; line-height: 1.6; }
@@ -987,4 +1113,770 @@ body textarea.json-text, body .log-viewer, body .log-line {
 .profile-item-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; padding-top: 8px; }
 .profile-empty { margin-top: 14px; padding: 18px 6px; text-align: center; font-size: 12.5px; }
 
+
+/* ===================================================================================
+   Home 首页氛围与动效（2026-09-28）
+   -----------------------------------------------------------------------------------
+   作用域：新增样式一律以 .launcher / .launcher-* 前缀或 .launcher .big-tile / .launcher .tiles
+           层级限定；`.big-tile` / `.tiles` / `.grid2x2` / `.typewriter` / `.launcher-*` 已全文搜索
+           确认仅 Home.tsx 使用（.status-dot / .spin / .btn / .card / .notice-bar 属共用类，
+           本区块一律不改写它们）。
+   动效纪律：动画只作用于 transform / opacity / background-position，不做 width / height /
+           margin 动画（无布局抖动）；不在 JS 里做视觉循环；页面不产生滚动条（.launcher 本身
+           overflow:hidden，氛围层用 inset:0）。
+   可关闭：文末 @media (prefers-reduced-motion: reduce) 一次性关闭本页全部动画（含光标闪烁）。
+   =================================================================================== */
+
+/* —— 1. 氛围背景层：缓慢漂移的极光光斑 + 极淡点阵网格 ——
+   层级：氛围层 z-index:0（绝对定位，脱离 flex 流，不占位），其余直接子元素抬到 z-index:1；
+        `.help-overlay`（教程弹窗，position:fixed）与 `.launcher-footer`（绝对定位页脚）显式复位，
+        避免被上面的通配规则改掉定位方式。 */
+.launcher > * { position: relative; z-index: 1; }
+.launcher > .launcher-bg { position: absolute; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+.launcher > .launcher-footer { position: absolute; z-index: 1; }
+.launcher > .help-overlay { position: fixed; z-index: 120; }
+
+.launcher-aurora {
+  position: absolute; display: block; border-radius: 50%;
+  filter: blur(58px); pointer-events: none; will-change: transform;
+}
+.launcher-aurora.a1 {
+  width: 46vw; height: 46vw; left: -10vw; top: -14vw; opacity: .5;
+  background: radial-gradient(circle at 50% 50%, var(--nc-primary-200), transparent 68%);
+  animation: launcher-drift-a 24s ease-in-out infinite alternate;
+}
+.launcher-aurora.a2 {
+  width: 40vw; height: 40vw; right: -9vw; top: -7vw; opacity: .42;
+  background: radial-gradient(circle at 50% 50%, var(--nc-primary-100), transparent 70%);
+  animation: launcher-drift-b 30s ease-in-out infinite alternate;
+}
+.launcher-aurora.a3 {
+  width: 52vw; height: 34vw; left: 50%; bottom: -19vw; margin-left: -26vw; opacity: .3;
+  background: radial-gradient(circle at 50% 50%, var(--nc-primary-100), transparent 72%);
+  animation: launcher-drift-c 36s ease-in-out infinite alternate;
+}
+@keyframes launcher-drift-a { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(6vw, 4vw, 0) scale(1.08); } }
+@keyframes launcher-drift-b { from { transform: translate3d(0, 0, 0) scale(1.04); } to { transform: translate3d(-5vw, 5vw, 0) scale(.96); } }
+@keyframes launcher-drift-c { from { transform: translate3d(-3vw, 0, 0) scale(1); } to { transform: translate3d(3vw, -3vw, 0) scale(1.06); } }
+
+/* 点阵网格：中部可见、四周淡出（用 mask 做渐隐，颜色取主题 --nc-primary-100，非写死品牌色） */
+.launcher-bg::after {
+  content: ''; position: absolute; inset: 0; opacity: .5;
+  background-image: radial-gradient(var(--nc-primary-100) 1.1px, transparent 1.1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(72% 62% at 50% 38%, #000 0%, transparent 100%);
+  mask-image: radial-gradient(72% 62% at 50% 38%, #000 0%, transparent 100%);
+}
+
+/* —— 2. 标题：干脆入场 + 渐变文字 + 柔光晕 ——
+   入场 0.45s，`backwards` 保证动画结束后回落到基础样式（不残留 transform）。 */
+.launcher .launcher-title { animation: launcher-title-in .45s cubic-bezier(.22, .68, .3, 1) backwards; }
+@keyframes launcher-title-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+/* 渐变文字用 @supports 兜底：万一某个内核不支持 background-clip:text，就自动退回上面那条
+   "实色 primary-500" 的原样式（不会出现"透明字 + 整块渐变底"的翻车形态）。 */
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  .launcher .typewriter {
+    background-image: linear-gradient(100deg, var(--nc-primary-600) 0%, var(--nc-primary-400) 45%, var(--nc-primary-600) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; -webkit-text-fill-color: transparent;
+    text-shadow: none;   /* 旧的双层 text-shadow 在透明填充下会变成"错位重影"，改由下面的光晕承担 */
+    filter: drop-shadow(0 6px 18px var(--nc-primary-100));
+  }
+  /* 光标 ▍ 必须是实色：-webkit-text-fill-color 会被继承，此处显式还原（闪烁与节奏不变） */
+  .launcher .typewriter::after { -webkit-text-fill-color: currentColor; color: var(--nc-primary-500); }
+}
+
+/* —— 3. 卡片：错峰淡入上浮 + hover 抬升 / 边框高光 + 微光扫过（sheen）—— */
+.launcher .tiles > .big-tile {
+  position: relative; overflow: hidden;
+  animation: launcher-card-in .5s cubic-bezier(.22, .68, .3, 1) backwards;
+}
+.launcher .tiles > .big-tile:nth-child(1) { animation-delay: .06s; }
+.launcher .tiles > .big-tile:nth-child(2) { animation-delay: .13s; }
+.launcher .tiles > .big-tile:nth-child(3) { animation-delay: .20s; }
+.launcher .tiles > .big-tile:nth-child(4) { animation-delay: .27s; }
+@keyframes launcher-card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* 微光扫过：默认藏在卡片左侧之外，仅 hover 时扫一次（不循环，避免持续干扰阅读） */
+.launcher .tiles > .big-tile::before {
+  content: ''; position: absolute; top: -20%; bottom: -20%; left: -60%; width: 40%;
+  background: linear-gradient(100deg, transparent 0%, var(--nc-primary-50) 50%, transparent 100%);
+  opacity: 0; pointer-events: none; transform: skewX(-16deg);
+}
+.launcher .tiles > .big-tile:hover::before { animation: launcher-sheen .9s cubic-bezier(.3, .7, .3, 1) 1; }
+@keyframes launcher-sheen {
+  0% { opacity: 0; transform: translateX(0) skewX(-16deg); }
+  20% { opacity: .45; }
+  100% { opacity: 0; transform: translateX(400%) skewX(-16deg); }
+}
+/* hover 抬升 + 细边框高光（色值取主题变量；比原有 .big-tile:hover 多抬 2px、外圈更亮） */
+.launcher .tiles > .big-tile:hover {
+  transform: translateY(-4px);
+  border-color: var(--nc-primary-300);
+  box-shadow: 0 0 0 1px var(--nc-primary-200), 0 16px 40px var(--nc-primary-100);
+}
+
+/* —— 4. 主按钮：白色扫光已删除（2026-09-28 反馈"反光太强，只保留渐变流动"）——
+   原来那条 `::after` 白色高光条（38% 白、峰值 opacity .85、6.5s 一次）整段移除，
+   主按钮的动效改由文末的"流动渐变"承担。保留 hover 柔和外发光；
+   禁用态（含「服务端连接中…」等引导前状态）不加发光，避免暗示可点击。 */
+.launcher .btn-primary { position: relative; overflow: hidden; }
+/* 页主按钮 hover：外沿亮一圈（1px 亮边 + 柔和外发光），不掉暗 —— 与文末"按钮外沿光效"同款，
+   这里显式写是因为 .launcher .btn-primary:not(:disabled):hover 的优先级更高。 */
+.launcher .btn-primary:not(:disabled):hover { box-shadow: 0 0 0 1px hsl(339 90% 60.78% / .6), 0 4px 18px var(--nc-primary-200); }
+
+/* —— 5. 动效总开关：prefers-reduced-motion 下本页所有动画/过渡静止（含光标闪烁）—— */
+@media (prefers-reduced-motion: reduce) {
+  .launcher-aurora,
+  .launcher .launcher-title,
+  .launcher .tiles > .big-tile,
+  .launcher .tiles > .big-tile:hover::before,
+  .launcher .typewriter::after {
+    animation: none !important;
+  }
+  .launcher .tiles > .big-tile,
+  .launcher .btn-primary { transition: none !important; }
+  /* 动画删掉后显式回落到"已完成"的静止状态，防止 backwards 起始帧把内容留在透明态 */
+  .launcher .launcher-title { opacity: 1; transform: none; }
+  .launcher .tiles > .big-tile { opacity: 1; transform: none; }
+  .launcher .tiles > .big-tile:hover { transform: none; box-shadow: 0 0 0 1px var(--nc-primary-200), 0 12px 34px var(--nc-primary-100); }
+  .launcher .tiles > .big-tile::before { display: none; }
+  .launcher .typewriter::after { opacity: 1; }
+}
+
+
+/* ===================================================================================
+   按钮底色（2026-09-30 · "白色按钮改为纯白别灰色，也不要带渐变，感觉这些按钮渐变
+   不好看，美化或者改回以前的，鼠标悬停时边框带光效就行了"）
+   -----------------------------------------------------------------------------------
+   · 删除 2026-09-28 那套"流动渐变"：`@keyframes btn-grad-flow`、`background-image` /
+     `background-size` / `background-position` / `background-repeat` / `animation` 全部移除，
+     底色回到纯色（取自本文件 / global.css 里各按钮类原本的纯色取值）。
+   · 白底纪律：底色本来是白 / 近白（#fff、content1、default-100、湛蓝面板里被改写成白底）的
+     按钮，一律写 纯白 #fff，不再出现灰白（hsl(... 97%)、content1 之类）或渐变；
+     文字色沿用各处原本的深色前景，保证白底深字。
+   · 悬停纪律：只加边框光效（见文末"按钮外沿光效"块），底色一律不动、不压暗、不位移。
+     global.css 里"悬停变暗"的几档（.btn:hover default-200、.btn-primary:hover primary-600、
+     .btn-soft:hover content2、.btn-soft-primary:hover primary-200、.btn-danger:hover hsl(343.42…83.53%)、
+     .btn-outline-danger:hover danger-100、.profile-panel/.token-panel .btn:hover azure-100、
+     .profile-panel .btn-primary:hover azure 40%）在这里用"同优先级 + 后加载"的等价规则覆盖成
+     不暗于原底色的取值（app.css 在 main.tsx 里于 global.css 之后 import）。
+   · 禁用态：无渐变、无动画、无光效（box-shadow: none 见文末），不透明度沿用 .btn:disabled 的 .55。
+   =================================================================================== */
+
+/* —— 常态：纯色底（原渐变底色的"首尾色"即该按钮原本的纯色）—— */
+.btn { background: #fff; }                                                                        /* 原 #fff→content1→#fff 渐变 */
+.btn-primary { background: var(--nc-primary-500); }                                               /* 原 primary-500 三档渐变 */
+.btn-soft { background: #fff; }                                                                   /* 原 content1→#fff→content1 渐变 */
+.btn-soft-primary { background: var(--nc-primary-100); }                                          /* 原 primary-100→primary-50 渐变 */
+.btn-danger { background: var(--nc-danger-100); }                                                 /* 原 danger-100→hsl(350.53…95%) 渐变 */
+.btn-success { background: var(--nc-success-100); }                                               /* 原 success-100→hsl(145.71…94%) 渐变 */
+.btn-outline { background: #fff; }                                                                /* 原 hsl(0 0% 100%/.6)→primary-50/.8 半透明渐变 */
+/* 2026-09-30：「清除已保存的密钥那个样式也改错了，我还点到了」
+ * 去掉渐变后这里变成了纯白底 —— 于是「清空密钥」这类危险按钮和旁边一堆白按钮
+ * 长得一模一样，曾误点把已保存的密钥清掉了。危险按钮必须一眼能认出来：
+ * 这里恢复成纯色浅红底（不是渐变，仍符合"不要渐变/不要流动光效"的要求）
+ * + 原来的红边红字（global.css 的 danger-400 / danger-600 未被改动）。 */
+.btn-outline-danger { background: hsl(343.42 100% 97.6%); }                                        /* 原 #fff→danger-100→#fff 渐变，且曾被压成纯白 */
+.btn-tb-soft { background: hsl(199 100% 95%); }                                                   /* 原 hsl(199 100% 95%/.95)→98% 半透明渐变 */
+.btn-tb-primary { background: var(--tb-azure-600); color: #fff; }                                 /* 原 azure-600→hsl(201.5…) 渐变 */
+
+/* —— hover：底色不动（不再变暗，也不再变亮），只在文末给边框光效 ——
+   这里显式重写，是因为去掉渐变后 global.css 里"悬停变暗"的旧底色会真正露出来。
+   注：`.btn-outline-danger:hover`（0,2,0 伪类）比 `.btn-outline-danger:hover:not(:disabled)`
+   （0,3,0 —— :not() 取内部最高优先级）低，所以 danger 轮廓按钮的悬停底色/文字色写在下面对应的
+   0,3,0 选择器里，global.css 的浅红底（danger-100）不再生效。 */
+.btn:hover { background: #fff; }
+.btn-primary:hover { background: var(--nc-primary-500); }
+.btn-soft:hover { background: #fff; }
+.btn-soft-primary:hover { background: var(--nc-primary-100); }
+.btn-danger:hover { background: var(--nc-danger-100); }
+.btn-success:hover { background: var(--nc-success-100); }
+.btn-outline:hover { background: #fff; }
+.btn-tb-soft:hover { background: hsl(199 100% 95%); }
+.btn-tb-primary:hover { background: var(--tb-azure-600); color: #fff; }
+/* 危险轮廓按钮：浅红底 + 红边红字，悬停只亮边框、底色不变（仍然一眼可辨，也不变暗）；
+   文字色沿用 global.css 里该按钮的 --nc-danger-600（深红，浅红底可读） */
+.btn-outline-danger:hover:not(:disabled) { background: hsl(343.42 100% 97.6%); border-color: var(--nc-danger-400); color: var(--nc-danger-600); }
+
+/* —— 湛蓝面板里被改写成白底的按钮（.token-panel / .profile-panel，特异性 0,2,0，
+      必须写在上面那批之后才能压过它们自带的背景）：纯白，悬停不变暗 —— */
+.token-panel .btn,
+.profile-panel .btn { background: #fff; }
+.token-panel .btn:hover,
+.profile-panel .btn:hover { background: #fff; }
+.profile-panel .btn-primary { background: var(--tb-azure-600); color: #fff; }
+.profile-panel .btn-primary:hover { background: var(--tb-azure-600); color: #fff; }
+
+/* —— 禁用态：已无渐变/动画可停（Animation 相关声明整块删除）；底色沿用各按钮的常态纯色，
+      不透明度沿用 .btn:disabled 的 .55，光效由文末 box-shadow:none 关掉 —— */
+
+/* —— 减少动效：按钮已经没有动画/渐变，这里只关掉过渡（外发光是静态的，保留）—— */
+@media (prefers-reduced-motion: reduce) {
+  .btn, .btn-primary, .btn-soft, .btn-soft-primary, .btn-danger, .btn-success,
+  .btn-outline, .btn-outline-danger, .btn-tb-soft, .btn-tb-primary,
+  .token-panel .btn, .profile-panel .btn, .profile-panel .btn-primary {
+    transition: none !important;
+  }
+}
+
+
+/* ===================================================================================
+   按钮外沿光效（2026-09-29：「可以带光效但是不要变暗，没让你变暗，边框周围亮一点就行」）
+   -----------------------------------------------------------------------------------
+   2026-09-30：去掉渐变后「鼠标悬停时边框带光效就行了」——悬停只剩边框光效
+     · hover 不再改底色（上面已把底色锁死不暗不亮），只做边框一圈光：
+       `0 0 0 1px <主色-300/400 档>` + `0 0 4px <主色半透明>`，另把 border-color 抬亮一档
+       （仅对本来就有非透明边框的类：.btn-outline / .btn-outline-danger / 湛蓝面板按钮）。
+    做法：只用向外的 box-shadow —— `0 0 0 1px <浅色>` 沿边框描一圈 + `0 2px 10px <主色半透明>`
+        一层柔和外发光。一律不用 inset 内阴影、不加任何半透明黑遮罩：
+        按钮底色由上面的纯色规则决定，所以光效只会让边框周围"亮起来"，不会让按钮变暗。
+     · 常态：1px 浅色描边 + 10px 柔光；
+     · :hover:not(:disabled)：描边换亮一档的浅色，并把柔光收成贴边 4px 的亮圈（更"描边"，不压暗底色）；
+     · :focus-visible：一圈清晰焦点环（outline 2px + offset 2px + 外发光），同样只向外；
+     · :disabled / [disabled]：box-shadow: none（不发光；流动与过渡已在上面关掉）。
+   色值全部取主题变量或主题色相的 hsl()（与文件既有写法一致），不用黑色、不用深档位。
+   =================================================================================== */
+
+/* —— 纯白底按钮（.btn / .btn-sm / .btn-block 等）—— */
+.btn { box-shadow: 0 0 0 1px var(--nc-primary-100), 0 2px 10px hsl(339.2 90.36% 51.18% / .12); }
+.btn:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--nc-primary-300), 0 0 4px hsl(339.2 90.36% 51.18% / .35); }
+.btn:focus-visible {
+  outline: 2px solid var(--nc-primary-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-primary-300), 0 2px 16px hsl(339.2 90.36% 51.18% / .26);
+}
+
+/* —— 主按钮（粉）：描边用更亮的粉 300/400，不用 600 以上 —— */
+.btn-primary { box-shadow: 0 0 0 1px hsl(339.2 90.36% 51.18% / .35), 0 2px 10px hsl(339.2 90.36% 51.18% / .3); }
+.btn-primary:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--nc-primary-300), 0 0 4px hsl(339.2 90.36% 51.18% / .45); }
+.btn-primary:focus-visible {
+  outline: 2px solid var(--nc-primary-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-primary-300), 0 3px 16px hsl(339.2 90.36% 51.18% / .5);
+}
+
+/* —— 浅底按钮（soft / soft-primary）—— */
+.btn-soft, .btn-soft-primary { box-shadow: 0 0 0 1px var(--nc-primary-100), 0 2px 10px hsl(339.13 92% 95.1% / .9); }
+.btn-soft:hover:not(:disabled), .btn-soft-primary:hover:not(:disabled) {
+  box-shadow: 0 0 0 1px var(--nc-primary-300), 0 0 4px hsl(339.2 90.36% 51.18% / .35);
+}
+.btn-soft:focus-visible, .btn-soft-primary:focus-visible {
+  outline: 2px solid var(--nc-primary-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-primary-300), 0 3px 16px hsl(339.2 90.36% 51.18% / .22);
+}
+
+/* —— 轮廓按钮 —— */
+.btn-outline { box-shadow: 0 0 0 1px var(--nc-primary-100), 0 2px 10px hsl(339.13 92% 95.1% / .85); }
+.btn-outline:hover:not(:disabled) { border-color: var(--nc-primary-400); box-shadow: 0 0 0 1px var(--nc-primary-300), 0 0 4px hsl(339.2 90.36% 51.18% / .35); }
+.btn-outline:focus-visible {
+  outline: 2px solid var(--nc-primary-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-primary-300), 0 3px 16px hsl(339.2 90.36% 51.18% / .22);
+}
+
+/* —— 危险按钮：红光，用 danger-100/400，不用 600 —— */
+.btn-danger { box-shadow: 0 0 0 1px var(--nc-danger-100), 0 2px 10px hsl(325.82 69.62% 53.53% / .18); }
+.btn-danger:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--nc-danger-400), 0 0 4px hsl(325.82 69.62% 53.53% / .4); }
+.btn-danger:focus-visible, .btn-outline-danger:focus-visible {
+  outline: 2px solid var(--nc-danger-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-danger-400), 0 3px 16px hsl(325.82 69.62% 53.53% / .35);
+}
+.btn-outline-danger { box-shadow: 0 0 0 1px hsl(331.82 75% 65.49% / .45), 0 2px 10px hsl(331.82 75% 65.49% / .22); }
+.btn-outline-danger:hover:not(:disabled) { border-color: var(--nc-danger-400); box-shadow: 0 0 0 1px var(--nc-danger-400), 0 0 4px hsl(331.82 75% 65.49% / .5); }
+
+/* —— 成功按钮：绿光 —— */
+.btn-success { box-shadow: 0 0 0 1px var(--nc-success-100), 0 2px 10px hsl(145.96 79.46% 43.92% / .18); }
+.btn-success:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--nc-success-400), 0 0 4px hsl(145.96 79.46% 43.92% / .4); }
+.btn-success:focus-visible {
+  outline: 2px solid var(--nc-success-400); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--nc-success-400), 0 3px 16px hsl(145.96 79.46% 43.92% / .35);
+}
+
+/* —— 湛蓝按钮（方案页 / Token 面板）：蓝光，与面板同色系 —— */
+.btn-tb-soft { box-shadow: 0 0 0 1px hsl(199 100% 78% / .5), 0 2px 10px hsl(200 100% 54% / .18); }
+.btn-tb-soft:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 4px hsl(200 100% 54% / .4); }
+.btn-tb-primary { box-shadow: 0 0 0 1px hsl(203 100% 46% / .35), 0 2px 10px hsl(203 100% 46% / .3); }
+.btn-tb-primary:hover:not(:disabled) { box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 4px hsl(203 100% 46% / .5); }
+.btn-tb-soft:focus-visible, .btn-tb-primary:focus-visible {
+  outline: 2px solid var(--tb-azure-500); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--tb-azure-400), 0 3px 16px hsl(203 100% 46% / .35);
+}
+
+/* —— 湛蓝面板里被改写成白底的按钮（.token-panel / .profile-panel）：同一支浅蓝光，不用粉色 —— */
+.token-panel .btn, .profile-panel .btn { box-shadow: 0 0 0 1px hsl(199 100% 88% / .9), 0 2px 10px hsl(200 100% 54% / .16); }
+.token-panel .btn:hover:not(:disabled), .profile-panel .btn:hover:not(:disabled) {
+  border-color: var(--tb-azure-400);
+  box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 4px hsl(200 100% 54% / .4);
+}
+.token-panel .btn:focus-visible, .profile-panel .btn:focus-visible, .profile-panel .btn-primary:focus-visible {
+  outline: 2px solid var(--tb-azure-500); outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--tb-azure-400), 0 3px 16px hsl(200 100% 54% / .35);
+}
+.profile-panel .btn-primary { box-shadow: 0 0 0 1px hsl(203 100% 46% / .35), 0 2px 10px hsl(203 100% 46% / .3); }
+.profile-panel .btn-primary:hover:not(:disabled) { border-color: var(--tb-azure-400); box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 4px hsl(203 100% 46% / .5); }
+
+/* —— 禁用态：不发光（渐变/动画已整块删除，不透明度沿用 .btn:disabled 的 .55）—— */
+.btn:disabled, .btn[disabled], .btn:disabled:hover, .btn[disabled]:hover,
+.token-panel .btn:disabled, .profile-panel .btn:disabled,
+.token-panel .btn[disabled], .profile-panel .btn[disabled] { box-shadow: none; }
+
+
+/* ===================================================================================
+   湛蓝面板里的输入框：聚焦环保持湛蓝，不要变回粉色
+   （global.css 的全局输入框焦点环是玫粉主题色；这几处 .profile-panel / .cost-* 的输入框
+     本来就是湛蓝配色，只补同色系的外圈，边框色沿用它们各自的既有规则。）
+   =================================================================================== */
+.profile-panel .input:focus, .profile-panel .select:focus {
+  border-color: var(--tb-azure-500);
+  box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 0 3px var(--tb-azure-100), 0 2px 12px hsl(200 100% 54% / .16);
+}
+.profile-panel .input:hover:not(:disabled), .profile-panel .select:hover:not(:disabled) { border-color: var(--tb-azure-400); }
+.cost-custom input:focus, .cost-price input:focus {
+  outline: none; border-color: var(--tb-azure-500);
+  box-shadow: 0 0 0 1px var(--tb-azure-400), 0 0 0 3px var(--tb-azure-100);
+}
+.cost-custom input:hover:not(:disabled), .cost-price input:hover:not(:disabled) { border-color: var(--tb-azure-400); }
+
+/* ===================================================================================
+   群聊画像页顶部筛选条（2026-09-24 点名「选择群聊 / 快速定位」这一块）
+   原先整条写死行内样式（灰底、灰边框、白底下拉），全局输入框的悬停/聚焦/错误边框
+   在它身上统统不生效。现在结构改用全局类（card / select / input），这里只补布局与
+   字号微调 —— 边框、底色、聚焦色一律交给上面的全局输入框规则，不在这里写死颜色。
+   =================================================================================== */
+.pg-filter { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.pg-filter-label { white-space: nowrap; }
+/* 2026-09-30：「（下拉框）感觉宽度太小了」「按钮样式统一，不用宽度统一，适中就行」，
+   随后又要求「下拉框的所有下拉面板宽度加宽」
+   下表三处宽度再放宽一档：下限 170 → 240，上限 280 → 380（浮层宽度 = 控件宽度，垫宽控件
+   就是加宽浮层）。仍保留上限、仍 width:auto 按内容自适应，不做成无脑全宽。
+   只改宽度/上限，字号、内边距、配色一律不动 —— 全局输入框规则不受影响。 */
+.pg-filter-select { width: auto; min-width: 240px; max-width: 380px; font-size: 12.5px; }
+.pg-filter-loc { width: auto; min-width: 240px; max-width: 380px; font-size: 12.5px; }
+.pg-filter-days { width: 66px; }
+.pg-filter-refresh { margin-left: auto; }
+
+/* 2026-09-24 已移除 .cfg-pending-gate（BridgeConfig 不再用 <fieldset disabled> 把四个页签整体置灰：
+   配置未读到时页面照常可点，由 save() 拒绝写盘）。样式留着会让下一个人以为还有这道闸，故删掉。 */
+
+
+/* ===================================================================================
+   下拉框（select）的下拉列表：统一为系统素色（2026-09-30 第二次要求：
+   「下拉框的所有下拉面板宽度加宽，并别带颜色」）
+   -----------------------------------------------------------------------------------
+   上一轮给选项浮层配了主题色（常态浅灰、选中粉底白字、湛蓝面板青蓝底），看过之后
+   明确不要颜色 —— 现在这套配色整段撤掉，只留两件真正有用的事：
+     1. `color-scheme: light`：保留。这不是颜色，是"按浅色主题渲染"的开关 ——
+        系统处于深色模式时，没有它原生浮层会变成黑底白字，那才是最大的"带颜色"。
+     2. 常态 / 选中 / 悬停 / 禁用 / 湛蓝面板：一律白底 + 系统默认字色，让浮层回到
+        操作系统自己的样子（选中高亮由系统绘制，我们不去染它）。
+   宽度：原生浮层的宽度等于控件自身的宽度，CSS 改不了浮层单独变宽 ——
+   想加宽只能把控件本身加宽，所以宽度统一放在 global.css 的 `select` 基样式里
+   （`min-width: min(200px, 100%)`，永远不会超过父容器），加上本文件里几个
+   写死了上限的筛选框（见下方 .pg-filter-select）。不写死字号与内边距。
+   =================================================================================== */
+
+select { color-scheme: light; }
+
+/* —— 选项一律素色：白底 + 系统字色（选中高亮交给系统绘制，不染色）—— */
+select option,
+select optgroup {
+  background: #fff;
+  color: inherit;
+}
+
+/* ===================================================================================
+   「群聊活跃时段」：列表里的对象名（2026-09-30：长群名把按钮撑破）
+   名称原本是 .btn 内的裸文本，而 .btn 是 inline-flex + white-space:nowrap，
+   长群名会把按钮撑出卡片并挤走同行其它项。这里给名称一个可压缩、可省略的容器：
+   flex 允许收缩 + min-width:0 才能真正触发省略号（flex 项默认 min-width:auto 不收缩）。
+   规则与组件里的行内兜底样式一致，两处都在也不冲突。
+   =================================================================================== */
+.act-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+
+/* ===================================================================================
+   下拉浮层里那条「小条条」（滚动条）：实情说明 + 能做的部分
+   （2026-09-30：「下拉框底下的小条条没改统一，而且感觉宽度太小了」）
+   -----------------------------------------------------------------------------------
+   结论（照实说，不假装改到了）：
+     · `<select>` 的选项浮层是浏览器/操作系统自己绘制的 popup widget，不在本页面的
+       DOM 树与 CSS 盒模型里，因此层内那条滚动条改不到 ——
+       `::-webkit-scrollbar*` 与 `scrollbar-width` / `scrollbar-color` 都够不到它。
+       依据：Chrome 的原生下拉浮层由 Blink 的弹出窗口单独绘制，页面样式只对 `<option>`
+       的 `background` / `color` / `font` 等有限属性生效（这正是上一轮那套 option 配色的
+       适用边界，见上方「下拉框（select）的下拉列表：主题统一」一段），滚动条不在其中。
+     · 本轮真正改了的是页面内所有真实滚动区（页面主区、各栏内滚、日志框、弹层正文、
+       textarea、JSON 编辑器……统一见 global.css 的「滚动条：全站统一」一段）：
+       6px → 10px、方角 → 胶囊圆角、系统灰 → 主题粉（悬停加深一档）、轨道透明。
+     · 若实际看到的那条「小条条」确实是下拉浮层内部那条，那么CSS 无法统一它；
+       要统一只有两条路：改用自定义下拉组件（非原生 select），或保持现状。此处不擅自改结构。
+   下面这个 `select::-webkit-scrollbar*` 是本页能做的部分：对 `<select size="N">` 这类
+   列表式下拉（滚动条画在控件盒内）确实生效；对普通弹出式下拉无害，写上不亏。 */
+select::-webkit-scrollbar { width: 10px; height: 10px; }
+select::-webkit-scrollbar-track { background: transparent; border-radius: 999px; }
+select::-webkit-scrollbar-thumb { background: var(--nc-primary-200); border-radius: 999px; }
+select::-webkit-scrollbar-thumb:hover { background: var(--nc-primary-400); }
+select::-webkit-scrollbar-corner { background: transparent; }
+
+/* ===================================================================================
+   按钮宽度：只统一「样式」，不统一「宽度」
+   （2026-09-30：「我只是说按钮样式统一不用宽度统一，适中就行」）
+   -----------------------------------------------------------------------------------
+   核查结果（本轮全仓 grep，见交付报告）：样式表里没有任何给 .btn 各变体写死宽度的规则，
+   唯一的宽度是 global.css 的 `.btn-block { width: 100% }`（"撑满一行"是它的语义，保留）。
+   故这里只补一条兜底纪律：除 .btn-block 外，按钮一律按内容自适应（宽度不写死、不设上限），
+   内边距沿用 global.css 的 `.btn { padding: 10px 18px }`（.btn-sm 6px 12px）——已是"适中"。
+   刻意不写 `min-width: 0`：按钮作为 flex 项时默认 `min-width: auto` 才不会被压到比文字还窄，
+   写上反而会让长文案的按钮在小屏下被挤扁，与"适中就行"相反。
+   写成一条显式规则是为了挡住后来者再给 .btn 加 width/min-width；它对行内样式无效
+   （行内优先级更高），因此不会也不需要去"抢"某个页面的局部写法。 */
+.btn:not(.btn-block) { width: auto; max-width: none; }
+
+/* ===================================================================================
+   2026-09-30：两点：
+   1) 「像这些卡片的输入框，圆角值改低一些」→ 先降到 6px；随后又要求
+      「圆角改成按钮一样」→ 现在输入类控件统一用 `var(--nc-radius-m)`，
+      与 `.btn` 同一个变量（12px）。以后只改这一个变量，按钮和输入框永远同步。
+   2) 「请作者喝奶茶的按钮，悬停的边框改为黄色高亮，不是红色」→ 该按钮带行内
+      `border: 1px solid #fcd34d`，行内优先级更高，所以边框色必须 `!important` 才盖得住；
+      底色与发光也一并换成暖黄，避免露出 .btn:hover 那套粉色外发光。
+   =================================================================================== */
+.input, .select, .textarea { border-radius: var(--nc-radius-m); }   /* = .btn 的圆角 */
+
+.btn-tip:hover:not(:disabled) {
+  background: #fde68a;
+  border-color: #f59e0b !important;
+  color: #92400e;
+  box-shadow: 0 0 0 1px #f59e0b, 0 2px 10px hsl(38 92% 50% / .35);
+}
+.btn-tip:focus-visible { outline: 2px solid #f59e0b; outline-offset: 2px; }
+
+/* ===================================================================================
+   群号输入行：「群号，如 123456789」输入框 + 「添加群」按钮
+   -----------------------------------------------------------------------------------
+   - 输入框固定 196×38：刚好容得下占位符（13.5px 下约 140px + 左右内边距）。
+   - 按钮 2026-09-24 起改为紧凑尺寸：此前与输入框等宽等高（196×38），按钮上只有三个字，
+     显得空且抢视线。配色 / 圆角 / 阴影全部沿用全局 .btn / .btn-primary，本段只覆盖尺寸，
+     因此它与「添加服务器」等既有按钮是同一套样式。
+   =================================================================================== */
+.grp-add-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 6px; flex-wrap: wrap;
+}
+.grp-add-row .input {
+  width: 196px;
+  height: 38px;
+  min-height: 38px;
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: 13.5px;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+.grp-add-row .btn {
+  width: auto;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+/* ===================================================================================
+   下拉框宽度：只放宽「明显过窄」的上限，不做全宽
+   （2026-09-30：「感觉宽度太小了」）
+   -----------------------------------------------------------------------------------
+   本文件里对下拉框设过宽度上限的只有 .pg-filter-select（见上方，180 → 280）。
+   其余 <select> 均走全局 `.input` / `.select` 的 `width: 100%`，本就随栅格自适应，无需改。
+   「不在本次可写范围内的两处」src/pages/BridgeConfig.tsx 第 2544 行 `maxWidth: 190`
+   与第 2931 行 `maxWidth: 260` 是行内样式写的下拉上限，该文件本次禁止修改，故未动。 */
+
+
+/* ===================================================================================
+   自定义下拉组件（src/components/Dropdown.tsx）：全站 `<select>` 的替代品
+   （2026-09-30 定稿「全站所有下拉都换成自定义下拉」，原因见上方两段：
+     原生 `<select>` 的选项浮层宽度 = 控件宽度、CSS 改不到，要加宽只能自己画面板）
+   -----------------------------------------------------------------------------------
+   本段只补两件事（不新增任何主题色，不动既有 select 规则）：
+     1. `.mb-dd`：让 `<button>` 长成 `<select>` 的盒子。只写既有规则没写过的属性
+        （display / text-align / cursor / font-family），刻意不写 font-size、padding、
+        background、border —— 那些一律由调用方传进来的 class（`.select` / `.input` /
+        `.pg-filter-select` …）负责。写在这里反而会因为"同特异性靠后者胜"把
+        `.pg-filter-select { font-size: 12.5px }` 顶掉。
+        唯一的例外是 `font-family: inherit`：`<button>` 的 UA 样式自带
+        `font: 400 13.33px Arial`，不写的话按钮里会出现 Arial。
+     2. `.mb-dd-panel` 系列：弹出面板一律中性色（白底 / 灰边 / 轻阴影 /
+        极浅中性灰高亮），不出现粉色、湛蓝等任何主题色。面板挂在 body 上（portal），
+        所以这些类不会被 `.cute-ui` / `.profile-panel` 的配色波及。
+   面板里的滚动条不在这里配颜色（要求「滚动条复用全局已有规则」）——
+   它继承 global.css 的 `html { scrollbar-color: var(--nc-primary-200) transparent }`。
+   =================================================================================== */
+.mb-dd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* 2026-09-30 「长度固定别随着字数乱动」+「其他的横向要显示全字」
+   * 宽度不再写死、也不随选中值字数变：由组件实测「最长一项」后内联给出，
+   * 所以只要选项列表不变，宽度就固定，且每项都能整行显示；
+   * 选项特别长的（页面显式传了 style.width 的筛选栏）以页面为准。
+   * 这里只兜底：没量到宽度时按内容排，且绝不越出所在列。 */
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  align-self: flex-start;
+}
+.mb-dd:disabled { cursor: not-allowed; }
+.mb-dd-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.mb-dd-caret { flex: 0 0 auto; opacity: .55; }
+
+.mb-dd-panel {
+  position: fixed;
+  z-index: 300;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .1);
+  color: #1f1f1f;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+.mb-dd-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 2026-09-30「别带颜色」面板里这根滚动条原来会继承 global.css 的
+ * `html { scrollbar-color: var(--nc-primary-200) }` —— 面板本体是中性色，条却是主题粉。
+ * 这里单独覆盖成中性灰（与面板同语言），不留任何主题色。 */
+.mb-dd-list {
+  scrollbar-width: thin;
+  scrollbar-color: #cfcfcf transparent;
+}
+.mb-dd-list::-webkit-scrollbar { width: 10px; height: 10px; }
+.mb-dd-list::-webkit-scrollbar-track { background: transparent; }
+.mb-dd-list::-webkit-scrollbar-thumb { background: #cfcfcf; border-radius: 999px; }
+.mb-dd-list::-webkit-scrollbar-thumb:hover { background: #b5b5b5; }
+.mb-dd-list::-webkit-scrollbar-corner { background: transparent; }
+.mb-dd-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #1f1f1f;
+}
+/* 悬停高亮 / 选中：同一个极浅中性灰，选中再加粗 + 对勾 —— 不带任何主题色 */
+.mb-dd-item.is-active { background: #f5f5f5; }
+.mb-dd-item.is-selected { background: #f5f5f5; font-weight: 600; }
+.mb-dd-item.is-disabled { color: #bdbdbd; cursor: not-allowed; }
+.mb-dd-item.is-disabled.is-active { background: transparent; }
+.mb-dd-check {
+  flex: 0 0 18px;
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b6b6b;
+}
+.mb-dd-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 隐藏测量盒：与面板同字体，逐项量文字宽度（不是估算） */
+.mb-dd-measure {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.mb-dd-measure > span { white-space: nowrap; }
+
+/* ===== 2026-09-24 变更要求：说明文字也要可爱字体 ===========================================
+ * 场景：管理端里几段「说明」含 `<code>` 片段（预置地址说明里的 `{地址}/chat/completions`、
+ * 工具压缩代理卡里的 `napcat_get_tool_schema` 等）。全站有一条
+ *     body code, body pre, … { font-family: 'JetBrains Mono', monospace !important; }
+ * 所以这些片段是等宽的，整段看起来"一半可爱一半代码"。按要求"字体都用可爱字体"，
+ * 于是在这些说明块上挂 `.cute-note`，连子元素（含 code）一起压回可爱圆体。
+ * 注意：只作用于挂了类的说明块，JSON 编辑器 / 日志 / 代码块照旧等宽，可读性不受影响。 */
+.cute-note,
+.cute-note *,
+.cute-note code {
+  font-family: 'AaCute', 'AaCute-full', sans-serif !important;
+  letter-spacing: 0.015em;
+}
+
+/* ===== 2026-09-24 变更要求：把界面滚轮（滚动条）全隐藏 ======================================
+ * 目标：整个界面都不再画滚动条，但滚动本身照常——滚轮、触摸板、键盘方向键、
+ * 以及容器上的拖动依旧能用，只是看不见滑槽与滑块（界面更干净）。
+ * 为什么标准属性与 webkit 伪元素要成对写：Chrome 121+ 起，元素自身一旦带 `scrollbar-width`，
+ * 就会改用标准属性并忽略 `::-webkit-scrollbar-*`；而 `html` / `body` 各有自己的继承来源
+ * （global.css 的 `html { scrollbar-width: thin }`），所以三处都写才盖得住。
+ * 为什么放在文件末尾：前面 `select::-webkit-scrollbar` 与本规则同为 (0,0,1) 特异性，
+ * 只能靠"后写的赢"来压过它（`!important` 也一并写上，双保险）。 */
+html,
+body,
+body * {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none; }
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-corner { display: none !important; background: transparent; }
+
+/* ===================================================================================
+   聊天记录页（src/pages/ChatHistory.tsx）
+   -----------------------------------------------------------------------------------
+   2026-09-24 主人要求：三张卡改成「粉 / 浅黄 / 浅蓝」并加一层流动渐变光效。
+     · 配色：.c-pink（今日发送）/ .c-yellow（总发送）/ .c-blue（平均 token）三个变体，
+       底渐变、描边、外发光、文字色各自成套，保证浅底上仍是深字（对比度不降）。
+     · 光效：每张卡两层半透明覆盖层 —— ::before 是缓慢横向流动的渐变（background-position 跑
+       300%，9 秒一轮），::after 是斜向扫过的高光（6.5 秒一轮，扫完停一会儿再扫）。
+       两层都在 padding-box 之内、数字文字 z-index 抬到 1，读数字不受影响。
+     · 不用滤镜/backdrop-filter 做流动（会在低端机上掉帧），只动 background-position 与 transform。
+     · prefers-reduced-motion 下两层光效静止（见文件末尾同名媒体查询）。
+   四个类名（.chat-stat-row / .chat-stat-card / .k / .v）由页面直接使用，尺寸只写到
+    不破坏换行的程度：卡片 flex:1 1 180px，窄屏自动折行。
+    其余 .chat-* 只做布局与中性格，不引入任何新主题色。 */
+.chat-stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.chat-stat-card {
+  position: relative;
+  overflow: hidden;
+  flex: 1 1 180px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 14px 16px;
+  isolation: isolate;
+}
+/* 流动渐变的底光：跑 background-position，比动 filter 便宜得多 */
+.chat-stat-card::before {
+  content: '';
+  position: absolute; inset: 0; z-index: 0;
+  background-size: 300% 100%;
+  background-position: 0% 50%;
+  animation: chat-card-flow 9s linear infinite;
+}
+/* 斜向扫过的高光带 */
+.chat-stat-card::after {
+  content: '';
+  position: absolute; top: -60%; left: 0; width: 38%; height: 220%;
+  z-index: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, .85), transparent);
+  transform: translateX(-120%) rotate(8deg);
+  animation: chat-card-sheen 6.5s cubic-bezier(.4, 0, .3, 1) infinite;
+}
+.chat-stat-card > * { position: relative; z-index: 1; }
+@keyframes chat-card-flow { from { background-position: 0% 50%; } to { background-position: 300% 50%; } }
+@keyframes chat-card-sheen {
+  0% { transform: translateX(-120%) rotate(8deg); opacity: 0; }
+  8% { opacity: .95; }
+  46% { transform: translateX(360%) rotate(8deg); opacity: 0; }
+  100% { transform: translateX(360%) rotate(8deg); opacity: 0; }
+}
+/* —— ① 粉色（今日发送）—— */
+.chat-stat-card.c-pink { border-color: #ffc6da; box-shadow: 0 8px 20px -12px rgba(255, 105, 160, .75); }
+.chat-stat-card.c-pink::before { background-image: linear-gradient(120deg, #fff2f7, #ffd9e8, #ffeaf3, #ffcfe1, #fff2f7); }
+.chat-stat-card.c-pink .k { color: #8e2a55; }
+.chat-stat-card.c-pink .v { color: #b81a5e; }
+.chat-stat-card.c-pink .k-sub { color: #a4466c; }
+/* —— ② 浅黄（总发送）—— */
+.chat-stat-card.c-yellow { border-color: #ffe08a; box-shadow: 0 8px 20px -12px rgba(235, 180, 40, .8); }
+.chat-stat-card.c-yellow::before { background-image: linear-gradient(120deg, #fffceb, #fff1c4, #fff9e2, #ffeaa8, #fffceb); }
+.chat-stat-card.c-yellow .k { color: #855a06; }
+.chat-stat-card.c-yellow .v { color: #9c6200; }
+.chat-stat-card.c-yellow .k-sub { color: #986d1c; }
+/* —— ③ 浅蓝（平均 token）—— */
+.chat-stat-card.c-blue { border-color: #a9cdf5; box-shadow: 0 8px 20px -12px rgba(70, 145, 230, .75); }
+.chat-stat-card.c-blue::before { background-image: linear-gradient(120deg, #f0f7ff, #d8ebff, #eaf4ff, #cde5ff, #f0f7ff); }
+.chat-stat-card.c-blue .k { color: #1d4e8a; }
+.chat-stat-card.c-blue .v { color: #14509b; }
+.chat-stat-card.c-blue .k-sub { color: #3a6491; }
+.chat-stat-card .k { font-size: 12.5px; color: #2f6b45; }
+.chat-stat-card .v { font-size: 26px; font-weight: 800; color: #1f5133; margin-top: 2px; }
+/* 数字下面的口径小字（2026-09-24 加）：写明窗口、算的是哪一部分、分母是多少，
+   让"卡片的数"能和左边会话列表的"条 / 发 / 收"直接对上。 */
+.chat-stat-card .k-sub { font-size: 11px; opacity: .95; line-height: 1.55; margin-top: 6px; }
+.chat-stat-note { font-size: 11.5px; color: var(--nc-foreground-500); line-height: 1.7; margin: 0 0 14px; }
+.chat-stat-note code { font-size: 11px; }
+
+/* 会话栏 + 消息栏：宽屏左右并排，窄屏上下堆叠（消息表格在窄屏并排会挤到不可读） */
+.chat-main { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 980px) { .chat-main { grid-template-columns: 1fr; } }
+
+.chat-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.chat-sep { width: 1px; height: 18px; background: var(--nc-border); margin: 0 2px; }
+.chat-batch-count { font-size: 12px; color: var(--nc-foreground-500); }
+.chat-days { text-align: center; }
+
+.chat-conv-list { max-height: 62vh; overflow-y: auto; margin-top: 4px; }
+.chat-conv-row {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 10px; border-radius: 10px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.chat-conv-row:hover { background: hsl(339.13 92% 98%); }
+.chat-conv-row.active { background: hsl(339.13 92% 96.5%); border-color: var(--nc-primary-300); }
+.chat-conv-name { font-size: 13.5px; font-weight: 700; color: var(--nc-foreground-800); }
+.chat-conv-meta { font-size: 11.5px; color: var(--nc-foreground-500); }
+.chat-conv-last { font-size: 12px; color: var(--nc-foreground-600); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.chat-msg-list { max-height: 58vh; overflow-y: auto; border-top: 1px solid var(--nc-border); }
+.chat-msg-row {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 4px; border-bottom: 1px solid var(--nc-border);
+}
+.chat-msg-time { font-size: 11.5px; color: var(--nc-foreground-500); white-space: nowrap; }
+.chat-msg-sender { font-size: 12.5px; font-weight: 700; color: var(--nc-foreground-800); white-space: nowrap; }
+.chat-msg-content { font-size: 13px; color: var(--nc-foreground-800); white-space: pre-wrap; word-break: break-word; flex: 1 1 auto; min-width: 0; }
+.chat-msg-recalled { font-size: 11.5px; color: var(--nc-foreground-400); }
+
+.chat-pager { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--nc-foreground-500); }
+.chat-pager-btns { margin-left: auto; display: inline-flex; gap: 8px; }
+.chat-err { font-size: 12.5px; color: var(--nc-danger-600); line-height: 1.6; margin-bottom: 8px; }
+.chat-empty { font-size: 12.5px; color: var(--nc-foreground-500); padding: 10px 2px; }
+/* 实时推流小标（替换掉原先的手动「刷新」按钮）：只说明数据怎么来的，不是一个可点控件。 */
+.chat-live {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; padding: 4px 9px; border-radius: 999px;
+  color: #16624a; background: #e8f8f1; border: 1px solid #b6e6d4;
+}
+.chat-live.is-poll { color: #8a5a06; background: #fff8e6; border-color: #ffe08a; }
+
+/* 2026-09-24 主人要求：动效总开关 —— 上面这些流动渐变/高光/进场动画一律静止。
+   清零的是动画本身，不动配色与布局（关掉动效后卡片仍是粉/黄/蓝）。 */
+@media (prefers-reduced-motion: reduce) {
+  .chat-stat-card::before,
+  .chat-stat-card::after { animation: none !important; }
+  .chat-stat-card::after { opacity: 0; }
+}
 

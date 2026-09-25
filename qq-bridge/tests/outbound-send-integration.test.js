@@ -1,7 +1,7 @@
-// 出站正文形态：**端到端**回归（真起 console-server + 假 OneBot 端点收消息）
-// 【2026-09-20 主人实测】
+// 出站正文形态：端到端回归（真起 console-server + 假 OneBot 端点收消息）
+// 2026-09-20 实测：
 //   · 正文不许是"被序列化的工具参数数组"：能还原就还原成多条气泡，还原不了就 400 硬失败；
-//   · 正文里的显式换行**只写在提示词里**，桥不做正则清洗（主人 2026-09-20 定稿）→ 换行原样透传。
+//   · 正文里的显式换行只写在提示词里，桥不做正则清洗（2026-09-20 约定）→ 换行原样透传。
 // 单元判据在 tests/outbound-format.test.js；这里跑的是"真发一次，看 OneBot 到底收到什么"。
 // 跑法：node tests/outbound-send-integration.test.js
 import assert from 'node:assert/strict';
@@ -161,7 +161,7 @@ await t('E2E5 单条气泡里嵌了数组（不是整条）→ 由 onebotSend �
 await t('E2E6 key 有、messages 空了（模型漏引号被丢弃）→ 400 且回执写明"用双引号"', async () => {
   received.length = 0;
   // 现场（state/tool-calls.jsonl 12:42:32/34）：
-  //   {"key":"private:1","messages": 主人这么直接啊 我脸都热了, "token":"1"}   ← 不是合法 JSON
+  //   {"key":"private:1","messages": 一段没加引号的正文, "token":"1"}   ← 不是合法 JSON
   // DSH 的宽松解析把 messages 整个丢掉，模型只看到"至少一个不能为空" → 原样重试两次白烧两步。
   const r = await post({ key: KEY, token: TOKEN });
   assert.equal(r.status, 400, `期望 400，实到 ${r.status} ${JSON.stringify(r.json)}`);

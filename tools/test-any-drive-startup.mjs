@@ -1,14 +1,14 @@
-/* 回归测试：【装到任意盘都能起来】（主人 2026-09-12 原话："要确保这个应用安装在哪个盘都可以找到，
- * 这样拿给别人安装才可以整成使用"）。
+/* 回归测试：【装到任意盘都能起来】（2026-09-12 的需求：要确保这个应用安装在哪个盘都可以找到，
+ * 这样拿给别人安装才可以整成使用）。
  *
- * 这个测试不复述代码逻辑，而是**真的**在另一个盘上造一棵安装树、用一个错的 cwd 拉起后端，
+ * 这个测试不复述代码逻辑，而是真的在另一个盘上造一棵安装树、用一个错的 cwd 拉起后端，
  * 再看它自己找到的是不是那棵树里的目录：
  *   ① 安装树：<别的盘>:\mb-anydrive-test\resources\runtime\{server,dist,qq-bridge,node_modules}
- *   ② 启动方式：`node <runtime>/server/index.js`，但 **cwd = C:\Windows\System32**
+ *   ② 启动方式：`node <runtime>/server/index.js`，但 cwd = C:\Windows\System32
  *      （等价于用户从资源管理器双击 qbm-node.exe / 旧快捷方式 / 计划任务拉起 —— 旧代码在这里会把
  *        dsh / qq-bridge / dist / 隔离 home 全部解析到 System32 下面，管理端页面 404）
- *   ③ 断言：/api/bridge/config 的 dir 落在**测试树**里、/api/state 能起来、dist/index.html 能取到
- *   ④ 隔离：给子进程一个临时 USERPROFILE，绝不让它读到/写到主人真正的 ~/.qq-bridge-manager/config.json
+ *   ③ 断言：/api/bridge/config 的 dir 落在测试树里、/api/state 能起来、dist/index.html 能取到
+ *   ④ 隔离：给子进程一个临时 USERPROFILE，绝不让它读到/写到用户真正的 ~/.qq-bridge-manager/config.json
  *
  * 用法：node tools/test-any-drive-startup.mjs        （可选环境变量 MB_TEST_DRIVE=E:）
  */

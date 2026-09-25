@@ -77,7 +77,7 @@ node scripts/setup-dsh.mjs
 
 This installs:
 
-- `~/.dsh/.agent-presets/qq-chat` and `~/.dsh/.agent-presets/default`
+- `~/.dsh/.agent-presets/qq-chat`
 - MCP entries in `~/.dsh/profiles/web/cordis.patch.yml`
 - `qq-mode-console` in the profile `package.json`
 - Default DSH mode set to `default` (second-generation simulation), with a local `state/mode.json` fallback
@@ -99,7 +99,7 @@ qq-bridge/
   config.example.json   # sanitized config template (real config.json is not in repo)
   docs/
     PROJECT_GUIDE.md    # detailed Chinese guide
-  dsh/agent-presets/    # qq-chat / default DSH agent preset templates
+  dsh/agent-presets/    # qq-chat DSH agent preset template
   plugins/qq-mode-console  # DSH settings qq-mode card plugin
   src/                  # bridge core and MCP servers
   public/

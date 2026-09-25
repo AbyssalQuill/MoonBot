@@ -1,13 +1,13 @@
 /* 回归测试：【应用关闭 → NapCat 也关闭】的守卫进程行为
- *   （主人 2026-09-13 要求："应用进程关闭时，NapCat 进程也要关闭"）
+ *   （2026-09-13：应用进程关闭时，NapCat 进程也要关闭）
  *
- * 这个测试**不碰真的 NapCat**：给守卫传一个临时目录当"托管目录"，所以它的 PowerShell 过滤条件
+ * 这个测试不碰真的 NapCat：给守卫传一个临时目录当"托管目录"，所以它的 PowerShell 过滤条件
  * 匹配不到任何进程 —— 我们只验证"它该不该动手、动手时做了哪些事、什么情况下必须不动手"。
  *
  * 覆盖：
  *   ① 父进程还在 → 守卫按兵不动
  *   ② 父进程消失 + guard 文件仍归自己 → 等宽限期后收摊（NapCat → 桥 → DSH 三步都发出去），然后退出
- *   ③ 父进程消失 + guard 文件已归新后端（管理器重启那种）→ **什么都不杀**，静默退出
+ *   ③ 父进程消失 + guard 文件已归新后端（管理器重启那种）→ 什么都不杀，静默退出
  *   ④ 没有 --parent 时不做事
  *
  * 用法：node tools/test-napcat-guardian.mjs
@@ -145,10 +145,10 @@ async function runGuardian({ guardPidMode, parentPid, grace = 1500, waitMs = 900
   check('⑤ 托管目录为空时明确跳过 NapCat 清理（绝不误杀）', /没有托管目录，跳过 NapCat 清理/.test(log), log.split('\n').filter(Boolean).pop() || '');
 }
 
-/* ── ⑥ 关键：守卫要能**活过**壳的 taskkill /T（否则一切白搭）────────────────
+/* ── ⑥ 关键：守卫要能活过壳的 taskkill /T（否则一切白搭）────────────────
  *  壳关窗时执行的是 `taskkill /pid <后端> /T /F` + 一条"按 exe 路径杀 qbm-node"的兜底。
- *  所以这里用一个假后端：让它调用**产品同款**的 spawnGuardianDetached() 把守卫送出去，
- *  再对假后端执行真实的 taskkill /T，然后断言守卫**还活着**（父链脱身 + exe 路径不同名）。 */
+ *  所以这里用一个假后端：让它调用产品同款的 spawnGuardianDetached() 把守卫送出去，
+ *  再对假后端执行真实的 taskkill /T，然后断言守卫还活着（父链脱身 + exe 路径不同名）。 */
 {
   const url = (p) => new URL(`file:///${p.replace(/\\/g, '/')}`).href;
   const { spawnGuardianDetached } = await import(url(path.resolve(here, '..', 'server', 'index.js')));

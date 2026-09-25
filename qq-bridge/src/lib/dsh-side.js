@@ -29,15 +29,14 @@ export function defaultIsolatedDshHome() {
   return path.resolve(REPO_ROOT, '..', '.runtime', 'dsh-isolated-home');
 }
 
-/** 是否属于“桌面端 DSH home”（默认禁止写入）
+/** 是否属于“桌面端 DSH home”（Windows 上默认禁止写入）
  *
- * 【2026-09-15 修「服务器上改了 preset 却永远不生效」】原来在**任何**平台上都把 `~/.dsh` 当作桌面端
- * home 拒绝写入。Windows 上这是对的（桌面端 GUI 和隔离实例是两个 home，不能乱写桌面那份）；
- * 但 Linux 服务器上 DSH 的 home **就是** `/root/.dsh`（systemd 起 dsh-web、没有桌面端），于是
- * `resolveDshTarget()` 判定"refusedDesktop"直接 return —— 桥每次重启都不再刷新 preset，
- * 实测服务器上 `.agent-presets/default/agent.cordis.yml` 一直停在部署那一刻的旧哈希，
- * 提示词改动（[TOOLS]/唤醒协议/角色卡豁免）**一个字都没进模型**。
- * 现在只在 Windows 上做这层保护；非 Windows 平台 `~/.dsh` 是正常安装目标。 */
+ * 2026-09-15：此前在任何平台都把 `~/.dsh` 当作桌面端 home 并拒绝写入。Windows 上这个判定成立
+ * （桌面端 GUI 与隔离实例是两个 home，不能互相写），但 Linux 服务器上 DSH 的 home 就是 `/root/.dsh`
+ * （systemd 拉起 dsh-web，没有桌面端），于是 `resolveDshTarget()` 直接判定 refusedDesktop 返回 ——
+ * 桥每次重启都不再刷新 preset：服务器上 `.agent-presets/<name>/agent.cordis.yml` 一直停在部署那一刻
+ * 的旧哈希，提示词改动（[TOOLS] / 唤醒协议 / 角色卡豁免）完全没有进入模型。
+ * 现在只在 Windows 上保留这层保护；非 Windows 平台 `~/.dsh` 视为正常安装目标。 */
 export function isDesktopDshHome(dir) {
   if (!dir) return false;
   if (process.platform !== 'win32') return false;
@@ -141,24 +140,24 @@ function yamlQuoteForPath(p) {
   return yamlSingleQuote(p);
 }
 
-/** 拷贝两套 agent preset 到 <home>/.agent-presets/ */
+/** 把仓库里的 agent preset 安装到 <home>/.agent-presets/ */
 export function installPresets(target) {
   if (isDesktopDshHome(target.home)) throw new Error(`refuse: desktop home ${target.home}`);
-  /* 【2026-09-22 修一处会静默失效的名单】原来这里写的是两套 preset 的名字，其中一个在仓库里
-   * 根本没有对应目录（源不存在时只打一行 skip）→ 那套 preset **永远不会被装进隔离 DSH**；
-   * 一旦有人把 `agentPreset` 指向它，`core/dsh-session.js` 建会话时会传一个 home 里不存在的 preset 名。
-   * 现在按仓库真实存在的目录来装：default 必装，另一套若在就一起装（找不到只 skip，不报错）。 */
-  for (const name of ['default', 'qq-chat']) {
+  /* 2026-09-22：安装名单按仓库里真实存在的目录生成。此前名单里有一个仓库中并不存在的 preset
+   * 目录，源缺失时只打一行 skip，导致那套 preset 永远不会被装进隔离 DSH；一旦有人把 `agentPreset`
+   * 指向它，core/dsh-session.js 建会话时就会传一个 home 里不存在的 preset 名。
+   * 2026-09-24 起仓库只保留 qq-chat 一份（原 default 已合并进它）。 */
+  for (const name of ['qq-chat']) {
     const src = path.join(REPO_ROOT, 'dsh', 'agent-presets', name);
     if (!fs.existsSync(src)) { log(`preset source missing, skip: ${src}`); continue; }
     const dest = path.join(target.home, '.agent-presets', name);
     ensureDir(path.dirname(dest));
     fs.cpSync(src, dest, { recursive: true, force: true });
     log(`preset installed: ${name}`);
-    /* 【2026-09-19】拷完立刻把主人的人设/发言规则合成进 default preset 的 [PERSONA] / [SPEECH RULES] 段：
-     * 新会话建起来时就直接从系统提示词里拿到人设，不再只依赖唤醒正文里的运行时覆盖段。
-     * 正在跑的会话（尤其永久会话）仍由唤醒正文覆盖 —— 两条路都留着，见 lib/preset-compose.js。 */
-    if (name === 'default') {
+    /* 2026-09-19：拷贝完成后立即把用户的人设 / 发言规则合成进 preset 的 persona 段，
+     * 使新会话建立时就带着人设，而不只依赖唤醒正文里的运行时覆盖段；
+     * 正在运行的会话（尤其永久会话）仍走唤醒正文 —— 两条路都保留，见 lib/preset-compose.js。 */
+    if (name === 'qq-chat') {
       try {
         const r = syncPresetOverrides({ home: target.home, root: REPO_ROOT, log });
         if (r.ok && r.changed) log('[dsh-side] 人设/发言规则已合成进 preset（新会话即生效）');
@@ -172,15 +171,15 @@ export function installPresets(target) {
 let sideCfg = null;
 export function setDshSideConfig(cfg) { sideCfg = cfg || null; }
 
-/* ── 【2026-09-21】MCP 工具压缩代理（开源 mcp-compressor）────────────────────────────
- * 主人要求"用那套开源 MCP 压缩工具"。它是个**代理**：DSH 不再直连我们的 napcat MCP，
+/* ── 2026-09-21：MCP 工具压缩代理（开源 mcp-compressor）──────────────────────────────
+ * 用那套开源 MCP 压缩工具。它是个代理：DSH 不再直连我们的 napcat MCP，
  * 而是连它，由它把 90 个工具压成 2 个包装工具（`<server>_invoke_tool` / `_get_tool_schema`），
  * 工具清单塞进包装工具的描述里。实测（挂我们真实的 90 个工具跑）：
- *     low 38.8% · medium 14.0% · **high 6.2%** · max 3.6%（相对完整工具表）
- * 代价：模型遇到不熟的工具要先 get_tool_schema 再 invoke_tool = **一步变两步**；
+ *     low 38.8% · medium 14.0% · high 6.2% · max 3.6%（相对完整工具表）
+ * 代价：模型遇到不熟的工具要先 get_tool_schema 再 invoke_tool = 一步变两步；
  *      桥侧靠工具名做的判断必须先解包（见 core/mux.js 的 unwrapCompressedToolName）。
  *
- * ⚠️ 必须有 fallback：压缩机没装 / 起不来时**绝不能**把工具表搞没（那等于机器人失能）。
+ * 必须有 fallback：压缩机没装 / 起不来时绝不能把工具表搞没（那等于机器人失能）。
  *    所以这里只做一次廉价的可用性探测，探不到就直连，并把原因写进日志。
  */
 export const COMPRESSOR_LEVELS = ['low', 'medium', 'high', 'max'];
@@ -191,9 +190,9 @@ export function normalizeCompressorLevel(v) {
 
 let compressorProbe = null;      // { ok, command, version, reason, at }
 /** 找 mcp-compressor 可执行文件（PATH 里有就直接用，否则探常见安装位置），结果缓存 10 分钟。
- *  【2026-09-21 Windows 上实测到的坑】`pip install mcp-compressor` 装出来的是
+ *  2026-09-21 Windows 上实测到的坑：`pip install mcp-compressor` 装出来的是
  *  `%LOCALAPPDATA%\Programs\Python\Python3XX\Scripts\mcp-compressor.exe`，
- *  它在**当前 shell 的 PATH 里**（`where mcp-compressor` 找得到），但 DSH 是管理器拉起的进程、
+ *  它在当前 shell 的 PATH 里（`where mcp-compressor` 找得到），但 DSH 是管理器拉起的进程、
  *  继承的是另一个环境，PATH 不一定带 Python 的 Scripts 目录 —— 于是"明明装了却判成没装"、
  *  静默回退直连。所以这里把 Windows 上几个常见的 Scripts 位置也列成候选（含版本通配）。 */
 export function compressorCandidates() {
@@ -259,8 +258,8 @@ function mcpBlock() {
   };
   // 压缩代理只挂在 napcat 这一路上（工具最多、体积最大）；另两个保持直连。
   const tc = sideCfg?.social?.toolCompressor ?? {};
-  /* 【2026-09-21 主人定稿】压缩代理**默认恒开** —— 只有显式写 `enabled: false` 才关。
-   * 语义从"必须显式打开"改成"除非显式关掉"：老配置里没有这个键 → 自动走代理（这才是主人要的"默认就用它"）。
+  /* 2026-09-21：压缩代理默认恒开 —— 只有显式写 `enabled: false` 才关。
+   * 语义从"必须显式打开"改成"除非显式关掉"：老配置里没有这个键 → 自动走代理（即"默认就用它"）。
    * 仍然保留关闭开关：代理是 Python 进程，出问题时要能一键回到直连。 */
   const wantProxy = tc.enabled !== false;
   const probe = wantProxy ? resolveToolCompressor({ log }) : { ok: false, reason: '未启用' };
@@ -407,11 +406,11 @@ export function ensurePluginBundles(target) {
 }
 
 /* ── 内置长期记忆插件（@meomeo-dev/dsh-memory）────────────────────────────────────────
- * 【2026-09-20 主人要求】"把桌面端 DSH 的记忆插件（remember）集成到项目内置 dsh 里"，
- * 目的是让 QQ 机器人**长久记住主人的要求和教训**（跨会话），而不是只靠每次唤醒的上下文。
+ * 2026-09-20：把桌面端 DSH 的记忆插件（remember）集成到项目内置 dsh 里，
+ * 目的是让 QQ 机器人长久记住用户的要求和教训（跨会话），而不是只靠每次唤醒的上下文。
  *
  * 为什么走"随包 vendored + link"这条路（而不是让目标机 npm install）：
- *   · 装机环境经常没网/没 npm，链式安装会在客户机上失败，而这是**出厂能力**；
+ *   · 装机环境经常没网/没 npm，链式安装会在客户机上失败，而这是出厂能力；
  *   · 与 qq-mode-console / dsh-qq-hold 两个自带插件同一套落点约定，行为可预期；
  *   · 插件只有 peerDependencies（cordis / dsh-tools / dsh-llm / dsh-settings / dsh-system-prompt），
  *     这些由随包 DSH 发行版提供，所以源码直接放进 plugins/ 就能加载，不需要它的 node_modules。
@@ -441,20 +440,20 @@ export function readDefaultModel(home) {
 
 /**
  * 把 memory 段写进 <home>/settings.yaml（幂等：已有 memory 段就整段替换，其余内容一字不动）。
- * `summaryMode: all` 是**故意的**：这个插件只把 global 层逐条注入系统提示词，user/project 层只给计数，
+ * `summaryMode: all` 是故意的：这个插件只把 global 层逐条注入系统提示词，user/project 层只给计数，
  * 而 remember 工具只允许写 user/project 两层 —— 用默认的 global 模式，机器人自己写下的要求/教训
- * **每次都得先 recall 一次模型调用**才看得见。用 all 模式它们一直都在眼前（代价是每步多几百~几千字符，
+ * 每次都得先 recall 一次模型调用才看得见。用 all 模式它们一直都在眼前（代价是每步多几百~几千字符，
  * 见 README 的用量说明；条目写少而精就不明显）。
  *
- * 【2026-09-21 成本实测后改 extractInterval：8 → 40（主人要求"把这类重建减半"）】
- * 拿线上 14 天、5,326 次请求复盘账单发现：**72% 的钱花在"未命中输入"，而其中 42% 来自单次重读 ≥60k token
- * 的请求**（平均一次重读 116,925 token、单次 ¥0.155），成因就是上下文被重建 —— 而这个插件的记忆摘要
- * 写在**系统提示词**里，**每写一条记忆就把整个前缀作废一次**（实测 09-20 一天 132 次 prune + 78 次 summary）。
+ * 2026-09-21：成本实测后改 extractInterval：8 → 40（把这类重建减半）。
+ * 拿线上 14 天、5,326 次请求复盘账单发现：72% 的钱花在"未命中输入"，而其中 42% 来自单次重读 ≥60k token
+ * 的请求（平均一次重读 116,925 token、单次 ¥0.155），成因就是上下文被重建 —— 而这个插件的记忆摘要
+ * 写在系统提示词里，每写一条记忆就把整个前缀作废一次（实测 09-20 一天 132 次 prune + 78 次 summary）。
  * `extractMode: event-counter` + `extractInterval` 决定"攒多少个事件提炼一次"：
  *   8  → 平均每 8 个事件就可能写一条 → 一天十几次前缀作废；
  *   40 → 频率降到 1/5，省下的正是那 42% 里的一大块。
- * 代价是"自动学到的规矩/教训"入库变慢（仍然会学，只是没那么勤）；主人显式说"记住…"时走的是
- * qq_memory_remember / remember 工具，**不受这个间隔影响**。
+ * 代价是"自动学到的规矩/教训"入库变慢（仍然会学，只是没那么勤）；用户显式说"记住…"时走的是
+ * qq_memory_remember / remember 工具，不受这个间隔影响。
  * 要恢复更勤的学习：把 extractInterval 改回小值，或把 autoExtract 设为 false 彻底关掉自动提炼。
  */
 export function ensureMemorySettings(target) {
@@ -487,9 +486,9 @@ export function ensureMemorySettings(target) {
 
 /** 幂等装配内置记忆插件，返回是否装配成功。
  *
- * ⚠️ 这里**必须是真实拷贝**，不能像其它插件那样只做 junction —— 2026-09-20 实测踩到：
+ * 这里必须是真实拷贝，不能像其它插件那样只做 junction —— 2026-09-20 实测踩到：
  *   `Cannot find package '@deepseek-ai/dsh-tools' imported from <repo>/plugins/dsh-memory/lib/src/index.js`
- * 原因：Node 解析裸包名时按**真实路径**向上找 node_modules。用 junction 指回仓库时，真实路径是
+ * 原因：Node 解析裸包名时按真实路径向上找 node_modules。用 junction 指回仓库时，真实路径是
  * `<repo>/qq-bridge/plugins/dsh-memory`，往上只有 `qq-bridge/node_modules`（出厂只带了 schemastery，
  * 因为 qq-mode-console 恰好只用它）；而这个插件 import 了 @deepseek-ai/dsh-tools / dsh-llm / dsh-settings /
  * dsh-system-prompt / dsh-commands —— 仓库里一个都没有，于是整棵插件树加载失败（隔离 DSH 直接起不来）。

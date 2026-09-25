@@ -1,7 +1,7 @@
 // 回归测试：唤醒理由的判定优先级 + /set active|diving 指令解析。
 //
-// 【为什么有这个测试】2026-09-19 主人报："群里 @ 我，我没回。"
-// 根因是 evaluateWakeTrigger 把 `triggers.anyMessage` 的判断**排在 @ 前面** —— 群里一旦转成
+// 为什么有这个测试：2026-09-19 报障："群里 @ 我，我没回。"
+// 根因是 evaluateWakeTrigger 把 `triggers.anyMessage` 的判断排在 @ 前面 —— 群里一旦转成
 // "全活跃"（anyMessage=true），"@ 机器人"也被标成 anyMessage；而 scheduleWake 的免打扰时段只放行
 // 真实触发（@/提问/点名/拍一拍/私聊），anyMessage 在拦截名单里 → 被 @ 也被跳过。
 // 现在 @ 永远优先标成 atMention。
@@ -95,7 +95,7 @@ check('/set diving（不带时段）= 全天潜水', () => {
   assert.deepEqual(parseSetModeCommand('/set diving'), { mode: 'diving', range: null });
 });
 check('【2026-09-23 已删除】/set mode active / /set mode diving 不再识别', () => {
-  // 主人要求去掉这套老写法：它与 /set active、/set diving 完全等价，只多打了 "mode"。
+  // 需求：去掉这套老写法。它与 /set active、/set diving 完全等价，只多打了 "mode"。
   // 现在应当落到"不匹配 → null"，由上层当普通文本放给模型。
   assert.equal(parseSetModeCommand('/set mode active'), null);
   assert.equal(parseSetModeCommand('/set mode diving'), null);

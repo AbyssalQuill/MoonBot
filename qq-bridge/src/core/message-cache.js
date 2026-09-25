@@ -195,7 +195,7 @@ export async function expandIncomingForwardPreview(key, segments, originalText) 
     }
   }
   if (!appendedAny) return out;
-  const expanded = `【对方转发了一段聊天记录】\n${parts.join('\n\n')}`;
+  const expanded = `[对方转发了一段聊天记录]\n${parts.join('\n\n')}`;
   // 把原文本里的占位符替换成展开内容；没有占位符（如纯转发无文字）则直接作为消息文本
   let replaced = false;
   for (const fid of ids) {

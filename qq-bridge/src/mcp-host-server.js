@@ -153,8 +153,12 @@ server.tool(
   },
   async ({ sinceMs, untilMs, limit, convKeys, targetUid }) => {
     try {
-      const dbFile = path.join(ROOT, 'state', 'memory.db');
-      if (!fs.existsSync(dbFile)) return { content: [{ type: 'text', text: `读取失败：找不到聊天库 ${dbFile}` }], isError: true };
+      // 2026-09-24：聊天记录已搬到独立库 state/chat.db（见 core/chat-db.js）。
+      // 老安装（新版桥还没跑过一次、迁移尚未发生）退回 memory.db —— 两个都不在才算失败。
+      const chatFile = path.join(ROOT, 'state', 'chat.db');
+      const legacyFile = path.join(ROOT, 'state', 'memory.db');
+      const dbFile = fs.existsSync(chatFile) ? chatFile : legacyFile;
+      if (!fs.existsSync(dbFile)) return { content: [{ type: 'text', text: `读取失败：找不到聊天库 ${chatFile}` }], isError: true };
       const from = Number.isFinite(Number(sinceMs)) ? Math.max(0, Number(sinceMs)) : Date.now() - 24 * 3600 * 1000;
       const to = Number.isFinite(Number(untilMs)) ? Number(untilMs) : Date.now();
       const cap = Math.max(1, Math.min(800, Number(limit) || 400));
@@ -222,7 +226,7 @@ server.tool(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          // 端点认的是**学习令牌**（不是会话令牌）；控制台另开鉴权时才需要 x-console-token
+          // 端点认的是学习令牌（不是会话令牌）；控制台另开鉴权时才需要 x-console-token
           'x-agent-token': String(token ?? '').trim(),
           ...(consoleToken ? { 'x-console-token': consoleToken } : {})
         },
@@ -277,8 +281,8 @@ if (getHostConfig().allowProcessControl) {
         return { content: [{ type: 'text', text: JSON.stringify({ started: false, alreadyOnline: true, info: before }) }] };
       }
       let spawnError = null;
-      /* 【2026-09-13 主人要求："不要带任何 cmd 黑窗"】原来这里是 `start "" "launcher.bat"` ——
-       * `start` 默认会给 launcher **新开一个黑色控制台窗口**。管理器自己起 NapCat 走的是
+      /* 2026-09-13：不要带任何 cmd 黑窗。原来这里是 `start "" "launcher.bat"` ——
+       * `start` 默认会给 launcher 新开一个黑色控制台窗口。管理器自己起 NapCat 走的是
        * 一键脚本的 wscript（GUI 宿主，不弹窗），这里也保持一致：
        *   ① 先 `start /b`（在当前无窗口的控制台里跑，完全不弹窗）；
        *   ② 若 20 秒还没等到网关上线，再用普通 `start` 重试一次（给它一个独立窗口，最不容易失败）。

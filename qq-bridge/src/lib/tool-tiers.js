@@ -2,34 +2,34 @@
 //
 // ── 为什么这是全项目最贵的一处 ────────────────────────────────────────────────────
 // 实测（tools/tool-schema-meter.mjs）：工具 JSON schema 合计约 8.0 万字符 ≈ 2.4 万 token/步，
-// 而一次请求的 system 只有约 5.4 万字符 —— **工具描述本身就是请求体里最大的一块，而且每一步都重发一遍**。
-// 结论很硬：**少注册一个用不到的工具，比把提示词写短几个字重要两个数量级**。
+// 而一次请求的 system 只有约 5.4 万字符 —— 工具描述本身就是请求体里最大的一块，而且每一步都重发一遍。
+// 结论很硬：少注册一个用不到的工具，比把提示词写短几个字重要两个数量级。
 //
 // ── 「档位」怎么定的（2026-09-21 改成"实测用出来的"，不是凭感觉挑）────────────────────
-// 第一版名单是按"看起来用不到"挑的，上线前拿服务器上**真实调用日志**（state/tool-calls.jsonl，
-// 1,108 次调用）对了一遍，发现它会砍掉机器人**天天在用**的东西：
+// 第一版名单是按"看起来用不到"挑的，上线前拿服务器上真实调用日志（state/tool-calls.jsonl，
+// 1,108 次调用）对了一遍，发现它会砍掉机器人天天在用的东西：
 //     qq_send_meme 44 次 · qq_send_voice 16 次 · qq_profile_set 16 次 · qq_get_message_images 12 次
 //     qq_get_recent_messages 12 次 · qq_memory_search 8 次 · qq_list_stickers / face_list / poke …
 // 而真正"一次都没被调过、却占着最大体积"的是另一批：pixiv 两个（1.1 万字符）、rich 卡片、
 // 角色卡四件、点歌、定时三条、QQ 空间五条、视频两条、联网找图、群文件…
-// 所以名单按【协议必需 + 实测调用过】重排，**任何被调用过的工具都不会因为切档而消失**：
+// 所以名单按【协议必需 + 实测调用过】重排，任何被调用过的工具都不会因为切档而消失：
 //
 //   off      不裁剪（默认；行为与改动之前完全一致）
 //   low      ≈ 保留一半 —— 只砍掉"实测零调用且体积最大"的那批（pixiv / rich / 角色卡 / 点歌 / 定时 / 空间 / 视频…）
 //   medium   ≈ 三成 —— 日常群聊够用：发/收/引用/表情包/记忆/查资料/主动搭话/看历史图
-//   high     ≈ 一成多 —— 最小闭环 + 实测用到的工具（**不丢任何被调用过的能力**）
+//   high     ≈ 一成多 —— 最小闭环 + 实测用到的工具（不丢任何被调用过的能力）
 //   extreme  ≈ 7% —— 极限档：只留"说话 + 引用 + 收尾 + 看未读"八件套。
-//                    ⚠ 会真的砍掉发米姆/语音/查记忆这些在用的能力，只在"这个月必须省钱"时用
+//                    会真的砍掉发米姆/语音/查记忆这些在用的能力，只在"这个月必须省钱"时用
 //   custom   走 social.slimTools.allow / deny 两张手写名单（老行为，仍然完全支持）
 //
-// 百分比是**实测**的（mcp-napcat-safe.js 注册时把每个工具的 JSON 尺寸加起来算），
+// 百分比是实测的（mcp-napcat-safe.js 注册时把每个工具的 JSON 尺寸加起来算），
 // 不是拍脑袋写的：`tools/tool-schema-meter.mjs` 可以随时重算，管理端也会显示当前档位的实测值。
 //
-// ⚠️ 档位是**白名单**语义：不在名单里的工具**根本不注册**（描述才不会进请求体）。
+// 档位是白名单语义：不在名单里的工具根本不注册（描述才不会进请求体）。
 //    这正是它省钱的原因 —— `social.tools.*` 那些开关做不到这件事（它们只在调用时返回 403，
 //    schema 照样全量下发，见 mcp-napcat-safe.js 里的更正说明）。
 //
-// 工具名一律用**裸名**（不带 `mcp__napcat__` 前缀）；带前缀也认（注册端会归一化）。
+// 工具名一律用裸名（不带 `mcp__napcat__` 前缀）；带前缀也认（注册端会归一化）。
 
 /** 协议必需：每一轮唤醒都靠它们读/说/收尾，任何档位都得留（extreme 档也只留这几件）。 */
 const ESSENTIAL = [
@@ -43,6 +43,10 @@ const ESSENTIAL = [
   'qq_wait_for_messages',   // 潜水前的观察
   'qq_list_groups',         // 群号 → 群名
   'qq_status',              // 自检（198 字符，永远保留）
+  /* 2026-09-24：get_time（裸名，不属 qq_ 家族）：有人问"现在几点/今天几号"时拿精确时间。
+   * 零副作用、纯读系统时钟、schema 只有百来字符，比一条群消息还便宜；而缺了它模型只能拿
+   * 旧的消息时间戳瞎猜。放进 ESSENTIAL，保证任何档位（含 extreme）都留得住这件能力。 */
+  'get_time',
 ];
 
 /** 实测被调用过（服务器 1,108 次调用日志里 ≥1 次）：切档**绝不能**把它们砍掉。 */
@@ -68,12 +72,12 @@ const OBSERVED_USED = [
 
 /** 便宜且协议/人格偶尔会用到的（都在 1,200 字符以下）：medium 档把它们留着。 */
 const CHEAP_EXTRA = [
-  'qq_send_burst', 'qq_proactive_send', 'qq_withdraw_message', 'qq_send_qq_face',
+  'qq_proactive_send', 'qq_withdraw_message', 'qq_send_qq_face',
   'qq_transcribe_voice', 'qq_memory_remember', 'qq_slang_query',
   'qq_get_group_members', 'qq_get_group_owner', 'qq_get_activity_hours', 'qq_set_activity_hours',
 ];
 
-/** 【2026-09-22 主人报「不能群聊里认识人」】群里"知道谁在说话、这个人是谁、群里以前说过什么"这三件事
+/** 2026-09-22 修「不能群聊里认识人」：群里"知道谁在说话、这个人是谁、群里以前说过什么"这三件事
  *  靠的就是这三个工具；它们原来落在 low 的 drop 名单里，切到 low/high 档就会被静默砍掉，
  *  表现就是"在群里谁都不认识、也不记得群里聊过什么"。归到"便宜且协议/人格偶尔会用到"这一档，
  *  medium 及以上档位一律保留；low 的 drop 名单里也已经把这三条撤掉了。 */
@@ -83,11 +87,24 @@ const GROUP_AWARENESS = [
   'qq_get_group_history',   // 群聊历史（认人 + 记事儿）
 ];
 
+/** 提示词里点名要模型调用的两条 —— 不在名单里就等于"提示词在指挥一件做不到的事"。
+ *  qq_memory_remember：唤醒正文的 [Recall] 行写着"要改就用 qq_memory_remember"（core/wake-send.js），
+ *    preset 的 [Recall] 段写着同一句；它是永久记忆层唯一的写入口，缺了它记忆只剩读、改不了。
+ *  qq_get_file_content：preset 的媒体标签行对 `[文件:报告.pdf]` 明写 "read it with qq_get_file_content"，
+ *    缺了它等于告诉模型"这是文档，去读"，同时把读的工具收走。
+ *  这一组不放进 ESSENTIAL（不是每轮都要），但 medium / high 两档必须留：它们的语义是"不丢在用的能力"，
+ *  而"提示词点名要求调用"比"实测调用过"更硬 —— 前者缺了必然出错，后者只是少用一次。
+ *  2026-09-24：补这两条的原因是审计发现 high 档（自称"不丢任何被调用过的能力"）把它们砍了。 */
+const PROMPT_NAMED = [
+  'qq_memory_remember',
+  'qq_get_file_content',
+];
+
 export const TOOL_TIERS = {
   off: { label: '不裁剪', note: '全部工具都注册（默认；与改动之前行为一致）', keep: null },
   low: {
     label: '低',
-    note: '只砍"实测零调用且体积最大"的那批（角色卡四件、视频两条、历史/清理/潜水、管理类…）。**最近真的被调用过的工具一律不砍** —— 这一档的 drop 名单已按 2026-09-22 的调用日志复核过：pixiv / 点歌 / 富卡片 / 定时 / QQ 空间五条 当时看着是零调用，后来主人在用（画画、发说说、点歌），所以全部从名单里撤掉了。群成员/群历史/群档案这三条也在这一天撤出（主人报"群里不认识人"）。',
+    note: '只砍"实测零调用且体积最大"的那批（角色卡四件、视频两条、历史/清理/潜水、管理类…）。最近真的被调用过的工具一律不砍 —— 这一档的 drop 名单已按 2026-09-22 的调用日志复核过：pixiv / 点歌 / 富卡片 / 定时 / QQ 空间五条 当时看着是零调用，后来主人在用（画画、发说说、点歌），所以全部从名单里撤掉了。群成员/群历史/群档案这三条也在这一天撤出（主人报"群里不认识人"）。',
     // low 用「不要」名单（其余一律保留）→ 将来新增工具默认可见，不会"忘了加白名单"
     drop: [
       'qq_character_list', 'qq_character_read', 'qq_character_pack', 'qq_character_search',
@@ -99,7 +116,7 @@ export const TOOL_TIERS = {
       'qq_memory_append', 'qq_memory_remove', 'qq_memory_clear',
       'qq_deepsleep', 'qq_remove_friend', 'qq_report_feedback',
       'qq_persona_learn_start', 'qq_persona_learn_stop', 'qq_persona_learn_status',
-      /* 【2026-09-22 撤出名单（当时判"零调用"，实际在用）】留着它们，否则会静默砍掉主人在用的能力：
+      /* 2026-09-22 撤出名单（当时判"零调用"，实际在用）：留着它们，否则会静默砍掉在用的能力：
        * qq_send_pixiv / qq_pixiv_search（画画）、qq_music_search（点歌）、qq_send_rich（卡片）、
        * qq_schedule_message（定时）、qq_send_qzone 与空间四条（发说说 / 互动）、qq_image_search（联网找图）、
        * qq_send_docx（发文档）、qq_like（点赞）、qq_withdraw_message（撤回）、qq_send_qq_face（QQ 表情）、
@@ -110,21 +127,24 @@ export const TOOL_TIERS = {
   },
   medium: {
     label: '中',
-    note: '协议必需 + 实测用到的 + 一圈便宜的小工具（群成员/群档案/群历史/活跃时段/撤回/连发/语音转写/黑话查询…）；不要 pixiv、富卡片、角色卡、点歌、定时、空间、文档、转发、管理类',
-    keep: [...ESSENTIAL, ...OBSERVED_USED, ...CHEAP_EXTRA, ...GROUP_AWARENESS],
+    note: '协议必需 + 实测用到的 + 提示词点名的两条 + 一圈便宜的小工具（群成员/群档案/群历史/活跃时段/撤回/语音转写/黑话查询…）；不要 pixiv、富卡片、角色卡、点歌、定时、空间、文档、转发、管理类',
+    keep: [...ESSENTIAL, ...OBSERVED_USED, ...CHEAP_EXTRA, ...GROUP_AWARENESS, ...PROMPT_NAMED],
   },
   high: {
     label: '高（实测用到的全留）',
-    note: '协议必需 + 实测被调用过的工具 + 群里认人那三条：**不丢任何被调用过的能力**（发米姆、语音、查记忆、看历史图、读对方发来的文件都在），砍掉的都是实测零调用的大块头。这是"不丢功能"前提下的地板',
-    keep: [...ESSENTIAL, ...OBSERVED_USED, ...GROUP_AWARENESS],
+    note: '协议必需 + 实测被调用过的工具 + 提示词点名要求调用的两条 + 群里认人那三条：不丢任何被调用过的能力（发米姆、语音、查记忆、看历史图、读对方发来的文件都在），砍掉的都是实测零调用的大块头。这是"不丢功能"前提下的地板',
+    keep: [...ESSENTIAL, ...OBSERVED_USED, ...GROUP_AWARENESS, ...PROMPT_NAMED],
   },
   extreme: {
     label: '极限（会丢功能）',
-    note: '⚠️ 只留「说话 + 引用 + 收尾 + 看未读」八件套，成本最低；但会砍掉发米姆/语音/查记忆/看历史图这些**在用的**能力，只在"这个月必须省钱"时用',
+    note: '只留「说话 + 引用 + 收尾 + 看未读 + 查时间」九件套，成本最低；但会砍掉发米姆/语音/查记忆/看历史图这些在用的能力，只在"这个月必须省钱"时用',
     keep: [
       'qq_send_message', 'qq_reply', 'qq_mark_read',
       'qq_get_prompt', 'qq_social_state', 'qq_get_unread_messages', 'qq_list_groups',
       'qq_status',
+      /* 2026-09-24：get_time 补进极限档 —— 提示词 [TOOLS] 1d 规定"正文不带时钟，问时间就调 get_time"，
+       * 而 [RULES] 7b（深夜提醒）也以它为前提。421 字符，占全量 0.43%，比砍掉它造成的错答便宜得多。 */
+      'get_time',
     ],
   },
   custom: { label: '自定义名单', note: '用下面的「白名单 / 黑名单」两张表（老行为）', keep: null },
@@ -164,7 +184,7 @@ export function resolveToolTier(slimTools = {}) {
     const drop = Array.isArray(def.drop) ? new Set(def.drop.map(bareToolName)) : null;
     return { level, keep, drop, allow: null, deny: null, source: keep ? `tier:${level}` : drop ? `tier:${level}-drop` : 'off' };
   }
-  // custom：手写白名单优先（主人明确点名要什么），其次黑名单
+  // custom：手写白名单优先（显式点名要什么），其次黑名单
   return { level, keep: allow, drop: null, allow, deny, source: allow ? 'custom-allow' : 'custom-deny' };
 }
 
@@ -180,8 +200,8 @@ export function toolAllowedByTier(name, resolved) {
 }
 
 /** 量化：把每个工具的 JSON 尺寸加起来，算出"注册了这么多，占不裁剪时的百分之几"。纯函数，便于测试。
- *  【2026-09-22】额外返回 `dropped`（这一档砍掉的工具名 + 各自字符数，按体积从大到小）：
- *  管理端要**把裁剪结果标出来**（主人要求"那个裁剪的也标出来别让别人猜"），不能让用户对着档位名猜。
+ *  2026-09-22：额外返回 `dropped`（这一档砍掉的工具名 + 各自字符数，按体积从大到小）：
+ *  管理端要把裁剪结果标出来（"那个裁剪的也标出来别让别人猜"），不能让用户对着档位名猜。
  *  界面读的就是这里算的名单 —— 与桥真正注册的那份同源（同一个 schemaMeter 账本），不会各说各话。 */
 export function measureSchemaShare(tools, keptNames, droppedNames) {
   const keep = keptNames ? new Set([...keptNames].map(bareToolName)) : null;

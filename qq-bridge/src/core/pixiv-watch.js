@@ -1,18 +1,18 @@
 // Pixiv 登录态自检 + 失效提醒（2026-09-19 建，2026-09-20 扩）。
 //
-// 背景：登录态是「按名字搜画师」的唯一前提，而它过去**只能靠主人手贴 PHPSESSID**，掉了就得回头找人。
+// 背景：登录态是「按名字搜画师」的唯一前提，而它过去只能靠用户手贴 PHPSESSID，掉了就得回头找人。
 // 2026-09-20 起改成两层，这个看护循环也要跟着认两种情况：
 //   ① 长期令牌（state/pixiv-token.json 里的 refresh_token / config.json 的 pixiv.refreshToken）：
 //      桥每 50 分钟自己换 access_token（core 里 startPixivTokenRefresh）。所以这里看到的"过期"，
-//      只可能是**轮换一直失败**（令牌被吊销、网络不通、时钟漂太远）—— 那才是要给主人报的事。
+//      只可能是轮换一直失败（令牌被吊销、网络不通、时钟漂太远）—— 那才是要给用户报的事。
 //   ② 旧的一次性 cookie（config.json 的 pixiv.cookie）：仍然是"掉了就掉"，用试纸自检（pixivLoginState）。
 //
 // 做三件事：① 顺带把"名字→画师号"的解析结果落盘缓存（见 lib/pixiv.js 的 ARTIST_CACHE）——
-// 登录态掉了，已经查过的名字照样能用；② 桥定期自检，失效时**主动在 QQ 里告诉主人**；
-// ③ 提醒里说清"只需要给一次 PHPSESSID"（换长期令牌），并给出一次性命令，免得主人以为要反复贴。
+// 登录态掉了，已经查过的名字照样能用；② 桥定期自检，失效时主动在 QQ 里告诉用户；
+// ③ 提醒里说清"只需要给一次 PHPSESSID"（换长期令牌），并给出一次性命令，免得用户以为要反复贴。
 //
 // 自检判据不是"配置里有没有 cookie"，而是 lib/pixiv.js 的 pixivLoginState()：
-// 拿一个"匿名时原图地址被抹掉"的作品当试纸，**能拿到原图地址**才算登录态真的生效。
+// 拿一个"匿名时原图地址被抹掉"的作品当试纸，能拿到原图地址才算登录态真的生效。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,7 @@ const STATE_PATH = path.resolve(__dirname, '..', '..', 'state', 'pixiv-cookie-st
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 每 6 小时自检一次
 const FIRST_DELAY_MS = 90 * 1000;               // 启动后 90 秒首检（不和启动流程抢资源）
 const NOTIFY_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 仍失效时，最多每 24 小时提醒一次
-/** 一次性命令：主人自己上手时照抄；提醒里也带上（只含占位符，绝不含真凭证）。 */
+/** 一次性命令：用户自己上手时照抄；提醒里也带上（只含占位符，绝不含真凭证）。 */
 const LOGIN_CMD = 'node tools/pixiv-login.mjs --cookie "PHPSESSID=..."';
 
 function readState() {
@@ -40,7 +40,7 @@ function writeState(s) {
 }
 
 /**
- * 启动自检循环。**两种登录态都没有时完全静默**（不吵人、不发消息）。
+ * 启动自检循环。两种登录态都没有时完全静默（不吵人、不发消息）。
  * @param {{logger?:Function, ownerKey?:()=>string, send?:(key:string,text:string)=>Promise<any>}} opts
  * @returns {() => void} 停止函数
  */

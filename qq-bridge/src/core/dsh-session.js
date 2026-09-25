@@ -24,7 +24,7 @@ export function initDshSessionCore(cfg) { cfgRef = cfg; }
 export function setDshSessionApi(api) { apiRef = api; }
 
 /**
- * 【2026-09-12】让**已有会话**也重新套用一次模型配置。
+ * 2026-09-12：让**已有会话**也重新套用一次模型配置。
  *
  * `ensureVisionModel()` 每个会话只跑一次（`visionModelAppliedSessions` 记住已套用的 sessionId），
  * 所以"在管理端改了 provider/model/reasoningEffort"之后，**老会话会一直用旧模型**——这正是"改了模型不生效"
@@ -50,7 +50,7 @@ export async function ensureVisionModel(sessionId) {
 
   /* 档位计划：配了就按配置先试，被服务商**明确拒绝**时退回"不带档位"。
    *
-   * 【2026-09-13 实测踩坑】pi-ai 只认 profile 里显式声明过的 `xhigh`/`max`：小米 MiMo（mimo-v2.5）
+   * 2026-09-13 实测踩坑：pi-ai 只认 profile 里显式声明过的 `xhigh`/`max`：小米 MiMo（mimo-v2.5）
    * 的 settings.yaml 没声明 reasoningEfforts，传 max 直接 UNSUPPORTED_REASONING_EFFORT。
    * 原来这里把"没配档位"当成 `max`，于是 selectModel 一直失败 → **会话模型永远切不过去**，
    * 整条会话卡在旧模型（deepseek-official + mimo-v2.5 这种错配）上，之后每一轮都在网关报
@@ -88,7 +88,7 @@ export async function ensureSession(key) {
     } else {
       try {
         await ensureVisionModel(existing);
-        /* 【2026-09-22 修 M17·"代际守卫恒 false"】上面那个 await 期间可能发生过 /workspace/reset
+        /* 2026-09-22 修 M17·"代际守卫恒 false"：上面那个 await 期间可能发生过 /workspace/reset
          * （sessionEpoch 会变）：旧映射指向的会话正在被归档，直接 `return existing` 等于把消息投进一个
          * 已作废的会话。而原来那个 `epoch !== sessionEpoch` 判断的两个读点之间**没有 await**，恒为 false，
          * 等于根本没有守卫。现在在 await **之后**复核一次：代际变了就丢掉映射，往下走去重建新会话。 */

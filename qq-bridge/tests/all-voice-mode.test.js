@@ -1,14 +1,14 @@
 // 「全语音发送模式」（state/voice-config.json 的 send.allVoice）回归测试。
 //
-// 设计原则与 tests/voice.test.js 一致：**不给真 QQ 发东西、不打真网络**（global.fetch 全被替身接管，
-// 因此哪怕本机配了真的语音服务，也不可能真的发出去），并且**不写 state 下的配置/额度文件**
+// 设计原则与 tests/voice.test.js 一致：不给真 QQ 发东西、不打真网络（global.fetch 全被替身接管，
+// 因此哪怕本机配了真的语音服务，也不可能真的发出去），并且不写 state 下的配置/额度文件
 // （合成一律在失败前置检查处抛错，走不到 bumpUsage/写缓存那一步；语音缓存目录被指到系统临时目录）。
 // 唯一会被 append 的是桥日志 state/bridge.log —— 与既有 voice.test.js 的表现一致，那里本来就写着日志。
 //
-// 覆盖主人点名的三条硬约束：
+// 覆盖需求指定的三条硬约束：
 //   ① allVoice 缺失（老配置）→ 行为与现在一致：不发语音、不打合成接口；
-//   ② allVoice=true 且合成失败 → **退回文字且不丢消息**（文字必须真的落到 send_group_msg）；
-//   ③ allVoice=true 且超过 dailyChars → 退回文字，并在日志里写明额度原因（而且**不该再打合成接口**）。
+//   ② allVoice=true 且合成失败 → 退回文字且不丢消息（文字必须真的落到 send_group_msg）；
+//   ③ allVoice=true 且超过 dailyChars → 退回文字，并在日志里写明额度原因（而且不该再打合成接口）。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -105,7 +105,7 @@ t('对外配置会回读 allVoice（前端渲染开关要用），且与生效�
   assert.equal(typeof pub.send.allVoice, 'boolean');
   assert.equal(typeof pub.send.probability, 'number');
   assert.equal(typeof pub.send.cooldownMs, 'number');
-  // ⚠️ 这里**故意不断言** ambient 必须为 false：主人可能正开着全语音模式自测，
+  // 这里故意不断言 ambient 必须为 false：本机可能正开着全语音模式自测，
   // 测试不该因为磁盘上的开关状态而变红。"默认关闭"由上一条用显式 cfg（{} / 缺字段）钉死。
   assert.equal(pub.send.allVoice, voice.allVoiceEnabled(), '对外配置必须与生效值一致');
 });
@@ -156,7 +156,7 @@ t('开关关闭时：sendMessages 仍然只发文字（老路径一字不变）'
 // ── ② 全语音开启 + 合成失败 → 退回文字，不丢消息 ─────────────────────────────
 
 t('全语音 + 合成失败 → 退回文字且不丢消息（走完整发送链，日志写明原因）', async () => {
-  // 注入一份"全语音已开、语音服务必然 500"的配置。initVoiceCore 的 voice 段优先级**低于**
+  // 注入一份"全语音已开、语音服务必然 500"的配置。initVoiceCore 的 voice 段优先级低于
   // state/voice-config.json，所以本机若显式存过 allVoice=false（或总开关没开），这条会先被跳过 —— 见下。
   voice.initVoiceCore({
     napcat: { httpUrl: 'http://127.0.0.1:3000', tmpDir: TMP_DIR },
@@ -308,9 +308,9 @@ t('全语音 + 当日额度用尽：sendMessages 里同样落到文字发送（�
 
 // ── ④ 成功路径（默认不跑，见说明） ───────────────────────────────────────────
 //
-// 为什么默认关闭：语音**成功**这一路会调 bumpUsage()，也就是写 state/voice-usage.json ——
+// 为什么默认关闭：语音成功这一路会调 bumpUsage()，也就是写 state/voice-usage.json ——
 // 那是"真实每日额度"计数器，桥在运行时也随时会写它。测试去动它有两个后果：
-//   ① 会吃掉主人当天的真实额度；② 与正在跑的桥抢写同一个文件。
+//   ① 会吃掉当天的真实额度；② 与正在跑的桥抢写同一个文件。
 // 所以默认只做"不落盘"的失败/回退链；要验成功路径时用 DSH_ALLVOICE_E2E=1 单独跑，
 // 或者（推荐）把 src/ 与 package.json 复制到一个临时目录里跑 —— 那样 usage 文件写在临时目录里，
 // 仓库的 state/ 一点都不会被动到。成功路径已验证过：合成 → record 段 → send_group_msg，且不发文字。

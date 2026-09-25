@@ -23,42 +23,42 @@ export function loadConfig() {
       reasoningEffort: 'max',
       ...(file.dsh ?? {})
     },
-    /* 【2026-09-19 主人要求】「一个会话永久使用，但别让上下文堆积」——
+    /* 2026-09-19 需求：「一个会话永久使用，但别让上下文堆积」——
      * 桥侧不自己动 DSH 的历史（DSH 的会话是内存事件溯源，外部改文件只会撞 seq gap），
-     * 而是把**压缩策略**写进 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的
+     * 而是把压缩策略写进 DSH home 的 cordis.patch.yml（home 级 patch 层），交给 DSH 自己的
      * compaction-basic + tool-result-pruner 执行：
      *   · 先剪掉超大工具结果（剪枝不发模型请求、聊天记录一字不动）；
      *   · 剪枝后仍超阈值 / 提供方报上下文溢出，才把最老一段摘要成 <compacted-summary>。
-     * 阈值用**比例**（相对已路由模型的 contextWindow），换模型自动等比缩放 —— 也是 DSH 的硬要求：
+     * 阈值用比例（相对已路由模型的 contextWindow），换模型自动等比缩放 —— 也是 DSH 的硬要求：
      * retainRatio 必须小于 thresholdRatio，否则插件直接拒绝加载。字段含义与取值见 lib/dsh-compaction.js。 */
     dshCompaction: {
       enabled: true,             // 关掉 = 不写这段（回到 DSH 默认：窗口 80% 才压缩 ≈ 等于不压缩）
-      /* ── 阈值的三次修正：0.06 → 0.12 → 0.08 → **0.16**（2026-09-22 用实测数据重算） ──────────
+      /* ── 阈值的三次修正：0.06 → 0.12 → 0.08 → 0.16（2026-09-22 用实测数据重算） ──────────
        * ① 0.06 → 0.12（2026-09-20）：0.06 会"每一步都压缩"（阈值被固定开销顶穿，114 步触发 46 次摘要，
        *    每步之间多花 15~20 秒）。
        * ② 0.12 → 0.08（2026-09-20 晚）：当时按"花费正比于上下文大小"的粗口径量到 0.41/0.56/0.79/1.04 分每条，
-       *    于是把阈值收小。**那个口径把冷启动和"压缩后重建"混在了同一个桶里**（见下面的实测）。
-       * ③ 0.08 → 0.16（2026-09-22，新提示词下重算）：把 token-usage.jsonl 按**上下文区间分桶**看，
-       *    真相是"上下文本体几乎不花钱，花钱的是**整段重读**"：
-       *      上下文 0~30k  （5.8% 的请求）→ 每次 ¥0.0382，其中 **49.8% 是大未命中** ← 压缩/冷启动后的重建
+       *    于是把阈值收小。那个口径把冷启动和"压缩后重建"混在了同一个桶里（见下面的实测）。
+       * ③ 0.08 → 0.16（2026-09-22，新提示词下重算）：把 token-usage.jsonl 按上下文区间分桶看，
+       *    真相是"上下文本体几乎不花钱，花钱的是整段重读"：
+       *      上下文 0~30k  （5.8% 的请求）→ 每次 ¥0.0382，其中 49.8% 是大未命中 ← 压缩/冷启动后的重建
        *      上下文 30~50k （36.8%）       → 每次 ¥0.0105，大未命中 10.6%
        *      上下文 50~70k （22.2%）       → 每次 ¥0.0033，大未命中 0.9%
        *      上下文 70~90k （15.6%）       → 每次 ¥0.0043
        *      上下文 90~120k（13.2%）       → 每次 ¥0.0040
        *      上下文 120~160k（5.5%）       → 每次 ¥0.0051
-       *    对 50k 以上做回归：每次 = ¥0.0020 + **0.022 ¥/M** × 上下文 —— 也就是"上下文每多 1M token、
-       *    每次请求多花 2.2 分"，本质上就是缓存命中价（0.02 ¥/M）。**大上下文本身几乎免费**；
+       *    对 50k 以上做回归：每次 = ¥0.0020 + 0.022 ¥/M × 上下文 —— 也就是"上下文每多 1M token、
+       *    每次请求多花 2.2 分"，本质上就是缓存命中价（0.02 ¥/M）。大上下文本身几乎免费；
        *    真正隔一段时间咬一口的是"压缩后第一次请求要整段重读"（实测每次重建 ≈ ¥0.036，
-       *    频率 ∝ 1/阈值）。所以最省钱的做法是**少压缩**，而不是把小上下文当目标。
+       *    频率 ∝ 1/阈值）。所以最省钱的做法是少压缩，而不是把小上下文当目标。
        *    模型（每天成本 = 步数×(0.0020+0.022/M×平均上下文) + 每天压缩次数×重建成本）：
-       *      0.08 → ¥3.34/天（压缩 28.7 次/天）· 0.12 → ¥2.67 · **0.16 → ¥2.53** · 0.18 → ¥2.53 · 0.25 → ¥2.66
+       *      0.08 → ¥3.34/天（压缩 28.7 次/天）· 0.12 → ¥2.67 · 0.16 → ¥2.53 · 0.18 → ¥2.53 · 0.25 → ¥2.66
        *    最省 0.16~0.18，稳健区间 0.14~0.20（比最优差 ≤2%）；模型在 0.08 处算得 ¥3.34/天 vs 实测
-       *    ¥3.49/天（偏差 −4%），可作标定。取 **0.16**（区间中部，压缩次数从 28.7/天降到 11.2/天）。
+       *    ¥3.49/天（偏差 −4%），可作标定。取 0.16（区间中部，压缩次数从 28.7/天降到 11.2/天）。
        *    复算脚本：tools/compaction-threshold.mjs（参数全部从线上 token-usage.jsonl 现场量）。 */
       thresholdRatio: 0.16,      // 上下文用到窗口的多少比例就开始治理（0.16 × 1M ≈ 16 万 token）
-      retainRatio: 0.02,         // 最近多少比例的上下文**逐字保留**（必须小于 thresholdRatio）
-      /* 【2026-09-19 主人反馈"模型像是不记得工具怎么调、也忘了规矩"之后从 1500 抬到 8192】
-       * 1500 太狠：`qq_get_prompt` 返回的整段协议、会话状态、角色卡、贴纸清单这些**工具结果**动辄
+      retainRatio: 0.02,         // 最近多少比例的上下文逐字保留（必须小于 thresholdRatio）
+      /* 2026-09-19 反馈"模型像是不记得工具怎么调、也忘了规矩"之后从 1500 抬到 8192：
+       * 1500 太狠：`qq_get_prompt` 返回的整段协议、会话状态、角色卡、贴纸清单这些工具结果动辄
        * 好几 KB，一律被剪成「开头 900 字 + 剪枝标记 + 结尾 300 字」——模型等于只看到个零头，越用越像
        * "不知道工具叫什么、不知道规矩"。8192 与 DSH 插件的默认值一致：整段唤醒协议 / 状态快照都能完整留下，
        * 真正超大的（图片 base64、超长历史）照旧被剪，不会把上下文撑爆。 */
@@ -70,8 +70,8 @@ export function loadConfig() {
     napcat: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.napcat ?? file.napcat ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
-    agentPreset: file.agentPreset ?? 'default', // 唯一模式（default=default）默认预设
-    workspaceTitle: file.workspaceTitle ?? 'QQ 聊天',
+    agentPreset: file.agentPreset ?? 'qq-chat', // 会话使用的 agent preset（仓库与隔离 home 只保留 qq-chat 一份）
+    workspaceTitle: file.workspaceTitle ?? 'Agents',   // 默认会话的工作区名（2026-09-24 由「QQ 聊天」改为 Agents）
     ownerQQ: normalizeOwnerQQ(file.ownerQQ),
     adminQQ: normalizeIdList(file.adminQQ ?? []),
     allow: {
@@ -84,7 +84,7 @@ export function loadConfig() {
     },
     // 私聊/群聊均未配置白名单时是否放行所有（true 时启动会打警告）
     allowAllWhenEmpty: file.allowAllWhenEmpty === true,
-    // 【2026-09-19】分侧放行开关：某个类的名单为空时，单独放开这一类（群严、私聊松的常见配置）。
+    // 2026-09-19：分侧放行开关：某个类的名单为空时，单独放开这一类（群严、私聊松的常见配置）。
     // 恒为布尔（缺省 false）—— 界面按"配置里存在的键"渲染，不给默认值的话这两个勾选框不会出现。
     allowAllPrivate: file.allowAllPrivate === true,
     allowAllGroups: file.allowAllGroups === true,
@@ -93,16 +93,16 @@ export function loadConfig() {
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
     consolePort: file.consolePort ?? 3100,
     consoleToken: file.consoleToken ?? '',
-    /* ── 【2026-09-21】提示词类的可调项（管理端「Core 设置」可改，即时生效）─────────────
-     * styleLine：唤醒正文每轮那一行语感提醒（1.2.4 加的「[Style] 说人话」）。
-     *   为什么要做成可配置：它是**离模型最近、对语气影响最大**的一句话，主人应当能自己改词，
-     *   而不必等一次发版。默认值与 1.2.4 定稿逐字一致（改默认值等于改语感，别乱动）。
-     *   空串 = 不注入这一行（想完全交给系统提示词时用）。 */
+    /* ── 2026-09-21 提示词类的可调项（管理端「Core 设置」可改，即时生效）─────────────
+     * styleLine：唤醒正文每轮那一行语感提醒（1.2.4 加入的「[Style] 说人话」）。
+     *   做成可配置的原因：它是离模型最近、对语气影响最大的一句话，应当能不依赖发版自行改词。
+     *   默认值与 1.2.4 定稿逐字一致 —— 改默认值等于改语感，不要随意修改。
+     *   空串 = 不注入这一行（完全交给系统提示词时使用）。 */
     prompt: {
       styleLine: '[Style] 说人话：短、有态度，别讲课别列举',
       ...(file.prompt ?? {})
     },
-    /* ── 【2026-09-21】/token 指令的计价参数（¥ / 百万 tok）─────────────────────────────
+    /* ── 2026-09-21 /token 指令的计价参数（¥ / 百万 tok）─────────────────────────────
      * 默认值与管理端「学习」页 src/pages/Learning.tsx::COST_DEFAULT 同源，两边算出来必须一致；
      * 改这里会同时改变 /token 的口径（面板那边仍读它自己的 localStorage，需各自设置）。 */
     tokenCost: {
@@ -123,15 +123,15 @@ export function loadConfig() {
       extractCooldownMs: 5 * 60 * 1000,
       inferenceThresholds: [2, 4, 8],
       injectMax: 8,
-      learnerPreset: 'default',
-      workspaceTitle: 'QQ 黑话学习',
+      learnerPreset: 'qq-chat',
+      workspaceTitle: 'SlangAgent',   // 黑话学习会话名（2026-09-24 由「QQ 黑话学习」改为 SlangAgent）
       autoResearch: true,
       ...(file.slang ?? {})
     },
     social: {
       enabled: true,
       autoReplyCheckMs: 30000,
-      agentPreset: 'default',
+      agentPreset: 'qq-chat',
       provideRecommendations: true,
       tools: {
         getPrompt: true,
@@ -141,7 +141,6 @@ export function loadConfig() {
         sendGroup: true,
         sendPrivate: true,
         reply: true,
-        sendBurst: true,
         sendMessage: true,
         waitMessages: true,
         feedback: true,
@@ -163,13 +162,13 @@ export function loadConfig() {
         getSelfImage: true
       },
       wake: {
-        /* 【2026-09-22 主人要求】默认就是**活跃**（每条消息都唤醒），不再默认潜水 ——
-         * "切活跃就活跃"：软重置/兜底路径（softResetWakeConfig）本来就会保留 active，这里把**缺省**也对齐，
+        /* 2026-09-22 需求：默认就是活跃（每条消息都唤醒），不再默认潜水 ——
+         * "切活跃就活跃"：软重置/兜底路径（softResetWakeConfig）本来就会保留 active，这里把缺省也对齐，
          * 于是新会话、被兜底重置过的会话都不会突然退回潜水。 */
         defaultMode: 'active',
         preSleepWaitEnabled: true,      // 沉睡前强制观察窗口开关：防止 AI 聊两句就潜水
         preSleepWaitMs: 30000,           // 默认沉睡前观察窗口：只等 30 秒，不傻等 5 分钟（后台可调）
-        /* 【2026-09-22 主人要求】不再默认「无限期潜水」：那是「等条件再醒」的永久潜水，观感等于失联。
+        /* 2026-09-22 需求：不再默认「无限期潜水」：那是「等条件再醒」的永久潜水，观感等于失联。
          * 现在默认 false = 想潜水时给一个有限时长（见 recommendedSleepMinMs/MaxMs），到点自然醒。
          * 管理端已把这一项从界面上撤掉（不再是旋钮），键保留只为兼容老配置与模型侧语义。 */
         recommendedDefaultInfinite: false,
@@ -178,8 +177,8 @@ export function loadConfig() {
         recommendedSleepMinMs: 300000,
         recommendedSleepMaxMs: 7200000,
         recommendedProbability: 0.05,
-        /* 【2026-09-15 主人反馈"活跃模式配置看着就是我的潜水配置，那它和潜水有何区别"】
-         * 确实有这个问题：转活跃以前只强制 anyMessage/infinite，**概率仍沿用潜水时代的 0.05** ——
+        /* 2026-09-15 反馈"活跃模式配置看着就是我的潜水配置，那它和潜水有何区别"：
+         * 确实有这个问题：转活跃以前只强制 anyMessage/infinite，概率仍沿用潜水时代的 0.05 ——
          * 于是"活跃"= 每 ~20 条消息才随机醒一次，观感和潜水差不多。
          * 现在给活跃模式一个自己的概率：切到 active 时若没显式指定 probability 就用它。 */
         activeProbability: 0.3,
@@ -198,7 +197,7 @@ export function loadConfig() {
       send: {
         burstEnabled: true,
         burstMaxMessages: 8,
-        // —— 打字节拍：只保留"按字数"一种（2026-09-15 主人定稿）——
+        // —— 打字节拍：只保留"按字数"一种（2026-09-15 定稿）——
         // 批内首条秒回；第 2 条起 = 本条字数 × linearPerCharMs，±linearJitterRatio 抖动，
         // 夹在 [linearMinMs, linearCapMs]。linearEnabled=false = 完全不延迟。
         linearEnabled: true,
@@ -223,7 +222,7 @@ export function loadConfig() {
         defaultQuietMs: 8000,
         minQuietAfterNewMs: 10000   // 收到新消息后至少再等这么久（默认 10 秒），防止抢话
       },
-      // 【2026-09-15 主人要求】私聊「不抢话」：看对方打字状态、等 ta 打完再回；
+      // 2026-09-15 需求：私聊「不抢话」：看对方打字状态、等 ta 打完再回；
       // 对方不停发消息时打字状态保持连续；用概率骰子决定要不要插话（智能接话）；
       // 等待期间的消息全部排队 → 合并成一次注入（省注入轮数）。详见 core/typing-hold.js
       typing: {
@@ -238,7 +237,7 @@ export function loadConfig() {
         maxListCount: 100,         // qq_list_stickers 单次最大返回数
         includeInPrompt: true,     // 是否在 qq_get_prompt / 唤醒提示里附带表情摘要与策略
         promptMaxStickers: 8,      // 提示里最多列出的常用表情数
-        // 【2026-09-15】发表情概率从"提示词软引导"改成**桥侧掷骰**（与语音同一套机制，见 core/send-dice.js）：
+        // 2026-09-15：发表情概率从"提示词软引导"改成桥侧掷骰（与语音同一套机制，见 core/send-dice.js）：
         // 每次唤醒桥掷一次，把 [Meme] dice HIT/MISS 写进唤醒正文；sendCooldownMs 管同一会话的连发。
         sendProbability: 0.3,      // 0~1；0 = 不主动发表情（只有被明确要求才发）
         sendCooldownMs: 180000,    // 刚发过表情包后这段时间内不再抽中（默认 3 分钟）
@@ -270,8 +269,8 @@ export function loadConfig() {
         maxLength: 500,
         notifyOwnerOnError: false
       },
-      // 【2026-09-16】上下文与轮换的两个"窗口"旋钮：
-      //   contextWindow = 新会话**首轮**往提示里贴多少条历史；resetWindow = **轮换后首轮**贴多少条。
+      // 2026-09-16：上下文与轮换的两个"窗口"旋钮：
+      //   contextWindow = 新会话首轮往提示里贴多少条历史；resetWindow = 轮换后首轮贴多少条。
       // 两者语义不同（一个是历史窗口大小，一个是"只此一次"的加长窗口），别当成重复项；
       // 读取处见 wake-send.js：ctxBase = max(6, contextWindow||12)、resetBase = max(ctxBase, resetWindow||24)、
       // 实际条数 = min(60, resetBase)（轮换首轮）/ min(24, ctxBase)（普通首轮）。
@@ -285,21 +284,21 @@ export function loadConfig() {
       },
       // 自动轮换（会话上下文换新）：wake-send.js 里 rotateThreshold / prewarmAhead 读的就是这两个键，
       // 缺省分别是 10 / 3。以前这里没有默认块，全新安装的 config.json 里也就没有这两个键 ——
-      // 管理端「上下文与轮换」卡只画配置里存在的键，于是新人**看不到轮换旋钮**（同一类"旋钮没接线"）。
-      // 【2026-09-18】wakeThreshold 由 12 调到 10：轮换得更勤一点，把单会话上下文压小。
+      // 管理端「上下文与轮换」卡只画配置里存在的键，于是新人看不到轮换旋钮（同一类"旋钮没接线"）。
+      // 2026-09-18：wakeThreshold 由 12 调到 10：轮换得更勤一点，把单会话上下文压小。
       // 注意它只是"缺省值"——真正生效的是 config.json 里的值，而且读取处每轮现读、热加载原地合并，
       // 所以改配置文件对跑着的老会话立即生效（详见 wake-send.js 的 rotateThresholdOf 注释）。
       autoReset: {
         wakeThreshold: 18,         // 累计多少真实来回后换新会话（最小 5）—— 2026-09-22 由 10 抬到 18，见下
         prewarmAhead: 3,           // 到阈值前提前几轮预建并预热下一代会话（最小 1）
-        /* 【2026-09-22 按实测数据求「换会话」的最优频率，并据此改缺省值】
-         * 换会话 = 新会话缓存是冷的：必须在**未命中价**（¥1/M）下重建整个固定前缀（system + 工具表），
+        /* 2026-09-22 按实测数据求「换会话」的最优频率，并据此改缺省值：
+         * 换会话 = 新会话缓存是冷的：必须在未命中价（¥1/M）下重建整个固定前缀（system + 工具表），
          * 再把唤醒正文与最近窗口注入一次。实测"冷启动请求"（0~30k 上下文桶）每次 ¥0.0382、
          * 其中 49.8% 是大未命中 → 一次换会话 ≈ ¥0.04~0.11。
-         * 收益 = 之后每一步读的上下文变小：实测每步成本 ≈ ¥0.0020 + **0.022 ¥/M × 上下文**，
+         * 收益 = 之后每一步读的上下文变小：实测每步成本 ≈ ¥0.0020 + 0.022 ¥/M × 上下文，
          * 换会话把上下文从 C̄ 降到 F+保留段；按 C̄≈60k、换后≈30k 算，每步只省 0.022e-6×30k ≈ ¥0.00066。
-         *   ⇒ 平衡点 N* = 换会话成本 ÷ 每步省下的钱 ≈ 0.05 ÷ 0.00066 ≈ **75 步 ≈ 18~25 个来回**。
-         * 阈值 10 明显偏勤：还没把重建费省回来就先付了一次；而且换会话会**丢掉会话内的连贯记忆**
+         *   ⇒ 平衡点 N* = 换会话成本 ÷ 每步省下的钱 ≈ 0.05 ÷ 0.00066 ≈ 75 步 ≈ 18~25 个来回。
+         * 阈值 10 明显偏勤：还没把重建费省回来就先付了一次；而且换会话会丢掉会话内的连贯记忆
          * （压缩不会 —— 它留一份摘要）。所以缺省改成：
          *   ① wakeThreshold 10 → 18（落在平衡点区间里，作为"关掉永久会话"时的合理值）；
          *   ② permanent: true 才是纯成本最优：上下文交给 DSH 侧压缩治理（见 dshCompaction 段），
@@ -309,8 +308,8 @@ export function loadConfig() {
       },
       ...(file.social ?? {})
     },
-    /* 【2026-09-22 修 BL2·整段顶层配置被丢弃】loadConfig 返回的是**显式键字面量**，以前只透了 file.social，
-     * 于是 config.json / config.example.json 里的顶层 guard 段**从来没进过 cfg** —— 而消费端
+    /* 2026-09-22 修 BL2·整段顶层配置被丢弃：loadConfig 返回的是显式键字面量，以前只透了 file.social，
+     * 于是 config.json / config.example.json 里的顶层 guard 段从来没进过 cfg —— 而消费端
      * core/napcat-guard.js 的 guardCfg() 读的就是 cfgRef?.guard，于是改 guard.* 完全无效、守护照旧按默认值跑，
      * napcat-guard.js 里 verdict='disabled' 那条分支也不可达。这里把 guard 段透传进来（出厂默认见 config.example.json）。 */
     guard: { ...(file.guard ?? {}) },
@@ -326,7 +325,6 @@ export function loadConfig() {
     sendGroup: true,
     sendPrivate: true,
     reply: true,
-    sendBurst: true,
     sendMessage: true,
     waitMessages: true,
     feedback: true,
@@ -391,21 +389,26 @@ export function loadConfig() {
 }
 
 /**
- * 打字节拍的**安全钳制**（2026-09-22 主人报"唤醒后要响应一段时间"之后加的）。
+ * 打字节拍的安全钳制（2026-09-22 报"唤醒后要响应一段时间"之后加的）。
  *
  * 现场（线上数据，不是推测）：服务器那份 config.json 的 social.send 被调成
  * `linearPerCharMs: 650` / `linearCapMs: 15000`（本机运行时是 150/1500，仓库默认 150/4000）。
  * 于是"一次回复里第 2 条气泡起 = 本条字数 × 650ms"：17 个字 = 11.0 秒。DSH 会话日志里每一条
  * `qq_send_message` 的结果都带着这个数：delays 5237 / 8050 / 9388 / 10989 / 11753 ms，
- * 118 次发送总计执行 990 秒 —— 主人感觉到的"唤醒后要响应一段时间"就是它，**不是** MCP 压缩代理
- * （那段窗口里 `napcat_get_tool_schema` 一步都没有过，即 0 次额外往返），**也不是**模型的思考
+ * 118 次发送总计执行 990 秒 —— 线上感觉到的"唤醒后要响应一段时间"就是它，不是 MCP 压缩代理
+ * （那段窗口里 `napcat_get_tool_schema` 一步都没有过，即 0 次额外往返），也不是模型的思考
  * （每步首个 token 0.7~1.7s，纯文本步 1~2s，都是命中前缀缓存的正常值）。
  *
- * 为什么用钳制而不是只改配置值：这些键**模型自己在私聊里就能改**（console-server.js 的
+ * 为什么用钳制而不是只改配置值：这些键模型自己在私聊里就能改（console-server.js 的
  * 可调项名单里有 linearPerCharMs/linearCapMs），只改文件的话下一次自调又会回来。真人聊天打字
- * 大约 4~5 字/秒（200~250ms/字），所以把 perChar 夹在 [60, 320]、cap 夹在 [800, 6000]：
+ * 大约 4~5 字/秒（200~250ms/字），所以把 perChar 夹在 [60, 1000]、cap 夹在 [800, 6000]：
  * 拟人的"按字数"节奏完整保留，但绝不会退化成"发一条等十几秒"。`linearEnabled: false`
  * （完全不延迟）不受影响，仍然原样生效。
+ *
+ * 2026-09-24 再次收紧边界：perChar 上限从 320 提到 1000。起因是主人当晚亲口定"一个字 500 毫秒"
+ * （私聊 23:32 "先按500算" → "那就定500"），而 320 这个上限把这个值直接截掉，串行链里没有任何
+ * 报错，模型那边只看到"设置成功" —— 于是它答"改好了"、主人看到的仍是"还是连发"。
+ * 现在总量由 cap（6000，主人自己也同意过的上限）封顶，perChar 只保留合理区间，不再替主人砍价。
  */
 export function clampSendPace(send) {
   if (!send || typeof send !== 'object') return send;
@@ -414,9 +417,9 @@ export function clampSendPace(send) {
     if (!Number.isFinite(n)) return null;
     return Math.min(hi, Math.max(lo, Math.round(n)));
   };
-  const perChar = clamp(send.linearPerCharMs ?? send.perCharMs, 60, 320);
+  const perChar = clamp(send.linearPerCharMs ?? send.perCharMs, 60, 1000);
   if (perChar != null && perChar !== Number(send.linearPerCharMs)) {
-    log(`[config] 打字节拍钳制：linearPerCharMs ${send.linearPerCharMs} → ${perChar}（按字数等太久 = 一条气泡等十几秒）`);
+    log(`[config] 打字节拍钳制：linearPerCharMs ${send.linearPerCharMs} → ${perChar}（超出 60~1000 的合理区间；总量另由 linearCapMs 封顶）`);
     send.linearPerCharMs = perChar;
   }
   const cap = clamp(send.linearCapMs ?? send.capMs, 800, 6000);
@@ -450,15 +453,15 @@ export function saveState() {
 }
 
 // ── 配置热加载（管理端保存即时生效） ─────────────────────────────────────────
-// 【为什么需要】桥接启动时 `const cfg = loadConfig()` 只读一次，而这个对象被 initXxxCore(cfg) 注入到十几个
-// 模块里（social/mux/wake-send…）。管理器改 config.json 后桥接毫无感知，更要命的是桥接自己还有 **10 处**会把内存
-// 里的旧 cfg **写回** config.json（console-server.js 5 处 + mux.js 4 处 + tunables.js 1 处），
-// 于是管理端的改动不但不生效，还会被**回滚**掉 —— 这就是"管理端改的模型/配置根本到不了 DSH 里"的根因。
+// 为什么需要：桥接启动时 `const cfg = loadConfig()` 只读一次，而这个对象被 initXxxCore(cfg) 注入到十几个
+// 模块里（social/mux/wake-send…）。管理器改 config.json 后桥接毫无感知，更要命的是桥接自己还有 10 处会把内存
+// 里的旧 cfg 写回 config.json（console-server.js 5 处 + mux.js 4 处 + tunables.js 1 处），
+// 于是管理端的改动不但不生效，还会被回滚掉 —— 这就是"管理端改的模型/配置根本到不了 DSH 里"的根因。
 // 修法：in-place 热加载（下两函数）+ 桥接启动时挂上监听。
 export function configFilePath() { return path.join(ROOT, 'config.json'); }
 
 /**
- * 把 next 合并进 target **原地**（不换对象引用，旧引用继续有效）。
+ * 把 next 合并进 target 原地（不换对象引用，旧引用继续有效）。
  * @returns {string[]} 变化的字段路径（'a.b.c'），无变化返回 []
  */
 export function applyConfigInPlace(target, next, pathPrefix = '') {
@@ -485,19 +488,19 @@ export function applyConfigInPlace(target, next, pathPrefix = '') {
  * 监听 config.json 并热加载到 target（管理器保存 / 手工编辑都会触发）。
  * 自己写盘时也会收到事件，但此时文件与内存一致 → changed 为空 → 不触发 onChange，不会自激循环。
  *
- * 【2026-09-19 修：热加载"看起来装了、其实早就死了"】
- *   原来写的是 `fs.watch(config.json)` —— Linux 上它盯的是**那个 inode**。而管理端保存服务端配置走的是
- *   「临时文件 → 备份 → mv 原子替换」，**rename 一覆盖，inode 就换了**，监视器从此盯在一个已被 unlink 的
- *   旧 inode 上：**之后任何改动都不再触发事件**，直到桥重启为止。
+ * 2026-09-19 修：热加载"看起来装了、其实早就死了"
+ *   原来写的是 `fs.watch(config.json)` —— Linux 上它盯的是那个 inode。而管理端保存服务端配置走的是
+ *   「临时文件 → 备份 → mv 原子替换」，rename 一覆盖，inode 就换了，监视器从此盯在一个已被 unlink 的
+ *   旧 inode 上：之后任何改动都不再触发事件，直到桥重启为止。
  *   线上实测（VPS，ZFS 根）：桥 07:34 启动时装好监视，07:39:54 管理端做了一次 mv 覆盖；此后
  *   「原地写」与「原子替换」两种写法都被实验证伪 —— 桥日志里一条 `已热加载` 都没有（同一台机器上
  *   单独测 fs.watch 是好的：原地写给 change、mv 覆盖给 change+rename，坏的只是"文件级 watch 被 rename 弄失聪"）。
- *   后果正是主人反复遇到的"管理端改了配置没生效 / 白名单移除了还在唤醒"。
+ *   后果正是线上反复遇到的"管理端改了配置没生效 / 白名单移除了还在唤醒"。
  *
  *   现在的双保险：
- *     ① **监听目录**（`fs.watch(dir)`，按文件名过滤）—— 目录 inode 不会因为文件被替换而失效，
+ *     ① 监听目录（`fs.watch(dir)`，按文件名过滤）—— 目录 inode 不会因为文件被替换而失效，
  *        mv 覆盖会给出 rename 事件，实测可靠；
- *     ② **2 秒轮询兜底**（`fs.watchFile`，stat 比较）—— 跨 inode、跨文件系统都能发现变化。
+ *     ② 2 秒轮询兜底（`fs.watchFile`，stat 比较）—— 跨 inode、跨文件系统都能发现变化。
  *   事件驱动依旧毫秒级，轮询只是保险，成本可忽略。
  * @returns {() => void} 停止监听
  */

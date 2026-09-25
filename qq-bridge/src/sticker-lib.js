@@ -174,12 +174,12 @@ export function buildStickerContext(entries, max = 8) {
     const used = e.useCount ? `（用过${e.useCount}次）` : '';
     return `- ${label}${extra}${used}`;
   });
-  return `【可用表情包】你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/有备注的 ${top.length} 个，完整列表请用 qq_list_stickers 查看）：\n${lines.join('\n')}`;
+  return `[可用表情包]你的 QQ 收藏表情里有 ${list.length} 个表情（以下为常用/有备注的 ${top.length} 个，完整列表请用 qq_list_stickers 查看）：\n${lines.join('\n')}`;
 }
 
 // default模式下的“真人发表情包”策略提示。
 // 这是软策略：AI 仍自主判断是否使用，桥接不强制。
-// rate（可选 0~1）：主人配置的“表情频率”——用于把下面的频率档位文案改成实际档。
+// rate（可选 0~1）：配置里的“表情频率”——用于把下面的频率档位文案改成实际档。
 export function buildStickerStrategyHint(rate) {
   let freqLine = '- 频率：普通闲聊大约每 2~3 轮就可以来一张；接梗、被夸、怼人、赞同、无语、赢了/输了、别人发了图这些场合尽量跟一张，热闹/玩梗时可以更密，只要别连续刷屏。';
   const r = Number(rate);
@@ -189,11 +189,11 @@ export function buildStickerStrategyHint(rate) {
     freqLine = `- 频率（主人设为「${band}」档 ≈ ${Math.round(r * 100)}%）：${pace}；但别连续刷屏，一条消息只能一张。`;
   }
   return [
-    '【表情包策略：像真人一样用，不刷屏】',
+    '[表情包策略：像真人一样用，不刷屏]',
     '- 表情优先级：① 收藏表情包（qq_list_stickers/qq_send_sticker）和 QQ 原生表情（qq_face_list/qq_send_qq_face，含动态大表情）同级第一，哪个更贴语境用哪个；② 颜文字比较少用（情绪到位时才来一个），要用就优先冷脸萌风格（ᗜ - ᗜ 这类 ᗜ 眼的死鱼脸但可爱）；③ 输入法 emoji 最后（直接写在文字里，QQ 会正常显示）。',
     '- 合适时机：被戳中笑点/槽点、接梗、怼人、赞同、自嘲、安慰、无语、赢了/输了、告别/晚安、别人发了表情时回一张，都可以自然用。',
-    // 【2026-09-19】这里原来还有一条**硬编码**的"- 频率：普通闲聊大约每 2~3 轮就可以来一张…"，
-    // 与下面按主人配置生成的 freqLine 直接打架（主人设 5% 时它还在说"每 2~3 轮一张"）。
+    // 2026-09-19：这里原来还有一条硬编码的"- 频率：普通闲聊大约每 2~3 轮就可以来一张…"，
+    // 与下面按配置生成的 freqLine 直接打架（设 5% 时它还在说"每 2~3 轮一张"）。
     // 频率只留 freqLine 一条真话：它由 social.sticker.sendProbability 算出来。
     freqLine,
     '- 选择：优先用备注（desc）和你的记忆（localNote/tags）能准确对上语境的；没有备注/不确定的表情，先 qq_get_sticker_image 看图再决定，不要瞎发。',

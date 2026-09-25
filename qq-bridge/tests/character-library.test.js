@@ -1,11 +1,11 @@
 // 角色库只读工具组（qq_character_list / qq_character_read / qq_character_pack / qq_character_search）
-// 的内部纯函数测试。**按真实结构**：一个角色 = 一个子目录 = 一个"角色包"（不是一堆平铺的 .md）。
+// 的内部纯函数测试。按真实结构：一个角色 = 一个子目录 = 一个"角色包"（不是一堆平铺的 .md）。
 //
 // 跑法：cd qq-bridge && node tests/character-library.test.js
 // 说明：
 // - 把 src/mcp-napcat-safe.js 当模块直接 import（QQB_MCP_NO_LISTEN=1 → 只加载、不连 MCP stdio），
 //   断言的就是四个工具真正调用的那批函数（工具回调只是薄壳）。
-// - 只打印路径 / 计数 / 文件名，**不打印任何角色卡正文**（主人的私人内容）。
+// - 只打印路径 / 计数 / 文件名，不打印任何角色卡正文（属私人内容）。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -376,7 +376,7 @@ check('配置：social.charactersDir 优先；空/缺失按"存在即用"回落�
   const fallback = lib.resolveCharactersDir({});
   assert.equal(lib.resolveCharactersDir({ social: {} }), fallback);
   assert.equal(lib.resolveCharactersDir({ social: { charactersDir: '   ' } }), fallback);
-  /* 【2026-09-20 修】出厂角色库随安装包进了 <qq-bridge>/characters 以后，"没配就固定回
+  /* 2026-09-20 修：出厂角色库随安装包进了 <qq-bridge>/characters 以后，"没配就固定回
    * ~/Downloads/characters/characters"会让全新机器上的四个角色工具指向一个不存在的目录
    * （装了 21 个包却一个都读不到）。现在按存在性回落，这条断言跟着契约改。 */
   const userLib = fs.existsSync(lib.DEFAULT_CHARACTERS_DIR);

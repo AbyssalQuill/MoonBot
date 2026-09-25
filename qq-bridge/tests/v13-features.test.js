@@ -1,6 +1,6 @@
 // 1.3.0 新增能力的回归用例（纯函数为主，不碰生产 state 文件）。
 // 覆盖三件事：
-//   ① /token 的金额口径 —— 必须与管理端「学习」页实测区逐字一致（算错钱是主人一眼能看出来的错）；
+//   ① /token 的金额口径 —— 必须与管理端「学习」页实测区逐字一致（算错钱是一眼能看出来的错）；
 //   ② 工具 schema 压缩档 —— 档位解析、白名单/黑名单优先级、实测占比；
 //   ③ 记忆检索的查询串构造 —— 短词不能喂给 trigram 的 FTS5（会直接返回空，表现为"查不到"）。
 // 跑法：cd qq-bridge && node tests/v13-features.test.js
@@ -74,7 +74,7 @@ await check('① 有数据时正文包含总量与钱数，且估算行不并进
     const r = buildTokenReportText({ days: 1 });
     const billed = Number(rep.today.billedTotal);
     assert.ok(billed > 0, `billedTotal=${billed}`);
-    // 【2026-09-22】第一行是"平台计费日"口径，数字带千分位（跟面板顶部「今日已用」逐位对得上）
+    // 2026-09-22：第一行是"平台计费日"口径，数字带千分位（跟面板顶部「今日已用」逐位对得上）
     assert.ok(r.text.includes(Number(billed).toLocaleString('en-US')), r.text);
     assert.match(r.text, /平台计费日/);
     assert.match(r.text, /¥\d/);
@@ -89,7 +89,7 @@ await check('① 两个日界口径必须分行标注（计费日 vs 北京自�
   try {
     // 造"跨换日"的数据：今天（计费日，北京 08:00 起）只有一点点，而北京自然日 00:00 起有一大堆
     // —— 线上现场就是 592,685（计费日）vs 12,182,789（自然日），旧版把两者挨着印，看着像算错。
-    // ⚠ 时刻必须**钉死**（opts.nowMs）：这个断言跟挂钟有关 —— 北京时间 11:00 以后"now−3h"也落在
+    // 时刻必须钉死（opts.nowMs）：这个断言跟挂钟有关 —— 北京时间 11:00 以后"now−3h"也落在
     //   计费日里，两边数字就会相等，测试会假失败（2026-09-22 实际踩到）。所以固定成北京 11:00。
     const NOW = Date.parse('2026-09-22T11:00:00+08:00');
     const rows = [
@@ -99,7 +99,7 @@ await check('① 两个日界口径必须分行标注（计费日 vs 北京自�
       { tsMs: NOW - 8 * 3600_000, sessionId: 's', convKey: 'private:1', prompt: 300000, completion: 20000, total: 11800000, est: false, cacheRead: 11500000, cacheWrite: 0 },
     ];
     fs.writeFileSync(path.join(dir, 'token-usage.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
-    /* 【2026-09-22】meter 也要吃同一个"钉死的现在"：分时桶按**北京自然日**归属，若它读真实时钟，
+    /* 2026-09-22：meter 也要吃同一个"钉死的现在"：分时桶按北京自然日归属，若它读真实时钟，
      * 那么真跑过北京 00:00 之后 todayHourly 就落到新的一天、聚合为空，这条断言会假失败。 */
     initTokenMeter({ stateDir: dir, nowMs: NOW });
     initTokenReportCore({ tokenCost: { ...DEFAULT_TOKEN_COST } });
@@ -177,9 +177,9 @@ await check('② extreme 档：只留八件套，且明确是"会丢功能"的�
 
 await check('② low 档走"不要"名单：名单外一律保留（新增工具默认可见）', () => {
   const r = resolveToolTier({ enabled: true, level: 'low' });
-  /* 【2026-09-22 改口径】low 的 drop 名单按**真实调用日志**复核过：
-   * pixiv / 富卡片 / 点歌 / 定时 / QQ 空间五条 当时判"零调用"，后来主人在用 → 全部撤出名单。
-   * 所以这条断言改成：**在用的不砍**、**零调用的大块头照砍**。 */
+  /* 2026-09-22 改口径：low 的 drop 名单按真实调用日志复核过：
+   * pixiv / 富卡片 / 点歌 / 定时 / QQ 空间五条 当时判"零调用"，后来确认真实在用 → 全部撤出名单。
+   * 所以这条断言改成：在用的不砍、零调用的大块头照砍。 */
   assert.equal(toolAllowedByTier('qq_send_pixiv', r), true, 'pixiv 主人在用（画画），不能再砍');
   assert.equal(toolAllowedByTier('qq_send_rich', r), true, '富卡片主人在用');
   assert.equal(toolAllowedByTier('qq_send_qzone', r), true, '发说说主人在用');

@@ -7,13 +7,13 @@
 //    "est":true,"promptChars":pc,"completionChars":cc}
 // est=false = 帧内真实 usage（LLM 上报）；est=true = 无真实 usage 时按帧 transcript 字符估算。
 //
-// ── 与 DSH 权威计数对账（2026-09-15，主人问「面板比真实值虚高/偏低」时加的）────────────────
-// 单帧漏记是**真实存在**的：帧里拿不到 sessionId 时整帧被丢弃（原实现直接 return no-sessionId），
+// ── 与 DSH 权威计数对账（2026-09-15，用户问「面板比真实值虚高/偏低」时加的）────────────────
+// 单帧漏记是真实存在的：帧里拿不到 sessionId 时整帧被丢弃（原实现直接 return no-sessionId），
 // 实测 2026-09-15 有一个会话 DSH 侧 961,349、桥侧 889,248，差 72,101（正好一步的量）。
 // 现在每隔一段时间（默认 5 分钟）+ 桥启动时，读 DSH 自己落的
 //   <dshHome>/storages/session_projcache/sessions/session-*.json → record.rows.tokenUsage.val.totals
 // （uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens，按会话累计）
-// 与桥侧同会话的累计逐桶比对，**只补桥侧少掉的那部分**（reconciled:true 的行），
+// 与桥侧同会话的累计逐桶比对，只补桥侧少掉的那部分（reconciled:true 的行），
 // 并把已对账水位写进 state/token-reconcile.json —— 因此可反复执行、不会重复补，
 // 也不会因为文件截断（MAX_LINES 裁剪）把历史重新加一遍。
 //
@@ -38,14 +38,14 @@
 //   getTokenReport(days?, opts?)   计费日聚合 → { dates, today, todayEstimatedTotal, todayHourly, note }
 //
 // ── 计费日（day window）口径：默认与提供方控制台一致 ────────────────────────────────
-// 提供方（小米 MiMo 开放平台 / Token Plan）用量控制台按 **UTC 自然日** 结算，即北京时每天
+// 提供方（小米 MiMo 开放平台 / Token Plan）用量控制台按 UTC 自然日 结算，即北京时每天
 // 08:00 换日；本模块原先按北京自然日聚合，于是 00:00-08:00 的用量被算进「今日」，而控制台
 // 把它算在昨天 —— 面板数字必然高于控制台。实测（2026-09-12 的 state/token-usage.jsonl）：
 //   北京自然日合计 13,809,552；把 00:00-07:59 的 3,426,760 划归前一天后为 10,382,792，
 //   与控制台当日 10,383,812 相差 1,020（0.0098%）。
 // 因此 days/today/dates 一律按「计费日」= tsMs - dayOffsetMin 所在日期聚合（dayOffsetMin=480
 // 即 UTC 日；设 0 退回北京自然日口径）。可用环境变量 QQ_TOKEN_DAY_OFFSET_MIN 覆盖。
-// 注意：todayHourly 仍按 **北京自然日** 的分时（GUI 标题写死「今日分时（北京时）」且按 hour
+// 注意：todayHourly 仍按 北京自然日 的分时（GUI 标题写死「今日分时（北京时）」且按 hour
 // 绝对值定位，改成计费日会让跨 08:00 的小时序列错位），它与 today 的窗口在 00:00-08:00
 // 段不同，属已知差异。
 import fs from 'node:fs';
@@ -127,12 +127,12 @@ function emptyAgg() {
   return {
     prompt: 0, completion: 0, total: 0, estTotal: 0, cacheRead: 0, cacheWrite: 0,
     cachePrompt: 0, cacheCompletion: 0, cacheSamples: 0, samples: 0,
-    /* 【2026-09-19 主人反馈"token 虚高"】对账补记（reconciled）单独记账：
+    /* 2026-09-19：用户反馈"token 虚高"。对账补记（reconciled）单独记账：
      * 那些行是"桥侧漏记、事后按 DSH 的会话累计补上"的用量，时间戳取的是 DSH 那次动会话的 mtime ——
-     * 它可能属于**更早的**用量，却落在今天这一桶里。面板把这一块单独显示出来，
-     * 主人就能对上提供方控制台时心里有数（"今日已用里有多少是补记的"）。 */
+     * 它可能属于更早的用量，却落在今天这一桶里。面板把这一块单独显示出来，
+     * 用户就能对上提供方控制台时心里有数（"今日已用里有多少是补记的"）。 */
     reconciledTotal: 0, reconciledSamples: 0,
-    /* 【2026-09-19】重试（llm/retry）：失败的尝试提供方照计费、DSH 不给 usage —— 单独记账 */
+    /* 2026-09-19：重试（llm/retry）：失败的尝试提供方照计费、DSH 不给 usage —— 单独记账 */
     retryCount: 0, retryEstimated: 0,
   };
 }
@@ -166,7 +166,7 @@ function bjKey(tsMs) {
 }
 
 /** 计费日键：把 tsMs 先减去 dayOffsetMin 再取北京日期。
- *  dayOffsetMin=480（默认）→ 键=该时刻的 **UTC 日期**（= 北京时 08:00 换日），与提供方控制台一致；
+ *  dayOffsetMin=480（默认）→ 键=该时刻的 UTC 日期（= 北京时 08:00 换日），与提供方控制台一致；
  *  dayOffsetMin=0 → 键=北京日期（旧口径）。 */
 function billingKey(tsMs, offsetMin = meter.dayOffsetMin) {
   try { return beijingDateKey(new Date(Number(tsMs) - offsetMin * 60000)); } catch { return ''; }
@@ -199,7 +199,7 @@ function parseLine(line) {
       cacheRead: num(rec.cacheRead),
       cacheWrite: num(rec.cacheWrite),
       est: rec.est === true,
-      /* 【2026-09-19】对账补记标记必须原样带进来：面板要单独报"今日已用里有多少是补记的"
+      /* 2026-09-19：对账补记标记必须原样带进来：面板要单独报"今日已用里有多少是补记的"
        * （这类行的时间戳取 DSH 那次动会话的时刻，可能属于更早的用量却被算进今天）。 */
       reconciled: rec.reconciled === true
     };
@@ -233,24 +233,24 @@ function realSigSeen(sessionId, tsMs, sig) {
 
 /** 计量用的"现在"：默认真实时钟；测试用 initTokenMeter({nowMs}) 钉死（见 nowMsOverride 的注释）。
  *
- * 【2026-09-23 修「/token 分时数据全 0」—— 根因是 `Number(null) === 0`】
+ * 2026-09-23 修「/token 分时数据全 0」—— 根因是 `Number(null) === 0`：
  * 线上症状：`/token` 的「今日 token」「全天预计」都对，但「未命中/命中/输出」「费用」全是 0，
  * `naturalTotal` 也是 0；管理端分时图整片空白。
  *
  * 成因链：
  *   ① `initTokenMeter(cfg)` 末尾（见本文件 362 行）把 `meter.nowMsOverride` 置为
  *      `Number.isFinite(Number(opt.nowMs)) ? Number(opt.nowMs) : null` —— 线上 cfg 不带 nowMs，
- *      所以它被写成 **null**；
- *   ② 原先这里写 `Number(meter.nowMsOverride)`：`Number(null)` 是 **0**（不是 NaN！），
- *      `Number.isFinite(0)` 为 **true**，于是 nowMsOf() 返回 **0** = 1970-01-01；
+ *      所以它被写成 null；
+ *   ② 原先这里写 `Number(meter.nowMsOverride)`：`Number(null)` 是 0（不是 NaN！），
+ *      `Number.isFinite(0)` 为 true，于是 nowMsOf() 返回 0 = 1970-01-01；
  *   ③ `applyToMemory` 的分时桶门是 `bjK === bjKey(nowMsOf())`，回放时右边恒为 '1970-01-01'，
  *      与任何一条记录都不相等 → `meter.hours` 永远空 → 分时桶全 0。
- *   ④ 而 `meter.days`（日维度）用的是 `billingKey(nowMsOf())` 只做**过滤**、不做**清空**，
+ *   ④ 而 `meter.days`（日维度）用的是 `billingKey(nowMsOf())` 只做过滤、不做清空，
  *      所以日合计照常正确 —— 这正是"总量对、分时全 0"这个奇怪组合的来源。
  *
  * 为什么单独调用 getTokenReport 时正常：那时 ensureInit 是惰性触发，`meter.nowMsOverride`
- * 还停在模块初始化的 **undefined**，`Number(undefined)` 是 NaN → 正确回落到 Date.now()。
- * 只要先走一次 initTokenMeter(null) 就会踩中 —— 桥启动正是这条路径，所以**线上必现**。
+ * 还停在模块初始化的 undefined，`Number(undefined)` 是 NaN → 正确回落到 Date.now()。
+ * 只要先走一次 initTokenMeter(null) 就会踩中 —— 桥启动正是这条路径，所以线上必现。
  *
  * 修法：先判 null/undefined 再判有限性，绝不把 null 送进 Number()。
  */
@@ -298,8 +298,8 @@ function applyToMemory(rec) {
     else addReal(ha, rec);
     meter.hours.set(h, ha);
   }
-  /* 【2026-09-19 修"今日预计虚高"】按「计费日内的时段槽」累计历史用量，
-   * 供外推时用**同一时段的近 7 天平均**估算剩余时段 —— 机器人夜里几乎不烧 token，
+  /* 2026-09-19 修"今日预计虚高"：按「计费日内的时段槽」累计历史用量，
+   * 供外推时用同一时段的近 7 天平均估算剩余时段 —— 机器人夜里几乎不烧 token，
    * 原来那套"按时间线性外推"等于假设凌晨也按白天速率烧，18 点就能推出一整天的 2 倍多。 */
   const slot = slotOf(rec.tsMs);
   if (slot >= 0) {
@@ -333,7 +333,7 @@ function pruneFile() {
     const keep = lines.slice(lines.length - PRUNE_TO_LINES);
     fs.writeFileSync(meter.file, keep.join('\n') + (keep.length ? '\n' : ''));
     meter.lineCount = keep.length;
-    // 裁剪后必须按**裁剪过的**文件重建按会话累计：否则对账基准会把被裁掉的历史算成
+    // 裁剪后必须按裁剪过的文件重建按会话累计：否则对账基准会把被裁掉的历史算成
     // 「桥侧已经记过」，DSH 侧的真实总量减去它会得出一个假增量（重复补）。
     meter.inited = false;
     ensureInit();
@@ -378,8 +378,8 @@ export function initTokenMeter(cfg) {
   // 计费日偏移：显式 cfg.dayOffsetMinutes 优先，其次环境变量，最后默认 480（UTC 日）
   meter.dayOffsetMin = normalizeDayOffset(opt.dayOffsetMinutes, ENV_DAY_OFFSET_MIN);
   meter.inited = false;
-  /* 【2026-09-22 修测试的"换日假失败"】北京自然日的分时桶（applyToMemory）与计费日窗口都以
-   * "今天"为参照，而它们读的是**真实时钟**（Date.now）—— 于是回归测试里哪怕把 nowMs 钉死，
+  /* 2026-09-22 修测试的"换日假失败"：北京自然日的分时桶（applyToMemory）与计费日窗口都以
+   * "今天"为参照，而它们读的是真实时钟（Date.now）—— 于是回归测试里哪怕把 nowMs 钉死，
    * 只要真的跨过北京 00:00，`todayHourly` 就会落到新的一天、聚合为空，`自然日 > 计费日` 那条断言
    * 假失败（2026-09-22 深夜实际踩到）。这里给 meter 一个可选的"参照时刻"覆盖：测试传 nowMs 就完全
    * 确定；线上不传，行为与以前逐字一致（nowMsOf 回落到 Date.now）。 */
@@ -592,13 +592,13 @@ export function meterTokenFrame(frame) {
     const evType = event ? event.type : null;
     const frameType = String(frame.type || '');
 
-    /* 【2026-09-19 实测：面板比提供方控制台低 0.3% 的来源】`llm/retry` = 一次尝试失败后重试。
-     * 失败的尝试**提供方照计费**（输入 token 已经送过去），但 DSH 不会为它产出 usage ——
+    /* 2026-09-19 实测：面板比提供方控制台低 0.3% 的来源。`llm/retry` = 一次尝试失败后重试。
+     * 失败的尝试提供方照计费（输入 token 已经送过去），但 DSH 不会为它产出 usage ——
      * 于是桥侧、乃至 DSH 自己的会话累计都少这一块。真机现场（2026-09-19）：
      *   控制台 48,063,224 / 面板 47,919,388，差 143,836；同一天日志里正好有 2 条 llm/retry
      *   （turn52/step8、turn3/step4），按当时的上下文规模估算每次 ≈ 7 万 token —— 数量级对得上。
-     * 这里只**记账**（次数 + 用该会话上一条真实请求的规模做估算），不冒充精确值：
-     * 面板会把它单独列出来，让主人能用它跟控制台对上号。 */
+     * 这里只记账（次数 + 用该会话上一条真实请求的规模做估算），不冒充精确值：
+     * 面板会把它单独列出来，让用户能用它跟控制台对上号。 */
     if (evType === 'llm/retry') {
       const last = meter.lastBillBySession.get(sessionId) || 0;
       meter.lastBillBySession.set(sessionId, last);
@@ -717,7 +717,7 @@ function dateKeyList(days, nowTs) {
  *   today: {total, estTotal, prompt, completion, cacheRead, cacheWrite, billedTotal, ...}
  *          billedTotal = 未命中 + 命中 + 缓存写 + 输出（= 提供方 total_tokens 口径，仅真实行）
  *   todayEstimatedTotal: 今日至今(真实+估算)按「计费日已过比例」外推；≤5% 时间直接返回当前值
- *   todayHourly: [{hour, prompt, completion, total, estTotal, cacheRead, cacheWrite, ...}]（**北京自然日** 0..当前时，零填充，GUI 小时图用）
+ *   todayHourly: [{hour, prompt, completion, total, estTotal, cacheRead, cacheWrite, ...}]（北京自然日 0..当前时，零填充，GUI 小时图用）
  *   dayWindow: { offsetMinutes, startBjMinutes, key } 说明 today 的口径
  *   note: 说明
  */
@@ -759,7 +759,7 @@ export function getTokenReport(days = 7, opts) {
   const base = today.total + today.estTotal;
   /* 线性外推（老口径）：把"当前速率"当成全天速率 —— 机器人夜里几乎不用，这个值系统性偏高，保留只为对照 */
   const todayLinearEstimatedTotal = elapsedFraction <= 0.05 ? base : Math.round(base / elapsedFraction);
-  /* 【2026-09-19 修"今日预计虚高"】按**同一时段的近 7 天平均**估剩余时段：
+  /* 2026-09-19 修"今日预计虚高"：按同一时段的近 7 天平均估剩余时段：
    *   · 时段槽 = 计费日内的第几个小时（0 = 换日那一刻，默认北京 08:00）；
    *   · 历史取最近 7 个计费日里、该槽的平均用量（不含今天）；
    *   · 剩余槽的预估之和 + 今日已用 = 预计；
@@ -890,7 +890,7 @@ function isBridgeOwnedSession(sessionId) {
 /**
  * 与 DSH 的会话级权威计数对账，把桥侧漏掉的部分补成 reconciled:true 的计量行。
  *
- * 为什么可以反复执行：DSH 的 totals 是**按会话累计**，桥侧水位（reconcileFloor）只记录
+ * 为什么可以反复执行：DSH 的 totals 是按会话累计，桥侧水位（reconcileFloor）只记录
  * 「已经认可过的 DSH 总量」。只有当 DSH 总量比上次水位高时才补，且补的量 = DSH 现在的量 −
  * max(桥侧同会话累计, 上次水位) 的逐桶差额；补完把水位抬到 DSH 当前值 → 幂等。
  *
@@ -914,7 +914,7 @@ export function reconcileWithDsh(opts = {}) {
     return out;
   }
   const quota = Number(opts.quotaPerRun) > 0 ? Number(opts.quotaPerRun) : 200; // 单次最多补多少会话
-  // 只对"最近还活跃"的会话补差额：DSH 的 totals 是会话**终身**累计，而计量文件会截断，
+  // 只对"最近还活跃"的会话补差额：DSH 的 totals 是会话终身累计，而计量文件会截断，
   // 首次对账若不分窗，会把几十个历史会话的量（可达数千万 token）一起补进来，7 日曲线直接爆掉。
   const maxAgeMs = Number(opts.maxAgeMs) > 0 ? Number(opts.maxAgeMs) : DEFAULT_RECONCILE_MAX_AGE_MS;
   const nowTs = opts.nowMs != null ? Number(opts.nowMs) : Date.now();
@@ -933,8 +933,8 @@ export function reconcileWithDsh(opts = {}) {
     });
     const floor = fl(meter.reconcileFloor.get(sid));
     const mine = fl(meter.sessionSums.get(sid));
-    /* 【修对账棘轮】以前只看"DSH 总量 > 水位"就认定有缺口，再逐桶补 max(0, dshNow[桶] − max(桥侧[桶], 水位[桶]))。
-     * 逐桶 max(0,·) 是**单向棘轮**：桥侧某个桶记多了（快照重放把同一 step 记成两条不同签名之类）
+    /* 修对账棘轮：以前只看"DSH 总量 > 水位"就认定有缺口，再逐桶补 max(0, dshNow[桶] − max(桥侧[桶], 水位[桶]))。
+     * 逐桶 max(0,·) 是单向棘轮：桥侧某个桶记多了（快照重放把同一 step 记成两条不同签名之类）
      * 永远扣不回来，而另一个桶的缺口还会继续补 —— 于是会话总量单调漂到 DSH 之上、再也回不去。
      *
      * 线上实测（取回 /root/qq-bridge/state/token-usage.jsonl 离线复算，session-724f5d85）：
@@ -943,7 +943,7 @@ export function reconcileWithDsh(opts = {}) {
      * 其中 2026-09-18 13:35:13 那条补记行（prompt=476,993、cacheRead=0）落在当日，使面板「今日已用」
      * 比 DSH 自己记的当日用量（21,562,418，与提供方控制台 21,563,440 只差 1,022 的结算延迟）多 476,993。
      *
-     * 所以先把**总量**比一遍：桥侧总量已不低于 DSH 总量就不补；要补也把"逐桶差额之和"限制在总缺口内。
+     * 所以先把总量比一遍：桥侧总量已不低于 DSH 总量就不补；要补也把"逐桶差额之和"限制在总缺口内。
      * 离线验证（只读导入本模块、stateDir/projcache 指向临时目录）：现状实现补记 4,700 后总量超 DSH 2,003；
      * 本修法补记 2,697（正好等于总缺口），总量与 DSH 相等。 */
     const mineSum = sumOf(mine), floorSum = sumOf(floor), dshSum = sumOf(dshNow);
@@ -965,7 +965,7 @@ export function reconcileWithDsh(opts = {}) {
       cacheRead: Math.max(mine.cacheRead, floor.cacheRead),
       cacheWrite: Math.max(mine.cacheWrite, floor.cacheWrite)
     };
-    // 逐桶取缺口，但**合计不得超过 deficit**（否则一样会把总量推到 DSH 之上），按缺口比例分配。
+    // 逐桶取缺口，但合计不得超过 deficit（否则一样会把总量推到 DSH 之上），按缺口比例分配。
     const gaps = {
       prompt: Math.max(0, dshNow.prompt - base.prompt),
       completion: Math.max(0, dshNow.completion - base.completion),

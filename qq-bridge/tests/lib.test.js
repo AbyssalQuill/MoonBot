@@ -29,9 +29,9 @@ assert.equal(bjMinToText(60 * 13 + 5), '13:05');
 assert.equal(bjMinToText(-5), '-1:-5');            // 迁移源行为：负数不归一化且 padStart 对负号串不补零
 assert.equal(bjMinToText(1445), '00:05');          // 跨日
 assert.equal(beijingTs(0), '1970-01-01 周四 08:00:00');
-/* 【2026-09-20 定稿：给人看的时间保持分钟精度，不带秒】
+/* 2026-09-20 定稿：给人看的时间保持分钟精度，不带秒
  * fmtBeijing 是唤醒正文/工具结果里所有消息时间的格式化器。中途试过对齐 memory.db 的 chat_messages.ts
- * （精确到秒），主人当场定稿"不需要带秒"。下面这个值就是库里真实一行（ts_ms=1789902923920）的**分钟**形态，
+ * （精确到秒），最终定稿"不需要带秒"。下面这个值就是库里真实一行（ts_ms=1789902923920）的分钟形态，
  * 一旦有人又把它改成秒级，这条断言会立刻红。 */
 assert.equal(fmtBeijing(1789902923920), '2026-09-20 周日 19:15');
 assert.equal(fmtBeijing(0), '????-??-?? ??:??');   // 缺时间戳时的占位
@@ -89,7 +89,7 @@ assert.equal(convertExampleSpacesToComma('你好 / ok'), '你好 / ok'); // 斜�
 // send-gaps（发送节奏纯函数）
 // 2026-09-11 重整后：下限不再来自配置，而是硬性的 MIN_GAP_MS=100
 // （原先由 burstIntervalMinMs 提供的 1800ms 下限已删除，改成 0 也能真的接近即时）。
-// 2026-09-15 主人定稿：节奏只留"按字数"一种，byLength 与 core/send-chain.js 用同一组参数
+// 2026-09-15 定稿：节奏只留"按字数"一种，byLength 与 core/send-chain.js 用同一组参数
 // （linearPerCharMs / linearMinMs / linearCapMs / linearJitterRatio），旧的 gapBaseMs/gapPerCharMs 已删除。
 assert.equal(MIN_GAP_MS, 100);
 assert.equal(clampGap(50, {}), 100);             // 低于硬下限 → 夹到 MIN_GAP_MS

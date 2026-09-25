@@ -75,8 +75,8 @@ import { SILENT_MARKER, isSilentMarker, SEND_TOOL_RE, isSendToolName, SPACE_SPLI
 import { state, loadConfig, loadState, saveState, watchConfigFile } from './core/config.js';
 import { acquireLock, releaseLock } from './core/runtime.js';
 import { enqueueSend, currentSendChain } from './core/send-chain.js';
-import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './core/qq-send.js';
-// Pixiv 登录态自检：登录态失效时主动提醒主人（长期令牌 + 旧 cookie 两条路），见 core/pixiv-watch.js
+import { sendToQQ, sendMessages, initQqSendCore, setQqSendBot } from './core/qq-send.js';
+// Pixiv 登录态自检：登录态失效时主动发一条私聊提醒（长期令牌 + 旧 cookie 两条路），见 core/pixiv-watch.js
 import { startPixivCookieWatch } from './core/pixiv-watch.js';
 // Pixiv 长期令牌自动轮换（PHPSESSID 换一次 refresh_token 之后，桥自己每小时换 access_token）
 import { startPixivTokenRefresh, pixivAuthState } from './lib/pixiv-auth.js';
@@ -154,7 +154,7 @@ import {
 } from './core/persona-learn.js';
 import { initPortraitLearn } from './core/portrait-learn.js';
 import { initVoiceCore } from './core/voice.js';
-import { initNapcatTokens } from './core/napcat-tokens.js';
+import { initNapcatTokens, probeNapcatLogin } from './core/napcat-tokens.js';
 import { initNapcatGuard, startNapcatGuard } from './core/napcat-guard.js';
 import { initSendDice } from './core/send-dice.js';
 import { ensureLearningToken } from './core/learning-token.js';
@@ -163,7 +163,7 @@ import {
   loadArchivedCache, liveSessionIdsOnDisk,
 } from './core/session-archive.js';
 
-/* 【2026-09-16】磁盘上真实存在的会话 id，按 60 秒缓存：事件泵的活跃会话筛选与启动自愈都用它。 */
+/* 2026-09-16：磁盘上真实存在的会话 id，按 60 秒缓存：事件泵的活跃会话筛选与启动自愈都用它。 */
 let _liveIdsCache = null;
 let _liveIdsAt = 0;
 function liveSessionIdsOnDiskCache() {
@@ -213,7 +213,7 @@ import {
   formatParticipation, suggestQuietMs, PEER_TYPING_HOLD_MAX_MS, scheduleWake,
   scheduleReplyCheck, buildWakeReminderPrompt,
   startDeliveryWatchdog,
-  // 主人改了插话概率 → 立刻同步到正在跑的会话（只动 source=owner 的，见 social-state.js）
+  // 配置里的插话概率一改 → 立刻同步到正在跑的会话（只动 source=owner 的，见 social-state.js）
   applyOwnerWakeProbabilityToSessions,
   // 人设已合成进系统提示词 → 启动时给"没见过当前人设版本"的会话标记一次补注入
   markStalePersonaReinjects,
@@ -223,7 +223,7 @@ import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder,
 } from './core/scheduler.js';
 import {
-  pushCrossDigest, addCrossMail, unreadCrossMails, markCrossMailsRead,
+  addCrossMail, unreadCrossMails, markCrossMailsRead,
   buildCrossChatBlock, initCrossChatCore,
 } from './core/crosschat.js';
 import {
@@ -275,14 +275,14 @@ async function main() {
     try {
       const target = resolveDshTarget();
       if (target.refusedDesktop || !target.booted) return;
-      // 【2026-09-12】preset 每次启动都刷新：它是**桥自带的代码资产**（persona / [WAKE TYPES] / [RULES]），
-      // 不是主人数据；而原来的逻辑是"装过一次就靠 marker 全跳过"，导致改了 agent.cordis.yml
-      // 之后重启桥**根本不会把新 preset 装进去**（实测活体 preset 一直停在旧哈希）。
+      // 2026-09-12：preset 每次启动都刷新：它是桥自带的代码资产（persona / [WAKE TYPES] / [RULES]），
+      // 不是用户数据；而原来的逻辑是"装过一次就靠 marker 全跳过"，导致改了 agent.cordis.yml
+      // 之后重启桥根本不会把新 preset 装进去（实测活体 preset 一直停在旧哈希）。
       // MCP/插件那些开销大的部分仍由 marker 把关，不受影响。
       try {
         installPresets(target);
         log(`[dsh-side] preset 已刷新到 ${path.join(target.home, '.agent-presets')}`);
-        /* 【2026-09-19 主人要求"外面改系统提示词里面也要改"】盯住 persona.md / speech-rules.md：
+        /* 2026-09-19：外面改系统提示词、里面也要跟着改 —— 盯住 persona.md / speech-rules.md：
          * 一改就重新合成进已安装的 preset（新会话直接生效），日志留一行。 */
         try {
           watchOverrideFiles({ home: target.home, root: ROOT, log });
@@ -291,7 +291,7 @@ async function main() {
       } catch (ePre) {
         log(`[dsh-side] preset 刷新失败（继续用现有 preset）: ${ePre?.message ?? ePre}`);
       }
-      /* 【2026-09-20 长期记忆插件】每次启动都幂等装配一遍（link + profile 注册 + settings 的 memory 段）。
+      /* 2026-09-20 长期记忆插件：每次启动都幂等装配一遍（link + profile 注册 + settings 的 memory 段）。
        * 为什么不能只在 installToIsolatedDsh 里做：那条路被 marker 挡住，装过一次就不再跑，
        * 于是升级上来的老安装永远不会有它（与 preset 那次踩的坑同型）。 */
       try {
@@ -325,7 +325,7 @@ async function main() {
   initSocialCore(cfg);
   // 投递看门狗：兜"桥已经收下、却因为某条链路静默失败而一直没交给模型"的消息。
   // 判据是 lastDeliveredSeq（未交付）而不是"有没有被回复"——模型看到后选择不回是它的自由，
-  // 但**没看到**必须被兜住。正常路径下它一次都不会触发（投递 1~3 秒内完成）。
+  // 但没看到必须被兜住。正常路径下它一次都不会触发（投递 1~3 秒内完成）。
   try { startDeliveryWatchdog(); } catch (error) { log('[watchdog] 启动失败:', error?.message ?? error); }
   initModeCore(cfg);
   initDshWatchCore(cfg);
@@ -344,9 +344,9 @@ async function main() {
   // 发送抽签（语音 / 表情包的概率与冷却）：桥侧掷骰后写进唤醒正文，不让模型自己猜概率
   initSendDice(cfg);
   initTokenMeter(cfg);
-  /* 【2026-09-21】/token 指令：用与「学习」页实测区同一套口径算今日花费（单价走 cfg.tokenCost）。 */
+  /* 2026-09-21：/token 指令：用与「学习」页实测区同一套口径算今日花费（单价走 cfg.tokenCost）。 */
   initTokenReportCore(cfg);
-  /* 【2026-09-21】把配置注给 dsh-side：napcat MCP 要不要走 mcp-compressor 压缩代理由它决定。
+  /* 2026-09-21：把配置注给 dsh-side：napcat MCP 要不要走 mcp-compressor 压缩代理由它决定。
    * 代理开关变了要重写 cordis.patch.yml（幂等）并重启隔离 DSH 才生效，与工具档位同一条路径。 */
   setDshSideConfig(cfg);
   try { patchProfileCordis(resolveDshTarget()); } catch (e) { log(`[dsh-side] 重写 MCP 块失败（不影响启动）：${e?.message ?? e}`); }
@@ -365,7 +365,7 @@ async function main() {
   } catch (error) {
     log(`[token] 用量对账初始化失败（忽略）: ${error?.message ?? error}`);
   }
-  /* 【2026-09-19】上下文剪枝省下多少：读 DSH 自己的会话日志（compaction/prune 的 shadowedTokenCount
+  /* 2026-09-19：上下文剪枝省下多少：读 DSH 自己的会话日志（compaction/prune 的 shadowedTokenCount
    * × 它之后同会话还发生过多少次请求）。这里只做初始化 + 首次扫描，之后由用量面板按需增量刷新。
    * 为什么不用事件流：官方 rc.1 没有全局广播，桥是逐会话 follow，只覆盖自己映射的会话；
    * 而会话日志是 DSH 落的权威记录，任何会话的剪枝都算数（真机验证过：日志里 prune 事件带 shadowedTokenCount）。 */
@@ -401,9 +401,9 @@ async function main() {
   log(visionSplitEnabled()
     ? `[vision] 已启用独立识图模型：${String(cfg.dsh?.visionModel || '')} @ ${String(cfg.dsh?.visionBaseUrl || '')}（图片先转文字再交给语言模型）`
     : '[vision] 未配置独立识图模型：图片按附件发给主模型（识图模型留空时用主模型）');
-  /* 【2026-09-19 上下文治理】把压缩策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层）。
+  /* 2026-09-19 上下文治理：把压缩策略写进隔离 DSH home 的 cordis.patch.yml（home 级 patch 层）。
    * 为什么在桥侧做：桥知道 DSH home 在哪（QQB_DSH_HOME 由启动脚本给出，本机由管理器配置给出），
-   * 而且 DSH 的 profile 是 `patchReload: live` —— 改这份文件**不用重启 DSH** 就生效，改动不打断会话。
+   * 而且 DSH 的 profile 是 `patchReload: live` —— 改这份文件不用重启 DSH 就生效，改动不打断会话。
    * 写不进去只是没有治理，绝不影响桥启动（失败只记一行日志）。 */
   try {
     const cRes = syncDshCompactionPatch({ home: resolveIsolatedDshHome(), cfg: cfg.dshCompaction, log });
@@ -428,7 +428,7 @@ async function main() {
   const { sendRich, musicSearch, buildMusicCard } = createMediaDomain(cfg);
   setConsoleMedia(sendRich, musicSearch, buildMusicCard);
 
-  /* Pixiv 登录态看护：只在"登录态失效"时才给主人发一条私聊提醒（最多一天一次）。
+  /* Pixiv 登录态看护：只在"登录态失效"时才向 owner 发一条私聊提醒（最多一天一次）。
    * 2026-09-20 起登录态的主流形态是 OAuth 长期令牌（自动轮换），cookie 只当旧安装的兼容路径。 */
   try {
     startPixivCookieWatch({
@@ -441,7 +441,7 @@ async function main() {
   }
 
   /* Pixiv 长期令牌自动轮换：每 50 分钟看一眼，access_token 快过期就换，并把轮换后的 refresh_token 落盘。
-   * 只有手里**真的有** refresh_token 才说这句话 —— 没配的时候不该在启动日志里假装有个登录态。 */
+   * 只有手里真的有 refresh_token 才说这句话 —— 没配的时候不该在启动日志里假装有个登录态。 */
   try {
     startPixivTokenRefresh({ logger: (m) => log(m) });
     if (pixivAuthState().hasRefreshToken) log('[pixiv] token 自动轮换已启动（间隔 50 分钟）');
@@ -483,17 +483,17 @@ async function main() {
   setSessionArchiveApi(api);
   // 活动感知回合看门狗：只在“完全静默”超过该时长（无任何 turn/tool/流式事件）才判定卡死。
   // default 防“忘记设置唤醒条件”：key -> 当前是否等待 AI 处理唤醒回合 / 本回合已更新唤醒配置 / 连续未设置次数
-  /* 【2026-09-16 启动自愈】剔掉指向"磁盘上已经不存在的会话"的映射。
+  /* 2026-09-16 启动自愈：剔掉指向"磁盘上已经不存在的会话"的映射。
    * 实测：手动清理过会话目录后，`state/sessions.json` 里还留着旧 id → 事件泵每秒重开一次死会话的
    * session/follow（日志刷 `follow 流终结 … (error)`，约 280 次/分钟），唤醒投递被拖慢甚至像"不回复"。
    * 这里对齐一次磁盘，只保留真实存在的会话；顺带把内存 reverse 也建干净。 */
   let sessionsPruned = 0;
   try {
     const alive = liveSessionIdsOnDisk();
-    /* 【2026-09-22 修 M1·"全员失忆"风险】`alive` 为空有两种含义，旧写法把它们混成一种：
+    /* 2026-09-22 修 M1·"全员失忆"风险：`alive` 为空有两种含义，旧写法把它们混成一种：
      *   ① 真的所有会话都不存在了 → 该清；
-     *   ② **枚举不到**（归档根路径拿不到 / 候选目录不存在 / 只留本桥 slug 而同名目录缺失）→ 不该清。
-     * 旧写法 `if (alive.size || 映射数)` 在 ② 下恒真 → 每个 sid 都"找不到" → **删光 state.sessions 并落盘**，
+     *   ② 枚举不到（归档根路径拿不到 / 候选目录不存在 / 只留本桥 slug 而同名目录缺失）→ 不该清。
+     * 旧写法 `if (alive.size || 映射数)` 在 ② 下恒真 → 每个 sid 都"找不到" → 删光 state.sessions 并落盘，
      * 记忆/画像/贴纸的会话身份随之丢失且不可恢复（现场日志：`磁盘上只剩 0 个会话`，全量只剩这一条）。
      * 现在空集一律跳过清理（与同文件 `:525` 对空集"未知"的语义对齐）。 */
     if (alive.size > 0 && Object.keys(state.sessions || {}).length) {
@@ -517,7 +517,7 @@ async function main() {
     const activeSids = () => {
       const out = [];
       const seen = new Set();
-      // 【2026-09-16】只把"磁盘上确实存在"的会话交给事件泵：死会话会让 follow 反复报错、拖慢唤醒投递。
+      // 2026-09-16：只把"磁盘上确实存在"的会话交给事件泵：死会话会让 follow 反复报错、拖慢唤醒投递。
       // 磁盘集合按 60 秒缓存一次（会话轮换/归档后自动跟上），拿不到就退回不筛选（宁可不筛也别漏跟）。
       let alive = null;
       try {
@@ -543,11 +543,11 @@ async function main() {
 
   loadSocialState();
 
-  /* 启动时把"主人配置的插话概率"同步到已有会话（2026-09-19 主人要求"插话概率等所有概率都要改好落地"）：
+  /* 启动时把"配置里的插话概率"同步到已有会话（2026-09-19：插话概率等所有概率都要改好落地）：
    * 老会话数据里没有来源标记，以前会一直用历史上存下来的那个值（常见是模型早期拍的 0.12），
-   * 主人后来在界面上改成 0.05/0.2 也永远不会变。这里在启动时对齐一次。
-   * 【2026-09-19 改口径】连"模型之前自定的"也一起覆盖 —— 主人说"我调的 0.15，唤醒词里带的
-   * 好像是 0.08"，就是因为老口径保留了模型的值。现在主人这份配置说了算。 */
+   * 后来在界面上改成 0.05/0.2 也永远不会变。这里在启动时对齐一次。
+   * 2026-09-19 改口径：连"模型之前自定的"也一起覆盖 —— 现场是"我调的 0.15，唤醒词里带的
+   * 好像是 0.08"，就是因为老口径保留了模型的值。现在配置这份值说了算。 */
   try {
     const r = applyOwnerWakeProbabilityToSessions();
     if (r.updated) log(`[config] 启动时同步插话概率：更新 ${r.updated} 个会话（其中覆盖模型自定的 ${r.overridden} 个）`);
@@ -567,7 +567,7 @@ async function main() {
     accessToken: cfg.napcat.wsAccessToken || cfg.napcat.accessToken || undefined,
     reconnect: true
   });
-  // 【2026-09-16 保登录态】连接是否活着（下面 open/close 里维护）+ "不回复"排查用的登录态巡检
+  // 2026-09-16 保登录态：连接是否活着（下面 open/close 里维护）+ "不回复"排查用的登录态巡检
   let napcatUp = false;
   setStickerBot(bot);
   setQqSendBot(bot);
@@ -634,10 +634,21 @@ async function main() {
     } catch (error) { log('自动审批好友请求出错:', error?.message ?? error); }
   });
 
-  bot.on('open', () => { napcatUp = true; log(`NapCat 已连接：${cfg.napcat.wsUrl}`); });
-  bot.on('close', (info) => { napcatUp = false; log(`NapCat 连接断开（code=${info?.code ?? '?'} reason=${String(info?.reason ?? '').slice(0, 80)}），重连中…`); });
-  // 【2026-09-15】以前这里直接把 error 对象丢给 log，而 Error 经 JSON.stringify 是 `{}` ——
-  // 日志里只看到 `NapCat 错误: {}`，**一点线索都没有**（排查"不回复"时被这个坑了一次）。
+  /* 2026-09-30：napcat 登录态改为 SSE 实时探测。
+   * 链路真的开了/断了 → 强制重探一次登录态（绕过 3 秒 TTL），订阅者（SSE）立刻收到新状态。
+   * 只有这两个真实事件会 force，平时探测靠 TTL 合并，不会去轰炸 NapCat。 */
+  bot.on('open', () => {
+    napcatUp = true;
+    log(`NapCat 已连接：${cfg.napcat.wsUrl}`);
+    void probeNapcatLogin({ force: true }).catch(() => {});
+  });
+  bot.on('close', (info) => {
+    napcatUp = false;
+    log(`NapCat 连接断开（code=${info?.code ?? '?'} reason=${String(info?.reason ?? '').slice(0, 80)}），重连中…`);
+    void probeNapcatLogin({ force: true }).catch(() => {});
+  });
+  // 2026-09-15：以前这里直接把 error 对象丢给 log，而 Error 经 JSON.stringify 是 `{}` ——
+  // 日志里只看到 `NapCat 错误: {}`，一点线索都没有（排查"不回复"时被这个坑了一次）。
   // 现在把 message/code/cause 都打出来，并带上 WS 状态与 URL，一眼能看出是握手被拒还是断线。
   bot.on('error', (error) => {
     const detail = [error?.message, error?.code, error?.cause?.code, error?.cause?.message]
@@ -645,49 +656,23 @@ async function main() {
     log(`NapCat 错误: ${detail}（wsUrl=${cfg.napcat.wsUrl}）`);
   });
 
-  /* 【2026-09-16 保登录态：把"不回复"的分叉判据写进日志】
-   * 主人反复遇到的"又不回复了"其实只有两种：
-   *   ① **QQ 掉登录态**（NapCat 里没登录）→ 只能扫码，扫码后**会话/快速登录信息**会重新落进数据卷；
-   *   ② **桥的连接断了**（QQ 那边一切正常）→ 3.1.3 起桥会判死即重建（退避封顶 10s），自己接回。
-   * 以前这两种在日志里长得一模一样（都只是连不上），只能靠翻 NapCat 容器日志去猜。
-   * 现在：只要 WS 没连上，就每分钟去问一次 NapCat 的 WebUI「QQ 到底登录没有」，状态变了才打一行，
-   * 说明白是哪一种、下一步该干什么。连上时完全不查、不打日志。
+  /* 2026-09-23：去除探针与状态检测。
+   * 以前这里每分钟、在 WS 没连上时去问一次 NapCat「QQ 到底登录没有」，只为把"掉登录态"和
+   * "桥断线"两类原因写进日志。现在整体去掉：
+   *   · 这本身就是一个周期性自动探针（明确要求不要）；
+   *   · 而且它早期版本走的正是 NapCat 的 WebUI 登录接口（要占页面自己那份额度）。
+   * 桥现在不主动查 NapCat 任何状态。真要判断，看桥自己的重连日志（退避封顶 10s）或直接开 NapCat 界面。
    */
-  const LOGIN_WATCH_MS = 60000;
-  let loginNote = '';
-  let loginNoteAt = 0;
-  const loginWatch = setInterval(() => {
-    void (async () => {
-      if (napcatUp) return;
-      let st = null;
-      try {
-        const mod = await import('./core/napcat-tokens.js');
-        st = await mod.probeQqLoginState();
-      } catch (error) {
-        st = { ok: false, error: String(error?.message ?? error) };
-      }
-      const note = !st?.ok
-        ? `登录态查不到（${st?.error ?? '未知'}）—— 多半是 NapCat 还没起来/WebUI 不可达，桥会继续重连`
-        : (st.isLogin
-          ? `QQ **仍是登录态**（${st.nick || '已登录'}${st.online ? '、在线' : ''}）⇒ 只是桥的连接断了，桥会自动重连（退避封顶 10s）；一分钟还没接上就看上面的重连错误`
-          : '⚠️ **QQ 已掉登录态**：需要去管理端首页 → NapCat WebUI 扫码。登录态存在数据卷 napcat-qq + 配置目录里的 napcat_<qq>.json，正常情况下重启桥/重启容器/掉电都**不会**掉登录（容器起来后按 ACCOUNT 自动快速登录）');
-      const now = Date.now();
-      if (note !== loginNote || now - loginNoteAt > 300000) {
-        loginNote = note;
-        loginNoteAt = now;
-        log(`[napcat-login] ${note}`);
-      }
-    })();
-  }, LOGIN_WATCH_MS);
-  loginWatch.unref?.();
+  const loginWatch = null;
+  void loginWatch;
 
-  // 【2026-09-12 修「启动不顺畅 / 桥自己死掉」】
-  // onebot-ws 的老语义是：**首次 open 之前就 close** → reject(NAPCAT_CONN) → 这里 await 抛出去 →
+  // 2026-09-12 修「启动不顺畅 / 桥自己死掉」
+  // onebot-ws 的老语义是：首次 open 之前就 close → reject(NAPCAT_CONN) → 这里 await 抛出去 →
   // main() 崩 → process.exit(1)。可 NapCat 启动要十几秒、首次还要扫码，于是：
   //   · 「一键启动整套」按顺序拉起时，桥几乎必然在 NapCat 就绪前先连一次 → 直接退出（今天 13:29/13:30 连死两次）；
   //   · 用户看到的是"整套启动成功"但机器人根本不收消息，还得再手动点一次桥的启动。
   // 现在改成：首次连接失败就带退避重试（NapCat 还没起/还没扫码都是正常情况），
-  // 预算内连上就继续；预算用完也**不退出** —— 桥保留控制台与后台重连循环，等 NapCat 起来自己接上。
+  // 预算内连上就继续；预算用完也不退出 —— 桥保留控制台与后台重连循环，等 NapCat 起来自己接上。
   const connectNapcat = async (budgetMs) => {
     const t0 = Date.now();
     for (let attempt = 1; ; attempt += 1) {
@@ -724,7 +709,7 @@ async function main() {
     })();
   }
   // 读取机器人昵称（用于社交模式"被提到"识别）
-  // ⚠️ 未连上时**不要**在这里等：getLoginInfo 会一直等回包（实测把后续 startConsoleServer 拖了 30 秒，
+  // 未连上时不要在这里等：getLoginInfo 会一直等回包（实测把后续 startConsoleServer 拖了 30 秒，
   // 用户看到的正是"桥起来半天、点开是白屏"）。没连上就交给后台重连成功后那次 fetchNickname。
   const fetchNickname = async () => {
     try {
@@ -755,7 +740,7 @@ async function main() {
   // NapCat 会话守护：探针定时器在这里起（放在 OneBot 客户端建好之后，没配 httpUrl 时还能走 WS 探活）
   startNapcatGuard();
   startConsoleServer();
-  // 配置热加载：管理器保存 config.json 后**原地**更新 cfg（不换对象引用——它已被 initXxxCore 注入到
+  // 配置热加载：管理器保存 config.json 后原地更新 cfg（不换对象引用——它已被 initXxxCore 注入到
   // 十几个模块），免重启即生效。模型相关字段变化时清掉"已 selectModel"缓存，让已存在的会话下一轮就换新模型。
   // 以前这里没有监听，管理器改完桥接还拿着启动时的旧值，甚至把旧值写回 config.json 把改动抹掉。
   try {
@@ -765,10 +750,10 @@ async function main() {
           resetVisionModelApplications();
           log('[config] 模型配置已变化，已清空会话模型缓存（下一轮起用新模型）');
         }
-        /* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】主人一改唤醒概率/活跃概率，
-         * 正在跑的会话必须**立刻**跟着变 —— 否则界面上改了数字，已经聊过的会话照旧用旧值
+        /* 2026-09-19：插话概率等所有概率都要改好落地 —— 一改唤醒概率/活跃概率，
+         * 正在跑的会话必须立刻跟着变 —— 否则界面上改了数字，已经聊过的会话照旧用旧值
          * （那正是"改了概率没反应"的机制原因）。
-         * 【2026-09-19 改口径】主人这份配置说了算：连"模型之前自定过概率"的会话也一起覆盖
+         * 2026-09-19 改口径：这份配置说了算：连"模型之前自定过概率"的会话也一起覆盖
          * （旧行为是保留模型的值，结果唤醒提示里一直是 0.08、看着像没生效）。 */
         if (changed.some((k) => k === 'social.wake.recommendedProbability' || k === 'social.wake.activeProbability' || k.startsWith('social.wake'))) {
           try {
@@ -776,7 +761,7 @@ async function main() {
             if (r.updated) log(`[config] 插话概率同步：更新 ${r.updated} 个会话（其中覆盖模型自定的 ${r.overridden} 个）`);
           } catch (e) { log('[config] 同步插话概率失败:', e?.message ?? e); }
         }
-        /* 【2026-09-19】上下文治理 / 永久会话改了要立刻生效：
+        /* 2026-09-19：上下文治理 / 永久会话改了要立刻生效：
          *   · dshCompaction.* → 重写 DSH home 的 cordis.patch.yml（那里的 patchReload: live 会即时应用，
          *     不必重启 DSH、不必重启桥，正在聊的会话也不会被打断）；
          *   · social.autoReset.permanent → 轮换判定每轮现读 cfg，改完下一轮就按新值走（这里只打一行日志）。 */
@@ -815,8 +800,8 @@ process.on('SIGTERM', () => {
 process.on('unhandledRejection', (error) => log('未处理异常:', error?.message ?? error));
 process.on('exit', () => releaseLock());
 
-// 【2026-09-12 保命护栏】stdout/stderr 的管道断了（管理器被重启/被 Electron 壳 taskkill 之后就是这种情况）
-// 会让下一次 console.log 抛 EPIPE —— Node 对 stdout 的未处理 error 直接**打死进程**，
+// 2026-09-12 保命护栏：stdout/stderr 的管道断了（管理器被重启/被 Electron 壳 taskkill 之后就是这种情况）
+// 会让下一次 console.log 抛 EPIPE —— Node 对 stdout 的未处理 error 直接打死进程，
 // 而且死得毫无痕迹：崩栈也写不进那个已经断掉的 stderr。实测表现就是"重启一下管理器，桥悄悄没了，
 // 机器人不再回消息，日志里连一句错误都没有"（桥侧日志停在最后一条正常业务行）。
 // 管理端已经改成把子进程 stdout 直写日志文件（spawnWithLogFile），这里是双保险：

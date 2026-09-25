@@ -1,6 +1,6 @@
 // 群友画像学习引擎：把「人格学习」那套触发方式（立即 / 间隔 / 每日定时 / 文本指令）套用到群成员画像上。
 //
-// 和 persona-learn.js 的唯一区别是**目标怎么来**：人格学习用 learning-config.json 里手填的
+// 和 persona-learn.js 的唯一区别是目标怎么来：人格学习用 learning-config.json 里手填的
 // persona.targetQQ，画像学习从聊天记录里自动筛活跃群成员
 // （非自己、有正文、近 N 天发言数 ≥ minMessages、单轮上限 maxTargets）。
 //
@@ -132,7 +132,7 @@ export function portraitLearnStart(uids) {
   lastTargets = [...list];
   learnInFlight = true;
   try {
-    // auto:false → 走「手工即时全量」路径：用 windowHours 当取样窗口，且**不写 persona.lastRunAtMs**
+    // auto:false → 走「手工即时全量」路径：用 windowHours 当取样窗口，且不写 persona.lastRunAtMs
     const res = personaLearnTargets(list, { days: Math.max(1, Math.round(cfg.windowHours / 24)) });
     log(`[portrait] 立即学习已受理 ${res?.started?.length ?? 0} 个目标：${(res?.started ?? []).join('、')}`);
     return { started: res?.started ?? [], targets: picked, disabled: res?.disabled === true };
@@ -206,16 +206,28 @@ export function initPortraitLearn() {
   log('群友画像学习引擎已就绪（立即 / 间隔 / 每日定时）');
 }
 
-/** 主人文本指令：/portrait learn|stop|status（也认「画像学习」） */
+/** 用法文案：只列英文规范写法（子命令一律英文，见下面的归一化说明）。 */
+function portraitHelpText() {
+  return '画像指令：/portrait learn（立即学习群友画像）｜/portrait stop（停止在跑的学习任务）｜/portrait status（查看当前状态）';
+}
+
+/** 用户文本指令：只认英文 `/portrait learn|stop|status`（大小写不敏感，连续空白按一个空格归一化）。 */
 export async function handlePortraitLearnCommand(text, ctx = {}) {
   const raw = String(text ?? '').trim();
-  const m = /^(?:\/portrait|画像学习|群友画像学习)\s*(learn|start|stop|status|学习|停止|状态)?\s*(.*)$/i.exec(raw);
-  if (!m) return { handled: false };
+  if (!raw) return { handled: false };
+  /* 归一化：转小写 + 把连续空白压成一个空格，与 /slang 的归一化风格一致（见 slang.js）。
+   * 这里不能把空格删掉，否则 `/portrait learn` 会被当成 `/portraitlearn` 这类历史简写而失去区分。
+   * 2026-09-24：斜杠指令只支持英文，删掉中文别名与历史简写 ——
+   *   ① 中文别名 `画像学习` / `群友画像学习`：直接从正则里去掉，不再有任何分支；
+   *   ② 中文子命令 `学习` / `停止` / `状态`：同上，已删除；
+   *   ③ `start` 简写（`/portrait start`）：删除，只保留 learn|stop|status 三个规范子命令。
+   * 子命令缺失或不是这三个（含中文写法）：只回用法文案，不猜意图、不落到 status。 */
+  const low = raw.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!/^\/portrait(\s|$)/.test(low)) return { handled: false };
   if (!ctx.isOwner) return { handled: true, reply: ['画像学习只有主人能指挥。'] };
-  const act = String(m[1] || '').toLowerCase();
-  const rest = String(m[2] || '').trim();
+  const act = low.slice('/portrait'.length).trim();
 
-  if (!act || act === 'status' || act === '状态') {
+  if (!act || act === 'status') {
     const s = portraitLearnStatus();
     const c = s.config;
     const lines = [
@@ -227,15 +239,19 @@ export async function handlePortraitLearnCommand(text, ctx = {}) {
     ];
     return { handled: true, reply: lines };
   }
-  if (act === 'stop' || act === '停止') {
+  if (act === 'stop') {
     const r = portraitLearnStop();
     return { handled: true, reply: [r.stopped?.length ? `已请求停止 ${r.stopped.length} 个目标的画像学习` : '当前没有进行中的画像学习'] };
   }
-  // learn / start / 学习
-  const explicit = rest.split(/[\s,，、]+/).filter((v) => /^\d{5,11}$/.test(v));
-  const r = portraitLearnStart(explicit.length ? explicit : undefined);
-  if (r.disabled) return { handled: true, reply: ['画像学习已在控制台停用，先打开开关。'] };
-  if (r.busy) return { handled: true, reply: ['上一轮画像学习还在进行中，稍等。'] };
-  if (!r.started?.length) return { handled: true, reply: [`没跑起来：${r.error || r.reason || '未知原因'}`] };
-  return { handled: true, reply: [`已受理画像学习 ${r.started.length} 个目标：${r.started.slice(0, 8).join('、')}${r.started.length > 8 ? '…' : ''}`] };
+  // learn [QQ号…]：只认英文子命令 learn（`start` 简写已按 2026-09-24 的决定删除）
+  if (act === 'learn' || act.startsWith('learn ')) {
+    const explicit = act.slice('learn'.length).split(/[\s,，、]+/).filter((v) => /^\d{5,11}$/.test(v));
+    const r = portraitLearnStart(explicit.length ? explicit : undefined);
+    if (r.disabled) return { handled: true, reply: ['画像学习已在控制台停用，先打开开关。'] };
+    if (r.busy) return { handled: true, reply: ['上一轮画像学习还在进行中，稍等。'] };
+    if (!r.started?.length) return { handled: true, reply: [`没跑起来：${r.error || r.reason || '未知原因'}`] };
+    return { handled: true, reply: [`已受理画像学习 ${r.started.length} 个目标：${r.started.slice(0, 8).join('、')}${r.started.length > 8 ? '…' : ''}`] };
+  }
+  // 未知子命令（含中文写法 /portrait 学习、历史简写 /portrait start）：只回用法
+  return { handled: true, reply: [portraitHelpText()] };
 }

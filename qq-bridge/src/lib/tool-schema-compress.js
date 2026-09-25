@@ -1,33 +1,33 @@
 // src/lib/tool-schema-compress.js — 工具 schema 的「描述压缩档」（2026-09-21）
 //
 // ── 这是什么，为什么这么做 ──────────────────────────────────────────────────────
-// 主人要的是「**开源那套 mcp 压缩工具**」的做法（atlassian-labs/mcp-compressor）。
+// 目标是「开源那套 mcp 压缩工具」的做法（atlassian-labs/mcp-compressor）。
 // 我把那个包（0.31.9）真的下下来、解包、用它自己的原生核跑了一遍，量出它的档位语义是：
 //     low    = 保留描述（只做去冗余）
-//     medium = 每条描述**只留第一句**
-//     high   = **完全不发描述**，只留工具名 + 参数名 + 类型
+//     medium = 每条描述只留第一句
+//     high   = 完全不发描述，只留工具名 + 参数名 + 类型
 //     max    = 连工具清单都不发（改用 get_tool_schema / invoke_tool 两个包装工具）
-// 用它自己的文本清单格式量，medium/high 分别是 16.1% / 6.3%（主人说的 8.6% 就是这个量级）。
+// 用它自己的文本清单格式量，medium/high 分别是 16.1% / 6.3%（此前提到的 8.6% 就是这个量级）。
 //
-// 但**我们这边不能换格式**：DSH 下发给模型的是标准 JSON Schema（每个参数还带 type/enum/required），
-// 结构性开销本身就有个地板。所以这里做的是**把它的档位语义原样搬过来**，压的是描述文字，
-// 工具一个不少、参数名/类型/枚举/必填全都照旧 —— 也就是主人要的"压缩本身，不是精简功能"。
+// 但我们这边不能换格式：DSH 下发给模型的是标准 JSON Schema（每个参数还带 type/enum/required），
+// 结构性开销本身就有个地板。所以这里做的是把它的档位语义原样搬过来，压的是描述文字，
+// 工具一个不少、参数名/类型/枚举/必填全都照旧 —— 也就是"压缩本身，不是精简功能"。
 //
-// 在**真实 wire 格式**上实测（90 个工具，本机出厂配置）：
+// 在真实 wire 格式上实测（90 个工具，本机出厂配置）：
 //     off    89,603 字符  ≈ 28,001 token/步   （100%）
 //     low    89,603 字符  ≈ 28,001 token/步   （99.9%，我们本来就都是单行描述，去空白收益≈0）
 //     medium 61,587 字符  ≈ 19,246 token/步   （68.7%）—— 每条描述只留第一句
 //     high   27,109 字符  ≈  8,472 token/步   （30.2%）—— 完全不发描述
 //     （绝对地板：连 enum/默认值/required 都砍掉、只留名字+参数名+类型 = 22.9%，high 已经很接近）
 //
-// ⚠️ high 是**激进档**：描述是模型判断"什么时候该用这个工具"的主要依据，去掉之后工具选择会更依赖
+// high 是激进档：描述是模型判断"什么时候该用这个工具"的主要依据，去掉之后工具选择会更依赖
 //    工具名本身的表意（我们的名字起得还算清楚：qq_send_sticker / qq_send_meme / qq_memory_remember…）。
-//    换来的差额是**每步 10,774 token**。要不要用，主人自己拿主意 —— 管理端一个下拉随时切。
-// ⚠️ 这里**不动** zod 的校验：叶子节点只走 `.describe()`（返回副本，checks 全保留），
+//    换来的差额是每步 10,774 token。要不要用由用户决定 —— 管理端一个下拉随时切。
+// 这里不动 zod 的校验：叶子节点只走 `.describe()`（返回副本，checks 全保留），
 //    容器节点用 `.optional()/.default()/.nullable()/z.array/z.object/z.union` 原样重建
 //    （已确认我们没有任何 array 级 min/max、没有 strict/passthrough/record/tuple/refine，重建不会丢校验）。
 
-/* 只有三档 —— 特意**不提供** mcp-compressor 的 `low`：那一档是"去冗余空白 + 去句末句号"，
+/* 只有三档 —— 特意不提供 mcp-compressor 的 `low`：那一档是"去冗余空白 + 去句末句号"，
  * 而我们的描述本来就都是单行、没有多余空白，实测压完反而比不压还大 2.6%（重建 union 容器会把
  * 描述搬进每个分支）。留一个"开了更贵"的档位只会误导，所以直接不给。 */
 export const SCHEMA_LEVELS = ['off', 'medium', 'high'];
@@ -72,7 +72,7 @@ function descOf(field) {
 /** 重建容器（array/object/union/optional/…）之后，把**容器自己那条**描述按档位补回去。
  *  【为什么必须补】实测踩到：`wrapped = z.union([...]).optional().describe('Group id')` —— 描述挂在外层，
  *  而重建用的是 `z.union(next)`，它不带描述 → low 档下 51 个参数（groupId / replyToMessageId / windows…）
- *  的描述**凭空消失**。描述是模型判断"这个参数填什么"的唯一线索，丢它比不压缩更糟。 */
+ *  的描述凭空消失。描述是模型判断"这个参数填什么"的唯一线索，丢它比不压缩更糟。 */
 function withOwnDesc(rebuilt, field, level) {
   const own = descOf(field);
   if (!own) return rebuilt;
@@ -82,7 +82,7 @@ function withOwnDesc(rebuilt, field, level) {
 
 /**
  * 按档位重建一个 zod 字段（叶子用 describe 副本 → 校验全保留；容器用公开构造器重建）。
- * 认不出的类型**原样返回**（宁可不压，也不能把校验搞坏）。
+ * 认不出的类型原样返回（宁可不压，也不能把校验搞坏）。
  * @param {any} field zod 字段
  * @param {string} level off|low|medium|high
  * @param {any} z zod 实例（注入进来，避免本模块自己 import zod 造成版本歧义）
@@ -123,7 +123,7 @@ export function slimField(field, level, z) {
         return withOwnDesc(z.union(next), field, level);
       }
       default: {
-        // 叶子（string/number/boolean/enum/literal/any…）：describe(undefined) 会**彻底移除**描述
+        // 叶子（string/number/boolean/enum/literal/any…）：describe(undefined) 会彻底移除描述
         const next = level === 'high' ? undefined : applyDesc(descOf(field), level);
         return field.describe(next);
       }
@@ -143,7 +143,7 @@ export function slimShape(shape, level, z) {
 
 /**
  * 纯函数：按档位算出"压完剩多少字符"，用于实测统计与管理端展示。
- * 输入是**已经转好的 JSON Schema**（DSH 真正下发的那份）。
+ * 输入是已经转好的 JSON Schema（DSH 真正下发的那份）。
  */
 export function measureJsonSchemaLevel(jsonSchema, level) {
   const walk = (node) => {

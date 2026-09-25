@@ -1,7 +1,7 @@
 // 内置表情包工具的真调用测试（MCP over stdio，不是"看文件在不在"）。
 //
 // 背景：现网 qq_meme_search 一直回"表情包图库搜索失败 / 本机没装内置表情包"，
-// 根因是安装包 payload 与现网 runtime 都漏装了 meme/ 表情包。本脚本用**真实 MCP 握手 + 真实工具调用**
+// 根因是安装包 payload 与现网 runtime 都漏装了 meme/ 表情包。本脚本用真实 MCP 握手 + 真实工具调用
 // 证明：工具找得到 pack、SQLite 查得到行、返回的文件名在本机磁盘上真实存在（且不是提示语）。
 //
 // 用法：
@@ -126,7 +126,7 @@ function parseRows(text) {
     .map((m) => ({ name: m[1], tag: m[2], pack: m[3], caption: m[4] }));
 }
 
-/** 用**真实的** relayout 脚本造一份 pack（这样被测的 index.db schema 与出厂/上传产物完全一致） */
+/** 用真实的 relayout 脚本造一份 pack（这样被测的 index.db schema 与出厂/上传产物完全一致） */
 function buildPack(dir, files) {
   for (const [rel, bytes] of Object.entries(files)) {
     const p = path.join(dir, rel);
@@ -162,7 +162,7 @@ if (MULTIPACK) {
     'memes/happy/只有全局包有.webp': WB,
   });
   check('用真实 relayout 造出 pack-b / pack-c', b.ok && c.ok, b.ok ? c.out.slice(-120) : b.out.slice(-400));
-  /* 【2026-09-20 回归】再放一份**软链/junction**指向的包：服务器上 `<meme-packs>/<包里>` 就是
+  /* 2026-09-20 回归：再放一份软链/junction 指向的包：服务器上 `<meme-packs>/<包里>` 就是
    * 指向别处的软链，而 readdir 的 Dirent 不跟随链接（e.isDirectory() === false）—— 旧代码会在这一步
    * 把整份包漏掉，表现就是工具回"本机没装内置表情包"（实测服务器上真的踩到了）。 */
   const linkedSrc = path.join(sandbox, 'outside', 'pack-linked');
@@ -172,8 +172,8 @@ if (MULTIPACK) {
   try { fs.symlinkSync(linkedSrc, linkPath, 'junction'); linkOk = fs.existsSync(path.join(linkPath, 'index.db')); } catch { linkOk = false; }
   check('造出一份 union/软链指向的包', linked.ok && linkOk, linkOk ? linkPath : `linked.ok=${linked.ok} linkOk=${linkOk}`);
   // relayout 之后再让 pack-b 的这一张"消失"：表里仍有、盘上没有 —— 这样"同名歧义时优先选了哪一份"
-  // 就变成**可观测**的（错误信息会点名包 id）。
-  // 注意：本机 Node 的 fs.rmSync 对**含中文的路径**会静默不生效（实测 existsSync 仍为 true），
+  // 就变成可观测的（错误信息会点名包 id）。
+  // 注意：本机 Node 的 fs.rmSync 对含中文的路径会静默不生效（实测 existsSync 仍为 true），
   // 而 renameSync 是好的（relayout 自己就靠它搬中文名文件）——所以这里用改名而不是删除。
   const ghost = path.join(packsRoot, 'pack-b', 'memes', 'happy', '两边都有但这边缺.webp');
   fs.renameSync(ghost, path.join(path.dirname(ghost), 'gone.webp'));
@@ -188,7 +188,7 @@ if (MULTIPACK) {
 
   const boot = stderrLines.find((l) => l.includes('内置表情包已加载')) ?? '';
   console.log(`stderr：${boot || '(没有!)'}`);
-  /* 只断言"这三份都在"，**不**断言总数：装了出厂包的机器（服务器上就是）会多出一份
+  /* 只断言"这三份都在"，不断言总数：装了出厂包的机器（服务器上就是）会多出一份
    * whale-fanart-001，写死 "已加载 3 份" 会让本测试在服务器上无端 FAIL（2026-09-22 实测踩到）。 */
   check('启动日志里三份沙箱包都被认出（含软链那份）', /已加载 \d+ 份/.test(boot) && /pack-b/.test(boot) && /pack-c/.test(boot) && /pack-linked/.test(boot), boot);
   check('三份都被点名（带来源标注）', /pack-b\(global\)/.test(boot) && /pack-c\(global\)/.test(boot) && /pack-linked\(global\)/.test(boot), boot);
@@ -202,7 +202,7 @@ if (MULTIPACK) {
   const sendMeme = async (args) => {
     const id = nextId++;
     // token 故意填 x：本机可能正跑着真桥控制台，这个 token 一定被拒，
-    // 所以这些调用**不可能真的往 QQ 发出任何东西**；本测试只验"解到了哪一份包/哪一个文件"。
+    // 所以这些调用不可能真的往 QQ 发出任何东西；本测试只验"解到了哪一份包/哪一个文件"。
     send({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'qq_send_meme', arguments: { key: 'private:10000', token: 'x', ...args } } });
     return textOf(await wait(id, 30000));
   };
@@ -256,9 +256,9 @@ if (MULTIPACK) {
     const s6 = await sendMeme({ file: '不存在.webp', pack: '没有这个包' });
     check('pack 不存在时说明现有包', s6.includes('找不到表情'), s6.slice(0, 200));
 
-    /* 【2026-09-22】主人看到的 `-32602: missing required tool_input fields: file` 回归：
-     * 这几条**一个 file 都不传**。`file` 如果还是必填，MCP 的参数校验会先把整次调用打回（没有 result，
-     * 只有 error，这里拿到的就是空文本）；答案在**落盘的临时图**上 —— 选中的那张会被复制到
+    /* 2026-09-22：线上看到的 `-32602: missing required tool_input fields: file` 回归：
+     * 这几条一个 file 都不传。`file` 如果还是必填，MCP 的参数校验会先把整次调用打回（没有 result，
+     * 只有 error，这里拿到的就是空文本）；答案在落盘的临时图上 —— 选中的那张会被复制到
      * `<本项目根>/state/sticker-tmp/`（本测试跑在隔离副本里，所以只会落在沙箱内，收尾一起删）。 */
     const tmpDir = path.join(copyRoot, 'state', 'sticker-tmp');
     const staged = () => { try { return fs.readdirSync(tmpDir); } catch { return []; } };
@@ -282,7 +282,7 @@ if (MULTIPACK) {
     if (!base.startsWith('.meme-multipack-') || /node_modules/i.test(sandbox)) {
       console.log(`清理已跳过（路径不像自测临时目录）：${sandbox}`);
     } else if (process.platform === 'win32') {
-      // Windows：fs.rmSync 对**含中文的路径**会静默不生效（实测），所以走 PowerShell。
+      // Windows：fs.rmSync 对含中文的路径会静默不生效（实测），所以走 PowerShell。
       const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `Remove-Item -LiteralPath ${JSON.stringify(sandbox)} -Recurse -Force`], { stdio: 'inherit' });
       console.log(`清理多包临时目录 exit=${r.status}；仍存在=${fs.existsSync(sandbox)}`);
     } else {
@@ -299,10 +299,10 @@ if (MULTIPACK) {
 // ---------------------------------------------------------------- 反向自测
 if (NEGATIVE) {
   section('反向自测：无 pack 时必须响亮报错（不许静默降级）');
-  // 【2026-09-13 事故修复】原来把隔离副本建在 `qq-bridge/node_modules/.meme-selftest-X/qq-bridge`，
-  // 清理时却 `Remove-Item dirname(dirname(tmp))` —— 那正好是 **qq-bridge/node_modules 本身**，
+  // 2026-09-13 事故修复：原来把隔离副本建在 `qq-bridge/node_modules/.meme-selftest-X/qq-bridge`，
+  // 清理时却 `Remove-Item dirname(dirname(tmp))` —— 那正好是 qq-bridge/node_modules 本身，
   // 于是跑一次 --negative 就把整套桥依赖删了（现网 `<安装目录>\resources\runtime\qq-bridge\node_modules`
-  // 就是这样被删掉的，重启桥就会起不来）。现在：副本放在项目根下的点目录（**不在 node_modules 里**），
+  // 就是这样被删掉的，重启桥就会起不来）。现在：副本放在项目根下的点目录（不在 node_modules 里），
   // 清理只删那一个 `.meme-selftest-*` 目录，并加一道"名字必须是 .meme-selftest- 开头"的安全断言。
   // 放这里仍然满足 ESM 解析：`@modelcontextprotocol/sdk` 靠向上找 `<REPO>/node_modules` 命中。
   const selftestDir = path.join(REPO, `.meme-selftest-${Date.now()}`);

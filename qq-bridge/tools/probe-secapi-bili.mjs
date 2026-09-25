@@ -86,7 +86,7 @@ function huntPlayUrls(node, path = '', hits = []) {
 
 /** 探一个 URL：能不能取到、什么类型、头 1KB 是不是真 MP4。
  *
- * ⚠️ **只读前 1KB 就把流掐掉**：这个代理会把整个 mp4 吐出来（一条 29MB），
+ * **只读前 1KB 就把流掐掉**：这个代理会把整个 mp4 吐出来（一条 29MB），
  * `await res.arrayBuffer()` 老老实实读完的结果就是 15s 超时 + 什么都看不到
  * （第一版探针就是这么被坑的：video/mp4 那几条 magic 全空，其实字节是好的）。
  * 读到 JSON 时把正文前 300 字带回来 —— 失败时它返回的是**伪装成 200 的 JSON**。 */
@@ -150,7 +150,7 @@ if (full) {
   if (!suspect.length) console.log('  （没有匹配到任何疑似字段）');
 
   /* 直链探活：真去 GET 一下，看要不要 Referer、会不会 403、是不是分片。
-   * ⚠️ 探针**故意只取头 1KB**（带 Range）—— 不带 Range 时这个代理会把整个 mp4 吐出来，
+   * 探针**故意只取头 1KB**（带 Range）—— 不带 Range 时这个代理会把整个 mp4 吐出来，
    * 一次就是 29MB，既慢又没意义（我们只关心"能不能取到、什么类型、是不是真 mp4"）。 */
   console.log('\n########## 直链探活（带/不带 Referer；带 Range 看是否分段） ##########');
   for (const h of urls.filter((x) => !x.isImage)) {

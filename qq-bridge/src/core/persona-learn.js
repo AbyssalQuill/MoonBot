@@ -1,10 +1,10 @@
 // 人格学习引擎：针对指定目标 QQ 用户，从 SQLite 聊天历史（chat_messages）里学习其
 // 语言风格/性格/习惯，并沉淀档案（profiles 表 + state/persona-library.json + memory_entries）。
 //
-// 触发方式：主人私聊/群聊文本指令（start learn / stop learn / learn status，含中文），
+// 触发方式：私聊/群聊文本指令（start learn / stop learn / learn status，含中文），
 // 或经 bridge console /api/learning/persona 被 MCP 工具调用（mcp 进程只发 HTTP）。
 //
-// 会话模式照抄 src/core/slang.js 的思路，但使用**独立** persona learner 会话
+// 会话模式照抄 src/core/slang.js 的思路，但使用独立 persona learner 会话
 // （独立 workspace 目录 state/persona-agent、会话文件 state/persona-agent.json），
 // 不混用黑话学习会话。persona 会话同样「不映射 QQ、不发送」。
 // turn 事件消费复用 slang.js 导出的共享 learner 映射（learnerSessions / learnerWaiters /
@@ -29,8 +29,8 @@ import { composePersonaProfile } from './persona-text.js';
 export const PERSONA_SESSION_FILE = path.join(STATE_DIR, 'persona-agent.json');
 export const PERSONA_LIBRARY_FILE = path.join(STATE_DIR, 'persona-library.json');
 export const LEARNING_CONFIG_FILE = path.join(STATE_DIR, 'learning-config.json');
-// 机器人**自己的人设**正文（主人/管理端把它当"角色卡"看）。wake-send.js 每轮唤醒按
-// mtime 读它注入 [PERSONA]，所以这里覆盖写完**下一条消息就是新人设、不用重启桥**。
+// 机器人自己的人设正文（用户/管理端把它当"角色卡"看）。wake-send.js 每轮唤醒按
+// mtime 读它注入 [PERSONA]，所以这里覆盖写完下一条消息就是新人设、不用重启桥。
 export const PERSONA_FILE = path.join(ROOT, 'persona.md');
 
 // 样本/解析/超时常量
@@ -41,7 +41,7 @@ const SAMPLE_PER_CONV_CAP = 60;    // 每个会话（conv_key）最多保留条�
 const SAMPLE_TEXT_CAP = 120;       // 每条样本截断字符数
 const PERSONA_TURN_TIMEOUT_MS = 300000; // 等待 learner turn 的超时（与黑话学习对齐：大块 prompt 的 turn 会更慢）
 const PERSONALITY_MAX = 1200;      // 单个性格字段的长度上限（原 400 会把性格写一半就断，成文介绍要更长）
-// 英文人设正文（payload 键 personaEn）的长度上限。定 6000 的理由：这段文字要能**直接当机器人人设**
+// 英文人设正文（payload 键 personaEn）的长度上限。定 6000 的理由：这段文字要能直接当机器人人设
 // 用（persona.md 注入上限 16000 字符，见 wake-send.js），但学习产出一段 150~400 词（≈1000~2600 字符）
 // 就够，6000 留足余量又不至于让模型把整篇英文作文塞进来。
 const PERSONA_EN_MAX = 6000;
@@ -64,7 +64,7 @@ if (!personaLibrary || typeof personaLibrary !== 'object' || Array.isArray(perso
 // 运行中标记：targetUid -> { state:'learning'|'idle', startedAtMs, stopRequested }
 const personaRunFlags = new Map();
 // 工具落库回执：uid -> { atMs, summary, samples }。
-// 学习会话现在**直接调 qq_learning_submit 落库**（见 console-server 的
+// 学习会话现在直接调 qq_learning_submit 落库（见 console-server 的
 // POST /api/learning/submit-persona），不再把 JSON 当文本吐出来；runPersonaLearnOne
 // 靠这张表判断「本轮真的提交成功了」，成功就不再解析文本、也不再落第二遍。
 const personaSubmits = new Map();
@@ -130,7 +130,8 @@ export async function ensurePersonaLearnerSession() {
   const dir = path.join(STATE_DIR, 'persona-agent');
   fs.mkdirSync(dir, { recursive: true });
   const wsValue = unwrap(await apiRef.workspace.create({ path: dir }), 'persona workspace.create');
-  const workspaceTitle = cfgRef?.persona?.workspaceTitle || 'QQ 人格学习';
+  // 2026-09-30：人格学习会话名由「QQ 人格学习」改为 PersonaAgent
+  const workspaceTitle = cfgRef?.persona?.workspaceTitle || 'PersonaAgent';
   if (wsValue.created && workspaceTitle) {
     try { await apiRef.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle }); } catch {}
   }
@@ -157,7 +158,7 @@ export async function ensurePersonaBrief(sessionId) {
   const accepted = await apiRef.sessions.prompt({ sessionId, mode: 'queue', content: [{ type: 'text', text: buildPersonaTaskBrief() }] });
   if (!accepted?.result?.ok) throw new Error(`首轮任务说明被拒: ${accepted?.result?.error?.message ?? 'unknown'}`);
   await waitPersonaTurn(sessionId, PERSONA_TURN_TIMEOUT_MS).catch((eW) => {
-    // 说明没在超时内结束**不阻塞**：queue 模式下本轮提醒本来就排在说明之后，
+    // 说明没在超时内结束不阻塞：queue 模式下本轮提醒本来就排在说明之后，
     // 但不吞异常——实测「说明 turn 一直不闭合」会让本轮提醒永远等不到 turn，必须留痕。
     log(`人格学习首轮任务说明等待超时（继续发本轮提醒）：${eW?.message ?? eW}`);
   }); // 让说明被读完；输出忽略
@@ -309,7 +310,7 @@ ${chatLines}`;
 
 // ── 新架构：首轮只注入「任务说明」，之后每轮只发一句提醒；样本由学习会话自己用
 //    qq_learning_corpus 工具按 QQ 号/时间范围查 SQLite（桥不再采样后整段灌对话）。──
-// 指令框架统一英文（省 token、跨模型更稳）；中文只留给**字段值**与回复主人的文案。
+// 指令框架统一英文（省 token、跨模型更稳）；中文只留给字段值与回复用户的文案。
 // 改这里的文案时把 PERSONA_BRIEF_VERSION +1：桥会按版本号重新注入首轮说明，
 // 避免已存在的学习会话揣着旧说明、与新提醒的格式对不上。
 // v5：payload 新增英文字段 personaEn（要能直接当机器人人设用的英文正文）——老会话必须重注入，
@@ -318,7 +319,7 @@ export const PERSONA_BRIEF_VERSION = 5;
 /** 本轮提醒的开头标记，首轮说明里引用同一个串；改它必须同时改 PERSONA_BRIEF_VERSION。 */
 export const PERSONA_RUN_MARKER = '[PERSONA RUN]';
 /**
- * 落库工具的全名。**必须是 mcp__napcat-host__ 这一组**：
+ * 落库工具的全名。必须是 mcp__napcat-host__ 这一组：
  * 学习会话只加载了 host 组 MCP，写成 mcp__napcat__qq_learning_submit 会直接
  * ToolNotFoundError / UNKNOWN_TOOL（实测过，模型因此退回文本输出）。
  */
@@ -379,14 +380,14 @@ export function buildPersonaRunCue(uid, opts = {}) {
   return `${PERSONA_RUN_MARKER} target QQ: ${uid}; range: ${new Date(from).toISOString()} ~ ${new Date(now).toISOString()} (sinceMs=${from}, untilMs=${now}).\n`
     + `1) Call ${PERSONA_CORPUS_TOOL} with targetUid=${uid}, sinceMs=${from}, untilMs=${now} to pull that person's messages.\n`
     + `2) Analyze them per the first-round rules, then call ${PERSONA_SUBMIT_TOOL} with token="${token}", uid="${uid}", samples=<n>, payload=<the JSON object>.\n`
-    // personaEn 每轮都提醒一次：它是主人真正要用的一段正文，漏了这轮就等于白学（老会话/长上下文最容易漏）。
+    // personaEn 每轮都提醒一次：它是用户真正要用的一段正文，漏了这轮就等于白学（老会话/长上下文最容易漏）。
     + `   The payload MUST contain the English field "personaEn": one finished English persona passage, NO Chinese characters, 150-400 words, playable as-is by 小鲸鱼.\n`
     + `3) After it returns ok:true, reply with exactly OK. If it errors, retry once, then print the JSON as a last resort.`;
 }
 
 // ── JSON 解析容错：剥 ```json 包裹 / 截取首个 { 到末个 } / 清尾逗号 / 字段规范化 ──
-/** 英文人设正文的收尾：超过 max 就**在句末标点处**截断，而不是硬 slice。
- *  为什么：这段文字会被主人直接「覆盖成机器人人设」，硬切会留下 "You are a calm..." 这种半句话，
+/** 英文人设正文的收尾：超过 max 就在句末标点处截断，而不是硬 slice。
+ *  为什么：这段文字会被用户直接「覆盖成机器人人设」，硬切会留下 "You are a calm..." 这种半句话，
  *  变成一份读起来莫名其妙的人设。句末标点太靠前（丢掉的比留下的还多）时才退回硬截。 */
 export function cutPersonaEn(text, max = PERSONA_EN_MAX) {
   const s = String(text ?? '').trim();
@@ -418,8 +419,8 @@ export function normalizePersona(raw) {
     topics: strArr(raw.topics, 10),
     taboos: strArr(raw.taboos, 10),
     relationshipAdvice: str(raw.relationshipAdvice).slice(0, 600),
-    // 英文人设正文：这一轮唯一要求"纯英文"的字段（主人要拿它覆盖机器人自己的人设）。
-    // 这里只做长度收尾，**不改写内容、也不因为夹了中文就丢掉**——质检交给
+    // 英文人设正文：这一轮唯一要求"纯英文"的字段（要拿它覆盖机器人自己的人设）。
+    // 这里只做长度收尾，不改写内容、也不因为夹了中文就丢掉——质检交给
     // personaApply 的 apply 校验（含中文会明确拒绝并说明），免得模型的错被悄悄吞掉。
     personaEn: cutPersonaEn(str(raw.personaEn))
   };
@@ -480,12 +481,12 @@ export function buildPersonaProfileText(parsed) {
 }
 
 /**
- * 【2026-09-20 修「学一轮把主人档案写死成两个词」】
- * 现场：主人私聊/群里的画像本来是几百字的成文（技术能力、说话风格、常去的梗…），
+ * 2026-09-20：修「学一轮把用户档案写死成两个词」。
+ * 现场：私聊/群里的画像本来是几百字的成文（技术能力、说话风格、常去的梗…），
  * 09-20 07:41 那一轮学习模型只交了 nickname，`buildPersonaProfileText` 于是产出
- * `昵称「群魅魔/AbyssalQuill」。` —— **两个词**，而 persistPersonaResult 无条件写库，
- * 旧的那段长文被整条覆盖（主人的原话："兜底也不用写死两个词啊…我以前是有的是不是被清除了"）。
- * 判据：新文本明显比旧的短、且旧文本够长（>120 字）时，视为"这轮没学到东西"，**保留旧文**，
+ * `昵称「群魅魔/AbyssalQuill」。` —— 两个词，而 persistPersonaResult 无条件写库，
+ * 旧的那段长文被整条覆盖（原话："兜底也不用写死两个词啊…我以前是有的是不是被清除了"）。
+ * 判据：新文本明显比旧的短、且旧文本够长（>120 字）时，视为"这轮没学到东西"，保留旧文，
  * 只在旧文里确实缺这个新字段时把它补在后面（补之前先去重，避免堆重复句子）。
  * 反过来：新文本更长、或旧文本本来就短 → 照常以新的为准（正常的"越学越全"）。
  */
@@ -504,17 +505,17 @@ export function mergePersonaProfileText(prevText, nextText) {
 export function persistPersonaResult(uid, parsed, sampleCount) {
   const now = Date.now();
   const rawProfileText = buildPersonaProfileText(parsed);
-  // 【2026-09-20】旧档案比这一轮产出的长得多 → 保留旧的（见 mergePersonaProfileText 顶部事故说明）
+  // 2026-09-20：旧档案比这一轮产出的长得多 → 保留旧的（见 mergePersonaProfileText 顶部事故说明）
   let prevPersonality = '';
   try { prevPersonality = String(getProfile(uid)?.personality ?? ''); } catch { prevPersonality = ''; }
   const profileText = mergePersonaProfileText(prevPersonality, rawProfileText);
   const summary = profileText || `样本 ${sampleCount} 条（本轮没有解析出可用字段，旧档案保留）`;
-  // a) profiles 表：**画像写进 personality，绝不碰 notes**。
-  //    【2026-09-14 主人反馈】旧版把 `人格学习:${摘要}` 追加进 notes，于是：
+  // a) profiles 表：画像写进 personality，绝不碰 notes。
+  //    2026-09-14 反馈：旧版把 `人格学习:${摘要}` 追加进 notes，于是：
   //      ① 每学一次就往「备注」里堆一段，两轮下来备注里全是几乎一样的文字；
-  //      ② notes 是**主人自己的备注**字段，被学习结果挤满并显示成「备注」，读起来莫名其妙。
+  //      ② notes 是用户自己的备注字段，被学习结果挤满并显示成「备注」，读起来莫名其妙。
   //    现在分工干净：人格画像 → personality（提示词里以 Personality: 注入，界面显示完整介绍）；
-  //    notes 只属于主人，代码不再写它。
+  //    notes 只属于用户，代码不再写它。
   try {
     if (profileText) setProfileField(uid, 'personality', profileText);
   } catch (error) {
@@ -534,10 +535,10 @@ export function persistPersonaResult(uid, parsed, sampleCount) {
     taboos: parsed.taboos.length ? parsed.taboos : (prev.taboos || []),
     relationshipAdvice: parsed.relationshipAdvice || prev.relationshipAdvice || '',
     profile: profileText || prev.profile || '',
-    // 英文人设正文：本轮产出 → 用新的；本轮模型没交（老会话/漏字段）→ **保留上一次的值**。
-    // 绝不能写空：主人审批过的正文一旦被一轮没交字段的学习清掉，他就得重新学一遍。
+    // 英文人设正文：本轮产出 → 用新的；本轮模型没交（老会话/漏字段）→ 保留上一次的值。
+    // 绝不能写空：用户审批过的正文一旦被一轮没交字段的学习清掉，他就得重新学一遍。
     personaEn: parsed.personaEn || prev.personaEn || '',
-    // 审批痕迹跟着档案走：persistPersonaResult 是**整条覆盖写**，这几个键不显式带过来就会丢。
+    // 审批痕迹跟着档案走：persistPersonaResult 是整条覆盖写，这几个键不显式带过来就会丢。
     personaEditedAtMs: Number(prev.personaEditedAtMs) || 0,
     personaAppliedAtMs: Number(prev.personaAppliedAtMs) || 0,
     samples: sampleCount,
@@ -571,7 +572,7 @@ export function recordPersonaSubmit(uid, payload, sampleCount) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, error: 'payload 必须是 JSON 对象' };
   const parsed = normalizePersona(payload);
   // 至少要有一个有效字段，避免模型交空壳把旧档案抹了（personaEn 也算有效：
-  // 有些轮次主人只想要那段英文正文）
+  // 有些轮次只想要那段英文正文）
   const meaningful = parsed.personality || parsed.nickname || parsed.style || parsed.chatHabits
     || parsed.topics.length || parsed.catchphrases.length || parsed.addressTerms || parsed.relationshipAdvice
     || parsed.personaEn;
@@ -667,16 +668,16 @@ async function runPersonaLearnOne(uid, opts = {}) {
 
 // ── 审批与修正：把学到的英文人设正文（personaEn）落库，或一键覆盖机器人自己的人设 ──────
 /**
- * 主人审批人格学习结果的两个动作。由 console-server 的
+ * 审批人格学习结果的两个动作。由 console-server 的
  * POST /api/learning/persona-apply 动态 import 调用（管理端「人格学习」栏的两个按钮）。
- *  - mode='save' ：把 text 当作**修正后的人设正文**写回该 uid 的库记录（只动 personaEn 与
+ *  - mode='save' ：把 text 当作修正后的人设正文写回该 uid 的库记录（只动 personaEn 与
  *                  personaEditedAtMs；profiles 表 / memory_entries / 机器人人设都不碰）。
- *  - mode='apply'：把 text（没传就用库里的 personaEn）**覆盖写入 qq-bridge/persona.md**；
+ *  - mode='apply'：把 text（没传就用库里的 personaEn）覆盖写入 qq-bridge/persona.md；
  *                  覆盖前备份旧人设成 persona.md.bak-<yyyyMMdd-HHmmss>（同目录，最多留 5 份），
  *                  覆盖成功后把这份正文也回写库（personaEn），保证界面显示的 = 当前生效的人设。
- * 校验：uid 必须 1~11 位数字；正文不能为空；apply 时**不能含中文**（主人明确要求人设正文必须是英文）。
+ * 校验：uid 必须 1~11 位数字；正文不能为空；apply 时不能含中文（人设正文必须是英文）。
  * 返回：save → { ok:true, uid, savedChars }；apply → { ok:true, uid, bytes, backup }；
- *       失败一律 { ok:false, error:'中文人话' }（不吐英文堆栈，主人看得懂才有用）。
+ *       失败一律 { ok:false, error:'中文人话' }（不吐英文堆栈，用户看得懂才有用）。
  */
 export function personaApply(uid, mode, text) {
   const cleanUid = String(uid ?? '').trim();
@@ -685,10 +686,10 @@ export function personaApply(uid, mode, text) {
     return { ok: false, error: "mode 仅支持 'save'（保存修正）/ 'apply'（覆盖机器人人设）" };
   }
   const prev = (personaLibrary[cleanUid] && typeof personaLibrary[cleanUid] === 'object') ? personaLibrary[cleanUid] : {};
-  // 【2026-09-15 修】只允许操作**库里已有的档案**。此前 apply 只校验正文，
+  // 2026-09-15：只允许操作库里已有的档案。此前 apply 只校验正文，
   // 于是给一个压根没学过的 QQ 号 + 一段英文也能把 persona.md 覆盖掉（实测真的踩到：
   // 用不存在的 uid 做验证，机器人人设被换成了测试文本，靠自动备份才还原）。
-  // 档案不存在就直接拒绝，并告诉主人正确用法。
+  // 档案不存在就直接拒绝，并告诉用户正确用法。
   if (!personaLibrary[cleanUid]) {
     return {
       ok: false,
@@ -716,7 +717,7 @@ export function personaApply(uid, mode, text) {
       ...prev,
       personaEn: body,
       personaEditedAtMs: now,
-      // 库里原本没这条 uid（主人手写的人设）时给个来源标记，别装成"学出来的"
+      // 库里原本没这条 uid（手写的人设）时给个来源标记，别装成"学出来的"
       source: prev.source || 'manual'
     };
     savePersonaLibrary();
@@ -747,15 +748,15 @@ export function personaApply(uid, mode, text) {
   return { ok: true, uid: cleanUid, bytes, backup };
 }
 
-// ── 「完善」模式：把学到的特点**融进当前人设**，而不是整篇替换 ──────────────────────
+// ── 「完善」模式：把学到的特点融进当前人设，而不是整篇替换 ──────────────────────
 /**
- * 生成一份「结合原人设的完善稿」草稿（**只出草稿，不写盘**）。
+ * 生成一份「结合原人设的完善稿」草稿（只出草稿，不写盘）。
  *
- * 主人 2026-09-15 的要求：覆盖人设不该只有"整篇替换"一种；
- * 更多时候想要的是**在原有 persona.md 上按学到的特点增删改**（保留原来的人设身份与结构，
+ * 2026-09-15 的需求：覆盖人设不该只有"整篇替换"一种；
+ * 更多时候想要的是在原有 persona.md 上按学到的特点增删改（保留原来的人设身份与结构，
  * 把目标的新口吻/习惯/忌讳揉进去）。两种都支持：
  *   · mode='apply'        → 整篇覆盖（原来的行为，一次替换，旧人设自动备份）
- *   · mode='fuse'（本函数）→ 结合原人设重写出一份**草稿**，主人看过/改过之后再决定要不要覆盖
+ *   · mode='fuse'（本函数）→ 结合原人设重写出一份草稿，用户看过/改过之后再决定要不要覆盖
  *
  * 实现：复用「人格学习」那条专用 learner 会话（同一个串行任务链，不新开会话），
  * 让人设文档本身作为输入交给模型重写；提示词明确要求"只输出新文档正文、不要调任何工具"，
@@ -869,7 +870,7 @@ function prunePersonaBackups() {
 
 // ── 对外主入口：开始/停止/状态 ──────────────────────────────────────────────
 /**
- * 对每个 uid（去重/过滤非数字/长度>11）发起人格学习：**非阻塞**——立刻排进串行任务链
+ * 对每个 uid（去重/过滤非数字/长度>11）发起人格学习：非阻塞——立刻排进串行任务链
  * 后台逐个学习（每个目标一次模型会话），立即返回已受理列表。
  * opts（v1 兼容）：
  *  - days：样本回看天数，默认 30（手工/指令触发=即时全量窗口）。
@@ -902,7 +903,7 @@ export function personaLearnTargets(uids, opts = {}) {
     queuePersonaTask(() => runPersonaLearnOne(uid, learnOpts));
   }
   // 自动间隔：所有目标学完（含“窗口内无发言”等提前返回）后写回水位，避免下轮重复拉同一窗口。
-  // 但整批一个都没成功时**不推进水位**——否则一次超时/报错就会被锁死 24 小时不重试。
+  // 但整批一个都没成功时不推进水位——否则一次超时/报错就会被锁死 24 小时不重试。
   if (auto && started.length) {
     queuePersonaTask(async () => {
       if (personaRunOkCount === 0) {
@@ -1020,7 +1021,7 @@ export function personaLearnStop(uids) {
 
 /** 状态：persona-library.json + 运行中标记 合并输出每个目标的
  *  {uid, state, learnedAtMs, samples, nickname, personalityPreview, personaEn, inTargetList, ...}。
- *  为什么 personaEn 也放这里：管理端「人格学习」栏展开时要**直接展示并编辑这段英文正文**，
+ *  为什么 personaEn 也放这里：管理端「人格学习」栏展开时要直接展示并编辑这段英文正文，
  *  而管理端读档案的 /api/learning/profile（server 侧组装的 persona-library 旧字段）不认新键；
  *  走这条既有状态通道，UI 不用为读一段文案再等一个端点，也不用改代理。 */
 export function personaLearnStatus(uids) {
@@ -1029,7 +1030,7 @@ export function personaLearnStatus(uids) {
   const uidSet = new Set(Object.keys(personaLibrary));
   for (const uid of personaRunFlags.keys()) uidSet.add(uid);
   // 人格学习的目标名单（learning-config.json persona.targetQQ）：用来标注"这条档案是不是目标列表里的人"。
-  // 「画像学习」会把自动筛出来的活跃群友**写进同一个档案库**（复用 persistPersonaResult），
+  // 「画像学习」会把自动筛出来的活跃群友写进同一个档案库（复用 persistPersonaResult），
   // 所以库里的记录不一定都是人格学习学的；界面据此提示，不擅自删画像学习那个功能。
   const targetSet = new Set(normalizeTargetUids(readLearningConfig()?.persona?.targetQQ ?? []));
   const out = [];
@@ -1054,7 +1055,7 @@ export function personaLearnStatus(uids) {
   return { status: out };
 }
 
-// ── 主人文本指令（'start learn'/'stop learn'/'learn status' 及中文；仅 isOwner）──
+// ── 用户文本指令（'start learn'/'stop learn'/'learn status' 及中文；仅 isOwner）──
 const PERSONA_START_RE = /^\s*(?:start\s+learn(?:ing)?|开始学习|学习一下)\s*(.*)$/is;
 const PERSONA_STOP_RE = /^\s*(?:stop\s+learn(?:ing)?|停止学习)\s*(.*)$/is;
 const PERSONA_STATUS_RE = /^\s*(?:learn\s+status|学习状态)\s*(.*)$/is;

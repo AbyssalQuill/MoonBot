@@ -45,7 +45,7 @@ try {
   console.log('  title   :', card.title);
   console.log('  note    :', card.note);
   console.log('  link    :', card.link);
-  /* 【2026-09-18 第十五批】这里原来 JSON.parse(card.primary.data.data) —— 但默认 style='share' 下
+  /* 2026-09-18 第十五批：这里原来 JSON.parse(card.primary.data.data) —— 但默认 style='share' 下
    * primary 本来就是 null（手拼 structmsg 卡已停用，见 video.js），那段一跑就抛异常，
    * 打印出来永远是"拼卡片失败"，看的人会以为卡片功能坏了。现在按真实模型检查：
    * 分享链接形态 + 小程序 Ark（服务端签发，必须带 qqdocurl，否则点开落不到这条视频）。 */

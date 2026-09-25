@@ -1,13 +1,13 @@
 // 人设 / 发言规则 → 系统提示词（DSH agent preset）合成器。
 //
-// 【2026-09-19 主人要求】把「人设」「规则」「系统提示词」分成三层，并把**人设与发言规则合成进系统提示词**：
+// 2026-09-19：把「人设」「发言规则」「系统提示词」分成三层，并把人设与发言规则合成进系统提示词：
 //   · 系统提示词（preset）只放规则：安全 / 工具 / 唤醒协议 / 内容边界 / 说话兜底 —— 全角色通用、不带任何角色特色，
-//     避免"提示词打架"；**不含默认人设**（没有 [PERSONA] 时不扮演任何角色）。
+//     避免"提示词打架"；不含默认人设（没有 [PERSONA] 时不扮演任何角色）。
 //   · 人设（persona.md）保留角色特性，原样进 [PERSONA] 段。
 //   · 发言规则（speech-rules.md）管"怎么打字"，原样进 [SPEECH RULES] 段。
 //
 // 为什么既写进 preset 又保留运行时注入（wake-send.js 的动态覆盖段）：
-//   DSH 的 agentPreset **只在建会话那一刻绑定**。写进 preset 的版本能让**新会话**一建起来就带着人设；
+//   DSH 的 agentPreset 只在建会话那一刻绑定。写进 preset 的版本能让新会话一建起来就带着人设；
 //   而正在跑的会话（尤其开着「永久会话不轮换」时）拿不到新 preset，只能靠运行时那段覆盖 —— 两条路都留着，
 //   改 persona.md / speech-rules.md 立刻对当前会话生效，新会话则直接从系统提示词里拿到。
 //
@@ -94,7 +94,7 @@ export function getComposedPersonaStamp() { return composedPersonaStamp; }
 
 /** 把 home 里已安装的 preset 重新合成一次（幂等；内容没变就不写盘） */
 export function syncPresetOverrides({ home, root, log = () => {} } = {}) {
-  const file = path.join(String(home || ''), '.agent-presets', 'default', 'agent.cordis.yml');
+  const file = path.join(String(home || ''), '.agent-presets', 'qq-chat', 'agent.cordis.yml');
   if (!home || !fs.existsSync(file)) return { ok: false, error: `preset 不在：${file}` };
   let cur = '';
   try { cur = fs.readFileSync(file, 'utf8'); } catch (e) { return { ok: false, error: `读不到 ${file}：${e?.message ?? e}` }; }
@@ -116,7 +116,7 @@ export function syncPresetOverrides({ home, root, log = () => {} } = {}) {
 }
 
 /**
- * 盯住 persona.md / speech-rules.md：一改就重新合成（主人说"外面改系统提示词里面也要改"）。
+ * 盯住 persona.md / speech-rules.md：一改就重新合成（"外面改系统提示词里面也要改"）。
  * 用 mtime+size 轮询（10 秒一次），不引 fs.watch（Windows 上 rename 语义不稳）。
  * @returns {() => void} 停止函数
  */

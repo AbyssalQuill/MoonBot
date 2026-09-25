@@ -8,9 +8,9 @@
 //   · `x/web-interface/search/type`   → 时通时 -412
 //   · `x/player/pagelist`             → 稳定可用（拿到 part=标题、duration、cid）
 //   · `x/web-interface/archive/related` → 可用
-//   · 视频页 HTML                      → 412（但**国内 IP**（主人家宽）能正常拿到 og: meta）
-//   所以取信息做成**多路降级**：直连 API → 视频页 og: meta → 分P接口 → 公共只读代理 → 只剩链接。
-//   任何一路成功就立刻返回，全失败也**永远**留一条能点开的链接，绝不让"分享"整体失败。
+//   · 视频页 HTML                      → 412（但国内 IP（家庭宽带上）能正常拿到 og: meta）
+//   所以取信息做成多路降级：直连 API → 视频页 og: meta → 分P接口 → 公共只读代理 → 只剩链接。
+//   任何一路成功就立刻返回，全失败也永远留一条能点开的链接，绝不让"分享"整体失败。
 //
 // 抖音那边：分享短链 v.douyin.com/xxx 能 302 解析出真实地址（含作品 id），
 // 但详情接口要 X-Bogus 签名、页面是 SPA，所以走"分享页 HTML 里的 _ROUTER_DATA / og: meta"这条路，
@@ -25,7 +25,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const PROBE_TIMEOUT_MS = 9000;
 
 /**
- * 公共只读代理：**默认关掉**。
+ * 公共只读代理：默认关掉。
  * 2026-09-17 在线上机器逐个实测，四个全废：
  *   · api.allorigins.win  → Request Timeout
  *   · corsproxy.io        → 403 keyless_legacy_url（匿名用法已停）
@@ -81,7 +81,7 @@ export function classifyVideoHost(rawUrl) {
   if (host.endsWith('.xiaohongshu.com') || host === 'xhslink.com') return 'xiaohongshu';
   if (host.endsWith('.weibo.com') || host.endsWith('.weibo.cn')) return 'weibo';
   if (host.endsWith('.youtube.com') || host === 'youtu.be') return 'youtube';
-  // 【2026-09-18 扩容】X（原 Twitter）/ Telegram / Pixiv —— 这三家都在 QQ 的链接预览白名单里，
+  // 2026-09-18 扩容：X（原 Twitter）/ Telegram / Pixiv —— 这三家都在 QQ 的链接预览白名单里，
   // 直接发官方链接客户端就会渲染卡片，所以走和 B 站/YouTube 同一条"官方分享链接"路。
   if (host === 'x.com' || host.endsWith('.x.com') || host === 'twitter.com' || host.endsWith('.twitter.com')) return 'x';
   if (host === 't.me' || host.endsWith('.t.me') || host === 'telegram.me' || host.endsWith('.telegram.me')) return 'telegram';
@@ -112,15 +112,15 @@ export function parseVideoUrl(rawUrl) {
     if (av) return { platform, kind: 'aid', id: av[1], url: `https://www.bilibili.com/video/av${av[1]}` };
     const bvQ = u.searchParams.get('bvid');
     if (bvQ && /^BV[0-9A-Za-z]{10}$/i.test(bvQ)) return { platform, kind: 'bvid', id: bvQ, url: `https://www.bilibili.com/video/${bvQ}` };
-    /* ── 2026-09-18 第十七批：b23.tv 的**路径位**必须原样留住 ──────────────────────
+    /* ── 2026-09-18 第十七批：b23.tv 的路径位必须原样留住 ──────────────────────
      * 官方 API 文档（bilibili-API-collect `docs/misc/b23tv.md`）写明 b23.tv 有三种形态：
-     *   ① 任意短链：路径由 **7 位**数字/大小写字母组成，如 https://b23.tv/pigt3PQ（有时效性）
+     *   ① 任意短链：路径由 7 位数字/大小写字母组成，如 https://b23.tv/pigt3PQ（有时效性）
      *   ② 视频短链(av)：/av<aid>
      *   ③ 视频短链(BV)：/BV<bvid>
      * 真人从 B 站 App 分享进 QQ 的真卡，qqdocurl 用的就是 ①（同一台 NapCat 回读到 6 张，
-     * 短码分别是 WZcddcS / WZVnINP / 0hEdnD1 / 9kFv2VX / w1c4DfM / 1ncmZVP，**全是 7 位字母数字**，
+     * 短码分别是 WZcddcS / WZVnINP / 0hEdnD1 / 9kFv2VX / w1c4DfM / 1ncmZVP，全是 7 位字母数字，
      * 见 tools/dump-real-cards-full.mjs 的回读）。老代码把 b23.tv 一律当"短链、id 空"，
-     * 后面 resolveBilibili 跟完 302 就**只留 BV、把短码丢了** —— 用户给的短码本来可以直接用，
+     * 后面 resolveBilibili 跟完 302 就只留 BV、把短码丢了 —— 用户给的短码本来可以直接用，
      * 丢掉之后只能拿 BV 去反推，等于我们自己把信息降级了。这里把短码单独带出来。 */
     if (u.hostname.toLowerCase() === 'b23.tv' || u.hostname.toLowerCase().endsWith('.b23.tv')) {
       const seg = path.replace(/^\/+/, '').split('/')[0] || '';
@@ -365,7 +365,7 @@ async function biliViaPages(id, kind, via) {
 }
 
 /**
- * 单路：**拿标题去搜，再按 bvid 精确命中**，补齐封面/UP主/播放量。
+ * 单路：拿标题去搜，再按 bvid 精确命中，补齐封面/UP主/播放量。
  *
  * 为什么绕这一圈：`view`（一次就能拿到全部字段）在这台机房 IP 上是稳定 412，
  * 而 `search/type` 只是"忙的时候"才 412。先用 pagelist 拿到准确标题，
@@ -399,7 +399,7 @@ async function biliViaSearchByTitle(title, bvid, via) {
 /* ==================== 第三方聚合解析（secapi.top，绕风控用） ==================== */
 
 /**
- * 第三方解析接口前缀。**每次调用现读环境变量**，不缓存到模块常量：
+ * 第三方解析接口前缀。每次调用现读环境变量，不缓存到模块常量：
  * 线上要临时换域名、或者要做"这一路挂掉能不能优雅退回"的现场验证时，
  * 不用改代码重新发版（`QQBRIDGE_SECAPI_BILI=<会失败的地址>` 起一次进程就能复现）。
  * 默认值与 `media.js` 里 QQ 音乐那套 secapi 调用是同一家聚合站，风格照抄它：
@@ -409,35 +409,35 @@ const SECAPI_BILI_DEFAULT = 'http://secapi.top/API/jiexi/bilibili.php';
 const secapiBiliBase = () => String(process.env.QQBRIDGE_SECAPI_BILI ?? '').trim() || SECAPI_BILI_DEFAULT;
 
 /** 这一路的超时。实测正常 0.9~1.6s、错误形态 50~190ms，8s 已经是很宽的余量；
- *  它只是**第一路**，卡住太久会拖慢整条发送链，所以不能给到官方那档 9s。 */
+ *  它只是第一路，卡住太久会拖慢整条发送链，所以不能给到官方那档 9s。 */
 const SECAPI_BILI_TIMEOUT_MS = 8000;
 
 /**
- * 单路：secapi.top 的 B 站解析 —— 存在的唯一理由就是**绕开机房 IP 的风控**。
+ * 单路：secapi.top 的 B 站解析 —— 存在的唯一理由就是绕开机房 IP 的风控。
  *
  * ── 2026-09-18 接口实测（`tools/probe-secapi-bili.mjs` 在线上这台 VPS 跑的，逐条可复现）──
- * `GET http://secapi.top/API/jiexi/bilibili.php?url=<链接或 BV>`，**参数名就是 `url`**：
+ * `GET http://secapi.top/API/jiexi/bilibili.php?url=<链接或 BV>`，参数名就是 `url`：
  *   · 传 `bv=BV…` → `{"code":400,"状态":"错误","信息":"请提供B站链接或BV号"}`（HTTP 仍是 200）；
  *   · 认这些入参形态（逐个实测，返回同一条 BVID）：长链、长链带 `?spm_id_from=` 等 query、
- *     裸 BV、`b23.tv/<7位短码>`、**短码带 `?share_medium=android&share_source=qq&bbid=…&ts=…`**、
+ *     裸 BV、`b23.tv/<7位短码>`、短码带 `?share_medium=android&share_source=qq&bbid=…&ts=…`、
  *     `b23.tv/<BV>`、`m.bilibili.com/video/<BV>`；
- *   · **不认** `av<aid>` 长链（`{"code":404,…,"信息":"未找到有效的BV号"}`），也不认小写 `bv…` ——
+ *   · 不认 `av<aid>` 长链（`{"code":404,…,"信息":"未找到有效的BV号"}`），也不认小写 `bv…` ——
  *     所以 `kind === 'aid'` 时这一路直接跳过，交给官方多路（见 resolveBilibili 第 0 路的判断）。
  *   · 也不认别的平台：抖音/快手/微博的链接一律回上面那句"未找到有效的BV号"。
  *
- * 返回是**中文键**（映射见下），另有 `视频播放地址.{4K,1080P,1080P+,720P,480P,360P,240P}`：
+ * 返回是中文键（映射见下），另有 `视频播放地址.{4K,1080P,1080P+,720P,480P,360P,240P}`：
  *   每个清晰度给 `视频链接`（`http://secapi.top/…?code=<base64>`，解出来是 `upos-…bilivideo.com`
  *   或 `upos-hz-mirrorakam.akamaized.net` 的 mp4）、`文件大小`、`时长(秒)`。
- *   实测：解开 base64 后的真实地址里带 `deadline=<unix秒>`，**距今约 2 小时（会过期）**；
- *   逐个清度实取（Range 1KB 看头 12 字节）**大部分是真 MP4**（magic `…66747970` = "ftyp"），
- *   偶有一条回 `{"code":404,"状态":"错误","信息":"短链无效"}`（HTTP 仍是 200）—— 也就是**不保证每条都能播**。
- *   ⚠️ 另一处坑：`时长(秒)` 的值是 `203666`，而同一条视频官方 `duration` 是 204 秒 ——
- *   它其实是**毫秒**，标签写错了。本桥的卡片不需要播放地址（卡片只放封面+标题+短链），
+ *   实测：解开 base64 后的真实地址里带 `deadline=<unix秒>`，距今约 2 小时（会过期）；
+ *   逐个清度实取（Range 1KB 看头 12 字节）大部分是真 MP4（magic `…66747970` = "ftyp"），
+ *   偶有一条回 `{"code":404,"状态":"错误","信息":"短链无效"}`（HTTP 仍是 200）—— 也就是不保证每条都能播。
+ *   另一处坑：`时长(秒)` 的值是 `203666`，而同一条视频官方 `duration` 是 204 秒 ——
+ *   它其实是毫秒，标签写错了。本桥的卡片不需要播放地址（卡片只放封面+标题+短链），
  *   所以这些字段一个都不往 `info` 里带，避免把"会过期的直链"混进缓存。
  *
- * ⚠️ **最坑的一条：不存在的 BV 会回 `code:200 / 状态:"成功"`，但字段全是空的**
+ * 最坑的一条：不存在的 BV 会回 `code:200 / 状态:"成功"`，但字段全是空的
  *   （实测 `url=BV1zz411c7zz` → 标题 ""、封面图 ""、时长 0、AID 0、`视频播放地址` 为 `[]`）。
- *   也就是说**不能只看 `code`**：标题为空一律当失败抛出去，否则会把一条"空视频"当成功，
+ *   也就是说不能只看 `code`：标题为空一律当失败抛出去，否则会把一条"空视频"当成功，
  *   卡片标题变成兜底的"B站视频"、封面也没有，等于把风控那套故障换个姿势重现一遍。
  */
 async function biliViaSecapi(id, kind) {
@@ -453,8 +453,8 @@ async function biliViaSecapi(id, kind) {
   const title = cleanBiliTitle(v.标题);
   // 见上面那条实测：code=200 也可能是空壳，标题为空就不认
   if (!title) throw new Error(`secapi 回 code=200 但标题为空（实测不存在/已删的视频就是这个形态，BVID=${v.BVID || '?'}）`);
-  /* `发布时间` 是 "2026-09-08 16:45:55" 这种**北京时间字符串**，而下游（buildVideoCard / 返回映射）
-   * 用的是官方那套 **epoch 秒**。这里显式按 +08:00 解析成 epoch，别用 Date.parse 裸解析
+  /* `发布时间` 是 "2026-09-08 16:45:55" 这种北京时间字符串，而下游（buildVideoCard / 返回映射）
+   * 用的是官方那套 epoch 秒。这里显式按 +08:00 解析成 epoch，别用 Date.parse 裸解析
    * （裸解析会按本机时区走，服务器是 UTC 就差 8 小时）。 */
   const pubMs = Date.parse(`${String(v.发布时间 || '').trim().replace(' ', 'T')}+08:00`);
   const s = body.统计信息 || {};
@@ -482,26 +482,26 @@ async function biliViaSecapi(id, kind) {
 }
 
 /**
- * 向 B 站官方分享接口要一条 **b23.tv/<7 位不透明短码>** 形态的短链。
+ * 向 B 站官方分享接口要一条 b23.tv/<7 位不透明短码> 形态的短链。
  *
  * ── 2026-09-18 第十七批·实测（`tools/probe-bili-share-link.mjs` 在线上机器跑的）──────────
  * 接口：`POST https://api.bilibili.com/x/share/click`（备路 `https://api.biliapi.net/x/share/click`）
  * 参数照 bilibili-API-collect `docs/misc/b23tv.md` 的原文示例逐字搬（那份文档也标了"参数表基本失效"，
  * 所以下面每个字段都是实跑验过的，不是抄完就算）：
  *   platform=unix  share_channel=COPY  share_id=main.ugc-video-detail.0.0.pv
- *   share_mode=4   oid=<**aid**，不是 bvid>  buvid=qwq  build=6114514
- * 本机（机房 IP，老 view 接口稳定 412）实跑 4 组参数，**4/4 全部 HTTP 200 code=0**，例如：
+ *   share_mode=4   oid=<aid，不是 bvid>  buvid=qwq  build=6114514
+ * 本机（机房 IP，老 view 接口稳定 412）实跑 4 组参数，4/4 全部 HTTP 200 code=0，例如：
  *   BV13Xb56NEEZ → data.content = "【五十个角色、五十种声音、同一个我-哔哩哔哩】 https://b23.tv/hcBfL2T"
  * 且把返回的短码跟到底验证过：`b23.tv/l38NbiD` → 302 → `https://www.bilibili.com/video/BV13Xb56NEEZ
- * ?…&unique_k=l38NbiD&share_plat=unix…`，**落的正是同一条 BV**；短码后面再挂
+ * ?…&unique_k=l38NbiD&share_plat=unix…`，落的正是同一条 BV；短码后面再挂
  * `?share_medium=android&share_source=qq&ts=…` 这些非设备参数也照样落对（bbid 是设备标识，我们不伪造）。
  *
- * ⚠️ 两个已知限制，如实写在这里：
- *   ① 同一个视频每次调用返回的短码**都不一样**（hcBfL2T / GTSQYqy / hayEZyQ / xbkyqoD），
- *      文档说这类任意短链"有时效限制"，但**具体多久过期没有测出来**（本次只验证了"刚生成就能跳对"）。
+ * 两个已知限制，如实写在这里：
+ *   ① 同一个视频每次调用返回的短码都不一样（hcBfL2T / GTSQYqy / hayEZyQ / xbkyqoD），
+ *      文档说这类任意短链"有时效限制"，但具体多久过期没有测出来（本次只验证了"刚生成就能跳对"）。
  *      所以只缓存 10 分钟用于同轮复用，不做长期缓存；真过期了卡片会点不开，而 b23.tv/<BV> 那种
  *      官方文档承认的形态不存在过期问题 —— 这是这里唯一的取舍。
- *   ② 拿不到短码时**必须**退回 `https://b23.tv/<BV>`（不要在卡片上放长链：
+ *   ② 拿不到短码时必须退回 `https://b23.tv/<BV>`（不要在卡片上放长链：
  *      QQ 的链接预览只认 b23.tv 这个白名单短域）。
  */
 const SHARE_CODE_TTL_MS = 10 * 60 * 1000;
@@ -594,9 +594,9 @@ export async function resolveBilibili(rawUrl) {
   if (!parsed || parsed.platform !== 'bilibili') throw new Error('不是 bilibili 链接');
   let { kind, id } = parsed;
   let url = parsed.url;
-  /* 用户给进来的是 **b23.tv + 7 位短码** 时，把他那条短链原样留下
+  /* 用户给进来的是 b23.tv + 7 位短码 时，把他那条短链原样留下
    * （短码只有 B 站签得出来，我们反推不回去；老代码跟完 302 就只留 BV，白丢一条有效分享链）。
-   * 注意：`b23.tv/<BV>` 虽然是官方文档承认的形态，但它**不是** B 站 App 分享时用的那种短码，
+   * 注意：`b23.tv/<BV>` 虽然是官方文档承认的形态，但它不是 B 站 App 分享时用的那种短码，
    * 所以不能因为"输入是 b23.tv 域名"就跳过换真短码这一步 —— 只认 `parsed.shortCode`。 */
   const givenShortUrl = parsed.shortCode ? String(rawUrl).trim() : '';
 
@@ -611,13 +611,13 @@ export async function resolveBilibili(rawUrl) {
   let info = null;
   let lastErr = null;
 
-  /* 第 0 路：第三方聚合解析 secapi.top（**故意放在官方之前**）。
+  /* 第 0 路：第三方聚合解析 secapi.top（故意放在官方之前）。
    *
    * 为什么排在官方前面：这一路的全部价值就是"从第三方服务器去取 B 站数据"，
    * 出口不是这台机房 IP，所以不吃 B 站对机房 IP 的那套风控（背景见下面第 1 路）。
    * 接口实测、字段全集、错误形态、`code=200 但空壳` 那个坑，都写在 `biliViaSecapi` 的注释里。
    *
-   * ⚠️ 它是**第三方、随时可能挂**，所以这里失败/超时**只打日志、绝不往上层抛**，
+   * 它是第三方、随时可能挂，所以这里失败/超时只打日志、绝不往上层抛，
    * 下面官方多路（wbi/view → pagelist+标题反查 → og:meta）原样保留当兜底。
    * 实测它的响应时间 0.9~1.6s、10 次连胜 10/10 无失败，正常时反而比官方那几路快。 */
   if (kind === 'bvid' && id) {
@@ -636,12 +636,12 @@ export async function resolveBilibili(rawUrl) {
    *
    * ── 2026-09-18 第十六批：这才是「B 站链接发出去还是纯链接」的真因 ──────────────
    * 实发日志里只有一行 `[video] bilibili view/direct 不可用：bilibili 风控：request was banned`，
-   * 然后就没有下文了。老路径 `/x/web-interface/view` 在这台机房 IP 上是**稳定 412**，
-   * 于是掉到第 2 路 pagelist（它只给标题和时长，**没有封面**），再掉"拿标题反查搜索"
+   * 然后就没有下文了。老路径 `/x/web-interface/view` 在这台机房 IP 上是稳定 412，
+   * 于是掉到第 2 路 pagelist（它只给标题和时长，没有封面），再掉"拿标题反查搜索"
    * （时通时 412）、再掉视频页 og:meta（同样 412）。最终 `info.cover` 是空串，
    * 而 `fetchMiniAppArk` 原来要求必须有封面 → 直接 return null
    * → console-server 里"没 Ark 也没封面" → seg=null → 降级梯子发分享链接。
-   * 也就是说：**卡片的零件都在，是"封面"这一个前置条件把整条小程序链路掐断了。**
+   * 也就是说：卡片的零件都在，是"封面"这一个前置条件把整条小程序链路掐断了。
    *
    * 同一分钟、同一 BV，在服务器上直连实测的对照：
    *   GET /x/web-interface/view?bvid=BV13Xb56NEEZ      → HTTP 412（风控页 3286B）
@@ -650,13 +650,13 @@ export async function resolveBilibili(rawUrl) {
    *       pic=http://i1.hdslb.com/bfs/archive/d806bc14c8c044b81799200896aa1cb7be45a8e2.jpg
    *       duration=204  stat.view=392087  desc=…
    *   （换 BV1d4411N7zD 复测同样 200；再同一时刻打老 view 仍然 412）
-   * 结论：风控是**按老路径打的**，wbi 那条没被拦；而且它**不强制 w_rid 签名**，裸调即可。
+   * 结论：风控是按老路径打的，wbi 那条没被拦；而且它不强制 w_rid 签名，裸调即可。
    * 所以第一优先改成 wbi/view，老 view 留着兜底（换机器/换网络可能反过来好使）。
    *
-   * 【2026-09-18 接入 secapi 后的改动，只有两处，其余逐字未动】：
-   *   ① 第 0 路已经把信息拿全了 → **整段跳过**，不再白打两条官方接口；
+   * 2026-09-18 接入 secapi 后的改动，只有两处，其余逐字未动：：
+   *   ① 第 0 路已经把信息拿全了 → 整段跳过，不再白打两条官方接口；
    *   ② secapi 只给了一部分（比如没封面）时照旧进这里，但用 `{...got, ...pruneEmpty(info)}`
-   *      **只补空字段、不覆盖第三方已给的值**（`pruneEmpty` 会把空值剔掉，所以 got 里的空字段
+   *      只补空字段、不覆盖第三方已给的值（`pruneEmpty` 会把空值剔掉，所以 got 里的空字段
    *      不会把 secapi 的标题顶掉）。拿到东西就 break，判据仍是 `if (info)`，与改动前一致。 */
   if (!info?.cover || !info?.author || !info?.title) {
     for (const apiPath of VIEW_API_PATHS) {
@@ -712,7 +712,7 @@ export async function resolveBilibili(rawUrl) {
 
   /* 卡片/小程序要用的"分享链"（shareUrl）在这里定下来，规则按优先级：
    *   ① 用户给的就是 b23.tv 链接 → 原样用他那条（短码是 B 站签的，反推不回来）；
-   *   ② 我们有 BV 号 → 向官方 x/share/click 要一条**真短码**（形态与真卡一致）；
+   *   ② 我们有 BV 号 → 向官方 x/share/click 要一条真短码（形态与真卡一致）；
    *      拿不到就退回 b23.tv/<BV>（bilibili-API-collect 明文承认的官方形态，不会过期）；
    *   ③ 都不是 → 空串，调用方回落到长链。 */
   let shareUrl = givenShortUrl;
@@ -725,7 +725,7 @@ export async function resolveBilibili(rawUrl) {
   if (!shareUrl && /^https?:\/\/b23\.tv\//i.test(String(rawUrl).trim())) shareUrl = String(rawUrl).trim();
   if (givenShortUrl) log(`[video] 用户给的是 b23.tv 短链，原样保留：${givenShortUrl}`);
 
-  /* 卡片的**点击目标**（`qqdocurl` / `jumpUrl`）单独算一份：必须是"QQ 补 `.html` 也不怕"的形态。
+  /* 卡片的点击目标（`qqdocurl` / `jumpUrl`）单独算一份：必须是"QQ 补 `.html` 也不怕"的形态。
    * 为什么不能直接用上面那条短链、以及这个形态是怎么实测出来的，全在 `biliHtmlSafeCardUrl` 的注释里。
    * aid 在极少数路径上可能是 0（secapi 与 wbi/view 都没给出），这时补一次 wbi/view 再算。 */
   let cardAid = Number(info.aid) || 0;
@@ -862,7 +862,7 @@ export async function resolveVideo(rawUrl) {
   if (parsed.platform === 'douyin') return resolveDouyin(rawUrl);
   /* 其它平台（YouTube / X / Telegram / Pixiv / 快手 / 小红书 / 微博…）：
    * 只做"通用抓一下 og: meta"，拿不到就只剩链接 —— 这几个平台本来就在 QQ 的链接预览白名单里，
-   * 卡片由客户端渲染，我们只需要把**标题**取回来说人话（发出去的永远是官方链接，不是自造卡片）。 */
+   * 卡片由客户端渲染，我们只需要把标题取回来说人话（发出去的永远是官方链接，不是自造卡片）。 */
   const referer = parsed.platform === 'pixiv' ? 'https://www.pixiv.net/'
     : parsed.platform === 'x' ? 'https://x.com/'
       : parsed.platform === 'telegram' ? 'https://t.me/'
@@ -918,30 +918,30 @@ const PLATFORM_LABEL = {
  * 现象：卡片渲染正常（封面/标题/哔哩哔哩标识都在），点开却落到
  * `https://b23.tv/<短码>.html` —— b23.tv 对该路径回的是自家的 not found
  * （HTTP 200 + `{"code":-404,"message":"啥都木有"}`，`tools/probe-bili-html-suffix.mjs` 的 C 段
- * 把响应体原样打出来了）。而**发出去的卡里 qqdocurl 是干净的**：回读私聊 1736784911 的每条卡
+ * 把响应体原样打出来了）。而发出去的卡里 qqdocurl 是干净的：回读私聊 1736784911 的每条卡
  * 逐字核对过，`detail_1.qqdocurl` 就是请求里那个值，QQ 服务端原样回显、一个字不加
  * （所以补 `.html` 的那一方在 QQ 侧，点击那一刻才动手，服务端证明不了、也拦不住）。
  *
  * 上一轮（第十八批）赌的是"`.html` 拼在整串末尾、会落进 query 里被忽略"，于是给 qqdocurl
- * 补了 `?share_medium=android&share_source=qq&ts=…`；用户实点**仍然失败**，那条赌注作废。
+ * 补了 `?share_medium=android&share_source=qq&ts=…`；用户实点仍然失败，那条赌注作废。
  *
- * 于是换思路：**既然拦不住补后缀，就挑一个"补了也照样进视频页"的形态。**
+ * 于是换思路：既然拦不住补后缀，就挑一个"补了也照样进视频页"的形态。
  * `tools/probe-bili-html-forms.mjs`（在家宽 IP 上跑 —— 机房 IP 打 www.bilibili.com 恒 412，
  * 分不清是 404 还是被风控）对 3 个不同 aid 的视频 × 2 种 UA（桌面 Chrome / 手机 QQ），
  * 把 QQ 可能贴出来的四种样子都真打了一遍，判据是页面 `<title>` 里必须出现目标视频标题：
- *   ① `https://b23.tv/<短码>`              原样 ✅ ｜ 补一个 `.html` ❌ ｜ 带查询串 ✅ ｜ 补两个 ❌
- *   ② `https://www.bilibili.com/video/BV…` 原样 ✅ ｜ 补一个 `.html` → **404「出错啦!」** ❌
+ *   ① `https://b23.tv/<短码>`              原样 通过 ｜ 补一个 `.html` 失败 ｜ 带查询串 通过 ｜ 补两个 失败
+ *   ② `https://www.bilibili.com/video/BV…` 原样 通过 ｜ 补一个 `.html` → 404「出错啦!」失败
  *   ③ `https://m.bilibili.com/video/av<aid>.html`
- *        **原样 ✅ ／ 补一个 ✅ ／ 补一个再挂查询串 ✅ ／ 补两个 `.html` ✅**（六个组合全绿）
- *   ④ `https://m.bilibili.com/video/av<aid>`（不带 `.html` 的对照）四种变体同样全 ✅
- * 原因：③ 是 B 站**移动端的历史路由**（`m.bilibili.com/video/av<aid>.html`），它自己就带 `.html`
+ *        原样 通过 ／ 补一个 通过 ／ 补一个再挂查询串 通过 ／ 补两个 `.html` 通过（六个组合全绿）
+ *   ④ `https://m.bilibili.com/video/av<aid>`（不带 `.html` 的对照）四种变体同样全部通过
+ * 原因：③ 是 B 站移动端的历史路由（`m.bilibili.com/video/av<aid>.html`），它自己就带 `.html`
  * 结尾，多补几个后缀照样 302 到 `https://www.bilibili.com/video/av<aid>/` 并把 `av<aid>` 原样保留。
  * 所以卡片的点击目标一律换成 ③。
  *
- * 顺带解掉一个隐患：`x/share/click` 签发的短码**有效期没测出来**（见 `fetchBiliShareCode`），
+ * 顺带解掉一个隐患：`x/share/click` 签发的短码有效期没测出来（见 `fetchBiliShareCode`），
  * 而 av 号形态没有过期这回事。短码只留给"分享文案里那行给人看的链接"。
  *
- * ⚠️ 没验证到的部分（不要粉饰）：③ 的抗 `.html` 性质是 **HTTP 层**实测（从家宽打，
+ * 没验证到的部分（不要粉饰）：③ 的抗 `.html` 性质是 HTTP 层实测（从家宽打，
  * 跟进了重定向链并核对了页面标题）；"QQ 点击时到底补不补、补几个"仍然只能真机点击才能确认，
  * 所以 `tools/send-bili-html-experiment.mjs` 发的那张 A 卡用的就是这个形态，等真机回报。
  *
@@ -952,7 +952,7 @@ export function biliHtmlSafeCardUrl({ aid = 0, bvid = '' } = {}) {
   const a = Number(aid) || 0;
   if (a) return `https://m.bilibili.com/video/av${a}.html`;
   /* 没有 aid 时（极少见：secapi / wbi-view 都没给出 aid）只能退回短码形态 ——
-   * 那个形态**不抗 `.html`**，但至少是条能打开的链接，比空着强。 */
+   * 那个形态不抗 `.html`，但至少是条能打开的链接，比空着强。 */
   const bv = String(bvid ?? '').trim();
   return bv ? `https://b23.tv/${bv}` : '';
 }
@@ -960,26 +960,26 @@ export function biliHtmlSafeCardUrl({ aid = 0, bvid = '' } = {}) {
 /**
  * 拼 QQ 卡片。返回与音乐卡片同构的 { title, primary, native, link, note }。
  *
- * ⚠️ 2026-09-18 实测纠偏（主人反馈"显示发送者QQ版本太低，无法展示内容"）：
- *   手写的 `json` 段（com.tencent.structmsg / view=news）在**新版 QQ 上会被直接拒收**，
+ * 2026-09-18 实测纠偏（用户反馈"显示发送者QQ版本太低，无法展示内容"）：
+ *   手写的 `json` 段（com.tencent.structmsg / view=news）在新版 QQ 上会被直接拒收，
  *   对方看到的是"发送者QQ版本太低，无法展示内容"。这跟本仓库里 QQ 音乐那次结论一致
  *   （见 media.js：ss.xingzhige 关闭 id 解析后，QQ 音乐改成发官方分享链接文本，
- *   由客户端自己渲染卡片）。所以视频默认也走**官方分享链接文本**：
+ *   由客户端自己渲染卡片）。所以视频默认也走官方分享链接文本：
  *   B 站/抖音都在 QQ 的联合预览白名单里，客户端自己会渲染出带封面/标题的原生卡片 ——
  *   比机器人手写的假卡更好，而且不会"版本太低"。
  *
  *   primary 因此默认是 null，真正的载体是 link（纯文本，走桥的文本发送通道）。
  *
- * 【2026-09-18 第十五批】`opts.style='json'` / `QQBRIDGE_VIDEO_CARD=json` 这条路**已停用**：
+ * 2026-09-18 第十五批：`opts.style='json'` / `QQBRIDGE_VIDEO_CARD=json` 这条路已停用：
  *   它手拼的 structmsg/news 卡 `config.token` 只能是空串，会命中"空 token 被 QQ 服务端静默拒收"
  *   那个已知坑（详见本函数尾部的注释）。现在传 json 也只是打一行日志、照样发分享链接。
  *   要原生卡片请走 `fetchMiniAppArk`（miniapp_01，token 由 QQ 服务端签发）。
  */
 /**
- * 【2026-09-18 第八批·重大纠正】B 站**原生小程序卡片**其实做得到 —— 直接调 NapCat 的 `get_mini_app_ark`。
+ * 2026-09-18 第八批·重大纠正：B 站原生小程序卡片其实做得到 —— 直接调 NapCat 的 `get_mini_app_ark`。
  *
  * 前两轮的结论（"小程序 Ark 是客户端能力、服务器版 QQ 生成不了、`res.content` 是 undefined 所以走不通"）
- * **是错的**。线上复测（同一台 QQ 3.2.33-52892 + NapCat 4.18.28，四种参数全试）：
+ * 是错的。线上复测（同一台 QQ 3.2.33-52892 + NapCat 4.18.28，四种参数全试）：
  *
  *   POST /get_mini_app_ark {type:'bili', title, desc, picUrl, jumpUrl}
  *   → {"status":"ok","data":{"data":{ app:"com.tencent.miniapp_01",
@@ -990,18 +990,18 @@ export function biliHtmlSafeCardUrl({ aid = 0, bvid = '' } = {}) {
  *        config:{type:"normal", forward:1, ctime:…, token:"<签名>"},
  *        miniappShareOrigin:3, miniappOpenRefer:"10002"}}}
  *
- * 这跟主人从 B 站分享进来的**真卡**（见 console-server 里 13.2 那段记录）逐字段对得上：
+ * 这跟用户从 B 站分享进来的真卡（见 console-server 里 13.2 那段记录）逐字段对得上：
  * 同一个 `app=com.tencent.miniapp_01`、同一个 `view=view_8C8E89…`、同一个 `appid=1109937557`、
- * 同一个 `shareTemplateId`，连 `m.q.qq.com/a/s/<hash>` 短链和 `config.token` **都是服务端现签的**。
- * 也就是说：**签名不是伪造的，是 QQ 服务端给的** —— 桥只是把参数换成这条视频的。
+ * 同一个 `shareTemplateId`，连 `m.q.qq.com/a/s/<hash>` 短链和 `config.token` 都是服务端现签的。
+ * 也就是说：签名不是伪造的，是 QQ 服务端给的 —— 桥只是把参数换成这条视频的。
  *
- * 为什么之前失败：那是**另一轮的偶发失败**（当时那条报的是 `res.content` undefined），
+ * 为什么之前失败：那是另一轮的偶发失败（当时那条报的是 `res.content` undefined），
  * 不是"QQ 版本不支持"、更不是"客户端能力"。底下走的是 SSO 服务端命令
  * `LightAppSvc.mini_app_share.AdaptShareInfo`（见 NapCat `operationContext.ts` /
  * `GetMiniAppAdaptShareInfo.ts`），跟本地 QQ 客户端版本无关。
  *
- * 所以"升级 Linux QQ"这条路**不需要走**：NapCat 4.18.28 的版本支持表（`packages/napcat-core/external/*.json`）
- * 最高只到 `3.2.33-52892`，**正是现在这台装的**；装更新的 QQ 反而会让 NapCat 找不到
+ * 所以"升级 Linux QQ"这条路不需要走：NapCat 4.18.28 的版本支持表（`packages/napcat-core/external/*.json`）
+ * 最高只到 `3.2.33-52892`，正是现在这台装的；装更新的 QQ 反而会让 NapCat 找不到
  * appid/packet/napi2native 映射而直接坏掉。
  *
  * ── 2026-09-18 第十五批·修「B 站卡片能发出来，但点进去不是那个视频」──
@@ -1010,22 +1010,22 @@ export function biliHtmlSafeCardUrl({ aid = 0, bvid = '' } = {}) {
  *   app=com.tencent.miniapp_01  view=view_8C8E89B49BE609866298ADDFF2DBABA4
  *   meta.detail_1 = { appid:"1109937557", title:"哔哩哔哩", desc:"【4K修复】周杰伦 - 晴天",
  *                     url:"m.q.qq.com/a/s/beec9bb4fa643e530120b82c9026e71f",
- *                     config.token 由服务端签发 …  —— **没有任何 qqdocurl 字段** }
- * 同一时间窗里**真人从 B 站 App 分享进 QQ 的真卡全都带 qqdocurl**（同一台 NapCat 回读，共 4 张）：
+ *                     config.token 由服务端签发 …  —— 没有任何 qqdocurl 字段 }
+ * 同一时间窗里真人从 B 站 App 分享进 QQ 的真卡全都带 qqdocurl（同一台 NapCat 回读，共 4 张）：
  *   09-17 15:11:22 私聊  desc=“你觉得世界上大多数痛苦…”， qqdocurl=https://b23.tv/WZVnINP?share_medium=android&share_source=qq&bbid=…&ts=…
  *   09-18 11:48:23 群 868756515  qqdocurl=https://b23.tv/9kFv2VX?share_medium=android&share_source=qq&bbid=…&ts=…
  *   09-18 12:46:18 群 868756515  qqdocurl=https://b23.tv/w1c4DfM?share_medium=android&share_source=qq&bbid=…&ts=…
  *   09-18 13:05:35 私聊  desc=五十个角色、五十种声音、同一个我， qqdocurl=https://b23.tv/1ncmZVP?…
- * B 站小程序**点开后靠 `qqdocurl` 决定进哪个视频页**，缺了它就只剩小程序的 url（m.q.qq.com 短链），
+ * B 站小程序点开后靠 `qqdocurl` 决定进哪个视频页，缺了它就只剩小程序的 url（m.q.qq.com 短链），
  * 于是"卡片显示正常、封面标题都对，点进去却不是那个视频"。
  *
  * qqdocurl 从哪来？NapCat 把 `webUrl` 原样放进 Ark 请求体的 `webURL`（/root/napcat-build/napcat.mjs:14206
  * `webURL: e.webUrl ?? ""`）。`tools/probe-miniapp-ark.mjs` 做的对照实验（同一 BV，只改一个参数）：
- *   A 不传 webUrl                      → detail_1 **没有 qqdocurl**
+ *   A 不传 webUrl                      → detail_1 没有 qqdocurl
  *   B webUrl=https://b23.tv/BV1GJ411x7h7 → qqdocurl=https://b23.tv/BV1GJ411x7h7
  *   C webUrl=https://www.bilibili.com/video/BV1GJ411x7h7 → qqdocurl=同一条长链
  *   D jumpUrl/webUrl 都用长链           → qqdocurl=同一条长链
- * 即：**QQ 服务端只在 webURL 非空时才生成 qqdocurl，值就是 webURL 的原样回显**。
+ * 即：QQ 服务端只在 webURL 非空时才生成 qqdocurl，值就是 webURL 的原样回显。
  * 之前这里只传了 jumpUrl、没传 webUrl —— 这正是那张卡没有 qqdocurl 的原因。
  *
  * @returns {Promise<null|{type:'json', data:{data:string}}>} 可直接当 rich 段的 json 段；失败返回 null
@@ -1040,9 +1040,9 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
   const picUrl = String(info?.cover ?? '').trim();
   /* 卡片的点击目标 = `qqdocurl`（也是 `jumpUrl`）。
    *
-   * bilibili 一律用 `info.cardUrl` —— 它由 `biliHtmlSafeCardUrl` 算出来，是**抗 `.html`** 的
+   * bilibili 一律用 `info.cardUrl` —— 它由 `biliHtmlSafeCardUrl` 算出来，是抗 `.html` 的
    * `https://m.bilibili.com/video/av<aid>.html` 形态（第十九批实测，见那个函数的注释）。
-   * `cardUrl` 缺席时这里**自己再算一遍**（调用方如果没走 `resolveBilibili`、或者只给了 aid/BV，
+   * `cardUrl` 缺席时这里自己再算一遍（调用方如果没走 `resolveBilibili`、或者只给了 aid/BV，
    * 也照样拿到抗 `.html` 的形态；有 aid 才拼 av 形态）。最后才退回短码 `info.shareUrl`
    * —— 那种形态不抗 `.html`，但仍是条能打开的链，比不发卡强。 */
   const cardBv = info?.kind === 'bvid' ? String(info?.id ?? '') : '';
@@ -1056,38 +1056,38 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
       || ''
     ).trim()
     : String(info?.url ?? '').trim();
-  /* webUrl —— **必须传**，它是 qqdocurl 的唯一来源（见上面第十五批的对照实验 A/B/C/D：
+  /* webUrl —— 必须传，它是 qqdocurl 的唯一来源（见上面第十五批的对照实验 A/B/C/D：
    * 不传 webUrl 就没有 qqdocurl，也就没有"点进去是哪条视频"这回事）。
    *
    * 它的取值历史（每一版都真发过，别重复踩）：
    *   · 第十五批：传 `https://www.bilibili.com/video/BV…` 长链 → 用户点开落不到那条视频；
    *   · 第十七批：改回 `https://b23.tv/<BV>`／官方签发的真短码 → 与真卡形态一致；
    *   · 第十八批：给短码补 `?share_medium=…&share_source=qq&ts=…`，赌"`.html` 拼在整串末尾会落进
-   *     query 被忽略" → 用户实点**仍然失败**，赌注作废（实测见 `biliHtmlSafeCardUrl`）；
-   *   · **第十九批（本次）**：`webUrl` 与 `jumpUrl` 一起换成**抗 `.html`** 的
+   *     query 被忽略" → 用户实点仍然失败，赌注作废（实测见 `biliHtmlSafeCardUrl`）；
+   *   · 第十九批（本次）：`webUrl` 与 `jumpUrl` 一起换成抗 `.html` 的
    *     `https://m.bilibili.com/video/av<aid>.html`（`info.cardUrl`）。
    *
    * 真卡的 `qqdocurl` 形如 `https://b23.tv/<不透明短码>?share_medium=android&share_source=qq&bbid=…&ts=…`
-   * —— 那串参数是 B 站 App 分享时自己带的，我们**没有**伪造它（`bbid` 是设备标识、`ts` 是分享时刻，
-   * 编不出来也不该编）。真卡还有一张 `scene=0` + **纯长链**无查询串的样本（用户自己发的那张），
+   * —— 那串参数是 B 站 App 分享时自己带的，我们没有伪造它（`bbid` 是设备标识、`ts` 是分享时刻，
+   * 编不出来也不该编）。真卡还有一张 `scene=0` + 纯长链无查询串的样本（用户自己发的那张），
    * 说明"带不带查询串"跟"点得开点不开"没有必然联系。
    *
    * ── 没验证到的部分（不要粉饰）──────────────────────────────────────────────
-   * `detail_1.url`（`m.q.qq.com/a/s/<hash>`）是 QQ 服务端签的短链，我们**无法解码**它指向
+   * `detail_1.url`（`m.q.qq.com/a/s/<hash>`）是 QQ 服务端签的短链，我们无法解码它指向
    * 小程序哪个页面：`tools/probe-qq-miniapp-url.mjs` 与 `probe-qq-hash-redirect.mjs` 用 PC Chrome /
-   * PC QQ / Android QQ / iOS QQ 四种 UA 跟过真卡和我们的卡的 hash，落地页对**所有卡**返回
-   * **同一份壳**（PC 5164 字节 / 手机 3948 字节，逐卡一致），页内只有 `mqqapi://microapp/open?url=`，
-   * 没有任何"hash → 目标页"的接口可查。所以"点进去到底是不是那条视频"**只能在真机 QQ 上看**。
+   * PC QQ / Android QQ / iOS QQ 四种 UA 跟过真卡和我们的卡的 hash，落地页对所有卡返回
+   * 同一份壳（PC 5164 字节 / 手机 3948 字节，逐卡一致），页内只有 `mqqapi://microapp/open?url=`，
+   * 没有任何"hash → 目标页"的接口可查。所以"点进去到底是不是那条视频"只能在真机 QQ 上看。
    *
-   * `jumpUrl` 这里与 `webUrl` 取同一个值：客户端看到的卡片里只有 `qqdocurl`、**没有 jumpUrl**
+   * `jumpUrl` 这里与 `webUrl` 取同一个值：客户端看到的卡片里只有 `qqdocurl`、没有 jumpUrl
    * （回读的卡片全文可证），所以它本来就不参与点击；取同一个值是"万一读的是 jumpUrl"也不引入
    * 第二个变量。文案里给人看的那行链接（`buildVideoCard` 的 shareUrl）仍是短码形态，不动。 */
   const webUrl = jumpUrl;
   /* 硬性要求只有两个：title 缺了卡片没标题，jumpUrl 缺了没有跳转目标。
    *
-   * 【2026-09-18 第十六批】**封面不再是硬性要求**。原来这里写的是
+   * 2026-09-18 第十六批：封面不再是硬性要求。原来这里写的是
    *   `if (!title || !picUrl || !jumpUrl) return null;`
-   * —— 于是 bilibili 一被风控、resolveVideo 交回空 cover，整条小程序卡链路就**静默断掉**
+   * —— 于是 bilibili 一被风控、resolveVideo 交回空 cover，整条小程序卡链路就静默断掉
    * （这个分支连一行日志都没有），降级梯子转而发纯文本链接。
    * 线上 13:25/13:26/13:27 那四次实发全是这个原因，而"函数级自检"因为自己编了封面，
    * 一次都没走到这里 —— 这就是"自检全绿、实发还是链接"的断点。
@@ -1096,11 +1096,11 @@ export async function fetchMiniAppArk(info, { httpUrl = '', token = '', timeoutM
    *   A picUrl=https://i0.hdslb.com/…jpg → app=com.tencent.miniapp_01 view=view_8C8E89…
    *       detail_1.url=m.q.qq.com/a/s/ac97… qqdocurl=https://b23.tv/BV13Xb56NEEZ
    *       preview=https://qq.ugcimg.cn/v1/…（服务端还会把封面重挂到自己图床）config.token 非空
-   *   B picUrl=""（空串）                → app / view / url / qqdocurl / token **一样齐全**，
+   *   B picUrl=""（空串）                → app / view / url / qqdocurl / token 一样齐全，
    *       只是 detail_1.preview 是空串 —— 即"没有缩略图的卡片"，不是"没有卡片"
    *   C 索性不传 picUrl 这个键            → 400 Schema compilation error: Expected union value
    *   D 只传 title+jumpUrl                → 同样 400
-   * 所以：**picUrl 这个键必须在，值可以是空串**。宁可发一张没有缩略图的真卡片，
+   * 所以：picUrl 这个键必须在，值可以是空串。宁可发一张没有缩略图的真卡片，
    * 也不要因为拿不到封面就退回纯链接 —— 卡片上的标题/UP主/时长照样准，点进去照样是那条视频。 */
   if (!title || !jumpUrl) {
     log(`[video] 不向 QQ 要小程序 Ark：缺 ${[!title && 'title', !jumpUrl && 'jumpUrl'].filter(Boolean).join('+')} —— 这次只能退回分享链接`);
@@ -1162,14 +1162,14 @@ export function buildVideoCard(info, opts = {}) {
   if (!url) throw new Error('视频卡片需要可点开的链接');
   const style = String(opts.style ?? process.env.QQBRIDGE_VIDEO_CARD ?? 'share').trim().toLowerCase();
 
-  // 分享文案对齐真人从 B 站"分享到 QQ"的形态：标题 - UP主 + **短链**
+  // 分享文案对齐真人从 B 站"分享到 QQ"的形态：标题 - UP主 + 短链
   //
-  // ⚠️ 2026-09-18 实测纠偏 2（主人反馈"bilibili卡片渲染失败，是链接"）：
-  //   发 `https://www.bilibili.com/video/BVxxx` 长链时对方看到的是**纯链接、没有卡片** ——
-  //   QQ 的链接预览只认它白名单里的**分享短域**（b23.tv）。
+  // 2026-09-18 实测纠偏 2（用户反馈"bilibili卡片渲染失败，是链接"）：
+  //   发 `https://www.bilibili.com/video/BVxxx` 长链时对方看到的是纯链接、没有卡片 ——
+  //   QQ 的链接预览只认它白名单里的分享短域（b23.tv）。
   //   而 `https://b23.tv/BV号` 是合法短链：实测它 302 到对应视频页（本来只用它做解析，现在直接用它当卡片载体）。
   //   所以 bilibili 一律发 b23.tv 短链，长链只在拿不到 BV 号时才退回去。
-  //   【第十七批】优先用 `info.shareUrl` —— 它可能是用户给的短码，也可能是官方 x/share/click 签发的
+  //   第十七批：优先用 `info.shareUrl` —— 它可能是用户给的短码，也可能是官方 x/share/click 签发的
   //   真短码；`b23.tv/<BV>` 只是这两种都拿不到时的兜底（形态见 fetchBiliShareCode 的实测注释）。
   const shareUrl = (() => {
     if (info?.platform === 'bilibili') return String(info?.shareUrl || (info?.kind === 'bvid' && info?.id ? `https://b23.tv/${info.id}` : url));
@@ -1180,21 +1180,21 @@ export function buildVideoCard(info, opts = {}) {
 
   const base = { title, native: null, link: shareText, platform: info?.platform || '', info, style };
 
-  /* 【2026-09-18 第十五批·停用"手拼 structmsg Ark"这条路，别再让 token 为空的手拼卡上线】
+  /* 2026-09-18 第十五批·停用"手拼 structmsg Ark"这条路，别再让 token 为空的手拼卡上线。
    *
    * style==='json' 时这里原来会手拼一张 `com.tencent.structmsg / view=news` 的 Ark，
-   * 其中 `config.token` 是**空字符串**。本仓库已实测过的坑（见 media.js 的"对账"注释与
-   * tools/diag-seq-history.mjs）：**手写 Ark 的 token 是空/随机值时 QQ 服务端直接拒收** ——
-   * 消息只写进本地库、对方什么都收不到；判据是回读消息的 `real_seq` **不前进**
-   * （diag-seq-history 在线上跑出来的就是一批"com.tencent.tuwen.lua … ❌ 本地幽灵"）。
+   * 其中 `config.token` 是空字符串。本仓库已实测过的坑（见 media.js 的"对账"注释与
+   * tools/diag-seq-history.mjs）：手写 Ark 的 token 是空/随机值时 QQ 服务端直接拒收 ——
+   * 消息只写进本地库、对方什么都收不到；判据是回读消息的 `real_seq` 不前进
+   * （diag-seq-history 在线上跑出来的就是一批"com.tencent.tuwen.lua … 本地幽灵"）。
    *
-   * 我（这一批）**没有复现**"structmsg+空 token"这一条 —— bridge.log 里找不到 structmsg 的记录
+   * 这一批没有复现"structmsg+空 token"这一条 —— bridge.log 里找不到 structmsg 的记录
    * （`grep structmsg` 无命中），线上最近发出去的视频卡都是 miniapp_01 或分享链接，所以这条结论
-   * 沿用仓库既有实测记录，不当成新证据。但既然它是**已知会静默丢消息**的形态，
+   * 沿用仓库既有实测记录，不当成新证据。但既然它是已知会静默丢消息的形态，
    * 就不该留一个"改个环境变量就能把幽灵卡发上线"的开关：
-   * 现在 style==='json' **不再产出任何 Ark**，一律退回与默认相同的分享链接形态，并在日志里说明原因。
+   * 现在 style==='json' 不再产出任何 Ark，一律退回与默认相同的分享链接形态，并在日志里说明原因。
    *
-   * 真正可用的原生卡片是 **NapCat 的 `get_mini_app_ark`**（app=com.tencent.miniapp_01，
+   * 真正可用的原生卡片是 NapCat 的 `get_mini_app_ark`（app=com.tencent.miniapp_01，
    * token/url/preview 全部由 QQ 服务端现场签发）—— 那条在 console-server 的视频分支里是第一优先，
    * 与本函数的 primary 无关。 */
   if (style === 'json') {

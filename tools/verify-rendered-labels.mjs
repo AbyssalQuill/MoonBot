@@ -2,11 +2,11 @@
 /**
  * 「界面上真的渲染出中文」验证 —— 不用浏览器也能验。
  *
- * 做法：用项目自带的 esbuild 把**真正的页面组件**（src/pages/BridgeConfig.tsx、VoiceConfig.tsx）
+ * 做法：用项目自带的 esbuild 把真正的页面组件（src/pages/BridgeConfig.tsx、VoiceConfig.tsx）
  * 打成一个 Node 模块（只把 ../api 这个网络层换成空壳，其余代码原样），再用 react-dom/server
  * 的 renderToStaticMarkup 渲染成 HTML：
- *   · renderToStaticMarkup 只跑首次渲染、**不跑 useEffect** —— 所以不会真去请求桥接口；
- *   · 然后把 HTML 里的标签与属性全剥掉，只看**文本节点**，检查里面还会不会出现配置键名。
+ *   · renderToStaticMarkup 只跑首次渲染、不跑 useEffect —— 所以不会真去请求桥接口；
+ *   · 然后把 HTML 里的标签与属性全剥掉，只看文本节点，检查里面还会不会出现配置键名。
  * 覆盖范围：CommonTab（常用设置里的全部卡片）/ ToolsTab（工具开关）/ SlimToolsCard（工具 schema 精简）
  *          / Field 逐键渲染（配置树里的每个键都单独渲染一次）/ VoiceConfig 的角色名兜底。
  *
@@ -41,9 +41,9 @@ for (const c of configs) {
   })(c.obj);
 }
 
-/* 【2026-09-19 补】只看本机 config 会漏键：线上 config.json 里写着 social.tools.sendVoice /
+/* 2026-09-19 补：只看本机 config 会漏键：线上 config.json 里写着 social.tools.sendVoice /
    transcribeVoice，本机那份没有 —— 于是"页面上有没有漏出裸英文 key"这项检查，恰好在真正出问题
-   的那两个键上失效（主人看到「工具与规则」页里两行裸 key，就是这么来的）。
+   的那两个键上失效（界面上看到「工具与规则」页里两行裸 key，就是这么来的）。
    这里把 core/config.js 声明的开关默认表整个并进来，检查面 = 桥真正支持的开关集合。 */
 const configJsPath = path.join(ROOT, 'qq-bridge', 'src', 'core', 'config.js');
 if (fs.existsSync(configJsPath)) {
@@ -130,7 +130,7 @@ async function buildProbe(srcPath, extraExports, transform) {
 /* ---------- 3. HTML → 文本节点 ---------- */
 function textOf(html) {
   return html
-    .replace(/<textarea[\s\S]*?<\/textarea>/g, ' ')   // textarea 里是配置的**值**（可能整段英文提示词），不是字段名
+    .replace(/<textarea[\s\S]*?<\/textarea>/g, ' ')   // textarea 里是配置的值（可能整段英文提示词），不是字段名
     .replace(/<[^>]*>/g, ' ')
     .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .replace(/\s+/g, ' ')
@@ -142,7 +142,7 @@ const SNAKE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;             // qq_send_messa
 const bridge = await buildProbe('src/pages/BridgeConfig.tsx',
   'Field, CommonTab, ToolsTab, SlimToolsCard, pretty, prettyTool, mcpLabel, LABEL, TOOL_LABEL, MCP_LABEL, UNNAMED_LABEL');
 /* 第二份探针：把「显示 MCP 工具原名」的开关默认值改成 true，
-   用来验证**勾开之后**也只会多出工具原名（不是配置键名）。 */
+   用来验证勾开之后也只会多出工具原名（不是配置键名）。 */
 const bridgeRaw = await buildProbe('src/pages/BridgeConfig.tsx',
   'ToolsTab, SlimToolsCard, UNNAMED_LABEL',
   (src) => src.replace(/const \[showRaw, setShowRaw\] = useState\(false\);/g, 'const [showRaw, setShowRaw] = useState(true);'));
@@ -231,7 +231,7 @@ const ALLOW = [
   /^png$/i, /^jpeg$/i, /^gif$/i, /^mp3$/, /^wav$/, /^deepseek-v4-pro$/, /^xhigh$/, /^max$/, /^off$/,
   /^low$/, /^high$/, /^medium$/, /^minimal$/, /^none$/, /^sh$/,
   /^\d+[a-z]*$/,                                     // 127.0.0.1:10721 这类数字/端口
-  // 【2026-09-19】「没有独立开关的工具」那一栏会列出宿主侧与联网工具的**工具原名**
+  // 2026-09-19：「没有独立开关的工具」那一栏会列出宿主侧与联网工具的工具原名
   // （mcp-host-server.js / mcp-web-search-safe.js 注册的，不是字段名，也不是 config 键）
   /^web_(search|fetch)$/, /^napcat_status$/, /^(start|stop)_napcat$/, /^qq_learning_(corpus|submit)$/,
 ];
@@ -247,7 +247,7 @@ for (const r of renders) {
     }
   }
 }
-/* 硬判据：渲染出来的文本里，绝不允许出现任何一个**配置键名**（字段名必须已翻成中文） */
+/* 硬判据：渲染出来的文本里，绝不允许出现任何一个配置键名（字段名必须已翻成中文） */
 const keyHits = [];
 for (const r of renders) {
   for (const k of keyNames) {

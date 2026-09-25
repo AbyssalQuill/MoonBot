@@ -1,22 +1,22 @@
-// 【2026-09-23 主人报「管理端卡片在本机断网之后重连服务器的时候反复循环状态机」】
+// 2026-09-23 报障：「管理端卡片在本机断网之后重连服务器的时候反复循环状态机」
 //
 // 现象：本机断网 → 服务器连接掉 → 网络恢复后，管理端首页卡片的状态机在
 //       connecting → tunnels → server-starting → (failed) 之间反复空转，停不下来。
 //
 // 根因（读 server/index.js 得到的确定链条，不是猜）：
-//   ① establishConnection() 在换连接时会对**旧连接**调 end()：
+//   ① establishConnection() 在换连接时会对旧连接调 end()：
 //        if (sshConnections.has(id)) { sshConnections.get(id).end(); sshConnections.delete(id); … }
 //      而 end() 会让旧连接异步抛 'close'。
 //   ② 'close' 处理器里那条"是不是已被新连接取代"的判据是：
 //        if (sshConnections.get(id) !== conn && sshConnections.has(id)) return;
-//      旧连接触发 close 时，sshdConnections 里这台**刚被 delete 掉** →
+//      旧连接触发 close 时，sshdConnections 里这台刚被 delete 掉 →
 //      get() 是 undefined（!== conn 成立，但）has() 是 false（第二个条件不成立）
-//      → 两个条件同时成立才 return，这里不成立 → **被当成真掉线** → scheduleReconnect()。
+//      → 两个条件同时成立才 return，这里不成立 → 被当成真掉线 → scheduleReconnect()。
 //   ③ 于是：排重连 → 5s 后 connectStep → 在 establishConnection 里又 end() 一个连接
 //      → 又抛 close → 又排重连 …… 状态机永远在走这几步，界面看着就是"反复循环"。
 //
 //   ④ 另外 waitServerReady() 在"三件套都没在跑"（d.down）时 break 出来直接 fail()，
-//      之后**没有任何人再推进状态机**；而重连定时器还在按退避触发，同样表现为循环。
+//      之后没有任何人再推进状态机；而重连定时器还在按退避触发，同样表现为循环。
 //
 // 本测试锁住这两条修法的关键契约（纯源码断言 + 行为断言，不联网、不起进程）。
 import assert from 'node:assert/strict';
@@ -45,7 +45,7 @@ ok("close 处理器里认这个标记并直接 return",
 
 console.log('\n== ② 标记必须在 replace 那一刻就生效（同一段里 add 早于 delete/end）==');
 {
-  // 关键顺序：add 必须在 sshConnections.delete() 与 .end() **之前**，
+  // 关键顺序：add 必须在 sshConnections.delete() 与 .end() 之前，
   // 否则旧连接的 close 回调跑起来时标记还没打上，照样会误判成掉线。
   const addIdx = src.indexOf('replacingConnections.add(server.id)');
   const delIdx = src.indexOf('sshConnections.delete(server.id)', addIdx - 400);

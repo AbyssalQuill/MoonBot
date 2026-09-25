@@ -5,7 +5,7 @@
  * 起因：管理端会把 config.json 的键直接渲染成字段名；没登记中文名的键就回落成
  *       `refreshOnMessageMs` 这种原始英文键名。本脚本是「一个都不许留」的验收依据。
  *
- * 数据全部来自**真实文件**，不手抄：
+ * 数据全部来自真实文件，不手抄：
  *   ① qq-bridge/config.example.json + qq-bridge/config.json → 全部配置键路径（含中间分组键）
  *   ② src/pages/BridgeConfig.tsx → 卡片白名单（path= / path: / only: / topOnly）、LABEL / TOOL_LABEL / MCP_LABEL 标签表
  *   ③ src/tool-schema-chars.ts → 「工具 schema 精简」卡里逐行渲染的 MCP 工具原名
@@ -13,7 +13,7 @@
  *
  * 判定：键（含分组键）必须有中文标签，且标签非空、含汉字。
  *       标签解析与界面一致：LABEL[完整路径] ?? LABEL[末段名] ?? TOOL_LABEL[末段名]（社交工具开关）。
- * 注意：脚本读的是**静态标签表**，不是 pretty() 的运行时兜底 —— 因此运行时兜底不会让审计蒙混过关。
+ * 注意：脚本读的是静态标签表，不是 pretty() 的运行时兜底 —— 因此运行时兜底不会让审计蒙混过关。
  *
  * 用法：node tools/audit-ui-labels.mjs
  * 退出码：0 = 未翻译键 0 个；1 = 有未翻译键（清单会逐条打印）。
@@ -230,7 +230,7 @@ for (const [name, table] of [['LABEL', LABEL], ['TOOL_LABEL', TOOL_LABEL], ['MCP
 }
 /* 6.8 全站静态扫描（用 TypeScript 的语法树真解析 JSX，不靠正则猜）：
  *      · 短文案（≤40 字，就是"字段名 / 按钮 / 小标题"那一类）里出现 camelCase / snake_case → 直接算未翻译；
- *      · 长文案（说明段落、ⓘ 说明）里点名桥里的键名 → 不算错，单列出来（主人明确要求说明里写清键名）。
+ *      · 长文案（说明段落、ⓘ 说明）里点名桥里的键名 → 不算错，单列出来（约定：说明里要写清键名）。
  *      覆盖 Home / Learning / SSHConfig / GroupPortrait / WebView / components / api 等所有 src 文件。 */
 const TECH_ALLOW = [
   /^mcp__napcat__$/, /^todo_write$/, /^ask_user_question$/, /^get_rkey$/, /^NAPCAT_QUICK_PASSWORD_MD5$/,
@@ -248,9 +248,16 @@ const srcFiles = [];
     else if (/\.tsx?$/.test(ent.name)) srcFiles.push(path.relative(ROOT, p).replace(/\\/g, '/'));
   }
 })(path.join(ROOT, 'src'));
+/* 有意保留的英文短文案：不是"没翻译"，而是它本来就得是英文。
+   `You're a helpful assistant.` 是人设输入框的灰色占位示例（BridgeConfig.tsx 人设卡），
+   旁白已写明"只是占位提示，不会写入文件，也不注入模型"——它演示的是英文人设长什么样，
+   翻成中文就失去了示例意义，所以这里放行；新增放行项必须写明理由。 */
+const SHORT_ALLOW = [
+  /^You're a helpful assistant\.$/,
+];
 const IDENT = /\b[a-z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 const LABELISH_ATTRS = new Set(['label', 'title', 'placeholder', 'aria-label', 'alt']);
-/* 纯英文标签的判定：先把**单位 / 产品名 / 协议名 / 数字 / 链接**这些"翻掉反而看不懂"的部分去掉，
+/* 纯英文标签的判定：先把单位 / 产品名 / 协议名 / 数字 / 链接这些"翻掉反而看不懂"的部分去掉，
    剩下的字符里还有英文字母才算未翻译。这样做的好处：'API Key' 会被抓出来（Key 不认识），
    而 '5MB'、'26.9k tokens'、'PID：'、'GitHub: AbyssalQuill/MoonBot'、'tok' 不会误报。 */
 /* 长的词必须排在前面（否则 'G' 会先把 'GitHub' 咬掉一半）；单字母单位加边界，
@@ -269,13 +276,14 @@ function scanNode(file, src, node) {
   const consider = (text, nodeForLine) => {
     const trimmed = text.trim();
     if (!trimmed) return;
-    // <code>/<pre> 里的内容是**行内技术引用**（文件名、工具原名、桥里的键名）——
-    // 与说明段落同等待遇：列出来但不判错（主人明确要求说明里写清桥里的键名）。
+    // <code>/<pre> 里的内容是行内技术引用（文件名、工具原名、桥里的键名）——
+    // 与说明段落同等待遇：列出来但不判错（约定：说明里要写清桥里的键名）。
     const parentTag = node.parent && ts.isJsxElement(node.parent)
       ? node.parent.openingElement.tagName.getText(src) : '';
     const inCode = parentTag === 'code' || parentTag === 'pre';
     const line = src.getLineAndCharacterOfPosition(nodeForLine.getStart(src)).line + 1;
     if (!inCode && !hasHan(trimmed) && trimmed.length <= 60
+      && !SHORT_ALLOW.some((re) => re.test(trimmed))
       && /[A-Za-z]/.test(trimmed.replace(KNOWN_TOKENS, ''))) {
       shortHits.push({ file, line, tok: trimmed, text: trimmed });
       return;

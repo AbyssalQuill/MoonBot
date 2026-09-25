@@ -5,7 +5,7 @@ import { SENSITIVE_RE } from '../sensitive.js';
 // 已知的default agent token 集合：日志/活动/出站文本统一脱敏，防止令牌被模型泄露到 QQ。
 export const KNOWN_AGENT_TOKENS = new Set();
 
-// 学习会话专用令牌集合（见 core/learning-token.js）：**故意与 KNOWN_AGENT_TOKENS 分开**。
+// 学习会话专用令牌集合（见 core/learning-token.js）：故意与 KNOWN_AGENT_TOKENS 分开。
 // 它的唯一作用是解锁 POST /api/learning/submit-persona；若混进 KNOWN_AGENT_TOKENS，
 // 学习会话就能顺带通行 /api/blacklist、/api/social/deepsleep 等管理端点，属于扩权。
 // 放进脱敏集合是另一回事——防止令牌被模型抄进 QQ 消息。
@@ -47,11 +47,11 @@ export function redactSensitive(obj) {
   return obj;
 }
 
-/* 【2026-09-20】把「这次调用要发给哪个会话」单独抽出来落盘。
+/* 2026-09-20：把「这次调用要发给哪个会话」单独抽出来落盘。
  * 为什么需要：会话令牌本身就是 QQ/群号（见本文件下方说明），所以 `key:"private:1736784911"`
- * 里的号码会被脱敏成 `private:***` —— 结果 **工具日志根本看不出消息发去了哪个会话**，
- * 主人报「pixiv 发图发错群」时我查不到目标，只能靠翻会话日志。
- * 群号/QQ 号属于日常信息（本文件下方也这么说），不是凭证；这里只在**工具日志**里补一个
+ * 里的号码会被脱敏成 `private:***` —— 结果工具日志根本看不出消息发去了哪个会话，
+ * 排查「pixiv 发图发错群」时查不到目标，只能靠翻会话日志。
+ * 群号/QQ 号属于日常信息（本文件下方也这么说），不是凭证；这里只在工具日志里补一个
  * 未脱敏的 `target` 字段用于诊断，token 依然照旧脱敏。 */
 export function extractToolTargetKey(args) {
   let parsed = args;
@@ -99,9 +99,9 @@ export function sanitizeToolArgs(args) {
 //   2) 令牌前带“令牌型标签”（令牌/【令牌】/[Token]/[Session token]/会话令牌/token/session token/
 //      x-agent-token/密钥/口令…，标签后可夹 是/为/: = 等分隔）并直接跟随该令牌。
 //      注：2026-09-12 起唤醒正文里的令牌行由【令牌】改为 [Token]（英文方括号），
-//      所以这里**必须同时认方括号形态**，否则模型把令牌抄进 QQ 消息时不再被拦。
+//      所以这里必须同时认方括号形态，否则模型把令牌抄进 QQ 消息时不再被拦。
 // “群号 / QQ号 / 账号 / 手机号”等日常称呼标签刻意不在标签表内 → 不误伤。
-// 【2026-09-20】新增 `[Session] <key>` 标签：唤醒正文从这一天起带这一行（wake-send.js sessionLine），
+// 2026-09-20：新增 `[Session] <key>` 标签：唤醒正文从这一天起带这一行（wake-send.js sessionLine），
 // 而 key 里就含令牌本体（group:<群号> / private:<QQ>），所以模型照抄整行发进 QQ 时必须同样被拦。
 const TOKEN_LABEL_SRC = '(?:\\u3010?\\s*(?:会话)?令牌\\s*\\u3011?|\\[\\s*(?:会话|session\\s*)?token\\s*\\]|\\[\\s*session\\s*\\]|x-agent-token|sessionToken|session[\\s-]?token|access[\\s-]?token|agent[\\s-]?token|api[\\s-]?key|token|密钥|口令)';
 const TOKEN_SEP_SRC = '(?:\\s*(?:是|为|[:=：])\\s*|\\s+)?';
@@ -168,12 +168,12 @@ export function unquoteJsonString(value) {
   return value;
 }
 
-/* ── 出站正文形态治理（2026-09-20 主人实测要求）──────────────────────────────────
+/* ── 出站正文形态治理（2026-09-20 实测）──────────────────────────────────────────
  * 两条规矩，都作用在"模型写的正文"上：
- *   ① 正文不许是"被序列化的工具参数数组"—— 那是容器，不是人话（**桥侧真拦**，见下）；
+ *   ① 正文不许是"被序列化的工具参数数组"—— 那是容器，不是人话（桥侧真拦，见下）；
  *   ② 正文里不许显式写换行（代码、诗歌/诗词除外）、颜文字只在人设要求时发且短句内联/
- *      长句单独一条 —— 这两条**只写在系统提示词里**（preset [TOOLS] 2b / 2c），桥不做正则清洗：
- *      主人 2026-09-20 定稿"换行不必正则"，而"人设到底要不要颜文字"桥根本猜不出来，
+ *      长句单独一条 —— 这两条只写在系统提示词里（preset [TOOLS] 2b / 2c），桥不做正则清洗：
+ *      2026-09-20 定稿"换行不必正则"，而"人设到底要不要颜文字"桥根本猜不出来，
  *      猜错就是把脸糊在别人的正式话题后面。
  * 入口：onebotSend（所有模型正文的唯一出口）+ POST /api/social/send-message（数组还原/拒发）。
  */
@@ -198,7 +198,7 @@ function arrayPayloadInner(text) {
 function stripWrapQuotes(s) {
   let t = String(s ?? '').trim();
   /* 只剥"外面那层包裹引号"，判据是引号个数为奇数 —— 因为切的时机在 `", "` 上，
-   * 现场原文（引号嵌套）切出来常常是**已经配平**的：
+   * 现场原文（引号嵌套）切出来常常是已经配平的：
    *   `"比如"谬友圈活跃19点到23点""` → `比如"谬友圈活跃19点到23点"`（2 个引号 = 内容自身的）
    * 而首尾那两条是落单的：
    *   `"直接跟我说就行`（1 个）、`我帮你设 ᗜ ‸ ᗜ"`（1 个）→ 要剥。
@@ -213,7 +213,7 @@ function stripWrapQuotes(s) {
 
 /**
  * 把"被序列化成一个字符串的气泡数组"还原成多条气泡。
- * 现场形态（主人 2026-09-20 实测；引号嵌套导致 JSON.parse 必然失败，
+ * 现场形态（2026-09-20 实测；引号嵌套导致 JSON.parse 必然失败，
  * 旧代码于是把整串当"一条消息"原样发进 QQ）：
  *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", "我帮你设 ᗜ ‸ ᗜ"]
  * @returns {string[]|null} null = 不是这个形状；数组 = 还原出的气泡

@@ -66,11 +66,11 @@ export function defaultWakeConfig() {
       poke: w.recommendedPoke !== false,
       anyMessage: defaultMode === 'active',
       probability: Math.min(1, Math.max(0, Number(w.recommendedProbability) || 0)),
-      /* 【2026-09-19 主人要求"插话概率等所有概率都要改好落地"】
-       * 这个值有两个来源：① 主人配置里的 recommendedProbability（这里叫 owner）；
+      /* 2026-09-19 需求"插话概率等所有概率都要改好落地"。
+       * 这个值有两个来源：① 用户配置里的 recommendedProbability（这里叫 owner）；
        * ② 模型自己按语境用 qq_set_wake_config 定的值（model）。
-       * 以前分不清是谁给的 → 主人在界面上改概率，已经聊过的会话永远不会变（模型早就自己定过一个值）。
-       * 现在带上来源标记：source=owner 的会话会在配置热加载时**立刻**跟着新值走；
+       * 以前分不清是谁给的 → 在界面上改概率，已经聊过的会话永远不会变（模型早就自己定过一个值）。
+       * 现在带上来源标记：source=owner 的会话会在配置热加载时立刻跟着新值走；
        * source=model 的会话保留模型的选择（模型是看着语境定的，不该被静默覆盖）。 */
       probabilitySource: 'owner'
     },
@@ -84,16 +84,16 @@ export function defaultWakeConfig() {
 }
 
 /**
- * 把主人配置里的"普通消息插话概率"应用到**正在跑的会话**上（2026-09-19）。
+ * 把用户配置里的"普通消息插话概率"应用到正在跑的会话上（2026-09-19）。
  *
- * 为什么需要：这个概率有两个来源（主人的 recommendedProbability / 模型自己定的值），
+ * 为什么需要：这个概率有两个来源（用户的 recommendedProbability / 模型自己定的值），
  * 靠 `triggers.probabilitySource` 区分。
  *
- * 【2026-09-19 主人反馈后改口径】主人说"我调的 0.15，唤醒词里带的好像是 0.08" —— 老口径是
- * "source=model 的会话保留模型的选择"，于是主人在界面上改完，老会话纹丝不动、唤醒提示里还是模型
- * 早就定下的 0.08，看起来就是"改了不生效"。现在改成：**主人一保存，所有会话都按主人这份执行**
+ * 2026-09-19 反馈后改口径：原话"我调的 0.15，唤醒词里带的好像是 0.08" —— 老口径是
+ * "source=model 的会话保留模型的选择"，于是在界面上改完，老会话纹丝不动、唤醒提示里还是模型
+ * 早就定下的 0.08，看起来就是"改了不生效"。现在改成：用户一保存，所有会话都按这份配置执行
  * （包括原来源=model 的，计数在 overridden 里并写日志）；模型之后仍可在会话内自己调整，
- * 但主人下次保存会再覆盖回来。由 bridge.js 的配置热加载回调与启动同步调用。
+ * 但用户下次保存会再覆盖回来。由 bridge.js 的配置热加载回调与启动同步调用。
  * @returns {{updated:number, overridden:number, kept:number}}
  */
 export function applyOwnerWakeProbabilityToSessions() {
@@ -142,7 +142,7 @@ export function softResetWakeConfig(st) {
       speakerIds: normalizeSpeakerIds(oldTr.speakerIds),
       keywords: Array.isArray(oldTr.keywords) ? oldTr.keywords.map((k) => String(k).slice(0, 100)).filter(Boolean).slice(0, 50) : def.triggers.keywords,
       probability: Number.isFinite(prevProb) && prevProb > 0 ? Math.min(1, Math.max(0, prevProb)) : def.triggers.probability,
-      // 软重置要保留"这个概率是谁定的"：模型定的就继续归模型，主人配置来的就继续跟主人配置走
+      // 软重置要保留"这个概率是谁定的"：模型定的就继续归模型，用户配置来的就继续跟用户配置走
       probabilitySource: oldTr.probabilitySource === 'model' ? 'model' : 'owner'
     },
     wakeCount: old.wakeCount || 0,
@@ -214,9 +214,9 @@ export function isInSleepWindow() {
 /**
  * 启动时给"没见过当前人设版本"的会话标记一次补注入（2026-09-20）。
  *
- * 为什么需要：人设 / 发言规则已经由 lib/preset-compose.js 合成进系统提示词，唤醒正文**不再重复注入**
+ * 为什么需要：人设 / 发言规则已经由 lib/preset-compose.js 合成进系统提示词，唤醒正文不再重复注入
  * 那整份文本；但这两种情况必须补一次，否则会话会一直用旧人设：
- *   ① 桥停机期间主人改了 persona.md / speech-rules.md —— 老会话的系统提示词是旧版；
+ *   ① 桥停机期间用户改了 persona.md / speech-rules.md —— 老会话的系统提示词是旧版；
  *   ② 本次升级之前建的会话（那时正文每次都注入，会话里没有任何"见过哪一版"的记录）。
  * 判据是 `_personaSeenStamp !== 当前版本`；补过一次就会把 stamp 记上，此后不再重复注入。
  * @param {string} currentStamp persona.md|speech-rules.md 的版本号（wake-send 的 runtimeOverrideStamp()）
@@ -358,16 +358,16 @@ export function saveSocialState() {
         lastIncomingAt: st.lastIncomingAt || 0,
         lastAiSeenAt: Number(st.lastAiSeenAt) || 0,
         // 「确实被回复过」的消息 id 集合（按 QQ messageId，跨会话轮换也稳定）。
-        // 用途：回合结束判断"某条被暂存的唤醒到底有没有被吞"时**按 id 查集合**，
+        // 用途：回合结束判断"某条被暂存的唤醒到底有没有被吞"时按 id 查集合，
         // 而不是像以前那样比时间戳——时间戳判不出"看过但没回"，也分不清"回过但又被重播"。
         answeredMessageIds: Array.isArray(st.answeredMessageIds) ? st.answeredMessageIds.slice(-300) : [],
         pendingUndeliveredText: String(st.pendingUndeliveredText ?? ''),
         _undeliveredAt: Number(st._undeliveredAt) || 0,
         sessionToolCalls: Number(st.sessionToolCalls) || 0,
         _promptInjected: st._promptInjected === true,
-        /* 【2026-09-19 修「对话中途也注入首轮提示词」】这个字段必须落盘，理由见下面默认值那行的注释。 */
+        /* 2026-09-19 修「对话中途也注入首轮提示词」：这个字段必须落盘，理由见下面默认值那行的注释。 */
         _promptOverrideStamp: (typeof st._promptOverrideStamp === 'string' && st._promptOverrideStamp) ? st._promptOverrideStamp : '',
-        /* 【2026-09-20】人设已合成进系统提示词 → 唤醒正文默认不再重复注入。这两个字段记录
+        /* 2026-09-20：人设已合成进系统提示词 → 唤醒正文默认不再重复注入。这两个字段记录
          * "这个会话见过哪一版人设 / 要不要再补一次"（详见 wake-send.js 里 buildWakePrompt 的注释）。 */
         _personaSeenStamp: (typeof st._personaSeenStamp === 'string' && st._personaSeenStamp) ? st._personaSeenStamp : '',
         _personaNeedsReinject: st._personaNeedsReinject === true,
@@ -380,11 +380,11 @@ export function saveSocialState() {
         preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
         preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
         lastUnreadSeq: st.lastUnreadSeq || 0,
-        // 【2026-09-11 23:08】"已交给模型的最高 seq"**必须落盘**：它只在内存里的话，
+        // 2026-09-11 23:08："已交给模型的最高 seq"必须落盘：它只在内存里的话，
         // 每次桥重启都会归零 → 等待工具的基线退回 lastUnreadSeq → 重启前被暂存、还没交付的消息
         // 就再也交付不了了（实测 15:04 被暂存的 seq12/seq13 就是这样被我自己的重启弄丢的）。
         lastDeliveredSeq: Number(st.lastDeliveredSeq) || 0,
-        // 投递看门狗的"意图水位"：桥**打算交付**过的最高 seq（scheduleWake 每次被调用就推进）。
+        // 投递看门狗的"意图水位"：桥打算交付过的最高 seq（scheduleWake 每次被调用就推进）。
         // 必须落盘：否则桥一重启，重启前"已经决定要交付、但还没交出去"的那批就再也兜不到了。
         _wakeIntendedSeq: Number(st._wakeIntendedSeq) || 0,
         activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-50) : [],
@@ -454,13 +454,13 @@ function dispatchWake(key, reason) {
  * 「会话忙期间把新消息直接塞进正在跑的那一轮」的注入口（实现在 wake-send.js 的 steerIntoRunningTurn）。
  *
  * 为什么要它：DSH 的 `session/prompt` 支持 `mode:'steer'` → `agent.steer()` → inbox 投到
- * **'next-step'**（本回合的下一个 step 边界就交给模型）；而 `mode:'queue'` 投的是
- * **'next-turn'**，那必然多出一整轮。原来的 `pendingWakeReasons` 补发走的就是 queue 这条路：
+ * 'next-step'（本回合的下一个 step 边界就交给模型）；而 `mode:'queue'` 投的是
+ * 'next-turn'，那必然多出一整轮。原来的 `pendingWakeReasons` 补发走的就是 queue 这条路：
  * 用户在你思考时补一句话 → 你回一次 → 结束后又被唤醒回一次，多花一整轮模型往返
  * （那一轮还会把那 8 万字符的 prompt 再重发一遍）。
- * 塞进去以后模型在**同一条回复里**就把新消息一起考虑掉了。
+ * 塞进去以后模型在同一条回复里就把新消息一起考虑掉了。
  *
- * 返回 Promise<boolean>：true = 已塞进在途回合（那条消息**仍然**照常入队做审计，
+ * 返回 Promise<boolean>：true = 已塞进在途回合（那条消息仍然照常入队做审计，
  * 回合结束时的补发逻辑会看到"已被本轮处理"而跳过，不会重复唤醒）。
  */
 let steerSender = null;
@@ -505,17 +505,17 @@ export function getSocialState(key) {
       _mediaAttachedSeq: 0, // 最近一次唤醒已附图覆盖到的最高消息 seq（防同一批图反复附）
       _promptSessionId: null, // 最近一次完整 prompt 注入时对应的 DSH sessionId（会话重建/DSH 重启后强制重新注入）
       _promptInjected: false, // 首次完整 prompt 是否已注入（持久化：避免桥重启后对同一长驻会话重复全量注入）
-      /* 【2026-09-19 修「对话中途也注入首轮提示词」· 线上实测】
+      /* 2026-09-19 修「对话中途也注入首轮提示词」· 线上实测：
        * `wake-send.js` 用「人设/发言规则文件的 mtime:size」当版本号：注入完整 prompt 时把版本号记进
-       * `_promptOverrideStamp`，下次唤醒比较，**不一样就重新注入**（人设保存后立即生效的机制）。
-       * 但这个字段**从来没被持久化**（serialize / load / 默认值三处都没有）→ 落盘再读回来永远是 ''，
-       * 于是 `ovStamp !== ''` 恒成立 → **每次唤醒都走"人设已更新"分支**、把 `_promptInjected` 打回 false，
+       * `_promptOverrideStamp`，下次唤醒比较，不一样就重新注入（人设保存后立即生效的机制）。
+       * 但这个字段从来没被持久化（serialize / load / 默认值三处都没有）→ 落盘再读回来永远是 ''，
+       * 于是 `ovStamp !== ''` 恒成立 → 每次唤醒都走"人设已更新"分支、把 `_promptInjected` 打回 false，
        * 下一轮又变成"首次唤醒，注入完整 prompt"。
        * 现场证据：`persona.md` / `speech-rules.md` 的 mtime 一直停在 09-16（文件根本没动），
        * 而 bridge.log 里「人设/发言规则已更新 → 重新注入完整 prompt」在 16:08~17:57 之间刷了 12 次，
-       * 且 state 里所有会话都**没有** `_promptOverrideStamp` 这个字段。 */
+       * 且 state 里所有会话都没有 `_promptOverrideStamp` 这个字段。 */
       _promptOverrideStamp: '', // 注入完整 prompt 时的人设文件版本号（mtime:size），人设一变就重新注入
-      /* 【2026-09-20】人设已合成进系统提示词，唤醒正文不再无条件重复它：
+      /* 2026-09-20：人设已合成进系统提示词，唤醒正文不再无条件重复它：
        *   _personaSeenStamp   = 这个会话的系统提示词/正文里"见过"的人设版本（默认空 = 还没记过）
        *   _personaNeedsReinject = 要不要在下一次完整注入时补一遍（人设刚改 / 重启前就存在的老会话） */
       _personaSeenStamp: '',
@@ -538,7 +538,7 @@ export function getSocialState(key) {
       preSleepWaitAccumMs: 0,
       lastUnreadSeq: 0,
       lastDeliveredSeq: 0,   // 已交给模型的最高 seq（wake-send.js 投递水位 / console-server 等待工具水位）
-      _wakeIntendedSeq: 0,   // 桥**打算交付**的最高 seq（投递看门狗的意图水位，见 sweepUndelivered）
+      _wakeIntendedSeq: 0,   // 桥打算交付的最高 seq（投递看门狗的意图水位，见 sweepUndelivered）
       activeTopics: [],
       pendingThoughts: [],
       memberImpressions: {}
@@ -551,11 +551,11 @@ export function getSocialState(key) {
   return st;
 }
 
-// ── 会话重置：清会话状态，但**保住「已回复账本」** ────────────────────────────────
-// 【2026-09-16 真机事故「reset 之后会重复回复一次」】
+// ── 会话重置：清会话状态，但保住「已回复账本」 ────────────────────────────────
+// 2026-09-16 真机事故「reset 之后会重复回复一次」：
 //   所有 reset 路径（控制台 /api/session/reset、/api/social/reset、/api/workspace/reset、
 //   聊天里发 /reset 或 /new、卡死隔离）原来都是 `social.conversations.delete(key)` 一刀切。
-//   被删掉的**不只是**会话上下文，还有四样"这个会话已经处理到哪了"的账：
+//   被删掉的不只是会话上下文，还有四样"这个会话已经处理到哪了"的账：
 //     · answeredMessageIds  「确实被回复过」的消息 id 集合
 //     · lastDeliveredSeq   已交给模型的最高 seq（投递水位 / 等待工具基线）
 //     · _wakeIntendedSeq   桥打算交付的最高 seq（投递看门狗水位）
@@ -567,7 +567,7 @@ export function getSocialState(key) {
 //   模型连"刚换上下文、别重答旧话题"这句都没有。
 //
 //   修法：换成"先快照账本 → 删旧状态 → 立刻把账本写回新状态"。
-//   ⚠️ 踩过的坑（必须同生同死）：**只保水位不保 seq 计数器是更严重的误杀**——重置后新消息的 seq
+//   踩过的坑（必须同生同死）：只保水位不保 seq 计数器是更严重的误杀——重置后新消息的 seq
 //   会从 1 重新数，而 lastDeliveredSeq 还停在 63，看门狗/注入去重会把这些新消息全判成"已交付"，
 //   机器人从此装死不回。所以这四项永远一起搬（见 send-idempotency.js 的 REPLY_LEDGER_FIELDS）。
 export function resetConversationKeepingLedger(key) {
@@ -632,7 +632,7 @@ export function loadSocialState() {
           _undeliveredAt: Number(val._undeliveredAt) || 0,
           sessionToolCalls: Number(val.sessionToolCalls) || 0,
           _promptInjected: val._promptInjected === true,
-          // 【2026-09-19】读回来也要认这个字段，否则重启后它又变回 undefined → 又触发"人设已更新"。
+          // 2026-09-19：读回来也要认这个字段，否则重启后它又变回 undefined → 又触发"人设已更新"。
           _promptOverrideStamp: (typeof val._promptOverrideStamp === 'string' && val._promptOverrideStamp) ? val._promptOverrideStamp : '',
           _personaSeenStamp: (typeof val._personaSeenStamp === 'string' && val._personaSeenStamp) ? val._personaSeenStamp : '',
           _personaNeedsReinject: val._personaNeedsReinject === true,
@@ -797,7 +797,7 @@ export function scheduleProactiveCheck(key) {
     }
     return; // 免打扰时段不排主动机会（@/私聊等真实触发仍走 scheduleWake）
   }
-  // deepsleep 与「单群静默名单」都**只针对群聊**（私聊照常）：静默群不主动冒泡。
+  // deepsleep 与「单群静默名单」都只针对群聊（私聊照常）：静默群不主动冒泡。
   if (String(key).startsWith('group:')) {
     const gpId = String(key).split(':')[1] || '';
     const silentGroups = Array.isArray(cfgRef.social?.deepsleepGroups) ? cfgRef.social.deepsleepGroups.map(String) : [];
@@ -866,25 +866,25 @@ export function scheduleWake(key, reason) {
     return;
   }
   const st = getSocialState(key);
-  // 【2026-09-12 投递看门狗的"意图水位"】只要 scheduleWake 被调用，就说明**桥已经决定把这条消息交给模型**，
+  // 2026-09-12 投递看门狗的"意图水位"：只要 scheduleWake 被调用，就说明桥已经决定把这条消息交给模型，
   // 于是把水位推进到"此刻 unread 的最高 seq"。看门狗（sweepUndelivered）只兜这一类：
   //   `seq <= _wakeIntendedSeq（桥打算交付） && seq > lastDeliveredSeq（但没交出去）`。
-  // ⚠️ 为什么必须有这个水位：**"有未读"和"决定唤醒"是两回事**。
-  //   群聊在潜水模式下按概率/关键词决定接不接话，绝大多数普通消息**根本不会触发唤醒**——
+  // 为什么必须有这个水位："有未读"和"决定唤醒"是两回事。
+  //   群聊在潜水模式下按概率/关键词决定接不接话，绝大多数普通消息根本不会触发唤醒——
   //   那是功能，不是故障。看门狗如果只按 `seq > lastDeliveredSeq` 判，就会把这些安静略过的消息
-  //   在 25 秒后全部强制唤醒：**潜水模式被废掉、还白烧一大堆 token**。
+  //   在 25 秒后全部强制唤醒：潜水模式被废掉、还白烧一大堆 token。
   //   （这个坑实测踩到过：2026-09-12 00:14 群 某群的一条普通消息被误判成"收下没交付"。）
   try {
     const maxUnreadSeq = (Array.isArray(st.unread) ? st.unread : [])
       .reduce((m, x) => Math.max(m, Number(x && x.seq) || 0), 0);
     if (maxUnreadSeq > 0) st._wakeIntendedSeq = Math.max(Number(st._wakeIntendedSeq) || 0, maxUnreadSeq);
   } catch (_) {}
-  // 【2026-09-11 主人要求：除了首轮，不要再往对话窗口注入任何消息 —— 要注入到"思考"里】
-  // 该会话此刻正挂着一个 `qq_wait_for_messages` 长轮询：新消息会作为**工具结果**直接回到模型手里。
-  // 所以这里**什么都不做**：不 steer（steer 在 DSH 里必然产生一条 user/message → 会出现在对话窗口）、
+  // 2026-09-11 需求：除了首轮，不要再往对话窗口注入任何消息 —— 要注入到"思考"里。
+  // 该会话此刻正挂着一个 `qq_wait_for_messages` 长轮询：新消息会作为工具结果直接回到模型手里。
+  // 所以这里什么都不做：不 steer（steer 在 DSH 里必然产生一条 user/message → 会出现在对话窗口）、
   // 不暂存、不补发、不唤醒。这才是"注入到思考里"—— 消息从工具调用返回，而不是被推成一条聊天消息。
   // 依据：DSH 的 sessionPromptRequestSchema 只有 sessionId/mode/content/clientTimeZone，
-  // 没有任何"不可见"字段；additionalContexts 的类型也是 UserMessage[]。**桥推送必然可见。**
+  // 没有任何"不可见"字段；additionalContexts 的类型也是 UserMessage[]。桥推送必然可见。
   if (activeWaits.has(key)) {
     log(`[default] ${key} 正在 qq_wait_for_messages 长轮询中，新消息随工具结果交回模型（不注入对话、不唤醒）`);
     return;
@@ -899,17 +899,17 @@ export function scheduleWake(key, reason) {
     return;
   }
   if (isConversationBusy(key, st)) {
-    // 【2026-09-12 架构收敛】这里**故意不做任何投递**，只放行到下面的合并窗。
+    // 2026-09-12 架构收敛：这里故意不做任何投递，只放行到下面的合并窗。
     // 与 wake-send.js 的 busy 分支（真正投递那一刻的判定）分工如下：
-    //   · 这里 = "合并窗之前"的判定。此刻刚到的消息还没攒够，**必须**先走合并窗
-    //     （主人 2026-09-11 的实测教训：为了压延迟把合并窗压到 800ms，两条隔 2 秒的消息被拆成两批，
+    //   · 这里 = "合并窗之前"的判定。此刻刚到的消息还没攒够，必须先走合并窗
+    //     （2026-09-11 的实测教训：为了压延迟把合并窗压到 800ms，两条隔 2 秒的消息被拆成两批，
     //      "正常人肯定一起回"的话被甩成两条回复）。在这里 steer 会绕过合并窗，等于把那个坑再踩一次。
     //   · wake-send.js 那份 = "投递那一刻"的判定。那时批已经攒好，才该决定"塞进在途回合"还是"正常唤醒"。
-    // 所以：**忙时不暂存、不丢消息，只是等合并窗**；到点后由 wake-send 优先 steer 进在途回合，
+    // 所以：忙时不暂存、不丢消息，只是等合并窗；到点后由 wake-send 优先 steer 进在途回合，
     // 塞不进去则走正常唤醒——而正常唤醒现在也是 steer 投递（prompt-deliver.js），
-    // 因此无论哪条路都**不可能再卡在 DSH 的 next-turn 队列里**（主人 2026-09-11 23:58 报的故障）。
+    // 因此无论哪条路都不可能再卡在 DSH 的 next-turn 队列里（2026-09-11 23:58 报的故障）。
     log(`[default] ${key} 会话繁忙但模型未在等待工具里 → 先攒合并窗，到点后优先塞进在途回合（不暂存，避免永久卡死）`);
-    // ⚠️ 故意不 return：继续走下面的合并窗 + 正常唤醒流程
+    // 故意不 return：继续走下面的合并窗 + 正常唤醒流程
   }
   cancelReplyCheck(key); // 真实唤醒已接管，取消普通回复检查，避免 30s 后再补一刀
   if (st.sleepTimer) {
@@ -918,15 +918,15 @@ export function scheduleWake(key, reason) {
   }
   st.pendingWakeReason = reason;
   // 交互型唤醒（@/提问/名字/拍一拍/私聊）用短合并窗口尽快响应；概率/主动/回复检查类保持合并窗口省 token。
-  // 秒唤醒（主人 2026-09-06 要求）：私聊合并窗 1s；群聊 @/提问 0.8s；概率/anyMessage 类 3s 上限。
+  // 秒唤醒（2026-09-06 需求）：私聊合并窗 1s；群聊 @/提问 0.8s；概率/anyMessage 类 3s 上限。
   //
-  // 【2026-09-11 再提速】补发轮（`_rebroadcastWake`，也就是"会话忙期间被暂存、回合结束后补发"的那批，
-  // 唤醒正文里的 `[Unread n] owner(id:xxx): …` 就是它们）**不再攒合并窗**：
+  // 2026-09-11 再提速：补发轮（`_rebroadcastWake`，也就是"会话忙期间被暂存、回合结束后补发"的那批，
+  // 唤醒正文里的 `[Unread n] owner[QQ=…](id:…): …` 就是它们）不再攒合并窗：
   //   · 合并窗的意义是"把刚到的连发攒成一轮"，而这批消息已经在"会话忙"期间等过了，再攒 1s 纯属重复等待；
-  //   · 同理**也不再因为"对方还在输入"顺延**（最多 2.5s）——他早就在等了。
+  //   · 同理也不再因为"对方还在输入"顺延（最多 2.5s）——他早就在等了。
   // 于是这批消息从"回合结束 → 再等 1s(+最多2.5s) → 投递"变成"回合结束 → 0.2s → 投递"。
-  // 【防泄漏】标志由 wake-send 在出 prompt 时清 0，且只在 120s 内有效（见 wake-send.js rbNote）。
-  // 这里必须用**同一个** TTL 判定：否则补发轮若被拖过 120s，这一行读到的仍是 >0，
+  // 防泄漏：标志由 wake-send 在出 prompt 时清 0，且只在 120s 内有效（见 wake-send.js rbNote）。
+  // 这里必须用同一个 TTL 判定：否则补发轮若被拖过 120s，这一行读到的仍是 >0，
   // 该会话之后的每一轮普通唤醒都会被误判成补发轮 → 永久 200ms 且永久失去"对方正在输入"等待。
   const rbAt = Number(st._rebroadcastWake) || 0;
   const isReplayWake = rbAt > 0 && Date.now() - rbAt < 120000;
@@ -938,19 +938,19 @@ export function scheduleWake(key, reason) {
     : (interactiveReasons.test(String(reason))
       ? (isPrivateWake ? 1000 : 800)
       : Math.min(3000, Math.max(400, Number(st.wakeConfig?.batchWindowMs) || 2000)));
-  // 私聊智能等待（2026-09-15 主人要求：看对方打字状态、等打完再回，并用概率骰子决定要不要插话）：
+  // 私聊智能等待（2026-09-15 需求：看对方打字状态、等打完再回，并用概率骰子决定要不要插话）：
   //   · 命中"等"→ 把唤醒窗口拉长（上限 social.typing.holdMaxMs），期间到的消息全进 unread → 合并成一次注入；
   //   · 命中"插话"（骰子命中 / 等太久到上限）→ 按正常节奏回，不抢话也不干等。
   // 补发轮跳过这一条：那批消息早在"会话忙"期间就等着了，再等他打完字只是二次延迟。
   if (!isReplayWake && key.startsWith('private:')) {
     const decision = typingHoldDecision({ typingUntil: st.peerTypingUntil, since: st.peerTypingSince, cfg: cfgRef });
     if (decision.wait) {
-      // 【2026-09-16 晚 修「思考期间到的消息被塞进下一个唤醒」】会话**正忙（有回合在跑）**时，
+      // 2026-09-16 晚 修「思考期间到的消息被塞进下一个唤醒」：会话正忙（有回合在跑）时，
       // 绝不许把唤醒窗口拉过这一轮：一旦拖到回合结束，投递就只能走"完整唤醒"= 下一个唤醒/下一轮。
       // 线上实测 13:39:59 那条消息就是这么被拖出当前轮的（窗口被拉到 5.2s → 13:40:05 投递时
-      // `[steer] 跳过：没有正在跑的模型回合` → `唤醒 private:***（private）`）。
+      // `[steer] 跳过：没有正在跑的模型回合` → `唤醒 private:*（private）`）。
       // 有回合在跑时窗口最多顺延 STEER_IN_TURN_DEFER_MAX_MS（在途注入那条路才是正解）；
-      // 模型本回合**一条都还没发出去**时一秒都不等（等下去只是把它拖出这一轮，见 wake-send.js 的 noReplyYet）。
+      // 模型本回合一条都还没发出去时一秒都不等（等下去只是把它拖出这一轮，见 wake-send.js 的 noReplyYet）。
       const busyNow = isConversationBusy(key, st);
       const hasBubble = turnHasBubble(key, state.sessions[key], st);
       const remainMs = decision.remainMs + 500;
@@ -979,17 +979,17 @@ export function scheduleWake(key, reason) {
 }
 
 // ── 投递看门狗：把"绝不吞消息"从"应该不会"变成"不可能" ─────────────────────────────
-// 【2026-09-12】只做一件事：找出**桥已经决定要交付、却一直没有交出去**的消息，重新排一次唤醒。
+// 2026-09-12：只做一件事：找出桥已经决定要交付、却一直没有交出去的消息，重新排一次唤醒。
 //
 // 判据是两段水位（两个都必须满足）：
-//   ① `seq <= _wakeIntendedSeq` —— 桥**打算**交付它（每次 scheduleWake 就会推进这个水位）；
-//   ② `seq > lastDeliveredSeq`  —— 但**还没**交出去。
-// ⚠️ 为什么必须有①：**"有未读"和"决定唤醒"是两回事**。群聊在潜水模式下按概率/关键词决定接不接话，
+//   ① `seq <= _wakeIntendedSeq` —— 桥打算交付它（每次 scheduleWake 就会推进这个水位）；
+//   ② `seq > lastDeliveredSeq`  —— 但还没交出去。
+// 为什么必须有①："有未读"和"决定唤醒"是两回事。群聊在潜水模式下按概率/关键词决定接不接话，
 //    绝大多数普通消息根本不触发唤醒 —— 那是功能，不是故障。只看②的话，这些被安静略过的消息
-//    会在 25 秒后被全部强制唤醒：**潜水模式废掉 + 白烧一堆 token**。
+//    会在 25 秒后被全部强制唤醒：潜水模式废掉 + 白烧一堆 token。
 //    （实测踩到：2026-09-12 00:14 某群的一条普通消息被误判成"收下没交付"。）
-// 另一条判据的取舍：交付 = 模型看到了 → 它选择不回是**有意识的决定**（主人 2026-09-11 选的 B），不该重发；
-//    未交付 = 桥这边某条链路静默失败了 → 必须重试。所以这里兜的是**投递**，不是"有没有被回复"。
+// 另一条判据的取舍：交付 = 模型看到了 → 它选择不回是有意识的决定（2026-09-11 选的 B），不该重发；
+//    未交付 = 桥这边某条链路静默失败了 → 必须重试。所以这里兜的是投递，不是"有没有被回复"。
 //
 // 触发条件刻意卡得很紧（正常路径下一次都不会触发——投递在 1~3 秒内完成）：
 //   ① 会话不在 `activeWaits`（等待工具在跑时，消息随工具结果回去，不需要唤醒）；
@@ -1016,7 +1016,7 @@ export function sweepUndelivered(overdueMs = WATCHDOG_DEFAULT_OVERDUE_MS, minRet
     // DSH 不可用期间排进 `queued` 的唤醒会在 DSH 恢复后自动补投，别在这里重复排一次。
     const dshQ = queued.get(key);
     if (Array.isArray(dshQ) && dshQ.length > 0) continue;
-    // 【必须有的前提】只兜"桥**打算交付**却没交出去"的消息（见 scheduleWake 里 `_wakeIntendedSeq` 的说明）。
+    // 必须有的前提：只兜"桥打算交付却没交出去"的消息（见 scheduleWake 里 `_wakeIntendedSeq` 的说明）。
     // 没有意图水位的消息 = 桥根本没打算唤醒它（群聊潜水模式下按概率略过的那些）→ 绝不能兜，
     // 否则等于把潜水模式废掉。
     const intended = Number(st._wakeIntendedSeq) || 0;
@@ -1098,13 +1098,13 @@ export function formatParticipation(st) {
 }
 
 // 推荐 qq_wait_for_messages 的静默时长（P4-18b 迁入）
-// 【2026-09-11 主人质疑"之前不是说这样很慢吗" —— 属实，这里是根源】
-// 旧版三个时长是**写死的** 8000 / 12000 / 12000，于是"让模型用等待工具取消息"这条路
+// 2026-09-11 质疑"之前不是说这样很慢吗" —— 属实，这里是根源。
+// 旧版三个时长是写死的 8000 / 12000 / 12000，于是"让模型用等待工具取消息"这条路
 // 每个来回都要白等 8~12 秒，正是当初被我判为"比 1 秒合并窗还慢"的原因。
 // 现在全部改成可配（`social.wait.defaultQuietMs / unfinishedQuietMs / burstQuietMs`），
 // 默认调到 1.5~3 秒：既能合并"连发几条"，又不会让每个来回卡十秒。
 export function suggestQuietMs(st) {
-  // ⚠️ 别用 `Number(x) || 默认值`：配置里写 0（=不要静默窗）会被 `||` 吃掉、退回默认值 ——
+  // 别用 `Number(x) || 默认值`：配置里写 0（=不要静默窗）会被 `||` 吃掉、退回默认值 ——
   //    这正是"配置里明明写了 defaultQuietMs: 0，实际还是等 8 秒"的原因（2026-09-11 查出）。
   const num = (v, dflt) => {
     const n = Number(v);
@@ -1133,22 +1133,22 @@ export function suggestQuietMs(st) {
 // （比如判断无需回直接收尾），同批图不会在下一次唤醒里再次附上，杜绝"每轮都带同一张旧图"循环；
 // 模型仍可用 qq_get_message_images 主动取图。
 /**
- * 从一批消息里挑"可以附进 prompt 的图片/表情"——**唤醒附图与在途回合注入共用这一条规则**。
+ * 从一批消息里挑"可以附进 prompt 的图片/表情"——唤醒附图与在途回合注入共用这一条规则。
  *
- * 为什么必须共用（2026-09-22 主人报"附图片好像有问题"，这就是根因）：
- *   图片附件原来只挂在**唤醒**那条路（sendWakePrompt → deliverRef(..., {media})）上，而在途注入
+ * 为什么必须共用（2026-09-22 报障"附图片好像有问题"，这就是根因）：
+ *   图片附件原来只挂在唤醒那条路（sendWakePrompt → deliverRef(..., {media})）上，而在途注入
  *   （wake-send.js 的 steerIntoRunningTurn）是自己直接调 apiRef.sessions.prompt 的，content 里
- *   **只有一个 text 块**。偏偏"忙时把消息塞进在途回合"才是主路径（steer 默认开），于是主人在模型
- *   正跑着时发的图**从来进不了模型的眼睛**：模型只看到 `owner(id:…): [图片] [image]` 一行占位文本，
+ *   只有一个 text 块。偏偏"忙时把消息塞进在途回合"才是主路径（steer 默认开），于是在模型
+ *   正跑着时发的图从来进不了模型的眼睛：模型只看到 `owner[QQ=…](id:…): [图片] [image]` 一行占位文本，
  *   回一句"图没传过来"。挑选规则只留这里一份，两条路都调它，免得再漂移。
  *
  * 规则（与老 collectFreshWakeMedia 的语义一字不差地搬过来）：
- *   ① 跳过自己发的；② 消息 seq 必须**高于**已附图水位（同一张图绝不附第二次，
+ *   ① 跳过自己发的；② 消息 seq 必须高于已附图水位（同一张图绝不附第二次，
  *   否则会退化成"每轮都把同一张旧图再附一遍"）；③ 只认 kind=image / face；④ 最多 cap 张。
  * @param {Array} msgs 候选消息（顺序由调用方决定：唤醒那条路传新→旧）
  * @param {number} floor 当前"已附图水位"（st._mediaAttachedSeq）
  * @param {number} limit 本次最多附几张
- * @returns {{media:Array, floor:number}} floor = 这批里**真的采纳了图**的最大 seq（调用方在投递成功后落账）
+ * @returns {{media:Array, floor:number}} floor = 这批里真的采纳了图的最大 seq（调用方在投递成功后落账）
  */
 export function pickAttachableMedia(msgs, floor = 0, limit = MAX_MEDIA_COUNT) {
   const out = [];
@@ -1178,9 +1178,9 @@ export function collectFreshWakeMedia(key, st) {
   const attachedFloor = Number(st._mediaAttachedSeq) || 0;
   const out = [];
   let maxSeqSeen = attachedFloor;
-  /* 【2026-09-18 修「不是每张图都能附上对话」——主人报"谬儿园有证据"】
-   * 原来这里是**固定只看最近 8 条**（`length - 8`）。群里一波连发十几条时，图夹在中间，
-   * 第 9 条以前的那几张就**永远出不了这个窗口**；而下面的水位只在"真的附上了"时才推进，
+  /* 2026-09-18：修「不是每张图都能附上对话」—— 报障"谬儿园有证据"。
+   * 原来这里是固定只看最近 8 条（`length - 8`）。群里一波连发十几条时，图夹在中间，
+   * 第 9 条以前的那几张就永远出不了这个窗口；而下面的水位只在"真的附上了"时才推进，
    * 于是那些图既没被附上、也不会再被扫到 —— 彻底丢掉（现场：group:1073589775 的
    * _mediaAttachedSeq 停在 180，而 184/185 两张图一直没出现在任何一轮里）。
    * 现在按「已附图水位」回溯，最多 40 条：水位之后的所有图都有机会被附上，
@@ -1192,14 +1192,14 @@ export function collectFreshWakeMedia(key, st) {
     if (!m || m.isSelf) continue;
     const seqN = Number(m.seq) || 0;
     if (!(unreadSeqs.has(seqN) || Number(m.time) > lastAiT)) continue;
-    // 挑选规则走 pickAttachableMedia（在途注入那条路用**同一套**，见该函数注释）
+    // 挑选规则走 pickAttachableMedia（在途注入那条路用同一套，见该函数注释）
     const picked = pickAttachableMedia([m], attachedFloor, MAX_MEDIA_COUNT - out.length);
     if (!picked.media.length) continue;
     out.push(...picked.media);
     if (picked.floor > maxSeqSeen) maxSeqSeen = picked.floor;
   }
-  /* 【2026-09-18 同上】水位只应该在"这之前的图都处理过了"时推进。
-   * 旧写法只在**真的附上了图**时推进 maxSeqSeen，于是"一条没图的消息"不影响水位 —— 看着对，
+  /* 2026-09-18 同上：水位只应该在"这之前的图都处理过了"时推进。
+   * 旧写法只在真的附上了图时推进 maxSeqSeen，于是"一条没图的消息"不影响水位 —— 看着对，
    * 但配合上面那个 8 条窗口就出问题：窗口滑过去之后，被漏掉的图再也回不来。
    * 现在窗口够大（40 条），保持原语义即可；这里只补一句：本轮没附图时也不要推进水位
    * （推进了就等于宣告"这段看过了"，图上不去）。 */
@@ -1215,15 +1215,15 @@ export function scheduleReplyCheck(key) {
   if (cfgRef.social?.enabled === false) return;
   if (social.paused) return;
   if (inDndWindow()) return; // 免打扰时段不安排回复兜底检查（被@等真实唤醒接管）
-  // 私聊不需要「回复检查」——因为私聊**不可能漏回**，这个兜底在这里是纯重复回合：
+  // 私聊不需要「回复检查」——因为私聊不可能漏回，这个兜底在这里是纯重复回合：
   //   1) evaluateWakeTrigger() 第一行就是 `if (kind === 'private') return 'private';`
   //      —— 私聊每条消息都无条件唤醒，与 mode/probability/关键词都无关；
   //   2) 会话忙时私聊消息进 pendingWakeReasons 排队、事后「合并补发」，不会被吞；
   //   3) 被唤醒频率限制时私聊会挂 20s 一次性重试，也不会被静默吞掉；
   //   4) 任何一次真实唤醒接管时都会 cancelReplyCheck(key)，把排队的回复检查清掉。
   //   于是私聊里这个定时器只有两种结局：被真实唤醒取消，或到点时「无未读,跳过」。
-  // 唯一会真跑起来的场合反而是有害的：正好卡在「主人刚发消息、唤醒还没派发」的窗口里，
-  // 抢先占住会话 → 主人的消息被判「会话繁忙」排队几十秒。
+  // 唯一会真跑起来的场合反而是有害的：正好卡在「刚发消息、唤醒还没派发」的窗口里，
+  // 抢先占住会话 → 那条消息被判「会话繁忙」排队几十秒。
   // 群聊不一样：群唤醒是条件式的（关键词/概率/@），普通消息可能永远不触发，那边的兜底要保留。
   // 想恢复旧行为（私聊也检查）就把 config.json 的 social.autoReplyCheckPrivateChats 设为 true。
   if (key.startsWith('private:') && cfgRef.social?.autoReplyCheckPrivateChats !== true) return;
@@ -1259,7 +1259,7 @@ export function scheduleReplyCheck(key) {
 }
 
 // 回合收尾提醒 prompt（防"忘记收尾进入永眠"的兜底注入）
-// 【2026-09-12】令牌标签改英文括号：[Token]（主人要求）；提示正文里只留"发生了什么 + 动态数值"
+// 2026-09-12：令牌标签改英文括号：[Token]（需求）；提示正文里只留"发生了什么 + 动态数值"
 // （观察时长），具体该怎么做在系统提示词 [WAKE TYPES] 第 13 条。
 export function buildWakeReminderPrompt(key) {
   const roleState = readRoleState();

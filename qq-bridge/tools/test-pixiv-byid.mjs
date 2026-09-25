@@ -100,7 +100,7 @@ ok('搜索路径不塞 Referer（仍走代理）', srcSearch.every((s) => !s.ref
 
 /* ───────────────────────── 离线：登录 cookie 层（按名字搜画师） ───────────────────────── */
 console.log('\n=== 6. cookie 规整（三种写法都要认，换行要清掉）===');
-/* ⚠️ 这些 fixture 故意带上 `FIXTURE` 字样：打包脱敏环节会扫"看起来像真凭据"的字符串
+/* 这些 fixture 故意带上 `FIXTURE` 字样：打包脱敏环节会扫"看起来像真凭据"的字符串
  * （tools/sanitize-full-payload.mjs 的 SECRET_PATTERNS），带 FIXTURE 的占位值会被跳过。
  * 改这些示例值时别把 FIXTURE 去掉，否则安装包构建会因为"疑似密钥残留"而拒绝出包。 */
 eq('整条 cookie 串原样保留（只留认识的键）', cleanPixivCookie('PHPSESSID=FIXTUREabc123; p_ab_id=7; other=1'), 'PHPSESSID=FIXTUREabc123; p_ab_id=7');

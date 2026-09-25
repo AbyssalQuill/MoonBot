@@ -1,11 +1,11 @@
-// 发送节奏兜底函数（**只有 linearEnabled=false 时才走到 computeGaps**）
+// 发送节奏兜底函数（只有 linearEnabled=false 时才走到 computeGaps）
 //
-// 【2026-09-15 主人定稿：节奏只留"按字数"一种】
+// 2026-09-15：节奏只留"按字数"一种。
 //   · 唯一权威实现在 core/send-chain.js 的 nextSendPaceMs：
 //     批内首条秒回，第 2 条起 = 字数 × linearPerCharMs（夹在 [linearMinMs, linearCapMs]，带抖动）。
 //   · 本文件的 byLength 分支现在直接复用同一组参数（linearPerCharMs / linearMinMs / linearCapMs /
 //     linearJitterRatio），不再有自己那套 gapBaseMs/gapPerCharMs/gapJitterRatio —— 两套参数必然打架。
-//   · fixed / auto 是**按调用显式指定间隔**的路径（qq_send_message 的 gapMode 参数），与线性节拍无关，保留。
+//   · fixed / auto 是按调用显式指定间隔的路径（qq_send_message 的 gapMode 参数），与线性节拍无关，保留。
 import { randInt } from './rand.js';
 
 /** 硬性最小间隔（纯安全下限，不来自配置）。 */
@@ -15,7 +15,7 @@ const FALLBACK_GAP_MIN_MS = 1000;
 const FALLBACK_GAP_MAX_MS = 3000;
 
 /**
- * 读数值配置：**显式配置的 0 就是 0**，只有真正没配（undefined/null/空串/非数字）才用默认值。
+ * 读数值配置：显式配置的 0 就是 0，只有真正没配（undefined/null/空串/非数字）才用默认值。
  */
 const numCfg = (v, d) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
 

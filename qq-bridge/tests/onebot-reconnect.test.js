@@ -132,7 +132,7 @@ console.log('== NapCat WS 判死即重建 ==');
   pass += 1;
 }
 
-// ⑥ 【2026-09-16 强化 NapCat 连接】主动探活：安静一段时间就 get_status，没回就立刻判死重建
+// ⑥ 2026-09-16 强化 NapCat 连接：主动探活：安静一段时间就 get_status，没回就立刻判死重建
 {
   class SilentWS extends FakeWS {
     send(data) { SilentWS.sent.push(String(data)); /* 故意什么都不回：模拟"链路还在、NapCat 侧已经不响应"的假死 */ }

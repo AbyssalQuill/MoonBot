@@ -32,7 +32,7 @@ const freePort = () => new Promise((resolve) => {
 });
 
 const port = await freePort();
-// ⚠️ 沙盒必须放在**仓库内**（tests/.tmp-keys）：MCP server 要 import @modelcontextprotocol/sdk，
+// 沙盒必须放在**仓库内**（tests/.tmp-keys）：MCP server 要 import @modelcontextprotocol/sdk，
 // 放到系统临时目录会解析不到 qq-bridge/node_modules（ERR_MODULE_NOT_FOUND）。
 const sandbox = path.join(HERE, '.tmp-keys');
 fs.rmSync(sandbox, { recursive: true, force: true });
@@ -135,7 +135,7 @@ await t('schema：qq_send_message 的 required 里不再有 key/token', () => {
 
 const okCall = await call('qq_send_message', { messages: '在的' });
 await t('只传 messages：**直接拒绝**（绝不猜会话）—— 契约是"缺 key 就当错"', () => {
-  /* 【2026-09-22 改口径】这条断言原来要求"自动补齐 key/token 并真的发出"，那是**改契约之前**的行为。
+  /* 2026-09-22 改口径：这条断言原来要求"自动补齐 key/token 并真的发出"，那是**改契约之前**的行为。
    * 现在（起因：一次 pixiv 发图发错群）缺 key 一律拒绝，绝不替模型猜会话：
    *   mcp-napcat-safe.js 里 schema 声明了 key → hasKeyField=true → 不传 key 命中 missingKey 分支。 */
   assert.ok(!/Invalid input|Invalid arguments|-32602/.test(okCall.text), '不该是 schema 校验失败：' + okCall.text.slice(0, 200));
@@ -152,7 +152,7 @@ srv2.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
 const r2 = await srv2.rpc('tools/call', { name: 'qq_send_message', arguments: { messages: '在的' } });
 const ambiguous = { isError: !!r2.result?.isError, text: String(r2.result?.content?.[0]?.text ?? '') };
 await t('缺 key：回可执行提示（指名去哪一行取），且不是 schema 校验失败', () => {
-  /* 【2026-09-22 改口径】缺 key 的提示现在指向**唤醒正文的 [Session] 行**（[Token] 只出现在"缺 token"
+  /* 2026-09-22 改口径：缺 key 的提示现在指向**唤醒正文的 [Session] 行**（[Token] 只出现在"缺 token"
    * 那条分支里，而本用例走的是"缺 key"分支）。断言改成按实际契约来，不再钉死旧文案。 */
   assert.equal(ambiguous.isError, true);
   assert.ok(/缺\s*key/i.test(ambiguous.text), '提示文案不对：' + ambiguous.text.slice(0, 200));

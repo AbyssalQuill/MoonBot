@@ -1,14 +1,14 @@
-/* 回归测试：【拉起 NapCat 守卫时不许弹出任何可见的控制台黑窗】（2026-09-13 主人要求）
+/* 回归测试：【拉起 NapCat 守卫时不许弹出任何可见的控制台黑窗】（2026-09-13）
  *
  * 背景（实测根因）：守卫必须"脱离管理器进程树"才能活过壳的 `taskkill /T`，所以是用 WMI
- * （Win32_Process.Create）建的。但 WMI 建进程时**没指定窗口显示方式**，Windows 就会给这个控制台
- * 程序新建并**显示**一个控制台窗口 —— 真机表现是：一开应用就多出一个 Windows Terminal 黑窗，
+ * （Win32_Process.Create）建的。但 WMI 建进程时没指定窗口显示方式，Windows 就会给这个控制台
+ * 程序新建并显示一个控制台窗口 —— 真机表现是：一开应用就多出一个 Windows Terminal 黑窗，
  * 里面正是守卫那行"守卫启动：父进程=… 托管目录=…"。
  * 修法（两条都实测过）：`Win32_ProcessStartup.CreateFlags=CREATE_NO_WINDOW` 无效（Create 返回 21），
  * 而 `Win32_ProcessStartup.ShowWindow=0`(SW_HIDE) 有效。
  *
  * 本测试直接调用产品里导出的 spawnGuardianDetached()，然后枚举顶层窗口，断言：
- *   ① 进程起来了（pid>0 且活着）；② **没有新增任何"可见"的控制台/终端窗口**；
+ *   ① 进程起来了（pid>0 且活着）；② 没有新增任何"可见"的控制台/终端窗口；
  *   ③ 守卫真的跑了（日志有"守卫启动"）；④ 故意不传 --dirs/--dsh-port/--bridge-script 时，
  *      它只记三行"跳过"，什么都不杀（安全边界没被破坏）。
  *
@@ -106,7 +106,7 @@ async function main() {
   const mod = await import(pathToFileURL(path.join(REPO, 'server', 'index.js')).href);
   check('server/index.js 导出了 spawnGuardianDetached', typeof mod.spawnGuardianDetached === 'function');
 
-  // 故意**不传** --dirs / --dsh-port / --bridge-script：守卫必须三样都跳过，什么都不杀
+  // 故意不传 --dirs / --dsh-port / --bridge-script：守卫必须三样都跳过，什么都不杀
   const logs = [];
   const r = mod.spawnGuardianDetached(guardianScript, [
     '--parent', '999999',                 // 不存在的父进程 → 它会走"父进程没了"的分支

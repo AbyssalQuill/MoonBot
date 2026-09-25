@@ -93,15 +93,15 @@ export function createSlangEntry({ content, meaning = '', usage = '', example = 
 }
 
 /**
- * 词条的**归一化比较键**（2026-09-19 修「学过的黑话又变成候选」）。
+ * 词条的归一化比较键（2026-09-19 修「学过的黑话又变成候选」）。
  *
- * 【为什么需要它】以前 `upsertSlangEntry` 用的是 `e.content === content` **完全字符串相等**。
+ * 为什么需要它：以前 `upsertSlangEntry` 用的是 `e.content === content` 完全字符串相等。
  * 而抽取是模型给的自由文本，同一个词每次写法都可能差一点：
  *   「笑死」/「笑死我」、带不带空格、带不带感叹号、`yyds`/`Yyds`、全角半角混用……
- * 只要差一个字符就算"新词" → **新建一条 candidate**。于是主人已经确认过的黑话，
+ * 只要差一个字符就算"新词" → 新建一条 candidate。于是已经确认过的黑话，
  * 换个写法又冒出来一条候选，看着就像"学过了还一直在候选里"。
  *
- * 归一化只做**安全**的那些（不会把真正不同的词并到一起）：
+ * 归一化只做安全的那些（不会把真正不同的词并到一起）：
  *   · 去掉所有空白（黑话常带空格）
  *   · 去尾部的标点/符号（！!。.、，,~～?？…）
  *   · 英文转小写（yyds 和 Yyds 是一回事）
@@ -125,7 +125,7 @@ export function upsertSlangEntry(entries, content, patch = {}) {
   if (existing) {
     /* 【状态只能往上走，不能被抽取结果打回候选】
      * 已 confirmed / rejected 的词条，即使抽取又提了一遍，也只累加次数与证据，
-     * **不允许**因为 patch 里带了 status:'candidate' 就被降级回候选池
+     * 不允许因为 patch 里带了 status:'candidate' 就被降级回候选池
      * （那正是"学过的词又出现在候选里"的另一半原因）。 */
     const safePatch = { ...patch };
     if (existing.status !== SLANG_STATUS.CANDIDATE && safePatch.status === SLANG_STATUS.CANDIDATE) {
@@ -178,19 +178,19 @@ export function buildSlangContext(entries, max = 8) {
     if (e.example) line += `（例：${clean(e.example)}）`;
     return line;
   });
-  return `【群聊黑话表】群里已确认/常用的网络用语和梗（按出现次数排序，知道即可，不要刻意堆砌）：\n${lines.join('\n')}`;
+  return `[群聊黑话表]群里已确认/常用的网络用语和梗（按出现次数排序，知道即可，不要刻意堆砌）：\n${lines.join('\n')}`;
 }
 
 // ── 新架构：首轮只注入「任务说明」，之后每次只发一句「小提醒」，让学习会话自己用
 //    qq_learning_corpus 工具按时间范围查 SQLite 聊天库统一分析（桥不再实时攒消息、不再整段灌对话）。──
-// 指令框架统一英文（省 token、跨模型更稳）；中文只留给**样本数据与产出内容**。
+// 指令框架统一英文（省 token、跨模型更稳）；中文只留给样本数据与产出内容。
 // 改这里的文案时把 SLANG_BRIEF_VERSION +1：桥会按版本号重新注入首轮说明，
 // 避免已存在的学习会话留着旧说明、与新提醒的格式对不上。
 export const SLANG_BRIEF_VERSION = 3;
 /** 本轮提醒的开头标记，首轮说明里引用同一个串；改它必须同时改 SLANG_BRIEF_VERSION。 */
 export const SLANG_RUN_MARKER = '[SLANG RUN]';
 /**
- * 语料工具全名。**必须写 mcp__napcat-host__ 这一组**：学习会话只加载 host 组 MCP，
+ * 语料工具全名。必须写 mcp__napcat-host__ 这一组：学习会话只加载 host 组 MCP，
  * 实测模型曾按裸名猜成 mcp__napcat__qq_learning_corpus → unknown tool 白跑一轮。
  */
 export const SLANG_CORPUS_TOOL = 'mcp__napcat-host__qq_learning_corpus';
@@ -225,11 +225,11 @@ NOTE: keys stay as written; "content" holds the raw Chinese term as it appeared 
 
 /** 每轮的小提醒：只给时间范围与（可选）会话限定，语料由 AI 自己查。
  *
- * 【2026-09-19 修「学过的黑话又变成候选」】这里多带一段 **ALREADY IN LIBRARY**：
- * 以前每一轮都只告诉模型"去查语料、抽候选"，**从不告诉它库里已经有什么** ——
+ * 2026-09-19 修「学过的黑话又变成候选」：这里多带一段 ALREADY IN LIBRARY：
+ * 以前每一轮都只告诉模型"去查语料、抽候选"，从不告诉它库里已经有什么 ——
  * 于是它每轮都会把已经存在的词再提一遍。完全相同的词还好（upsert 会合并、只累加次数），
  * 但抽取是自由文本，同一个词写法差一点（多一个字、多个空格、多个标点）就会被当成新词
- * → 又新建一条 candidate。**从源头告诉它"这些已经有了，别再输出"**，比事后去重更干净。
+ * → 又新建一条 candidate。从源头告诉它"这些已经有了，别再输出"，比事后去重更干净。
  * 名单超长时截断（保留最近更新的那些），避免把每轮提示词撑大。
  */
 export function buildSlangRunCue({ sinceIso, untilIso, sinceMs, untilMs, convKeys, known } = {}) {

@@ -1,4 +1,4 @@
-// 连接状态机 + "服务端组件好了没有"判定的回归（2026-09-22 主人要求：
+// 连接状态机 + "服务端组件好了没有"判定的回归（2026-09-22 需求：
 // "连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上「服务端启动中」状态机"）。
 //
 // 纯逻辑测试：喂样例 remoteStatus（与 getRemoteServerStatus 的真实形状一致）与状态机钩子，
@@ -74,7 +74,7 @@ console.log('== ② 状态机的阶段推进 ==');
   ok('warmed → ready', m.view().phase === 'ready', m.view().phase);
   ok('warm.done = true（界面据此不再重载）', m.view().warm.done === true, JSON.stringify(m.view().warm));
   ok('文案说"不会再重复鉴权"', /不会再重复鉴权/.test(m.view().note), m.view().note);
-  /* elapsedMs 是"卡在**当前阶段**多久了"（阶段变了才归零，只改文案不归零）——界面用它显示"已用时 Ns"。 */
+  /* elapsedMs 是"卡在当前阶段多久了"（阶段变了才归零，只改文案不归零）——界面用它显示"已用时 Ns"。 */
   t += 12000;
   ok('elapsedMs 是当前阶段的停留时长', m.view().elapsedMs === 12000, String(m.view().elapsedMs));
   t += 1000;

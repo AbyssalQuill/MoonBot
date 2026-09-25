@@ -8,7 +8,7 @@
 //   · 百度图片   —— 有 acjson 接口，直接返回 JSON（国内网络更稳）
 // 两个都失败才抛错，调用方据此决定要不要让模型换说法。
 //
-// ⚠️ 只返回 URL，不下载、不落盘 —— 下载和发送由调用方走 SSRF 安全的 safeFetchBuffer 完成。
+// 只返回 URL，不下载、不落盘 —— 下载和发送由调用方走 SSRF 安全的 safeFetchBuffer 完成。
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const TIMEOUT_MS = 9000;
@@ -21,7 +21,7 @@ function usableImageUrl(raw) {
   if (/bing\.com\/(th|images\/search)/i.test(u)) return '';
   if (/(^|\/)(spacer|blank|transparent|loading)\.(gif|png|jpg)/i.test(u)) return '';
   if (/logo|icon/i.test(u) && /\.(png|gif|svg)(\?|$)/i.test(u)) return '';
-  // 【2026-09-18 实测踩到】Bing 结果里有大量 fbsbx/lookaside 抓取代理地址：
+  // 2026-09-18 实测踩到：Bing 结果里有大量 fbsbx/lookaside 抓取代理地址：
   // 搜"蓝鲸"第一条给的就是 facebook 的 lookaside 链接（而且是别的图），
   // 这类 URL 既不可靠又常常和查询无关 —— 直接不用。
   if (/(lookaside\.fbsbx\.com|scontent\..*\.fbcdn\.net)/i.test(u)) return '';
@@ -161,7 +161,7 @@ export async function searchImages(query, opts = {}) {
     if (!progressed) break;
   }
 
-  /* 【2026-09-18 实测踩到】按源顺序直接发第一张不可靠：搜"蓝鲸"时 Bing 的第一条是
+  /* 2026-09-18 实测踩到：按源顺序直接发第一张不可靠：搜"蓝鲸"时 Bing 的第一条是
    * facebook 抓取链接 + 完全无关的标题，发出去就是"找了张不相干的图"。
    * 所以做一次**按查询词的相关度排序**：标题/页面 URL/图片 URL 里命中查询词的加分，
    * 中文查询下纯英文标题减分（多半是国外站点噪声）。稳定排序，同分保持原顺序。 */

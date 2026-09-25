@@ -1,7 +1,7 @@
 // 回归测试：人设/发言规则"已合成进系统提示词 → 唤醒正文不再重复注入"的判定与合成侧记录。
 //
-// 【为什么有这个测试】2026-09-20 主人看着首连正文说："既然都合并到系统提示词了，那这些有的可以省略吧"。
-// 那时 [PERSONA]+[SPEECH RULES]（10KB 量级）在**每条首连正文**里重复一遍，而系统提示词里已经有同一份。
+// 为什么有这个测试：2026-09-20 从首连正文里发现问题，原话"既然都合并到系统提示词了，那这些有的可以省略吧"。
+// 那时 [PERSONA]+[SPEECH RULES]（10KB 量级）在每条首连正文里重复一遍，而系统提示词里已经有同一份。
 // 判定必须两条都成立才省略：① preset 里合成的那份就是当前版本；② 这个会话没有"待补注入"标记
 // （人设刚改过 / 桥停机期间改过 → 老会话的系统提示词是旧版，必须补一次）。
 //
@@ -68,7 +68,9 @@ try {
 
   console.log('\n=== 合成侧：syncPresetOverrides 会记下"preset 里是哪一版" ===');
   const home = path.join(sandbox, 'home');
-  const presetDir = path.join(home, '.agent-presets', 'default');
+  // 2026-09-24：preset 目录名随 default → qq-chat 的合并改名，这里必须跟着改，
+  // 否则 syncPresetOverrides 找不到目标文件，断言会以"preset 不在"失败。
+  const presetDir = path.join(home, '.agent-presets', 'qq-chat');
   fs.mkdirSync(presetDir, { recursive: true });
   const presetFile = path.join(presetDir, 'agent.cordis.yml');
   fs.writeFileSync(presetFile, [

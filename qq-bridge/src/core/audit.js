@@ -25,7 +25,7 @@ export async function handleSensitiveIntercept(key, kindLabel, hasKnownToken, sa
   const safeSample = sample ? redactSensitiveText(String(sample).slice(0, 60)) : '';
   log(`⚠️ 回复被安全策略拦截 (${key})，命中类别：${kindLabel}${hasKnownToken ? '（含会话令牌）' : ''}${safeSample ? `，片段样本：${safeSample}` : ''}`);
   appendActivity(`${key} agent 回复被拦截（${kindLabel}${hasKnownToken ? '/会话令牌' : ''}${safeSample ? `；${safeSample}` : ''}）`);
-  // 注意：不在 QQ 上发送任何拦截/报错通知（主人明确要求隐藏所有报错）；
+  // 注意：不在 QQ 上发送任何拦截/报错通知（需求：隐藏所有报错）；
   // 如需人工提醒可查看 state/bridge.log 与活动记录。
 }
 

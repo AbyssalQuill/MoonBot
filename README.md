@@ -168,7 +168,7 @@ node src/bridge.js
 ### 语音：TTS 与 ASR
 
 - **能力定义**：模型需要"用说的"回答时调 `qq_send_voice` 把文本合成语音发出；收到对方的 `record` 段时调 `qq_transcribe_voice` 转写后再理解，绝不猜测语音内容。
-- **实现路径**：`core/voice.js`（`synthesize()`、`voiceTurnHint()`、`allVoicePlan()`、`allVoiceEnabled()`）、`core/send-dice.js`（`dice('voice', …)`）。工具：`qq_send_voice`（`mcp-napcat-safe.js:2211`）、`qq_transcribe_voice`（`mcp-napcat-safe.js:2239`）。三种音色来源见下表（`core/voice.js:11-13`）。
+- **实现路径**：`core/voice.js`（`synthesize()`、`voiceTurnHint()`、`allVoicePlan()`、`allVoiceEnabled()`）、`core/send-dice.js`（`dice('voice', …)`）。工具：`qq_send_voice`（`mcp-napcat-safe.js:2170`）、`qq_transcribe_voice`（`mcp-napcat-safe.js:2198`）。三种音色来源见下表（`core/voice.js:11-13`）。
 
 | 模式 | 模型 | 要点 |
 | --- | --- | --- |
@@ -182,7 +182,7 @@ node src/bridge.js
 ### 发送链与正文格式治理
 
 - **能力定义**：模型的全部对外正文经统一出口发出：分气泡、引用回复、连发、以及"读了不回"时的标读收尾，都由这条链完成。
-- **实现路径**：`core/send-chain.js`（`enqueueSend`）、`core/qq-send.js`（`onebotSend`，`qq-send.js:168`，**所有模型正文的唯一出口**）、`core/send-idempotency.js`（幂等闸门）、`lib/onebot-delivery.js`（分段与节奏）、`lib/send-gaps.js`（`computeGaps`）、`core/config.js`（`clampSendPace`，`config.js:410`）。工具：`qq_send_message`（`:1323`）、`qq_reply`（`:937`）、`qq_send_burst`（`:1281`）、`qq_mark_read`（`:1216`）。
+- **实现路径**：`core/send-chain.js`（`enqueueSend`）、`core/qq-send.js`（`onebotSend`，`qq-send.js:168`，**所有模型正文的唯一出口**）、`core/send-idempotency.js`（幂等闸门）、`lib/onebot-delivery.js`（分段与节奏）、`lib/send-gaps.js`（`computeGaps`）、`core/config.js`（`clampSendPace`，`config.js:410`）。工具：`qq_send_message`（`:1323`）、`qq_reply`（`:937`）、`qq_mark_read`（`:1216`）。
 - **关键约束**：节奏只有"按字数"一种 —— 批内首条秒回，第 2 条起 = 本条字数 × `linearPerCharMs`（默认 150），±`linearJitterRatio` 抖动，夹在 `[linearMinMs, linearCapMs]`；`linearEnabled=false` 即完全不延迟。**钳制**：`linearPerCharMs ∈ [60,320]`、`linearCapMs ∈ [800,6000]`、`linearMinMs` 不得高过 `linearCapMs`（`clampSendPace`）。发送侧还有 `maxSendPerMinute` / `maxSendPerHour` / `maxMessageChars` 上限，以及 `core/audit.js` 的敏感内容拦截。
 - **格式治理**："不许显式换行""颜文字要有出处""代码类不分段"三条由**提示词**（preset 的 `[TOOLS] 2b~2e`）约束，桥侧**不做正则清洗**；桥真正拦的是"工具参数数组被当成正文"—— 切不出正文就 **400 硬失败、一条都不发**（`lib/text-safe.js` + 发送端点 + `onebotSend`）。
 - **收尾那句 OK 是"回合结束令牌"，只由提示词约定（2026-09-22 主人两次表态后的最终做法）**：主人先说"模型不是每次都是 OK…可以强化"，在我把桥侧闸门做出来（本回合已发过气泡就不再发 `OK`/`好了`/`已发送`）之后又明确"**我意思就是要它每次只发 OK 的，不用强迫，无伤大雅**"。所以最终只有提示词那一半：preset `[RULES] 13 CLOSING_OK` —— 发送工具成功后，正文以**单独一个 `OK`** 收尾；那一行是回合结束令牌，桥会丢弃、**永远不进 QQ**（`core/mux.js`：`sendToolSucceeded` 为真时正文按思考忽略；没调发送工具时的裸 `OK` 按"本轮不说话"处理，还顺手免掉了"写了正文没调工具"的未交付草稿暂存）。**桥侧的闸门与判定器已删除**（`src/lib/ack-text.js`、`tests/ack-suppress.test.js`、发送端点里的那段拦截），发送端点回到单一语义：模型让发什么就发什么（幂等闸门仍然照旧拦重复）。顺带把 preset 里编号撞车的 MUSIC 从 13 改成 14。
@@ -191,8 +191,8 @@ node src/bridge.js
 ### 收发图片
 
 - **能力定义**：入站图片要作为**真附件**进模型（而不是占位文本）；出站则由模型联网找图并发送。
-- **实现路径（入站）**：两条路共用同一套 —— 挑选规则 `core/social-state.js` 的 `pickAttachableMedia`（`social-state.js:1153`），取图闸门 `core/media-pipe.js` 的 `resolveMediaList`（`media-pipe.js:218`，由 `bridge.js:478` 注入）。唤醒路在 `wake-send.js:1104`，在途注入路在 `steerIntoRunningTurn` 里；另有 `qq_get_message_images`（`mcp-napcat-safe.js:1688`）供模型主动取某一批消息的图。
-- **实现路径（出站）**：`qq_image_search`（`mcp-napcat-safe.js:3112`，只查不发）与 `qq_send_image`（`mcp-napcat-safe.js:3132`，找图并真发），搜图实现在 `lib/image-search.js`（Bing / 百度，**只返回 URL，不下载不落盘**）。四个来源按 `file > messageId > imageUrl > query` 取值：`file` 是**本地已有的图**（含 DSH 附件对象路径），`messageId` 是**转发聊天里那张图**（按消息 id 取回原图重发，模型在唤醒正文里就能看到 `(id:…)`），`imageUrl` 是 `qq_image_search` 给的直链，`query` 才是联网现搜。三条来源最后都汇成同一件事 —— 字节先过 `verifyImageComplete` 完整性闸门，再写进 `napcat.tmpDir`（这个目录就是挂进 NapCat 容器的那份），然后把该目录里的路径交给 `/api/social/send-message`（公共落盘函数 `stageImageBytes`）。跨会话发图（私聊里把图转进群）与正文同构，靠 `crossSession: true` 过 `console-server` 的跨会话闸门；**读图那一侧**按 messageId 找图时会先找目的地会话、再遍历所有活跃会话（`findMessageMedia(..., {info:true})`）——因为跨会话时 `key` 是目的地，图却躺在发起会话的记忆窗口里。
+- **实现路径（入站）**：两条路共用同一套 —— 挑选规则 `core/social-state.js` 的 `pickAttachableMedia`（`social-state.js:1153`），取图闸门 `core/media-pipe.js` 的 `resolveMediaList`（`media-pipe.js:218`，由 `bridge.js:478` 注入）。唤醒路在 `wake-send.js:1104`，在途注入路在 `steerIntoRunningTurn` 里；另有 `qq_get_message_images`（`mcp-napcat-safe.js:1706`）供模型主动取某一批消息的图。
+- **实现路径（出站）**：`qq_image_search`（`mcp-napcat-safe.js:3071`，只查不发）与 `qq_send_image`（`mcp-napcat-safe.js:3091`，找图并真发），搜图实现在 `lib/image-search.js`（Bing / 百度，**只返回 URL，不下载不落盘**）。四个来源按 `file > messageId > imageUrl > query` 取值：`file` 是**本地已有的图**（含 DSH 附件对象路径），`messageId` 是**转发聊天里那张图**（按消息 id 取回原图重发，模型在唤醒正文里就能看到 `(id:…)`），`imageUrl` 是 `qq_image_search` 给的直链，`query` 才是联网现搜。三条来源最后都汇成同一件事 —— 字节先过 `verifyImageComplete` 完整性闸门，再写进 `napcat.tmpDir`（这个目录就是挂进 NapCat 容器的那份），然后把该目录里的路径交给 `/api/social/send-message`（公共落盘函数 `stageImageBytes`）。跨会话发图（私聊里把图转进群）与正文同构，靠 `crossSession: true` 过 `console-server` 的跨会话闸门；**读图那一侧**按 messageId 找图时会先找目的地会话、再遍历所有活跃会话（`findMessageMedia(..., {info:true})`）——因为跨会话时 `key` 是目的地，图却躺在发起会话的记忆窗口里。
 - **关键约束**：`qq_send_image` 下载走 `safe-fetch.js` 的 `safeFetchBuffer`（SSRF 防护 + 体积上限 + "确实是图片"校验），**除 NapCat 临时目录外什么都不写盘**；一次一张，不刷屏；`qq_image_search` 只给候选，模型不得编造图片 URL。入站侧带图被拒时自动**回退纯文本重投**，且附图水位只在图片真投出去之后才推进。
 - **落盘为什么必须换地方**：不直接把宿主原路径丢给 NapCat，是因为 DSH 附件目录 `/root/.dsh/attachments/v1/objects/…` 不在 `napcat.dockerPathMap` 的挂载里，容器化的 NapCat 读不到（实测表现：接口返回 `ok`、用户端什么都没收到）。所以三条来源一律先读字节、再落到 `napcat.tmpDir`，只把这个目录里的路径交出去。
 - **引用穿透（同一天第三处）**：主人"引用着自己那张图 + 让我转进群"时，图在**被引用的那条**消息里。两处一起兜：① 入站消息记下被引用消息的 id（`appendSocialMessage(..., quoteTargetId)` → `msg.quoteTarget`），`findMessageMedia` 本身没图时沿这个 id 往下找一层，结果如实报 `viaQuote`/`quoteMessageId`；② 引用内容里含 `[图片]`/`[表情]`/`[视频]` 时，唤醒正文渲染成 `[引用 某某#<id>：[图片]]`，模型可以直接拿这个 id 去转发（普通纯文字引用的格式一字不变）。
@@ -204,21 +204,21 @@ node src/bridge.js
 ### Pixiv 搜图与发图
 
 - **能力定义**：`qq_pixiv_search` 只查不发（返回候选与筛选明细），`qq_send_pixiv` 找图并真发。模型在"来张 XX 的图 / 发个 pixiv 原图"这类场景调用。
-- **实现路径**：`lib/pixiv.js`（`pixivImageTier:207`、`planPixivSend:232`、`normalizePixivFilters:351`、`filterPixivItems:479`、`pixivImageSources`）、`safe-fetch.js` 的 `verifyImageComplete`（`safe-fetch.js:286`）。工具：`mcp-napcat-safe.js:3215` / `:3250`。
+- **实现路径**：`lib/pixiv.js`（`pixivImageTier:207`、`planPixivSend:232`、`normalizePixivFilters:351`、`filterPixivItems:479`、`pixivImageSources`）、`safe-fetch.js` 的 `verifyImageComplete`（`safe-fetch.js:286`）。工具：`mcp-napcat-safe.js:3174` / `:3250`。
 - **关键约束**：三道闸门 —— **档位分桶**（缩略档永不发，降级必须显式并写进结果 `tierFallback`）、**像素对账**（用作品详情的宽高与实际像素比对）、**字节完整性**（JPEG 的 FFD9 / PNG 的 IEND / GIF 的 0x3B / RIFF 长度 + `content-length`），任一不过就换下一个候选。`qq_send_pixiv` **永远排除 R-18/R-18G**（刻意不给 `r18` 参数）；筛选条件全部在本地对已抓回的数据做（镜像站只认 `keyword` 与 `page`），排序只支持投稿时间。
 - **生产上的坑**：`looksLikeImageBuffer` 只认开头 3 个字节，上半张正常、下半幅灰的图会全链路通过 —— 这是"半幅灰图"的根因；镜像站单张 2.7~5.7 秒、出现过 25 秒超时，所以它只垫底；cookie 与 Bearer **只发给 pixiv 自己的域名**（`pixivRequestHeaders`），镜像站永远看不到凭证。
 
 ### QQ 空间
 
 - **能力定义**：看空间动态、评论、楼中楼回复、点赞、发说说（可带一张配图）。
-- **实现路径**：工具 `qq_qzone_view`（`mcp-napcat-safe.js:2500`）、`qq_qzone_comment`（`:2587`）、`qq_qzone_reply_comment`（`:2626`）、`qq_qzone_like`（`:2671`）、`qq_send_qzone`（`:2711`）；业务在 `core/qzone.js`，配图在 `lib/qzone-image.js`。
+- **实现路径**：工具 `qq_qzone_view`（`mcp-napcat-safe.js:2535`）、`qq_qzone_comment`（`:2587`）、`qq_qzone_reply_comment`（`:2626`）、`qq_qzone_like`（`:2671`）、`qq_send_qzone`（`:2711`）；业务在 `core/qzone.js`，配图在 `lib/qzone-image.js`。
 - **关键约束**：配图**零落盘优先** —— 字节 ≤ `DEFAULT_BASE64_MAX_BYTES`（10MB，`lib/napcat-file.js:27`）时直接把 `base64://` 交给 NapCat，超限才写进 `napcat.tmpDir` 并在 `try/finally` 里成败都删（`qzone-image.js:101-131`）。空间是公开可见的，所以配图一律排除 R-18，与 `qq_send_pixiv` 同一规矩；`qq_send_qzone` / `qq_qzone_like` 受总开关 `QZONE_TOOL_DISABLED` 管。
 - **生产上的坑**：旧代码传给 `send_qzone_msg` 的参数名是 `file`，而 NapCat **只读 `images`** —— 那个参数一直被静默忽略（配了图也发不出来、还不报错）；点赞已改走 QZone 现役接口 `internal_dolike_app`（老的 `emotion_cgi_do_like_v6` 已 HTTP 500）；成功后 `tid` 在 `data.tid`，旧写法只读 `data.data.tid`（多套一层）导致 `tid` 恒为 null。
 
 ### 撤回与历史
 
 - **能力定义**：模型说错话或发错对象时撤回自己刚发的消息；看不懂被引用的内容时展开转发消息、读群文件；需要旧信息时检索历史记录。
-- **实现路径**：`qq_withdraw_message`（`mcp-napcat-safe.js:1170`）、`qq_get_message_detail`（`:1516`）、`qq_get_my_recent_messages`（`:1498`）、`qq_get_forward_msg`（`:1951`，合并转发展开）、`qq_get_file_content`（`:1534`）、`qq_get_group_history`（`:890`）。检索在 `core/memory.js` 的 FTS5（`memory.js:172`），工具 `qq_memory_search`（`:2833`）。
+- **实现路径**：`qq_withdraw_message`（`mcp-napcat-safe.js:1230`）、`qq_get_message_detail`（`:1516`）、`qq_get_my_recent_messages`（`:1498`）、`qq_get_forward_msg`（`:1951`，合并转发展开）、`qq_get_file_content`（`:1534`）、`qq_get_group_history`（`:890`）。检索在 `core/memory.js` 的 FTS5（`memory.js:172`），工具 `qq_memory_search`（`:2833`）。
 - **文件不是图片（2026-09-22 主人要求「`[文件] [file]` 这种文件类型也标出来，别让模型以为发的是图片」）**：文件段原来渲染成 `[文件名字]`，没有名字就只剩一个 `[文件]`，唤醒正文另加一个 ` [file]` —— 模型读不出"这是什么东西"，会把对方发来的一个 PDF 当图片去调识图工具。现在统一成 `[文件:报告.pdf · PDF · 1.2 MB]`（名字 · 类型 · 大小），`[Unread]` 行上的标记是 ` [file:PDF]`；名字缺省也写"未命名文件"，**绝不退化成裸 `[文件]`**。类型映射与渲染只有一份实现：`lib/message-parse.js` 的 `fileKindLabel` / `formatBytesShort` / `fileMarker`，三个调用点（`segmentsToText`、`forward.js` 的合并转发展开、`wake-send.js` 的 `[Unread]` 行）全部 import 它；`extractFilesFromSegments` 顺带把 `ext` / `kind` / `marker` 记进消息对象。preset 里补了一条：`[图片]/[image]` 是图片（用识图工具），`[文件:…]/[file:…]` 是文档，**永远不是图片**，要读就用 `qq_get_file_content`，不许直接描述内容。回归测试 `qq-bridge/tests/file-marker.test.js`（20 项）。
 - **关键约束**：**只能撤自己发的**，`messageId` 来自唤醒正文的 `(id:xxx)` 或 `qq_get_my_recent_messages`；撤回事件由桥落库并标 `[已撤回]` + 写 `chat_messages.recalled_at`（`bridge.js:589-614`）。
 - **生产上的坑**：旧检索是 `content LIKE '%词%'` 全表扫，查不着时模型会说"我看不到更早的消息" —— 最贵的一种失败；现在是 FTS5 **trigram** 外部内容表 + 触发器同步 + BM25 排序，结构一变就把 `FTS_SCHEMA_VERSION` +1（`memory.js:120`、当前 `'2'`）自动重建。另有一个三角限制：trigram 要求每个 token 至少 3 个字符，**不足 3 字的关键词会被 FTS5 直接拒绝**（`memory.js:243`）。
@@ -236,7 +236,7 @@ node src/bridge.js
 
 - **能力定义**：两套东西不要混 —— ① QQ 账号自己的**收藏表情**（官方接口）；② 随包分发的**内置表情包 meme-packs**（一份包 = 一个目录，`manifest.json` + `index.db` + `memes/<tag>/<文件名>`）。
 - **实现路径**：收藏侧 `qq_list_stickers`（`:1758`）、`qq_get_sticker_image`（`:1784`）、`qq_send_sticker`（`:1812`）、`qq_collect_sticker`（`:1839`）、`qq_sticker_note`（`:1894`）、`qq_set_sticker_remark`（`:1925`），实现在 `core/sticker.js`；内置侧 `qq_meme_search`（`:2075`）、`qq_send_meme`（`:2125`）；QQ 原生表情 `qq_face_list`（`:2781`）、`qq_send_qq_face`（`:2801`）。
-- **关键约束**：**一条消息就是一张贴纸或表情，不能同气泡带文字** —— 先发文字再发表情；`qq_set_sticker_remark` 默认关（`social.tools.setStickerRemark=false`），一般用 `qq_sticker_note` 就够。包目录三处：`<runtime>/meme/<packId>`（出厂）、`<runtime>/meme-packs/<packId>`（后装/上传）、`<角色库根>/<角色slug>/meme-packs/<packId>`（**角色专属**，跟着当前角色走，`mcp-napcat-safe.js:216-228`）；找不到包时 `qq_meme_search` / `qq_send_meme` **直接不注册**（`:251` 会打印尝试过的全部路径）。
+- **关键约束**：**一条消息就是一张贴纸或表情，不能同气泡带文字** —— 先发文字再发表情；`qq_set_sticker_remark` 默认关（`social.tools.setStickerRemark=false`），一般用 `qq_sticker_note` 就够。包目录三处：`<runtime>/meme/<packId>`（出厂）、`<runtime>/meme-packs/<packId>`（后装/上传）、`<角色库根>/<角色slug>/meme-packs/<packId>`（**角色专属**，跟着当前角色走，`mcp-napcat-safe.js:1915-1939`）；找不到包时 `qq_meme_search` / `qq_send_meme` **直接不注册**（`:251` 会打印尝试过的全部路径）。
 - **没给文件名也能发（2026-09-22 主人看到 `-32602: missing required tool_input fields: file`）**：模型手上常常只有"生气 / 睡觉"这种描述、没有文件名，而 `qq_send_meme` 的 `file` 原来是**必填** —— 参数校验层在工具执行之前就把整次调用打回来，模型看到的只有一句 JSON-RPC 的 `-32602`，它甚至不知道自己错在哪。现在 `file` 是可选，并补三条路：① `fileName` 别名（客户端换名字也不至于再吃 `-32602`）；② `query`（情绪/内容描述）+ `tag`（分类）—— 没给文件名时桥用**与 `qq_meme_search` 同一套 SQL** 挑第一条（`firstMemeByQuery`：按 `orderedMemePacks` 的顺序只读打开各 pack 的 `index.db`，坏包跳过），并把挑中的 `file` / `pack` / 命中的 caption 一起回报（`pickedByQuery: true`），模型下次就知道该传什么；③ 两条都没给时回的是"要么给 file、要么给 query"这种可操作提示，而不是校验层的裸错误。回归 `qq-bridge/tests/meme-query-fallback.test.js`（20 项，含"两条返回路径都带上了 `pickedByQuery`"）。
 - **发布节奏**：发不发由桥掷骰（`core/send-dice.js` 的 `memeTurnHint`），概率 `social.sticker.sendProbability`（默认 0.3）、冷却 `sendCooldownMs`（默认 3 分钟），命中才插 `[Meme] dice HIT`；0 = 不主动发，只有被明确要求才发。
 - **生产上的坑**：NapCat 不暴露 `add_custom_face` 时收藏会**降级为本地图库**（`core/sticker.js:546-549`）；工具返回"这个 NapCat 版本不支持自动收藏"时就要停手、告诉对方暂时不行、**绝不重试**。GIF 不许当本地路径发（QQ 只显示闪烁的静态预览），必须走 `qq_send_meme`。
@@ -244,9 +244,9 @@ node src/bridge.js
 ### 联网搜索与解析
 
 - **能力定义**：`web_search` 联网搜索、`web_fetch` 抓网页正文；`qq_video_parse` 解析一个视频链接（只读）、`qq_video_search` 按关键词搜视频；位置信息走 `qq_send_rich` 的 `location` 卡片。
-- **实现路径**：`mcp-web-search-safe.js`（`web_search:944`、`web_fetch:980`，SSRF 防护走 `safe-fetch.js` 的 `validateFetchUrl` / `safeFetchBuffer`）；`qq_video_parse`（`mcp-napcat-safe.js:3064`）、`qq_video_search`（`:3128`）、`core/video.js`；位置卡在 `core/console-server.js:3302-3403`。
+- **实现路径**：`mcp-web-search-safe.js`（`web_search:944`、`web_fetch:980`，SSRF 防护走 `safe-fetch.js` 的 `validateFetchUrl` / `safeFetchBuffer`）；`qq_video_parse`（`mcp-napcat-safe.js:3023`）、`qq_video_search`（`:3128`）、`core/video.js`；位置卡在 `core/console-server.js:3163-3403`。
 - **关键约束**：视频解析拿不到元数据时会返回 `degraded:true` —— 就老实说看不到，别编。位置卡三种形态（`social.send.locationMode`）：`tuwen`（默认，高德图文卡）、`map`（静态地图图 + 地点文字 + 地图链接）、`native`（QQ 原生位置气泡）；配了高德 key 时用官方静态图，没配用实测可用的一张。
-- **生产上的坑**：原生 `location` 段用 `get_friend_msg_history` 回读时**段列表是空的**（`console-server.js:3306-3317` 的线上取证），所以默认不发它；真机那张腾讯地图卡是微信小程序卡、构造不出来，做的是"看起来就是腾讯地图那张卡"的图文卡（`appid=100571486` 是高德在 QQ 里的应用号，`social.send.locationApp='amap'` 可切回高德身份）。
+- **生产上的坑**：原生 `location` 段用 `get_friend_msg_history` 回读时**段列表是空的**（`console-server.js:3167-3178` 的线上取证），所以默认不发它；真机那张腾讯地图卡是微信小程序卡、构造不出来，做的是"看起来就是腾讯地图那张卡"的图文卡（`appid=100571486` 是高德在 QQ 里的应用号，`social.send.locationApp='amap'` 可切回高德身份）。
 
 ### 记忆与画像
 
@@ -261,7 +261,7 @@ node src/bridge.js
 
 - **能力定义**：音乐点歌卡、视频卡（原生小程序 Ark 优先）、联系人卡、位置卡、骰子/猜拳、合并转发、Word 文档。
 - **实现路径**：`qq_send_rich`（`:3025`）与 `core/media.js`（`createMediaDomain`）、`qq_music_search`（`:3084`）、`qq_send_forward`（`:2992`）、`qq_send_docx`（`:2962`）与 `core/docx.js`；签名服务是独立进程 `qq-bridge/music-sign-proxy.py`。
-- **封面三条硬规矩**：① 封面**只做 URL 归一化**（`normalizeCoverUrl()`：http 升 https、限定尺寸、补 `type=jpg`），**绝不过第三方图片代理**（`media.js:337-387`）；② 版式分两种 —— `share`（默认）照抄真机分享的图文卡，手机端会画封面，`music` 是旧的 `music.lua` 版式（手机端不画封面，还会被"将要访问"中转页拦一层，用 `social.send.musicCardStyle='music'` 可回退）；③ 视频卡**优先要原生 Ark**（B 站/微博走 NapCat 的 `com.tencent.miniapp_01`，`console-server.js:3273`），只有失败才回落"封面图 + 分享文本"。
+- **封面三条硬规矩**：① 封面**只做 URL 归一化**（`normalizeCoverUrl()`：http 升 https、限定尺寸、补 `type=jpg`），**绝不过第三方图片代理**（`media.js:337-387`）；② 版式分两种 —— `share`（默认）照抄真机分享的图文卡，手机端会画封面，`music` 是旧的 `music.lua` 版式（手机端不画封面，还会被"将要访问"中转页拦一层，用 `social.send.musicCardStyle='music'` 可回退）；③ 视频卡**优先要原生 Ark**（B 站/微博走 NapCat 的 `com.tencent.miniapp_01`，`console-server.js:3134`），只有失败才回落"封面图 + 分享文本"。
 - **关键约束**：**绝不手写卡片字段** —— 模型只传 `type=music` + `musicType` + `musicId`，桥自己解析标题/歌手/封面/音频，失败自动回落成官方歌曲链接并在结果里写 `music.card=link`。`qq_send_docx` 有每日额度（`state/docx-quota.json`，`core/docx.js:27`）；NapCat 在容器里时宿主路径读不到，这正是 `lib/napcat-file.js` 存在的原因。超单条上限（`social.send.maxMessageChars`）时用 `qq_send_forward` 或 `qq_send_docx`，**不是**拆气泡。
 - **生产上的坑**：手写封面正是"手机端白卡"的元凶；封面加过一版 wsrv 代理，而代理会让签名服务把图转存成手机不渲染的 `qq.ugcimg.cn` 链接 —— 那一版已回退；网易云的封面 URL 写着 `.jpg`、`content-type` 也报 `image/jpg`，**字节却是 PNG**（magic `89504e`），光看扩展名分不出来，只能按首字节判；`y.gtimg.cn` 在本机客户端上时好时坏，统一改写成 `y.qq.com`。
 
@@ -284,7 +284,7 @@ node src/bridge.js
 ### 跨会话投递
 
 - **能力定义**：一个会话里的模型给**另一个会话**留言，或读取别的会话留给它的留言。
-- **实现路径**：`qq_crosschat_send`（`mcp-napcat-safe.js:1376`）、`qq_crosschat_inbox`（`:1426`），落库 `state/crosschat.json`，实现在 `core/crosschat.js`。
+- **实现路径**：`qq_crosschat_send`（`mcp-napcat-safe.js:1394`）、`qq_crosschat_inbox`（`:1426`），落库 `state/crosschat.json`，实现在 `core/crosschat.js`。
 - **关键约束**：工具必须显式带 `crossSession: true` 才允许发到非当前会话（`core/console-server.js` 的 `crossSessionRefusal`，`:550`）；"受信任的跨会话代发"名单 = 主人 `ownerQQ` 加上 `social.trustedCrossSessionUids`（`console-server.js:503`、`mux.js:314` 的 `isTrusted` 判定），名单外的来源不享受代发语义。
 - **闸门性质**：它属于"调用期"约束（拒绝调用，但不减少请求体积），与 `social.slimTools.*` 的**注册期**裁剪是两套机制，排查时别混。
 
@@ -343,6 +343,7 @@ node src/bridge.js
 ### 记得住
 
 - SQLite 长期记忆（`state/memory.db`）：三层记忆（permanent / durable / working）+ FTS5 trigram 全文索引 + BM25 相关性排序
+- 聊天记录独立成库（`state/chat.db`）：`chat_messages` + 全量可搜的 FTS5 索引 + 会话汇总与总量计数（总条数 / 群聊 / 私聊 / 今日发出等），管理端「聊天记录」页可直接查看、检索、按条或按会话删除历史
 - 群友画像（personality / likes / dislikes / notes…）、结构化档案文本注入
 - 黑话学习：从群聊语料里抽候选、研究、确认，已确认词条不再常驻上下文，模型需要时自己查
 - 人格学习、群友画像学习、跨会话互知（`qq_crosschat_*`）
@@ -385,7 +386,7 @@ MoonBot Public/
 │   ├─ src/core/*.js         业务：唤醒投递、会话、社交状态、发送链、媒体、语音、学习、用量
 │   ├─ src/lib/*.js          基础库：OneBot 客户端、消息解析、图片体检、Pixiv、路径与文本
 │   ├─ src/mcp-*.js          三组 MCP server
-│   ├─ dsh/agent-presets/    agent preset（qq-chat / default）
+│   ├─ dsh/agent-presets/    agent preset（qq-chat，仓库与隔离 home 各一份）
 │   ├─ plugins/              DSH 插件：dsh-qq-hold、qq-mode-console、dsh-memory
 │   ├─ characters/           角色库（一个子目录 = 一个角色包）
 │   ├─ tools/  tests/        开发工具与回归测试
@@ -461,7 +462,7 @@ powershell -File tools\restart-manager.ps1      # 重启管理端后端（只杀
 
 ## 隐私
 
-机器人会把 QQ 消息、群成员昵称与 QQ 号写入本地 SQLite（`qq-bridge/state/memory.db`）与 JSON 状态文件，用于上下文、画像与黑话学习。这些数据只在本机与你自己配置的服务器上，不会上传到 MoonBot 项目本身。模型调用会把当前会话上下文发给**你自己配置的**模型服务商。
+机器人会把 QQ 消息、群成员昵称与 QQ 号写入本地 SQLite（聊天记录 `qq-bridge/state/chat.db`、记忆档案 `qq-bridge/state/memory.db`）与 JSON 状态文件，用于上下文、画像与黑话学习。这些数据只在本机与你自己配置的服务器上，不会上传到 MoonBot 项目本身。模型调用会把当前会话上下文发给**你自己配置的**模型服务商。
 
 ## 许可
 

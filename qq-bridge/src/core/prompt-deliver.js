@@ -25,8 +25,8 @@ export function initPromptDeliverCore(cfg) { cfgRef = cfg; }
 export function setPromptApi(api) { apiRef = api; }
 /** resolveMediaList（媒体解析，main 侧实现）注入 */
 export function setPromptMediaResolver(fn) { mediaResolver = fn; }
-/** 【2026-09-22】读取已注入的媒体解析器：在途回合注入（wake-send.js 的 steerIntoRunningTurn）
- *  必须用**同一个**实现去取图 —— 那份实现里已经有"DSH 附件层单边像素硬上限"的闸门
+/** 2026-09-22：读取已注入的媒体解析器：在途回合注入（wake-send.js 的 steerIntoRunningTurn）
+ *  必须用同一个实现去取图 —— 那份实现里已经有"DSH 附件层单边像素硬上限"的闸门
  *  （media-pipe.js 的 gateImage/ensureDeliverableImage），另写一份必然漂移。 */
 export function getPromptMediaResolver() { return mediaResolver; }
 
@@ -101,10 +101,10 @@ export const flushQueue = async () => {
     }
   } finally {
     flushingQueue = false;
-    /* 【2026-09-22 修 M17】这一轮跑完后队列里又有了东西（可能是本轮补投失败放回的，
-     * 也可能是**补投期间**新排进来的）→ 必须再排一次 flush。旧写法什么都不做，而排队的
+    /* 2026-09-22：修 M17。这一轮跑完后队列里又有了东西（可能是本轮补投失败放回的，
+     * 也可能是补投期间新排进来的）→ 必须再排一次 flush。旧写法什么都不做，而排队的
      * `setTimeout(flushQueue, 3000)` 若恰好在本轮进行中触发，会命中开头的 `if (flushingQueue) return`
-     * **直接丢掉**，队列就静静躺在那里等到下一次入队才动（表现：消息卡着不补投）。 */
+     * 直接丢掉，队列就静静躺在那里等到下一次入队才动（表现：消息卡着不补投）。 */
     if (queued.size > 0) {
       setTimeout(() => { flushQueue(); }, 500);
     }
@@ -141,27 +141,27 @@ export async function deliverPromptNow(key, promptText, opts = {}) {
   try {
     // 投递加超时：DSH 会话回合卡死时 prompt 可能永不返回，30s 后按失败处理并隔离该会话
     //
-    // 【2026-09-12 架构收敛：唤醒投递从此**只用 steer**，永远不再用 queue】
-    // 这是"消息停在 next-turn 队列里再也出不来"（主人 2026-09-11 23:58 报的）的根治点。
+    // 2026-09-12 架构收敛：唤醒投递从此只用 steer，永远不再用 queue。
+    // 这是"消息停在 next-turn 队列里再也出不来"（2026-09-11 23:58 报的故障）的根治点。
     // 依据是逐层读过的 DSH 源码，不是推测：
     //   · `{mode:'queue'}` → `agent.followup()` → `send(msg,'next-turn',true)`
-    //     （`dsh-agent-loop/lib/index.js:401-403`）→ 进 inbox 的 **next-turn** 队列。
-    //     next-turn 只在**回合循环的下一次迭代**被 claim（同文件 534 起的 `while(true)` →
+    //     （`dsh-agent-loop/lib/index.js:401-403`）→ 进 inbox 的 next-turn 队列。
+    //     next-turn 只在回合循环的下一次迭代被 claim（同文件 534 起的 `while(true)` →
     //     `preStep(target)` → `inbox.claim(target)`）。所以只要"当前这个回合永不结束"
     //     （模型挂着 qq_wait_for_messages 长轮询 / 被一次重启打断后僵在 running），
-    //     这条消息就**永久停在 next-turn 里**——模型永远看不到，桥也收不到任何事件。
-    //   · `{mode:'steer'}` → `agent.steer()` → `send(msg,'next-step',true)` → **next-step** 队列。
-    //     而 `inbox.claim()`（`dsh-agent/lib/index.js:56-61`）**总是先把 next-step 全部取走**，
+    //     这条消息就永久停在 next-turn 里——模型永远看不到，桥也收不到任何事件。
+    //   · `{mode:'steer'}` → `agent.steer()` → `send(msg,'next-step',true)` → next-step 队列。
+    //     而 `inbox.claim()`（`dsh-agent/lib/index.js:56-61`）总是先把 next-step 全部取走，
     //     再按 target 补取一条 next-turn：
-    //       回合正在跑 → 本回合的**下一个 step 边界**就交给模型（不乱起新回合、不多花一整轮）；
+    //       回合正在跑 → 本回合的下一个 step 边界就交给模型（不乱起新回合、不多花一整轮）；
     //       agent 空闲   → `send()` 里 `wakingAfterAbort` 不成立（`phase.kind==='idle'`，同文件 396-397），
     //                      target 保持 next-step，`wakeDriver()` 直接开一个回合，
     //                      而回合第一步 preStep 就把 next-step 全领走 → 照样第一时刻送达。
-    //     ⇒ **steer 是全定义（total）的：无论会话忙不忙，它都必定被取走，不可能被搁浅。**
+    //     ⇒ steer 是全定义（total）的：无论会话忙不忙，它都必定被取走，不可能被搁浅。
     // 为什么以前用 queue："忙时不想插进在途回合"。可那条路线的代价就是上面那次永久卡死，
-    // 而卡死的代价远大于"对话窗口里多一条注入"——主人 2026-09-11 已明确定调：**不静默 > 不注入**。
+    // 而卡死的代价远大于"对话窗口里多一条注入"——2026-09-11 已定调：不静默 > 不注入。
     // 备注：真正"零注入"的快路径没有被这条改动影响——模型挂着 qq_wait_for_messages 时，
-    // 消息作为**工具结果**回到它手里（social-state.js 顶部的 activeWaits 守卫），根本不走这里。
+    // 消息作为工具结果回到它手里（social-state.js 顶部的 activeWaits 守卫），根本不走这里。
     accepted = await withTimeout(apiRef.sessions.prompt({ sessionId, mode: 'steer', content }), 30000, `DSH prompt ${sessionId}`);
   } catch (error) {
     // 投递超时/失败：DSH 会话可能已卡死，隔离该会话，避免投递队列永久卡 busy

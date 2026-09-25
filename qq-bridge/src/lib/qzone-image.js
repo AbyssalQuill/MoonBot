@@ -1,33 +1,33 @@
 // QQ 空间（说说）配图：找图 → 体检 → 变成 NapCat 收得下的参数（2026-09-21 新增）
 //
-// ── 先说清"发说说的真实链路"，因为配图怎么给完全由它决定（下面每条都是读代码/读**装好的包**得到的，不是猜）──
+// ── 先说清"发说说的真实链路"，因为配图怎么给完全由它决定（下面每条都是读代码/读装好的包得到的，不是猜）──
 //   ① 桥侧：mcp-napcat-safe.js 的 qq_send_qzone → OneBot `POST <httpUrl>/send_qzone_msg`（mcp-napcat-safe.js:2637）。
 //   ② NapCat 侧（本机装的是 9.9.26-44498，包体 resources/app/napcat/napcat.mjs）：
-//        · `SendQzoneMsg._handle`（80276~80283 行）逐个处理 **`e.images`**：先
+//        · `SendQzoneMsg._handle`（80276~80283 行）逐个处理 `e.images`：先
 //          `Ti(this.core.NapCatTempPath, a)`（9237 行那个图片解析器：case 1 本地路径 / case 2 http(s) 下载 /
-//          case 3 `base64://` 解码）归一成一个真正的文件路径；**URL 与 base64 这两种"非本地"来源，
-//          NapCat 自己在 finally 里删掉**（`c.isLocal || o.push(c.path)` + `Pg(s)`）；
+//          case 3 `base64://` 解码）归一成一个真正的文件路径；URL 与 base64 这两种"非本地"来源，
+//          NapCat 自己在 finally 里删掉（`c.isLocal || o.push(c.path)` + `Pg(s)`）；
 //        · 再把该文件字节转 base64 → `uploadImageToQzone`（11560 行）POST
 //          `up.qzone.qq.com/cgi-bin/upload/cgi_upload_image` 拿 richval；
 //        · 最后 `publishQzoneMsg(content, richvals, ugc_right, target_uins)`（11578 行）把 richval 用 \t 拼起来
 //          POST `emotion_cgi_publish_v6`（11585 行）。
 //   ⇒ 结论两条：
-//      (a) **图片可以按 URL / base64 直传，桥这边一个字节都不用落盘** ⇒ 策略选"能零落盘就零落盘"；
+//      (a) 图片可以按 URL / base64 直传，桥这边一个字节都不用落盘 ⇒ 策略选"能零落盘就零落盘"；
 //      (b) 旧代码给的是 `file`（mcp-napcat-safe.js:2636），而 NapCat 只读 `images` —— 那个参数
-//          **一直被静默忽略**（配了图也发不出来，还不报错）。这一条顺手修掉，见 mcp-napcat-safe.js 的 qq_send_qzone。
+//          一直被静默忽略（配了图也发不出来，还不报错）。这一条顺手修掉，见 mcp-napcat-safe.js 的 qq_send_qzone。
 //
-// ── 策略：优先零落盘；只有超限才临时落盘，而且**成败都立刻删** ──
+// ── 策略：优先零落盘；只有超限才临时落盘，而且成败都立刻删 ──
 //   · 字节 ≤ DEFAULT_BASE64_MAX_BYTES（10MB，napcat-file.js:27）→ 直接把 `base64://…` 交给
 //     napcatImageFileArg —— 它对 `base64://` 原样返回（napcat-file.js:63），于是"最终交给 NapCat 的形态"
-//     仍然只由那一个 helper 决定：docx 那次「识别URL失败」正是把**宿主路径**绕过 helper 塞给容器 NapCat 造成的；
+//     仍然只由那一个 helper 决定：docx 那次「识别URL失败」正是把宿主路径绕过 helper 塞给容器 NapCat 造成的；
 //   · 字节 > 10MB → 才写进 napcat.tmpDir（服务器上它指向容器挂载目录，见 napcat-file.js:16-21），
 //     仍走 helper（auto 模式映射成容器内路径），cleanup 由调用方 finally 调 —— try/finally 保证异常路径也删；
-//   · 残留兜底：sweepQzoneImageTmp 在启动时扫一次（只删**我们自己命名**的临时文件，原因见该函数注释）。
+//   · 残留兜底：sweepQzoneImageTmp 在启动时扫一次（只删我们自己命名的临时文件，原因见该函数注释）。
 //
 // ── 不落盘的前提是"字节是好的"：与 safe-fetch 用同一道闸门 ──
 //   safeFetchBuffer 内部已经跑 verifyImageComplete（safe-fetch.js:382），这里再显式对一次，两个理由：
-//   ① 本地 file 参数这条路的字节**没经过** safeFetchBuffer，必须自己过闸；
-//   ② 体检不过就**发纯文字说说**（return 里如实写原因），既不报错也不 attach 半幅灰的截断图。
+//   ① 本地 file 参数这条路的字节没经过 safeFetchBuffer，必须自己过闸；
+//   ② 体检不过就发纯文字说说（return 里如实写原因），既不报错也不 attach 半幅灰的截断图。
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -41,14 +41,14 @@ import {
 } from './pixiv.js';
 import { sniffImageInfo } from './image-compress.js';
 
-/** 一条说说最多配几张图（主人要"默认一张"；多了就卡在这个上限，见 clampQzoneImageCount）。 */
+/** 一条说说最多配几张图（默认一张；多了就卡在这个上限，见 clampQzoneImageCount）。 */
 export const QZONE_IMAGE_MAX = 3;
 
 /** 临时图的启动清扫阈值：3 小时（一次成功的发帖在秒级完成，超过这个岁数的必然是"写盘后进程被打断"的残留）。 */
 export const QZONE_IMAGE_TMP_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 
 /** 我们自己命名的临时文件：`qzone-<毫秒>-<6位随机>.<ext>`。
- *  清扫**只认这个形状且必须从头匹配**（^…$）—— 见 sweepQzoneImageTmp 里"为什么不按目录清空"的注释。 */
+ *  清扫只认这个形状且必须从头匹配（^…$）—— 见 sweepQzoneImageTmp 里"为什么不按目录清空"的注释。 */
 const QZONE_TMP_NAME_RE = /^qzone-\d{10,}-[0-9a-z]{4,}\.(?:jpe?g|png|gif|webp)$/i;
 
 /** 配图张数：默认 1，非法值当 1，上限 QZONE_IMAGE_MAX（3）。 */
@@ -78,8 +78,8 @@ export function sniffQzoneImageExt(buf) {
 }
 
 /**
- * 配图体检：**字节完整**（FFD9 / IEND / 0x3B / RIFF 长度对得上，且 content-length 对得上）+ 认得出格式。
- * **纯函数，离线可测**。宽高拿不到不拦（有的格式/裁剪形状嗅探不出来），只作附带的像素对账信息。
+ * 配图体检：字节完整（FFD9 / IEND / 0x3B / RIFF 长度对得上，且 content-length 对得上）+ 认得出格式。
+ * 纯函数，离线可测。宽高拿不到不拦（有的格式/裁剪形状嗅探不出来），只作附带的像素对账信息。
  */
 export function verifyQzoneImage(buf, info = {}) {
   const complete = verifyImageComplete(buf, info.contentLength ?? null, info.contentEncoding ?? null);
@@ -98,10 +98,10 @@ export function verifyQzoneImage(buf, info = {}) {
 }
 
 /**
- * 把配图字节变成"可以塞进 OneBot `images` 数组"的那个字符串。**零落盘优先**。
+ * 把配图字节变成"可以塞进 OneBot `images` 数组"的那个字符串。零落盘优先。
  * @returns {{arg:string, mode:'base64'|'file', path:string, bytes:number, cleanup:(()=>Promise<void>)|null}}
  *   mode=base64 → 一个字节都没写盘（NapCat 拿到 base64 后自己落它的临时目录并在 finally 删）；
- *   mode=file   → 只有超过 base64 上限才会出现，调用方**必须**在 finally 里 await cleanup()。
+ *   mode=file   → 只有超过 base64 上限才会出现，调用方必须在 finally 里 await cleanup()。
  */
 export function prepareQzoneImageArg(buf, cfg, opts = {}) {
   const logger = typeof opts.log === 'function' ? opts.log : log;
@@ -133,9 +133,9 @@ export function prepareQzoneImageArg(buf, cfg, opts = {}) {
 }
 
 /**
- * 启动清扫：删掉**自己写的**、超过 maxAgeMs 的配图临时文件。**同步、纯文件系统，离线可测**。
+ * 启动清扫：删掉自己写的、超过 maxAgeMs 的配图临时文件。同步、纯文件系统，离线可测。
  *
- * 为什么按文件名过滤而不是"按目录清空"：临时目录可能是 `napcat.tmpDir`，那是与**表情包/文档**
+ * 为什么按文件名过滤而不是"按目录清空"：临时目录可能是 `napcat.tmpDir`，那是与表情包/文档
  * 共用的容器挂载目录（napcat-file.js:16-21 的部署配置就是这么写的），清空目录等于把别人的东西删了。
  * 同名做法可参照 core/sticker.js:439 / core/docx.js:76（都是"启动时扫一次旧文件"）。
  */
@@ -163,7 +163,7 @@ export function sweepQzoneImageTmp(dir, maxAgeMs = QZONE_IMAGE_TMP_MAX_AGE_MS, n
 
 /**
  * 按入参取图（本地文件 / 直链 / pixiv / 联网搜图），逐张过体检，最多 want 张。
- * **不抛错**：拿不到图就返回空 items + notes，让调用方发纯文字说说（主人要的边界：配图失败别把发帖搞挂）。
+ * 不抛错：拿不到图就返回空 items + notes，让调用方发纯文字说说（约定边界：配图失败别把发帖搞挂）。
  * 入参优先级（第一条非空者生效）：file > imageUrl > pixivIllustId/pixivQuery > imageQuery。
  * @returns {{requested:boolean, want:number, items:object[], notes:string[], tried:string[]}}
  */

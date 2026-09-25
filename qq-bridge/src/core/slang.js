@@ -49,7 +49,7 @@ export function isPersistentLearner(sessionId) {
 /**
  * 判断一个错误是不是「DSH 侧这条学习会话真的没了」（才值得把会话登记丢掉、下轮重建）。
  *
- * 踩过的坑（2026-09-11 实测）：旧写法是 `/会话|session|not found|404/i`，而桥**自己**的等待超时
+ * 踩过的坑（2026-09-11 实测）：旧写法是 `/会话|session|not found|404/i`，而桥自己的等待超时
  * 文案是「等待人格学习会话 turn 超时(300000ms)」——里面带「会话」二字，于是每次超时都被
  * 误判成会话失效 → 删掉 persona-agent.json / slang-session.json 里的登记 → 下轮重建会话、
  * 再吃一次 300s 的说明注入。表现为「学习偶发失败且每次都要重来」，很难查。
@@ -94,7 +94,8 @@ export async function ensureSlangLearnerSession() {
   const dir = path.join(STATE_DIR, 'slang-agent');
   fs.mkdirSync(dir, { recursive: true });
   const wsValue = unwrap(await apiRef.workspace.create({ path: dir }), 'slang workspace.create');
-  const workspaceTitle = cfgRef.slang?.workspaceTitle || 'QQ 黑话学习';
+  // 2026-09-30：黑话学习会话名由「QQ 黑话学习」改为 SlangAgent
+  const workspaceTitle = cfgRef.slang?.workspaceTitle || 'SlangAgent';
   if (wsValue.created && workspaceTitle) {
     try { await apiRef.workspace.rename({ workspaceId: wsValue.workspace.workspaceId, title: workspaceTitle }); } catch {}
   }
@@ -210,8 +211,8 @@ export async function runSlangExtraction(key) {
         : [];
       const result = upsertSlangEntry(slangEntries, item.content, { evidence, countIncrement: 1 });
       if (result.created) added += 1; else updated += 1;
-      /* 【2026-09-19】原来这里是 `thresholds.includes(entry.count)` —— 只有**恰好**等于 2/4/8 才排研究。
-       * 于是出现次数落在 3、5、6、7 的词条**永远轮不到研究**；再叠加抽取一停，候选就永久躺在池子里
+      /* 2026-09-19：原来这里是 `thresholds.includes(entry.count)` —— 只有恰好等于 2/4/8 才排研究。
+       * 于是出现次数落在 3、5、6、7 的词条永远轮不到研究；再叠加抽取一停，候选就永久躺在池子里
        * （线上实测：118 条候选里 103 条 count=1、15 条 count=2，而 0 条被研究过）。
        * 改成"达到最低阈值即可、且本次次数比上次研究时高"，既保留"够次数才研究"的意图，又不会漏掉中间次数。 */
       const minThreshold = thresholds.length ? Math.min(...thresholds) : 2;
@@ -237,10 +238,10 @@ export async function runSlangExtraction(key) {
 }
 
 export async function runSlangResearch(candidates) {
-  /* 【2026-09-19】这条链以前有 5 处**静默 return** —— 失败时一声不响，
+  /* 2026-09-19：这条链以前有 5 处静默 return —— 失败时一声不响，
    * 于是现场表现是「勾了候选点批量分析，什么都没发生，候选一直堆着」。
-   * 线上实查：118 条候选里 **0 条有含义、0 条被研究过**（`lastInferenceCount` 全为 0）
-   * —— 也就是这个函数从来**没有成功跑过一轮**，而且没留下任何线索。
+   * 线上实查：118 条候选里 0 条有含义、0 条被研究过（`lastInferenceCount` 全为 0）
+   * —— 也就是这个函数从来没有成功跑过一轮，而且没留下任何线索。
    * 现在每一处提前退出都写明原因，下次一看日志就知道卡在哪一步。 */
   if (slangStopRequested) { // /slang stop 后排队的后续研究任务直接跳过（不清队列，逐个提前退出）
     slangStopRequested = false;
@@ -250,7 +251,7 @@ export async function runSlangResearch(candidates) {
   if (!candidates || !candidates.length) { log('[slang] 研究任务跳过：没有候选'); return; }
   if (cfgRef.slang?.enabled === false) { log('[slang] 研究任务跳过：slang.enabled=false'); return; }
   if (!dshReady) {
-    /* 最可疑的一条：DSH 没就绪时整批研究**直接丢掉**，不重排也不报错。
+    /* 最可疑的一条：DSH 没就绪时整批研究直接丢掉，不重排也不报错。
      * 候选会一直躺在池子里，看起来就像"分析过了但还是候选"。 */
     log(`[slang] 研究任务跳过：DSH 未就绪（dshReady=false），本批 ${candidates.length} 条候选未处理，等下次触发`);
     return;
@@ -281,7 +282,7 @@ export async function runSlangResearch(candidates) {
     const results = parseResearchJson(output);
     for (const r of results) {
       // 用归一化键找回词条：模型返回的文本可能和库里差一个空格/标点/大小写，
-      // 以前用完全相等匹配会导致这些研究结果被**静默丢弃**（候选永远得不到解释）
+      // 以前用完全相等匹配会导致这些研究结果被静默丢弃（候选永远得不到解释）
       const rKey = slangKey(r.content);
       const entry = rKey
         ? slangEntries.find((e) => slangKey(e.content) === rKey)
@@ -393,7 +394,7 @@ export function confirmedSlangList() {
 }
 
 /** 把「已确认黑话表」拼进唤醒正文。
- *  【2026-09-13 主人要求】默认**不再注入**：黑话表每一轮唤醒都要重发一遍，纯烧额度；
+ *  2026-09-13：默认不再注入。黑话表每一轮唤醒都要重发一遍，纯烧额度；
  *  改成"要用的时候自己查" —— 模型需要时调 `qq_slang_query`（黑话库）或 `qq_memory_search`（SQLite 历史）。
  *  想恢复旧行为：在桥的 `config.json` 里写 `"slang": { "injectIntoPrompt": true }`（或设 `injectMax` 并显式打开此开关）。 */
 export function withSlangContext(promptText) {
@@ -589,10 +590,10 @@ export function runSlangNightlyLearn() {
 }
 
 /** C. /slang learn / console 按钮用：忽略定时直接增量学习（走串行链），成功即打标。
- *  force=true 时即使 learning-config slang.enabled=false 也强制执行（主人强推）。
- *  【2026-09-13 修「点了立即学习却什么也没学」】原来窗口是 `[lastLearnAtMs+1, now]` ——
+ *  force=true 时即使 learning-config slang.enabled=false 也强制执行（强制学习）。
+ *  2026-09-13：修「点了立即学习却什么也没学」。原来窗口是 `[lastLearnAtMs+1, now]` ——
  *  只要上次学习刚跑过（水位≈now），再点一次就只有几秒的窗口，必然"未发现候选"，
- *  看起来就是"黑话学习坏了"。现在手动学习**至少回看 24 小时**（水位更早时仍从水位起，不重复扫古早历史）。 */
+ *  看起来就是"黑话学习坏了"。现在手动学习至少回看 24 小时（水位更早时仍从水位起，不重复扫古早历史）。 */
 const SLANG_MANUAL_LOOKBACK_MS = 24 * 3600 * 1000;
 export function slangLearnNow(force = false) {
   const live = readLearningConfig();
@@ -615,9 +616,9 @@ export function slangStopNow() {
 }
 
 /**
- * 【2026-09-16】黑话学习的"状态机"快照：给管理端显示"现在到底进行到哪一步"。
- * 为什么要有它：以前界面只有"立即学习/停止"两个按钮，点了之后**看不出学习跑到哪、
- * 是在提取还是在研究、还是排队**，只能干等；而且很容易误以为"点了没反应"。
+ * 2026-09-16：黑话学习的"状态机"快照：给管理端显示"现在到底进行到哪一步"。
+ * 为什么要有它：以前界面只有"立即学习/停止"两个按钮，点了之后看不出学习跑到哪、
+ * 是在提取还是在研究、还是排队，只能干等；而且很容易误以为"点了没反应"。
  * 这里的字段全部来自模块内的真实运行态，不猜测：
  *   phase: disabled（学习开关关着）/ extracting（批量提取+研究在跑）/ stopping（收到停止请求，等当前分块结束）
  *          / queued（有排队任务，还没开始）/ researching（有候选正在研究会话里分析，属提取之后的阶段）
@@ -786,7 +787,7 @@ async function runLearnExtractionBlock(sessionId, promptText, stats, researchCan
 }
 
 function slangHelpText() {
-  // 【2026-09-12】主人要求中文子命令带空格显示（/slang 学习、/slang 停止）；
+  // 2026-09-12：中文子命令带空格显示（/slang 学习、/slang 停止）；
   // 解析侧一直是"先去掉所有空白再比对"，所以带不带空格都认，这里只是让人看着一致。
   return '黑话指令：/slang learn（立即增量学习）｜/slang stop（停止在跑的学习/研究任务）';
 }
@@ -796,10 +797,10 @@ function slangHelpText() {
 export async function handleSlangSlashCommand(text, ctx = {}) {
   const raw = String(text ?? '').trim();
   if (!raw) return { handled: false };
-  /* 归一化：转小写并把连续空白压成一个空格。只认**全英文**写法：`/slang learn`、`/slang stop`。
-   * 【2026-09-13 主人要求】不再兜底 `/slanglearn`、`/slangstop`、`/slang学习` 这些历史简写 ——
-   * 所以这里**不能**把空格删掉，否则 `/slang learn` 会被当成 `/slanglearn` 而失去区分。
-   * 【2026-09-19 主人要求】再去掉中英混写的 `/slang 学习` / `/slang 停止`：斜杠指令统一英文，
+  /* 归一化：转小写并把连续空白压成一个空格。只认全英文写法：`/slang learn`、`/slang stop`。
+   * 2026-09-13：不再兜底 `/slanglearn`、`/slangstop`、`/slang学习` 这些历史简写 ——
+   * 所以这里不能把空格删掉，否则 `/slang learn` 会被当成 `/slanglearn` 而失去区分。
+   * 2026-09-19：再去掉中英混写的 `/slang 学习` / `/slang 停止`：斜杠指令统一英文，
    * 中文说法（"学一下黑话"）交给模型自然处理。 */
   const low = raw.toLowerCase().replace(/\s+/g, ' ').trim();
   if (!low.startsWith('/slang')) return { handled: false };

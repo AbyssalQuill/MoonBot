@@ -54,7 +54,7 @@ check('remoteRestartBridge 里没有脚本时会明确报错（不是静默成�
   /restart-script-missing/.test(index) && /ok: false/.test(index));
 
 const deploy = read(DEPLOY);
-/* 【2026-09-23 加严】原来这里只判"deploy.js 里出现过 restart-bridge.sh 这个字符串"——
+/* 2026-09-23 加严：原来这里只判"deploy.js 里出现过 restart-bridge.sh 这个字符串"——
  * 于是**旧写法还在文件里也照样 PASS**：事实上 deploy.js 的克隆路径 1397 行就退回了
  * 「内联 nohup bash start-bridge.sh + pgrep 判据」的老形状（不杀旧桥、判据命中旧进程 →
  * 永远 bridge-up）。现在按 index.js 那两条同等的力度断言，并额外守住两件本次修掉的事：

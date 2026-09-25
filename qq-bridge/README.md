@@ -27,7 +27,7 @@ QQ 消息 ──► NapCat（OneBot v11 WS）──► 本桥接进程 ──►
   - `napcat-host`（桥接自带 `src/mcp-host-server.js`）：`napcat_status`（默认只读探活）；`start_napcat` / `stop_napcat` 需显式开启 `napcat.allowProcessControl: true` 且仅在 `closed-agent` 模式可用
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`（带 SSRF 防护），供 agent 查网络用语/资料
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
-- **性格定制**：QQ 会话统一使用`default` agent preset（`~/.dsh/.agent-presets/default/agent.cordis.yml`）；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
+- **性格定制**：QQ 会话统一使用`qq-chat` agent preset（`~/.dsh/.agent-presets/qq-chat/agent.cordis.yml`，2026-09-24 由原 `default` 合并改名而来）；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——启停 AI、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
 - **运行模式（唯一）**：
   - `default`（运行 `setup-dsh.mjs` 后 DSH 默认）：文本不自动转发，AI 通过 `qq_get_unread_messages` / `qq_send_message` 等工具自主看消息、发言、等待、设置唤醒/潜水；DSH 端使用 `default` preset（历史 chat/closed-agent/一代 reserved 模式已删除）
@@ -162,7 +162,7 @@ qq-bridge/
   config.example.json   # 配置模板（脱敏占位符；真实 config.json 不入库）
   docs/
     PROJECT_GUIDE.md    # 公开版项目说明书
-  dsh/agent-presets/    # qq-chat / default 的 DSH agent preset 模板
+  dsh/agent-presets/    # qq-chat 的 DSH agent preset 模板
   plugins/qq-mode-console  # DSH 设置页 qq-mode 卡片插件
   src/
     bridge.js           # 主程序

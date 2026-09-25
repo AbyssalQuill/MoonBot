@@ -1,8 +1,8 @@
-/* 端到端验证 qq_send_pixiv 按号取图：像 DSH 那样用 MCP 协议起一个**全新的** mcp-napcat-safe 子进程，
- * 真调工具（走的是真代码，不是复刻），最后一步把图真发进主人的 QQ 私聊。
+/* 端到端验证 qq_send_pixiv 按号取图：像 DSH 那样用 MCP 协议起一个全新的 mcp-napcat-safe 子进程，
+ * 真调工具（走的是真代码，不是复刻），最后一步把图真发进 owner 的 QQ 私聊。
  *
- * ⚠️ 会真的发图（默认 3 张 + 若干"应被拒绝"的调用不发图）。只在需要现场取证时手动跑。
- * ⚠️ 必须带 5 个通过项才算数：这次修的就是"下载 0 个地址"，而"图到底有没有进 QQ"只有真发才知道
+ * 注意：会真的发图（默认 3 张 + 若干"应被拒绝"的调用不发图）。只在需要现场取证时手动跑。
+ * 注意：必须带 5 个通过项才算数：这次修的就是"下载 0 个地址"，而"图到底有没有进 QQ"只有真发才知道
  *    （本项目历史上多次栽在"自检绿了、实发没解决"）。
  *
  * 用法（在桥的机器上）：node qq-bridge/tools/e2e-pixiv-send.mjs
@@ -12,7 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'node:url';
 
-const OWNER = process.env.E2E_OWNER_QQ || '1736784911';   // 收图的那个会话（默认主人私聊）
+const OWNER = process.env.E2E_OWNER_QQ || '1736784911';   // 收图的那个会话（默认 owner 私聊）
 const KEY = `private:${OWNER}`;
 const TOKEN = OWNER;
 

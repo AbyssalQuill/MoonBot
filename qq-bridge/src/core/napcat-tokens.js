@@ -1,8 +1,8 @@
-// NapCat 鉴权令牌的真正落地：把 WebUI / HTTP / WS 三个令牌**写进 NapCat 自己的配置文件**并重启容器。
+// NapCat 鉴权令牌的真正落地：把 WebUI / HTTP / WS 三个令牌写进 NapCat 自己的配置文件并重启容器。
 //
-// 【2026-09-15 主人反馈的诊断】在管理端改「NapCat 登录令牌」看起来成功了，但：
+// 2026-09-15 用户反馈的诊断：在管理端改「NapCat 登录令牌」看起来成功了，但：
 //   · NapCat 仍然收默认的 truefriend（旧令牌照样能进 WebUI）；
-//   · 因为管理端改的只是**桥自己 config.json 里"期望用哪个令牌"**（napcat.accessToken / wsAccessToken），
+//   · 因为管理端改的只是桥自己 config.json 里"期望用哪个令牌"（napcat.accessToken / wsAccessToken），
 //     从没写进 NapCat 的配置 —— 两者不一致时，桥会用新令牌去连、NapCat 只认旧令牌 → 401/连不上。
 //
 // 服务器上的令牌实际藏在这三个地方（都在 NapCat 的 config 目录里，容器挂载为 /app/napcat/config）：
@@ -23,7 +23,7 @@ import { log } from '../lib/log.js';
 let cfgRef = null;
 export function initNapcatTokens(cfg) {
   cfgRef = cfg;
-  // 【2026-09-16 保登录态】桥每次启动顺手把"登录票据"备份一份（napcat_<QQ>.json + protocol + webui.json）。
+  // 2026-09-16 保登录态：桥每次启动顺手把"登录票据"备份一份（napcat_<QQ>.json + protocol + webui.json）。
   // 亲历：NapCat 的 PID1 不转发 SIGTERM，docker stop/restart 实际是硬杀；万一票据被写坏，
   // 有一份好备份就等于"不用重新扫码"。备份目录 <config>/login-backup/<时间>，只留最近 BACKUP_KEEP 份。
   try {
@@ -119,9 +119,9 @@ function protocolFiles(dir) {
 }
 
 /**
- * 【2026-09-16 保登录态】**登录票据**文件：`napcat_<QQ>.json`（不含 protocol，那份在 protocolFiles 里）。
+ * 2026-09-16 保登录态：登录票据文件：`napcat_<QQ>.json`（不含 protocol，那份在 protocolFiles 里）。
  * 它就是"重启后不用重新扫码"的依据 —— NapCat 启动时按 `ACCOUNT=<QQ>` 拿它做快速登录。
- * 早先的备份只覆盖 webui/onebot/protocol，**漏了这一个**：真要是被硬杀写坏，就只能重新扫码。
+ * 早先的备份只覆盖 webui/onebot/protocol，漏了这一个：真要是被硬杀写坏，就只能重新扫码。
  * 现在把它一起纳入备份（写令牌时 + 安全重启前都会备份）。
  */
 function loginTicketFiles(dir) {
@@ -141,7 +141,7 @@ function readTokensFromObj(obj) {
   return { http, ws };
 }
 
-/** 现状：NapCat 磁盘上的令牌（掩码）+ 桥配置里"期望"的令牌（掩码）+ 是否不一致。**不回传明文。** */
+/** 现状：NapCat 磁盘上的令牌（掩码）+ 桥配置里"期望"的令牌（掩码）+ 是否不一致。不回传明文。 */
 export async function napcatTokenStatus() {
   const dir = napcatConfigDir();
   const cfg = cfgRef?.napcat ?? {};
@@ -150,14 +150,14 @@ export async function napcatTokenStatus() {
     dir,
     container: containerName(),
     napcat: { webui: '', http: '', ws: '' },
-    // 【2026-09-15 修】桥这边的值也必须掩码：这个接口会经管理端代理回浏览器，
+    // 2026-09-15：桥这边的值也必须掩码：这个接口会经管理端代理回浏览器，
     // 早先直接把 config.json 里的令牌原样回传（实测回出来是明文）——那是"密钥只回掩码"这条规矩的例外，不能留。
     bridge: { webui: '', http: mask(cfg.accessToken), ws: mask(cfg.wsAccessToken) },
     files: { webui: false, onebot: [], protocol: [] },
     mismatch: { http: false, ws: false, webui: false },
-    // 【2026-09-16】顺带把"NapCat 到底登没登录 QQ"查出来：这是"机器人不回复"排查的第一分叉。
+    // 2026-09-16：顺带把"NapCat 到底登没登录 QQ"查出来：这是"机器人不回复"排查的第一分叉。
     login: null,
-    // 【2026-09-16 强化 NapCat 连接】桥→NapCat 这条链路自己的诊断（连上没有 / 多久没下行 / 重连过几次）。
+    // 2026-09-16 强化 NapCat 连接：桥→NapCat 这条链路自己的诊断（连上没有 / 多久没下行 / 重连过几次）。
     // 与 login 一起构成"不回复"的完整判据：桥聋了（connection.connected=false） vs QQ 掉登录态（login.isLogin=false）。
     connection: null,
     notes: []
@@ -187,7 +187,8 @@ export async function napcatTokenStatus() {
   out.mismatch.ws = Boolean(out.bridge.ws) && Boolean(out.napcat.ws) && mask(String(cfg.wsAccessToken ?? '')) !== out.napcat.ws;
   // 登录态是"不回复"排查的第一分叉：QQ 没登录（要扫码） vs 桥聋了（本版已修，10s 自愈）
   try {
-    out.login = await probeQqLoginState();
+    // 2026-09-24：改走带 TTL 缓存的探测：卡片刷新与 SSE 同时取数时只真打一次 NapCat。
+    out.login = await probeNapcatLogin();
   } catch (error) {
     out.login = { ok: false, error: String(error?.message ?? error) };
   }
@@ -197,7 +198,14 @@ export async function napcatTokenStatus() {
   // 桥→NapCat 的连接诊断（最近一个 OneBot 客户端）
   try {
     const { napcatClientStats } = await import('../lib/onebot-ws.js');
-    out.connection = napcatClientStats();
+    // 2026-09-24：napcatClientStats() 在没有活动客户端实例时返回 null，
+    // 前端把 null 说成「查询失败（桥刚启动或未暴露统计信息）」—— 是谎报。
+    // 这里显式回一个 unavailable 标记，让前端把"没有这项数据"与"真的出错"分开说。
+    out.connection = napcatClientStats() ?? {
+      unavailable: true,
+      reason: 'no-client',
+      note: '桥当前没有活动的 OneBot WS 客户端实例（本次运行还没建立连接）',
+    };
   } catch (error) {
     out.connection = { error: String(error?.message ?? error) };
   }
@@ -232,8 +240,8 @@ function backupDir(dir) {
 function restartContainer() {
   const name = containerName();
   const t0 = Date.now();
-  // 【2026-09-16 保护登录态】宽限从 30s 提到 60s：NapCat 的 PID1 是 `bash entrypoint.sh`
-  // （只 trap 了 SIGPIPE、**不转发 SIGTERM 给 QQ**），所以 `docker stop`/`restart` 实际上等的是
+  // 2026-09-16 保护登录态：宽限从 30s 提到 60s：NapCat 的 PID1 是 `bash entrypoint.sh`
+  // （只 trap 了 SIGPIPE、不转发 SIGTERM 给 QQ），所以 `docker stop`/`restart` 实际上等的是
   // "超时后 SIGKILL"；给足 60s 就是给 QQ 更多时间把会话刷回数据卷（卷：napcat-qq）。
   const r = spawnSync('docker', ['restart', '-t', '60', name], { timeout: 180000, encoding: 'utf8' });
   const ms = Date.now() - t0;
@@ -243,137 +251,132 @@ function restartContainer() {
   return { ok: true, ms, detail: String(r.stdout || '').trim().slice(0, 200) };
 }
 
-/**
- * 【2026-09-19 修「刷新现状刷多了报查不到（NapCat WebUI 登录接口没通过（login rate limit））」】
+/* 2026-09-23：去除探针与状态检测。
  *
- * 原因：`probeQqLoginState()` 以前**每次调用都重新走一遍 WebUI 登录**
- * （`POST /api/auth/login` 换 Credential，再用它查登录态）。而状态卡片每次刷新/轮询都调它，
- * 连点几下就把 NapCat 的登录接口打到限流 → 界面显示"查不到"。
+ * 这里曾经有 `getWebuiCredential()` / `dropWebuiCredential()` / `probeWebuiLoginRaw()`：
+ * 为了查一个登录态，先去 `POST /api/auth/login` 换一个 WebUI Credential 再用它查。
+ * 问题在于 NapCat 的登录接口是按 IP 限流的（每 60 秒只放 loginRate 次，出厂 10），
+ * 而 WebUI 页面自己也要用同一份额度去换它那份 Credential。桥这里多登一次，
+ * 页面就少一次；登得多了页面直接登不进去 → 页面上所有接口 Unauthorized
+ * （最先报出来的就是「获取QQ列表失败: Unauthorized」「获取二维码失败: Unauthorized」）。
  *
- * 现在：**Credential 缓存复用**（同一 token 在 TTL 内直接复用，一次网络都不花），
- * 撞限流则进入**退避期**，退避期内直接放弃本次探测。登录接口本来只是为了拿这个 Credential，
- * 没有任何理由每次重登一次。
- */
-/* 【2026-09-22】Credential 复用时长 10 分钟 → **45 分钟**：NapCat 自己校验 Credential 的口径是
- * "签名对 + 一小时内 + 没被吊销"（`validateCredentialWithinOneHour`），所以 45 分钟内复用完全安全，
- * 而每少登一次就少花一次它按 IP 计的登录额度（那份额度 WebUI 页面自己也要用，见
- * server/napcat-webui-auth.js 的说明）。Credential 万一失效，下面的 401 分支会丢缓存重登一次。 */
-const WEBUI_CRED_TTL_MS = 45 * 60 * 1000;   // Credential 复用 45 分钟
-const WEBUI_RL_BACKOFF_MS = 60 * 1000;      // 撞限流后退避 1 分钟
-let webuiCred = { token: '', value: '', at: 0 };
-let webuiBackoffUntil = 0;
-
-/** 拿一个可复用的 WebUI Credential；拿不到返回 ''（调用方据此如实说"暂时查不到"）。 */
-async function getWebuiCredential(token) {
-  const now = Date.now();
-  if (webuiCred.value && webuiCred.token === token && now - webuiCred.at < WEBUI_CRED_TTL_MS) {
-    return webuiCred.value;   // 命中缓存
-  }
-  if (now < webuiBackoffUntil) return '';   // 限流退避期内不再尝试
-  const r = await probeWebuiLoginRaw(token);
-  if (r.credential) {
-    webuiCred = { token, value: r.credential, at: now };
-    return r.credential;
-  }
-  if (/rate\s*limit|too\s*many/i.test(String(r.message ?? ''))) {
-    webuiBackoffUntil = now + WEBUI_RL_BACKOFF_MS;
-    webuiCred = { token: '', value: '', at: 0 };
-  }
-  return '';
-}
-
-/** 丢弃缓存的 Credential（失效时调一次，下次重新登录）。 */
-function dropWebuiCredential() {
-  webuiCred = { token: '', value: '', at: 0 };
-}
-
-/** 原始登录：返回 { code, message, http, credential }（原 probeWebuiLogin 只回 code/message）。 */
-async function probeWebuiLoginRaw(token) {
-  const hash = crypto.createHash('sha256').update(`${token}.napcat`).digest('hex');
-  try {
-    const res = await fetch(`http://127.0.0.1:${webuiPort()}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hash }),
-      signal: AbortSignal.timeout(8000)
-    });
-    const j = await res.json().catch(() => null);
-    return {
-      code: j?.code ?? null,
-      message: String(j?.message ?? ''),
-      http: res.status,
-      credential: String(j?.data?.Credential ?? '')
-    };
-  } catch (error) {
-    return { code: null, message: String(error?.name ?? error), http: 0, credential: '' };
-  }
-}
+ * 现在这些整体删除：桥侧不再有任何一处调 NapCat 的 WebUI 登录接口。
+ * 登录态改用 OneBot 端口判断（见下面 probeQqLoginState），那条路完全不碰限流桶。 */
 
 /**
- * 【2026-09-16】NapCat 自己的**登录态**（是否已登录 QQ）。
+ * NapCat 的登录态（是否已登录 QQ）。
  *
- * 为什么要有它：所有"机器人不回消息"的排查里，第一件事就是分清
- *   ① QQ 掉登录态（要扫码，NapCat 里没登录） 还是 ② 桥聋了（QQ 在收消息、桥连不上）。
- * 以前只能靠 `docker logs napcat` 里有没有新消息去猜；现在直接问 NapCat 的 WebUI：
- *   `POST /api/auth/login`（拿 Credential）→ `POST /api/QQLogin/CheckLoginStatus`
- *   返回 `{isLogin, isOffline, loginPhase, coreReady}`（实测 2026-09-15）。
- * 登录态本身**不会**因为重启/掉电而丢：会话在数据卷 `napcat-qq` + 配置目录里的
- * `napcat_<qq>.json` 里，容器起来后 NapCat 用 `ACCOUNT=<qq>` 自动快速登录（不需要重新扫码）。
+ * 2026-09-23：去除探针与状态检测 → 改成不碰 WebUI 登录接口的版本。
+ * 老版本是 `POST /api/auth/login` 换 Credential → `POST /api/QQLogin/CheckLoginStatus`。
+ * 那两次调用都要吃 NapCat 按 IP 限流的登录额度，而那份额度 WebUI 页面自己也要用
+ * —— 桥多问一次，页面就少一次，问多了页面直接 Unauthorized。
+ *
+ * 现在只问 OneBot 端口（默认 http://127.0.0.1:3000，`get_login_info`）：
+ * 它是 NapCat 给机器人用的正经接口，完全不进登录限流桶，也不会影响 WebUI 会话。
+ * 语义如实区分三种情况，不把"问不到"混成"没登录"：
+ *   · 端口有响应且 retcode=0 → 已登录（带回 uin/nick）
+ *   · 端口有响应但 401/retcode≠0 → NapCat 在跑，但登录态没就绪或 OneBot 令牌不对
+ *   · 端口不监听 → 查不到（QQ 没登录时 OneBot 端口本来就不监听，NapCat 没起也一样）
  */
 export async function probeQqLoginState() {
-  const dir = napcatConfigDir();
-  if (!dir) return { ok: false, error: '没找到 NapCat 配置目录（napcat.dockerPathMap / tmpDir 没配好）' };
-  const w = readJsonFile(path.join(dir, 'webui.json'));
-  const token = String(w?.token ?? '');
-  if (!token) return { ok: false, error: '读不到 webui.json 的 token，无法查询登录态' };
-  // 令牌换了就把缓存作废（否则会拿旧 Credential 去查，一直失败）
-  if (webuiCred.token && webuiCred.token !== token) dropWebuiCredential();
-  let credential = await getWebuiCredential(token);
-  if (!credential) {
-    /* 【2026-09-19】拿不到 Credential（限流退避中 / 网络异常）时**必须如实说"暂时查不到"**，
-     * 而不是让上游把它渲染成"QQ 未登录、请扫码" —— 那是两件完全不同的事。 */
-    const backoff = webuiBackoffUntil > Date.now();
+  const base = String(cfgRef?.napcat?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  /* 2026-09-24 实测发现：桥刚启动的头几秒，napcat.httpToken 还没被运行期的令牌同步填上，
+   * 这里就会不带 Authorization 去问，NapCat 直接回 403「令牌不对」—— 看着像"没登录"，
+   * 其实是"桥还没把令牌读进来"。既然本部署里 HTTP 与 WS 用的是同一个令牌（061228），
+   * 就退回 accessToken，避免启动瞬间误报。 */
+  const httpToken = String(cfgRef?.napcat?.httpToken || cfgRef?.napcat?.accessToken || '');
+  let res;
+  try {
+    res = await fetch(`${base}/get_login_info`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(httpToken ? { authorization: `Bearer ${httpToken}` } : {}) },
+      body: '{}',
+      signal: AbortSignal.timeout(6000)
+    });
+  } catch (error) {
     return {
       ok: false,
-      rateLimited: backoff,
-      error: backoff
-        ? 'NapCat WebUI 登录接口被限流，暂时查不到登录态（已自动退避，稍后恢复；这**不代表** QQ 掉线）'
-        : '拿不到 WebUI Credential，暂时查不到登录态'
+      error: `OneBot 端口 ${base} 没响应（${String(error?.name ?? error)}）—— NapCat 没起来、或 QQ 未登录时它本来就不监听（这不等于"QQ 掉线了"）`,
+      source: 'onebot'
     };
   }
-  const call = async (p) => {
-    try {
-      const res = await fetch(`http://127.0.0.1:${webuiPort()}${p}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
-        body: '{}',
-        signal: AbortSignal.timeout(8000)
-      });
-      return await res.json().catch(() => null);
-    } catch (error) {
-      return { code: null, message: String(error?.message ?? error) };
-    }
-  };
-  let st = await call('/api/QQLogin/CheckLoginStatus');
-  // Credential 过期/失效 → 丢缓存重登**一次**（只重试一次，免得又撞限流）
-  if (st?.code !== 0 && /auth|token|credential|unauthor|invalid/i.test(String(st?.message ?? ''))) {
-    dropWebuiCredential();
-    const again = await getWebuiCredential(token);
-    if (again) st = await call('/api/QQLogin/CheckLoginStatus');
+  const j = await res.json().catch(() => null);
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, error: `OneBot 端口在跑，但令牌不对（HTTP ${res.status}）—— 号没登出来之前也常见`, source: 'onebot' };
   }
-  const info = st?.code === 0 ? await call('/api/QQLogin/GetQQLoginInfo') : null;
-  const d = st?.data ?? {};
+  if (!j || Number(j.retcode ?? j.status ?? -1) !== 0) {
+    return { ok: false, error: `OneBot 说查不到登录信息：${String(j?.message ?? `HTTP ${res.status}`)}`, source: 'onebot' };
+  }
+  const d = j.data ?? {};
   return {
-    ok: st?.code === 0,
-    isLogin: Boolean(d.isLogin),
-    online: info?.data ? Boolean(info.data.online) : Boolean(d.isLogin) && d.isOffline === false,
-    loginPhase: String(d.loginPhase ?? ''),
-    coreReady: Boolean(d.coreReady),
-    qrAccepted: Boolean(d.qrLoginAccepted),
-    uin: info?.data?.uin != null ? String(info.data.uin) : '',
-    nick: String(info?.data?.nick ?? ''),
-    error: st?.code === 0 ? '' : String(st?.message ?? '查询登录态失败')
+    ok: true,
+    isLogin: true,
+    online: true,
+    uin: d.user_id != null ? String(d.user_id) : '',
+    nick: String(d.nickname ?? ''),
+    error: '',
+    source: 'onebot'
   };
+}
+
+/* ===================================================================================
+  2026-09-24：「napcat 登录态改为 SSE 实时探测」
+   -----------------------------------------------------------------------------------
+   做法（既不轮询轰炸 NapCat，又能真·实时）：
+     · `probeQqLoginState()` 只读一句 OneBot `get_login_info`（不碰登录/扫码/退出接口）；
+     · 3 秒 TTL 缓存 + 并发合并：连续点刷新、或卡片与 SSE 同时取数，只会真的打一次；
+     · 真实链路事件（WS open / close / 看门狗）触发 force 重探 → 登录态一变立刻推给订阅者；
+     · SSE 连接建立时先推一份真值，之后 30 秒兜底重探一次（2 次/分钟，用于抓
+       "WebUI 上 isLogin 还是 true、实际已被 QQ 作废"这种静默失效），另有 20 秒纯注释心跳；
+     · 无订阅者时一次都不探（只有联网卡片/SSE 有人在看时才问 NapCat）。
+   =================================================================================== */
+const LOGIN_TTL_MS = 3000;
+const loginSubs = new Set();
+let loginSnap = null;      // { at, login }
+let loginInFlight = null;  // 并发合并用的在途探测
+
+/** 订阅登录态变化（SSE 用）。返回退订函数。 */
+export function subscribeNapcatLogin(fn) {
+  loginSubs.add(fn);
+  return () => { loginSubs.delete(fn); };
+}
+
+/** 有没有人在看（没人看就不去问 NapCat） */
+export function napcatLoginHasSubscribers() { return loginSubs.size > 0; }
+
+/** 最近一次探测结果（可能为 null＝从没探过） */
+export function napcatLoginSnapshot() { return loginSnap; }
+
+function publishLogin() {
+  for (const fn of loginSubs) {
+    try { fn(loginSnap); } catch { /* 单个订阅者出错不影响其他人 */ }
+  }
+}
+
+/**
+ * 探一次登录态。默认走 3 秒缓存；`force` 只给真实链路事件与用户显式刷新用。
+ * 永不抛：任何异常都归一成 { ok:false, error }。
+ */
+export async function probeNapcatLogin({ force = false } = {}) {
+  if (!force && loginSnap && Date.now() - loginSnap.at < LOGIN_TTL_MS) return loginSnap.login;
+  if (loginInFlight) return loginInFlight;   // 并发请求合并成一次真实探测
+  loginInFlight = (async () => {
+    let value;
+    try {
+      value = await probeQqLoginState();
+    } catch (error) {
+      value = { ok: false, error: String(error?.message ?? error), source: 'onebot' };
+    }
+    const prev = loginSnap?.login;
+    loginSnap = { at: Date.now(), login: value };
+    // 只在"结论变了"时推送，避免同样的状态反复打订阅者
+    if (!prev || prev.ok !== value.ok || prev.isLogin !== value.isLogin
+        || String(prev.uin ?? '') !== String(value.uin ?? '')) {
+      publishLogin();
+    }
+    return value;
+  })();
+  try { return await loginInFlight; } finally { loginInFlight = null; }
 }
 
 async function probeHttp(token, timeoutMs = 6000) {
@@ -426,33 +429,16 @@ async function waitWebuiUp(timeoutMs = 120000) {
   return false;
 }
 
-/**
- * 用 NapCat WebUI 的登录接口权威验证一个 WebUI 令牌。
- * 【实测 2026-09-15】前端调的是 `POST /api/auth/login`，body 为 `{ hash: sha256(token + ".napcat") }`；
- * 令牌正确 → `{code:0, data:{Credential:…}}`，错误 → `{code:-1, message:"token is invalid"}`。
- * 这是唯一能"当场证明旧令牌已失效"的办法（OneBot 的 3000 端口在 QQ 未登录时根本不监听）。
- */
-async function probeWebuiLogin(token) {
-  const hash = crypto.createHash('sha256').update(`${token}.napcat`).digest('hex');
-  try {
-    const res = await fetch(`http://127.0.0.1:${webuiPort()}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ hash }),
-      signal: AbortSignal.timeout(8000)
-    });
-    const j = await res.json().catch(() => null);
-    return { code: j?.code ?? null, message: String(j?.message ?? ''), http: res.status };
-  } catch (error) {
-    return { code: null, message: String(error?.name ?? error), http: 0 };
-  }
-}
+/* 2026-09-23：已删除 `probeWebuiLogin()`。
+ * 它用 `POST /api/auth/login` 去"权威验证"一个 WebUI 令牌 —— 那是探针，已整体去除。
+ * 桥侧现在不存在任何一处调 NapCat WebUI 登录接口的代码（全库可 grep 佐证）。
+ * 令牌对不对，直接看 webui.json 的内容 + 页面能不能点开即可。 */
 
 /**
  * 把令牌写进 NapCat 配置（可选重启 + 复验）。
  * @param {{ webuiToken?:string, httpToken?:string, wsToken?:string, restart?:boolean }} opts
  *        只改传进来的项；全部不传 = 只读现状（不会写盘、不会重启）。
- * @returns 结构化结果（**任何情况下都不回传令牌明文**，只有掩码）
+ * @returns 结构化结果（任何情况下都不回传令牌明文，只有掩码）
  */
 export async function applyNapcatTokens(opts = {}) {
   const dir = napcatConfigDir();
@@ -524,7 +510,7 @@ export async function applyNapcatTokens(opts = {}) {
     }
   }
 
-  // 只在**真的改了值**时才重启：早先按"对齐了几个 token 字段"判断，导致同值重写也会白重启一次 NapCat
+  // 只在真的改了值时才重启：早先按"对齐了几个 token 字段"判断，导致同值重写也会白重启一次 NapCat
   // （每次重启 ~30 秒，还可能掉登录态要重扫码）。
   if (!changed.dirty) {
     return {
@@ -547,16 +533,13 @@ export async function applyNapcatTokens(opts = {}) {
       verify.note = '重启后 120 秒内没等到 NapCat WebUI 起来（稍后可在「服务端状态」里看，或看桥日志）';
     } else {
       const bits = [];
-      // ① WebUI 令牌：用登录接口当场验证新旧
+      /* 2026-09-23：去除探针与状态检测。
+       * 这里以前会用 `POST /api/auth/login` 当场复验新/旧 WebUI 令牌（各一发登录额度）。
+       * 已删除：那份额度是 WebUI 页面自己要用的，桥不该花；而且 NapCat 只认启动那一刻读进
+       * 内存的令牌，文件写了、容器也重启了，页面点开就知道对不对，不需要桥再替它试。
+       * WebUI 令牌这里只报"已写入 + 已重启"。 */
       if (wantWebui) {
-        const now = await probeWebuiLogin(wantWebui);
-        verify.webuiOk = now.code === 0;
-        bits.push(`WebUI 新令牌：${verify.webuiOk ? '登录接口通过' : `未通过（${now.message || now.http}）`}`);
-        if (before.webui && before.webui !== wantWebui) {
-          const oldRes = await probeWebuiLogin(before.webui);
-          verify.webuiOldRejected = oldRes.code !== 0;
-          bits.push(`旧 WebUI 令牌：${verify.webuiOldRejected ? '已被拒（token is invalid）' : '居然还能用（请回报）'}`);
-        }
+        bits.push('WebUI 令牌：已写入 webui.json 并重启 NapCat（是否生效以页面能否点开为准 —— 桥不再代跑登录接口，免得占用页面的登录额度）');
       }
       // ② OneBot HTTP 令牌：只有 QQ 已登录时 3000 才会监听；能探就探，探不到就如实说明
       const tokenForProbe = wantHttp || String(cfgRef?.napcat?.accessToken ?? '');

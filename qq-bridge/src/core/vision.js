@@ -1,19 +1,19 @@
-// 独立识图模型（2026-09-19 主人要求："把语言模型和识图模型分开，识图模型不配置就用语言模型"）
+// 独立识图模型（2026-09-19 需求："把语言模型和识图模型分开，识图模型不配置就用语言模型"）
 //
 // 为什么单独一条：
-//   · 以前的识图只有一条路 —— 把图片当**附件**发给 DSH 主模型，并且要求主模型自己多模态；
+//   · 以前的识图只有一条路 —— 把图片当附件发给 DSH 主模型，并且要求主模型自己多模态；
 //     等于"看图"和"回话"必须是同一个厂商、同一份额度、同一种计价。
-//   · 主人要的是：语言模型照旧（文字回话），识图另外指一个地址 + 一把 key + 一个模型
-//     （OpenAI 兼容的 /chat/completions），图片在这个通路上被转成**文字描述**再交给语言模型。
+//   · 需求是：语言模型照旧（文字回话），识图另外指一个地址 + 一把 key + 一个模型
+//     （OpenAI 兼容的 /chat/completions），图片在这个通路上被转成文字描述再交给语言模型。
 //     好处：识图可以用便宜的/专门的模型，主模型只收文字，省额度也少踩"主模型不支持图片"的坑。
 //
 // 三种配置形态（与界面帮助文案一一对应，不要各写一套）：
 //   ① dsh.visionBaseUrl 为空            → 本模块整个不启用，图片按老路走 DSH 附件（默认行为，一字不变）。
 //   ② visionBaseUrl 空、visionModel 有值 → 也是老路，只是 DSH 那边显式用 visionModel 读图（见 dsh-session.js）。
 //   ③ visionBaseUrl 有值（且 visionModel 有值）→ 启用独立通路：桥自己 POST /chat/completions，
-//      把图片以 `image_url` 的 data URL 递过去，取回文字描述，用描述**替换**附件。
+//      把图片以 `image_url` 的 data URL 递过去，取回文字描述，用描述替换附件。
 //
-// 失败降级：独立通路任何一步失败（超时/非 2xx/解析不出文字）都**退回附件**，绝不因为识图挂了就丢图。
+// 失败降级：独立通路任何一步失败（超时/非 2xx/解析不出文字）都退回附件，绝不因为识图挂了就丢图。
 import http from 'node:http';
 import https from 'node:https';
 import { log } from '../lib/log.js';
@@ -63,9 +63,9 @@ function requestJsonPost(urlString, body, headers) {
     if (!['http:', 'https:'].includes(url.protocol)) { reject(new Error('识图模型请求地址只支持 http/https')); return; }
     const payload = Buffer.from(JSON.stringify(body), 'utf8');
     const mod = url.protocol === 'https:' ? https : http;
-    /* 注意：这里**不走** safe-fetch 的 SSRF 白名单 —— 识图服务常常就架在本机/内网
+    /* 注意：这里不走 safe-fetch 的 SSRF 白名单 —— 识图服务常常就架在本机/内网
      * （llama.cpp、ollama、公司内部网关），挡掉内网等于这个功能没法用。
-     * 地址是主人在管理端亲手填的运维级配置，与 dsh.baseUrl 同级信任。 */
+     * 地址是用户在管理端亲手填的运维级配置，与 dsh.baseUrl 同级信任。 */
     const req = mod.request({
       protocol: url.protocol,
       hostname: url.hostname,
@@ -120,7 +120,7 @@ function extractText(body) {
 /**
  * 用独立识图模型描述一张图。
  * @returns {Promise<{ok:true, text:string, model:string, ms:number}|{ok:false, error:string}>}
- *   失败**不抛**：调用方按"退回附件"处理（识图是增强，不该成为丢图的理由）。
+ *   失败不抛：调用方按"退回附件"处理（识图是增强，不该成为丢图的理由）。
  */
 export async function describeImageWithVisionModel(buffer, mimeType, opts = {}) {
   const ep = visionEndpoint();
@@ -143,7 +143,7 @@ export async function describeImageWithVisionModel(buffer, mimeType, opts = {}) 
   try {
     const res = await requestJsonPost(ep.url, body, headers);
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      // 只截前 200 字：错误体可能很长，但**不会**含我们自己的 key
+      // 只截前 200 字：错误体可能很长，但不会含我们自己的 key
       return { ok: false, error: `HTTP ${res.statusCode}：${res.text.slice(0, 200)}` };
     }
     let parsed;

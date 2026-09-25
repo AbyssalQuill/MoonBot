@@ -72,7 +72,7 @@ qq-bridge/
 │   ├── PROJECT_GUIDE.md        # 本文档（公开版）
 │   └── DSH_SETUP.md            # DSH 端安装说明（另一台设备）
 ├── dsh/
-│   └── agent-presets/          # qq-chat / default 的 DSH preset 模板
+│   └── agent-presets/          # qq-chat 的 DSH preset 模板
 ├── plugins/
 │   └── qq-mode-console/        # DSH 设置页 qq-mode 卡片插件
 ├── assets/
@@ -218,7 +218,7 @@ DSH 事件流（api.events.mux）→ pumpMux()
 QQ 聊天角色模式（`reserved2`）还有：
 
 - 状态/消息：`qq_get_prompt`、`qq_get_unread_messages`、`qq_get_recent_messages`、`qq_get_message_detail`、`qq_get_active_members`、`qq_social_state`
-- 发送/互动：`qq_send_message`、`qq_send_burst`、`qq_send_poke`、`qq_send_sticker`
+- 发送/互动：`qq_send_message`、`qq_send_poke`、`qq_send_sticker`
 - 等待/收尾：`qq_wait_for_messages`、`qq_mark_read`、`qq_set_wake_config`
 - 记忆/黑话/表情：`qq_memory_*`、`qq_slang_query`、`qq_slang_submit`、`qq_list_stickers`、`qq_get_sticker_image`、`qq_sticker_note`、`qq_collect_sticker`
 - 形象：`qq_get_self_image`

@@ -47,10 +47,10 @@ export function cancelKeyedSends(chainKey) {
 
 /** 取消所有会话的待发任务（工作区级重置用）。 */
 export function cancelAllKeyedSends() {
-  /* 【2026-09-22 修 M17·"守卫失效"】epoch 守卫的判据是 `epochs.get(key) !== epoch`（enqueue 时抓下的值），
-   * 而这里原来**先** `epochs.clear()`：清空之后两边都是 undefined/0，守卫恒不成立 →
-   * 只有"被单独 cancelKeyedSends 过的会话"才会过期，其余会话**取消后旧气泡照发**。
-   * 正确做法是把每个 key 的 epoch **+1**（让旧快照失效），再清链尾与节拍计数。 */
+  /* 2026-09-22：修 M17·"守卫失效"。epoch 守卫的判据是 `epochs.get(key) !== epoch`（enqueue 时抓下的值），
+   * 而这里原来先 `epochs.clear()`：清空之后两边都是 undefined/0，守卫恒不成立 →
+   * 只有"被单独 cancelKeyedSends 过的会话"才会过期，其余会话取消后旧气泡照发。
+   * 正确做法是把每个 key 的 epoch +1（让旧快照失效），再清链尾与节拍计数。 */
   for (const [k, v] of epochs) epochs.set(k, (Number(v) || 0) + 1);
   chains.clear();
   linearCounts.clear();
@@ -95,9 +95,9 @@ export function sendChainInFlight() { return inFlight; }
 // 线性关闭（enabled=false）时两个函数都返回空语义，调用方完整保留旧节奏（零侵入）。
 // 计数与等待点分离：投递任务执行前查 nextSendPaceMs(key)，投递成功后调 markSendDelivered(key)。
 // 非文本投递（表情/图/戳一戳等，各自独立 enqueueSend）不经过本计数，不计入、也不受线性约束。
-// ── 发送打字节拍：只保留「按字数」这一种（2026-09-15 主人定稿）────────────────
+// ── 发送打字节拍：只保留「按字数」这一种（2026-09-15 定稿）────────────────
 // 规则：同一条回复（一次 send 调用 = 一批）里，
-//   · 第 1 条气泡：立即发出（秒回，主人明确要过的行为）；
+//   · 第 1 条气泡：立即发出（秒回，已明确要过的行为）；
 //   · 第 2 条起：等"这条气泡自己打完要多久" = 字数 × 每字毫秒（linearPerCharMs），
 //     再乘 ±linearJitterRatio 的随机抖动，最后夹在 [linearMinMs, linearCapMs]。
 // 曾经的两种多余玩法都已删除：按"连发第几条 × 步长"递增（linearBaseMs/linearStepMs/linearMode=count）、
@@ -107,7 +107,7 @@ export function sendChainInFlight() { return inFlight; }
 // 非文本投递（表情/图/戳一戳等，各自独立 enqueueSend）不经过本计数，不计入、也不受节拍约束。
 const LINEAR_DEFAULTS = {
   enabled: true,        // social.send.linearEnabled（false = 不做任何打字延迟）
-  perCharMs: 150,       // social.send.linearPerCharMs（**每个字**的打字时间，主参数）
+  perCharMs: 150,       // social.send.linearPerCharMs（每个字的打字时间，主参数）
   minMs: 250,           // social.send.linearMinMs（下限：太短的气泡也别贴脸连发）
   capMs: 4000,          // social.send.linearCapMs（上限：超长句也不会等到天荒地老）
   jitterRatio: 0.25,    // social.send.linearJitterRatio（每条的随机抖动比例，真人不会每条一样快）
@@ -129,7 +129,7 @@ function linearCfgNow() {
   if (isObj && user.enabled === undefined && user.linearEnabled !== undefined) {
     merged.enabled = user.linearEnabled !== false;
   }
-  // 【2026-09-12 修 · 同名不同字段是"发送慢"的真凶；2026-09-15 改成按字数后仍是同一坑】
+  // 2026-09-12：修 · 同名不同字段是"发送慢"的真凶；2026-09-15 改成按字数后仍是同一坑。
   //   配置里写的是 linearPerCharMs / linearMinMs / linearCapMs / linearResetMs / linearJitterRatio，
   //   而模块内部读 perCharMs / minMs / capMs / resetMs / jitterRatio —— 不对齐就永远取不到，
   //   表现是"改了配置没反应"（当初 350/4000 就是被这么忽略掉的）。
@@ -158,10 +158,10 @@ function linearEntry(key) {
   return rec;
 }
 
-/** 【2026-09-12 加速】把某会话的"连续发送计数"清零。
+/** 2026-09-12 加速：把某会话的"连续发送计数"清零。
  *  语义 = "这一条回复是一次新的连发批"：批内第一条不等节拍（秒回），第二条起按字数算。
- *  为什么需要它：计数原本是**按会话跨回合累加**的（只有静默超过 resetMs 才归零），
- *  热聊时上一条的字数会一直影响下一条 → 一条回复的**第一条气泡也要先干等**。
+ *  为什么需要它：计数原本是按会话跨回合累加的（只有静默超过 resetMs 才归零），
+ *  热聊时上一条的字数会一直影响下一条 → 一条回复的第一条气泡也要先干等。
  *  `sendMessages` 每次调用开头调一次，让节奏只描述"这一次连发"。 */
 export function resetSendPace(key) {
   if (key == null || String(key) === '') return;
@@ -171,10 +171,13 @@ export function resetSendPace(key) {
 /** 每条投递任务执行前调用：返回本条应等待的毫秒数。
  *  无 key（全局默认链）或 linearEnabled=false → 返回 null（调用方不延迟）。
  *
- *  唯一规则（2026-09-15 主人定稿：只保留这一种）：
- *   · 批内第 1 条 → 0（秒回，主人明确要过"模型一决定回，气泡立刻出"）；
+ *  唯一规则（2026-09-15 定稿：只保留这一种）：
+ *   · 批内第 1 条 → 0（秒回，已明确要过"模型一决定回，气泡立刻出"）；
  *   · 第 2 条起 → clamp(本条字数 × linearPerCharMs × 抖动, linearMinMs, linearCapMs)。
- *  textLen 省略时退回上一条的字数（老调用点不会因此失控）。 */
+ *  textLen 省略时退回上一条的字数（老调用点不会因此失控）。
+ *
+ *  ⚠️ 只适用于"一次调用真的带一批气泡"的调用方（sendToQQ 的拆条、sendBurstToQQ）。
+ *  模型走的 qq_send_message 是一次调用一条气泡 → 用下面的 typingDelayMs，别用这个。 */
 export function nextSendPaceMs(key, textLen) {
   if (key == null || String(key) === '') return null;
   const cfg = linearCfgNow();
@@ -196,8 +199,34 @@ export function nextSendPaceMs(key, textLen) {
   return Math.max(Math.min(minMs, cap), Math.min(cap, typing));
 }
 
+/** 单条气泡的"打字时间"：**只看这条自己的字数**，与批内序号 / 连续计数完全无关。
+ *
+ *  这是"内置在 qq_send_message 里"的那个线性延迟（2026-09-24 复原）：
+ *  模型每次工具调用只发一条气泡，所以延迟必须挂在"这条气泡"上，而不是"批内第几条"上 ——
+ *  否则每条都被当成批内首条，节拍恒为 0（真实调用形态：342 次调用 / 0 次一次带多条）。
+ *
+ *  返回值：linearEnabled=false 或 字数/每字毫秒非正 → null（调用方不延迟，节奏交回调用方）；
+ *          否则 clamp(字数 × perCharMs × (1 ± jitterRatio), minMs, capMs)。
+ *  与 nextSendPaceMs 共用同一套参数与同一个 clamp，改配置两处一起变。 */
+export function typingDelayMs(textLen) {
+  const cfg = linearCfgNow();
+  if (cfg.enabled === false) return null;
+  const perChar = Math.max(0, Number(cfg.perCharMs) || 0);
+  if (!(perChar > 0)) return null;
+  const len = Math.round(Number(textLen) || 0);
+  if (!(len > 0)) return null;
+  const cap = Math.max(0, Number(cfg.capMs) || 0);
+  const minMs = Math.max(0, Number(cfg.minMs) || 0);
+  const rawJitter = Number(cfg.jitterRatio);
+  const jitter = Number.isFinite(rawJitter) ? Math.min(0.9, Math.max(0, rawJitter)) : 0;
+  const factor = jitter > 0 ? (1 - jitter + Math.random() * jitter * 2) : 1;
+  const typing = Math.round(len * perChar * factor);
+  return Math.max(Math.min(minMs, cap), Math.min(cap, typing));
+}
+
 /** 投递成功后调用（textLen = 本条实际字数，供"下一次算间隔"用）。只有投递成功才推进计数。 */
-export function markSendDelivered(key, textLen) {  if (key == null || String(key) === '') return;
+export function markSendDelivered(key, textLen) {
+  if (key == null || String(key) === '') return;
   const k = String(key);
   const cfg = linearCfgNow();
   const now = Date.now();

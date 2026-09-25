@@ -111,7 +111,7 @@ export function dshSessionsCandidates() {
     out.push(s);
   };
   const managerDir = path.join(process.env.USERPROFILE || process.env.HOME || '', '.qq-bridge-manager');
-  /* 【2026-09-16 修「归档器在服务器上一直空转」】
+  /* 2026-09-16 修「归档器在服务器上一直空转」：
    * 实测（服务端）：归档器状态里 `sessionsRoot: null` —— 它只会看"管理器 config.json 里的隔离 home"和
    * `DSH_HOME`，而服务器上桥的环境变量是 `QQB_DSH_HOME=/root/.dsh`（见 start-bridge.sh），
    * 两个都不匹配 → 每 10 分钟空跑一次、日志里只有"已启用"那一行，
@@ -182,7 +182,7 @@ export function workspaceSessionDirs(sessionsRoot, opts = {}) {
   return out;
 }
 
-/** 【2026-09-16】列出**不属于本桥**的工作区目录（本机残留/别的实例），供一次性清理用。 */
+/** 2026-09-16：列出**不属于本桥**的工作区目录（本机残留/别的实例），供一次性清理用。 */
 export function foreignWorkspaceDirs(sessionsRoot) {
   if (!sessionsRoot) return [];
   const out = [];
@@ -197,7 +197,7 @@ export function foreignWorkspaceDirs(sessionsRoot) {
 }
 
 /**
- * 【2026-09-16 体检自愈】磁盘上真实存在的会话 id 集合（本桥所有工作区）。
+ * 2026-09-16 体检自愈：磁盘上真实存在的会话 id 集合（本桥所有工作区）。
  *
  * 为什么需要：会话目录一旦被手动/自动清理，而桥的 `state/sessions.json`（key→sessionId 映射）
  * 还留着旧 id，启动时会被读回内存 → 事件泵会**每秒重开一次死会话的 session/follow**，
@@ -424,7 +424,7 @@ export function sessionArchiveStatus() {
     workspaceDir: sessionWorkspaceDir(),
     sessionsRoot,
     workspaceSessionDirs: bridgeDirs,
-    // 【2026-09-16】本机/别的实例留下的工作区目录（不在本桥 state 前缀下）：一次性清理用
+    // 2026-09-16：本机/别的实例留下的工作区目录（不在本桥 state 前缀下）：一次性清理用
     foreignWorkspaceDirs: foreign.map((p) => path.basename(p)),
     archivedLocally: archivedLocally.size,
     running

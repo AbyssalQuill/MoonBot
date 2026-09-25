@@ -109,7 +109,7 @@ for (const [, v] of TOOL_MCP) for (const n of v.split('/').map((s) => s.trim()).
 report('TOOL_MCP names that are not defined tools', [...bogus].sort());
 
 // 5b) 工具清单完整性：每个工具要么有开关（TOOL_MCP 覆盖），要么登记在 TOOLS_NO_SWITCH。
-//     「QQ 工具开关」页原来只列 config 里已有的键，主人看到的清单因此缺一大截。
+//     「QQ 工具开关」页原来只列 config 里已有的键，界面上看到的清单因此缺一大截。
 const switchCovered = new Set();
 for (const [, v] of TOOL_MCP) for (const n of v.split('/').map((s) => s.trim()).filter(Boolean)) if (defined.has(n)) switchCovered.add(n);
 report('tools with neither a switch nor a TOOLS_NO_SWITCH entry (the page would hide them)', [...defined].filter((n) => !switchCovered.has(n) && !TOOLS_NO_SWITCH.has(n)).sort());

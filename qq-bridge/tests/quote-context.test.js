@@ -1,4 +1,4 @@
-// 引用上下文回归：模型看到的那一行必须带上被引用的原文（主人 2026-09-21 反馈：
+// 引用上下文回归：模型看到的那一行必须带上被引用的原文（2026-09-21 反馈：
 // 私聊里引用一条消息，机器人答"查不到 / 拿不到引用内容"——落库是对的，最后一跳丢了）。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,7 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const SRC = path.join(process.cwd(), 'src');
-/* 【2026-09-22】沙箱原来建在仓库里（tests/.tmp-quote-context-<pid>）：Windows 上 sqlite 句柄没释放时删不掉，
+/* 2026-09-22：沙箱原来建在仓库里（tests/.tmp-quote-context-<pid>）：Windows 上 sqlite 句柄没释放时删不掉，
  * 于是仓库里堆了 42 个 .tmp-quote-context-* 残留目录（审计项之一）。改到系统临时目录，删不掉也不脏仓库。 */
 const sandbox = path.join(os.tmpdir(), `.tmp-quote-context-${process.pid}`);
 fs.rmSync(sandbox, { recursive: true, force: true });
@@ -74,7 +74,9 @@ t('④ 首轮唤醒的 [Status] 行带上引用原文（"这一步该答哪条"�
     text: '[引用 DeepSeek Harness：这就是你养的那群吗 ᗜ ‸ ᗜ]你说这个，我本来就养了你一个',
   }];
   const prompt = wake.buildWakePrompt(KEY, 'private');
-  assert.match(prompt, /\[Status\][^\n]*waiting on owner\(id:779625557\)/, '应点名在等哪一条');
+  // 2026-09-24：说话人标签从 `owner(id:<消息号>)` 改成 `owner[QQ=<QQ号>](id:<消息号>)` —— 见
+  // wake-send.js 的 speakerTag()（旧写法把消息号当成主人的 QQ 号，模型据此否认过主人）。
+  assert.match(prompt, /\[Status\][^\n]*waiting on owner\[QQ=1736784911\]\(id:779625557\)/, '应点名在等哪一条（QQ 号与消息号分开）');
   assert.match(prompt, /\[引用 DeepSeek Harness：这就是你养的那群吗/, '[Status] 行必须带被引用原文');
   assert.match(prompt, /你说这个，我本来就养了你一个/);
 });
@@ -103,12 +105,13 @@ t('⑤ 唤醒正文里没有引用标记时保持原样（不带多余的引用�
 });
 
 t('⑥ 系统提示词里有缩略语与引用归属的规则', () => {
-  const preset = fs.readFileSync(path.join(process.cwd(), 'dsh', 'agent-presets', 'default', 'agent.cordis.yml'), 'utf8');
-  /* 【2026-09-21 提示词压缩后的断言口径】
-   * 这三条原来钉的是 1.2.5 的**原句**（`ABBREVIATIONS ARE THE ROOM'S LANGUAGE` 之类）。
+  // 2026-09-24：preset 目录名随 default → qq-chat 的合并改名。
+  const preset = fs.readFileSync(path.join(process.cwd(), 'dsh', 'agent-presets', 'qq-chat', 'agent.cordis.yml'), 'utf8');
+  /* 2026-09-21 提示词压缩后的断言口径：
+   * 这三条原来钉的是 1.2.5 的原句（`ABBREVIATIONS ARE THE ROOM'S LANGUAGE` 之类）。
    * 2026-09-21 把 [COMPREHEND] 压成短行 spec（TEACHER/缩略语/引用归属一条不删，只是换了更短的写法），
    * 原句自然就没了 —— 测试跟着失效说明它钉的是"措辞"而不是"规则"。
-   * 现在改成钉**规则本身**：断言那条规则的关键词都在（缩写表、引用归属判据、抓住整条线），
+   * 现在改成钉规则本身：断言那条规则的关键词都在（缩写表、引用归属判据、抓住整条线），
    * 并且断言规则里点名的中文缩略语样本确实还在（那是最容易被压缩顺手删掉的东西）。
    * 目的不变：只要有人把这三条规则删掉或删空，这个用例必须红。 */
   assert.match(preset, /_ABBREVIATIONS|ABBREVIATION/, '缩略语规则不见了');

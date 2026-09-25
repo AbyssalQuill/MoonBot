@@ -14,15 +14,16 @@ import { deployApi } from './deploy.js';
 import { mergeCredentialText, credentialStatusFromText, validateCredentialDocument } from './iso-credential.js';
 // NapCat 运行时完整性自检/自修（payload 分片不同源、杀软误删、更新复制不完整都会启动即崩）
 import { ensureNapcatApps } from './napcat-repair.js';
-// NapCat WebUI 登录自查的**唯一入口**（预算 + 缓存 + 限流冷却）。为什么必须收口见该文件头注释：
+// NapCat WebUI 登录自查的唯一入口（预算 + 缓存 + 限流冷却）。为什么必须收口见该文件头注释：
 // 把登录接口当状态探针会跟 WebUI 页面自己抢 NapCat 的按 IP 限流额度，页面就永远登不进去。
-import { createNapcatWebuiAuth } from './napcat-webui-auth.js';
-// 连接服务端的**状态机**（纯逻辑可单测）：让界面能看到"SSH → 隧道 → 服务端组件逐个就绪 → 预鉴权 → 就绪"
+/* 2026-09-23：去除探针与状态检测。原来这里 import 了 napcat-webui-auth —— 那个模块
+ * 唯一的职责就是"用 NapCat 的登录接口去验证令牌"，正是抢 WebUI 页面登录额度的元凶。整个模块已删除。 */
+// 连接服务端的状态机（纯逻辑可单测）：让界面能看到"SSH → 隧道 → 服务端组件逐个就绪 → 预鉴权 → 就绪"
 import { createConnectMachine, describeRemoteStatus } from './connect-machine.js';
 const deploy = deployApi();
 
-/* 【2026-09-12 主人要求："确保这个应用安装在哪个盘都可以找到"】
- * 运行时根目录一律以**本文件所在位置**为准：<runtime>/server/index.js → <runtime>。
+/* 2026-09-12：需求"确保这个应用安装在哪个盘都可以找到"。
+ * 运行时根目录一律以本文件所在位置为准：<runtime>/server/index.js → <runtime>。
  * 原来有 9 处用 `process.cwd()` 当安装根目录：Electron 壳（main.js）拉起时 cwd 确实是 <runtime>，
  * 所以平时看不出问题；但用户从资源管理器双击 qbm-node.exe、用旧快捷方式/计划任务、或把后端当独立服务
  * 拉起时，cwd 会变成 C:\Windows\System32 之类 —— 于是 dsh / qq-bridge / dist / 隔离 home 全部解析错：
@@ -45,7 +46,7 @@ const LOG_DIR = join(CONFIG_DIR, 'logs');
 if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
 if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
 
-/* 【2026-09-22 修 M11·"空 provider"的兜底只能有一处】
+/* 2026-09-22 修 M11·"空 provider"的兜底只能有一处：
  * 以前三处各写各的：写密钥那处兜底 deepseek-official（密钥进 DEEPSEEK_API_KEY）、
  * 写隔离 DSH settings.yaml 那处兜底 xiaomi-token-plan-cn + mimo-v2.5（模型被改成小米）、
  * 回读状态那处又按小米算环境变量名 —— 用户没填服务商时，界面提示"已保存"、密钥卡却显示"尚未配置"，
@@ -104,19 +105,19 @@ const DEFAULT_CONFIG = {
       webuiPort: 6099,
       webuiToken: 'truefriend',          // NapCat WebUI 登录 token（登录 6099 网页用）
       quickLogin: '',                    // 快速登录 QQ 号；空=自动探测 napcat_*.json
-      /* 【2026-09-18 主人要求】「关闭界面时结束 NapCat」开关（实例配置页可自由开关）：
-       * 开 = 关掉管理器窗口 / 退出管理器进程时，把**本次本地启动器拉起来的那个** NapCat 一并结束（不留后台残留）；
+      /* 2026-09-18：需求「关闭界面时结束 NapCat」开关（实例配置页可自由开关）：
+       * 开 = 关掉管理器窗口 / 退出管理器进程时，把本次本地启动器拉起来的那个 NapCat 一并结束（不留后台残留）；
        * 关 = 退出管理器完全不碰 NapCat，它继续在后台跑（连守卫也不会去收，见 armNapcatGuardian 的 --kill-napcat）。
        *
-       * 默认值取 **true**（开），理由是"哪一侧更容易造成用户没察觉的坏状态"：
-       *   ① 打包版关窗时 Electron 壳执行的是 `taskkill /pid <后端> /T /F` —— 管理器**被强杀、跑不到任何清理代码**，
-       *      而 NapCat 是 wscript 拉起的游离进程（NapCatWinBootMain.exe → 注入 QQ.exe），不在壳的进程树里。
-       *      主人 2026-09-13 已明确要求"应用进程关闭时 NapCat 进程也要关闭"，并已由 server/napcat-guardian.mjs 落实。
-       *      若把默认值设成 false，等于**悄悄回退掉那条已生效的需求**：用户什么也没点，行为却变了。
+       * 默认值取 true（开），理由是"哪一侧更容易造成用户没察觉的坏状态"：
+       *   ① 打包版关窗时 Electron 壳执行的是 `taskkill /pid <后端> /T /F` —— 管理器被强杀、跑不到任何清理代码，
+       *      而 NapCat 是游离进程（隐藏拉起 → NapCatWinBootMain.exe 注入 QQ.exe），不在壳的进程树里。
+       *      2026-09-13：需求"应用进程关闭时 NapCat 进程也要关闭"，已由 server/napcat-guardian.mjs 落实。
+       *      若把默认值设成 false，等于悄悄回退掉那条已生效的需求：用户什么也没点，行为却变了。
        *   ② 反过来，NapCat 留着不关的代价是"用户以为关了、其实 QQ 还在后台登录并收发消息"——无声且难发现；
        *      而重登成本极低：配了 quickLogin 就是免扫码自动登录，没配也可以扫码，实例 enabled 还会被自动恢复。
        *   ③ 这个开关不是"多一个功能"，而是"给已生效的默认行为一个出口"：想留后台 NapCat 的人把它关掉即可。
-       * 注意：关掉它**只影响退出时收不收 NapCat**，跟「停止」按钮、单点登录互斥（停本机 NapCat）无关。 */
+       * 注意：关掉它只影响退出时收不收 NapCat，跟「停止」按钮、单点登录互斥（停本机 NapCat）无关。 */
       killOnExit: true,
     },
     bridgeLocal: {
@@ -141,7 +142,7 @@ function loadConfig() {
       if (dsh.isolatedHome && !existsSync(dirname(dsh.isolatedHome)) && !existsSync(dsh.isolatedHome)) dsh.isolatedHome = base.instances.dshIsolated.isolatedHome;
       if (dsh.dshCli && !existsSync(dsh.dshCli)) dsh.dshCli = findDshCli();
       if (nap.installDir && !existsSync(nap.installDir)) nap.installDir = '';
-      // 【2026-09-12 可移植性加强】"路径存在"不等于"属于本次安装"：换盘（或别人装到别的盘）时，
+      // 2026-09-12 可移植性加强："路径存在"不等于"属于本次安装"：换盘（或别人装到别的盘）时，
       // 旧安装还在这台机器上，上面那些 existsSync 判据会放行 → 新装的 E: 版会去驱动 D: 的 DSH / NapCat。
       // 只保留落在【当前安装树】或【当前用户主目录】内的路径，其余一律作废、重新现场探测。
       const inTree = (p) => {
@@ -200,7 +201,7 @@ function openTunnels(connId, conn, list) {
   // await 不完 —— 表现就是"connected=true 但一条隧道都没有"（界面里服务端界面全点不开）。
   return Promise.race([
     Promise.all(list.map(({ remote, local, name }) => new Promise((resolve) => {
-    /* 【2026-09-14】断线重连/连点"连接"时会先 closeTunnels 再重新 listen，而 Windows 上刚关掉的
+    /* 2026-09-14：断线重连/连点"连接"时会先 closeTunnels 再重新 listen，而 Windows 上刚关掉的
      * 监听端口不会立刻释放 → bind 报 EADDRINUSE，于是"SSH 连上了但隧道一条都没建"
      * （表现：/api/state 里 connected=true 而 srv-* 全部 reachable=false，界面里服务端界面点不开）。
      * 现在对这个特定错误退避重试（最多 4 次，共 ~1.5s），其它错误照旧如实上报。 */
@@ -211,7 +212,7 @@ function openTunnels(connId, conn, list) {
           socket.pipe(stream).pipe(socket);
         });
       });
-      // 隧道建立成功要**如实回报**（原来 resolve() 不带值 → 响应里 tunnels 全是 null，
+      // 隧道建立成功要如实回报（原来 resolve() 不带值 → 响应里 tunnels 全是 null，
       // 用户看不出到底建了几条、映射到哪个端口）。失败也要回一条说明，而不是静默。
       srv.on('error', (err) => {
         if (err?.code === 'EADDRINUSE' && tryNo < 4) {
@@ -233,8 +234,8 @@ function openTunnels(connId, conn, list) {
 }
 
 /** 隧道健康检查 + 自愈：连接还在、隧道却没了（或丢了某几条）就补建。
- *  现场教训（2026-09-15 主人反馈"主页界面打不开 / 一键启动有问题"）：/api/state 显示
- *  connected=true，但 13000/13080/13100 **一个都没在听** —— 界面里所有"打开"全点不开。
+ *  现场教训（2026-09-15 反馈"主页界面打不开 / 一键启动有问题"）：/api/state 显示
+ *  connected=true，但 13000/13080/13100 一个都没在听 —— 界面里所有"打开"全点不开。
  *  根因是 establishConnection 先记连接、再建隧道，隧道失败/超时后没人补。现在每次取状态都自检一遍。 */
 async function ensureTunnels(serverId) {
   const conn = sshConnections.get(serverId);
@@ -265,13 +266,13 @@ function closeTunnels(connId) {
   }
 }
 
-/* ── 断线自动重连（2026-09-15 主人反馈"感觉服务器又断连了…为啥老是断连"）─────────────
+/* ── 断线自动重连（2026-09-15 反馈"感觉服务器又断连了…为啥老是断连"）─────────────
  * 现场：管理器本机开着，但 /api/state 里 connected=false、到 50470 一条 established 都没有 ——
- * SSH 连接掉了，而**旧代码掉了就永远掉了**：`conn.on('close')` 只清缓存，没有任何重连，
+ * SSH 连接掉了，而旧代码掉了就永远掉了：`conn.on('close')` 只清缓存，没有任何重连，
  * 于是界面一直显示"服务端未运行"，非要人手点一次「连接」。关掉应用再打开也一样（内存里的连接表本来就空了）。
  *
  * 现在两条路都补上：
- *   ① 自动重连：连接**非用户主动断开**地掉了 → 按 5s/10s/20s/30s/60s 退避重连，直到成功；
+ *   ① 自动重连：连接非用户主动断开地掉了 → 按 5s/10s/20s/30s/60s 退避重连，直到成功；
  *      重连成功会重建隧道、刷新状态缓存（与点「连接」走同一段代码）。
  *   ② 开机自动连：管理器启动时如果上次连着某台服务器（activeServerId），自动把它连回来 ——
  *      打开应用就该看到"服务端运行中"，而不是一个空壳界面。
@@ -280,7 +281,7 @@ function closeTunnels(connId) {
  */
 const reconnectTimers = new Map();     // serverId -> timer
 const manualDisconnects = new Set();   // 用户明确点过「断开」的 serverId（不自动重连）
-/* 【2026-09-23 修「断网重连状态机反复循环」】正在被主动替换掉的旧连接所属的 serverId。
+/* 2026-09-23 修「断网重连状态机反复循环」：正在被主动替换掉的旧连接所属的 serverId。
  * 旧连接被 end() 时会抛 'close'，那不是真掉线；没有这个标记，'close' 会把"换连接"误判成
  * "掉线"，于是排一次重连、重连里又换连接、又抛 close …… 状态机空转不停（见 establishConnection）。 */
 const replacingConnections = new Set();
@@ -296,11 +297,11 @@ function cancelReconnect(serverId) {
 /** 与「连接」按钮同一段建立流程（鉴权 + 隧道 + 缓存作废 + 设为活动服务器）。 */
 async function establishConnection(server, opts = {}) {
   if (sshConnections.has(server.id)) {
-    /* 【2026-09-23 修「断网重连时状态机反复循环」】
+    /* 2026-09-23 修「断网重连时状态机反复循环」：
      * 这里换掉旧连接时调的 `end()` 会触发旧连接的 'close' 事件，而那一刻 sshConnections 里
      * 这台刚被 delete（下面一行），于是 'close' 里那条"是不是被新连接取代了"的判据
      *   `sshConnections.get(id) !== conn && sshConnections.has(id)`
-     * 两个条件都不成立 → **判定成"真掉线"** → scheduleReconnect → 5s 后再走一遍 connectStep
+     * 两个条件都不成立 → 判定成"真掉线" → scheduleReconnect → 5s 后再走一遍 connectStep
      * → 又在这里 end() 下一个连接 → 又触发一次 'close' …… 状态机就在
      * connecting → tunnels → server-starting → (failed) 之间空转，界面看起来"反复循环"。
      * 修法：先把这台标记成"正在主动替换"，让旧连接的 close 处理器认出这是自家人为切断、直接忽略。 */
@@ -314,7 +315,7 @@ async function establishConnection(server, opts = {}) {
   const conn = await connectOne(server, opts);
   sshConnections.set(server.id, conn);
   const tunnelsCreated = await openTunnels(server.id, conn, tunnelMapFor(server));
-  // 【2026-09-15】隧道没全建起来**不再当作"连上了"**：以前先记连接、隧道失败就没人管，
+  // 2026-09-15：隧道没全建起来不再当作"连上了"：以前先记连接、隧道失败就没人管，
   // 于是界面显示"服务端运行中"却所有界面都打不开。现在至少喊出来（并由 ensureTunnels 每次自愈重试）。
   const badTunnels = (tunnelsCreated || []).filter((x) => !x.ok);
   if (badTunnels.length) mlog(`[ssh] ${server.name || server.host} 隧道未全建成：${badTunnels.map((x) => `${x.name}(${x.error || '失败'})`).join('、')}`);
@@ -330,7 +331,7 @@ async function establishConnection(server, opts = {}) {
   // 连接掉了就自动重连（用户主动断开的那台除外）
   conn.on('close', () => {
     if (manualDisconnects.has(server.id)) return;
-    /* 【2026-09-23】主动替换旧连接时，旧连接也会抛 'close' —— 那不是掉线，不能当掉线处理。
+    /* 2026-09-23：主动替换旧连接时，旧连接也会抛 'close' —— 那不是掉线，不能当掉线处理。
      * 没有这一条就会自己触发自己：换连接 → 旧连接 close → 排重连 → 再换连接 …… 无限循环。 */
     if (replacingConnections.has(server.id)) return;
     if (sshConnections.get(server.id) !== conn && sshConnections.has(server.id)) return;
@@ -361,7 +362,7 @@ function scheduleReconnect(serverId, reason = '') {
   const t = setTimeout(async () => {
     reconnectTimers.delete(serverId);
     try {
-      /* 【2026-09-22】重连也走状态机：先 SSH + 隧道（成功即算连上），再后台等服务端组件就绪 +
+      /* 2026-09-22：重连也走状态机：先 SSH + 隧道（成功即算连上），再后台等服务端组件就绪 +
        * 静默预鉴权。以前这里 await establishConnection 就完事，界面上永远看不到"服务端还在起"。 */
       await connectStep(server, reason || 'reconnect');
       mlog(`[ssh] ${server.name || server.host} 自动重连成功（第 ${attempt} 次）`);
@@ -376,9 +377,9 @@ function scheduleReconnect(serverId, reason = '') {
 }
 
 /* ── 连接 + 状态机驱动（唯一入口）───────────────────────────────────────────
- * 主人 2026-09-22 要求："连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
+ * 2026-09-22：需求"连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
  * 「服务端启动中」状态机。" —— 以前开机自动连是走 scheduleReconnect 的，第一次要等 5 秒退避，
- * 而且界面上只有一句"服务端重连中…"：**服务器在起**和**凭据错了永远起不来**长得一模一样。
+ * 而且界面上只有一句"服务端重连中…"：服务器在起和凭据错了永远起不来长得一模一样。
  * 现在所有连接入口（开机自动连 / 用户点连接 / 掉线重连）都走这里，边走边把状态机推给界面看。 */
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -397,7 +398,7 @@ async function connectStep(server, reason = 'manual', opts = {}) {
   return created;
 }
 
-/** 第二步：等服务端那三个组件逐个就绪（边走边更新状态机），就绪后**静默预鉴权一次** NapCat 界面。 */
+/** 第二步：等服务端那三个组件逐个就绪（边走边更新状态机），就绪后静默预鉴权一次 NapCat 界面。 */
 async function waitServerReady(server, reason = 'manual', { waitServerMs = 150000, pollMs = 4000 } = {}) {
   const conn = sshConnections.get(server.id);
   const napPort = tunnelLocalPort(server.id, 'NapCat WebUI', 13000);
@@ -417,22 +418,20 @@ async function waitServerReady(server, reason = 'manual', { waitServerMs = 15000
      * 也带着明细，界面不会在最后一步把三件套的状态清空。 */
     connectMachine.remote(st, reason);
     if (d.ready) {
-      const r = await warmNapcatWebuiOnce({
-        scope: server.id, port: napPort,
-        token: String(st?.napcat?.webuiToken || '').trim() || cachedNapcatWebuiToken(server.id, napPort),
-        reason: 'startup',
-      });
+      /* 2026-09-23 去除探针：以前这里会"静默预鉴权"一次 —— 真打一发 NapCat 的登录接口。
+       * 那一发正是 WebUI 页面首次登录要用的，所以删掉：只把状态机推到 ready，一个请求都不发。 */
+      const r = { ok: true, removed: true, skipped: true, note: '预鉴权已去除（登录额度全部留给 WebUI 页面自己）' };
       connectMachine.warmed(r, reason);
       return { ok: true, warm: r, remote: st };
     }
     /* 整套都没在跑时不用干等：状态机已经写明"点一键启动整套"，这里就到点为止。
-     * 【2026-09-23】注意这条 break 之后**不能**直接判 failed 就完事：服务端刚开机/刚重启时
+     * 2026-09-23：注意这条 break 之后不能直接判 failed 就完事：服务端刚开机/刚重启时
      * "三件套都没在跑"是正常的过渡态，旧代码在这里 fail 之后没有任何人再推进状态机，
      * 界面就永远停在"连接失败"，而重连定时器还在按退避反复触发 → 看起来就是"反复循环"。 */
     if (d.down) break;
     await sleepMs(pollMs);
   }
-  /* 到点或遇到"整套没在跑"：如实记失败原因，但**同时安排一次重连**，让状态机能自己走下去。
+  /* 到点或遇到"整套没在跑"：如实记失败原因，但同时安排一次重连，让状态机能自己走下去。
    * 已在重连中（reconnectTimers 有本机）时不重复排，避免叠加定时器。 */
   connectMachine.fail(new Error('服务端组件到点还没就绪（看状态机里的组件明细，或点「一键启动整套」）'), reason);
   if (!reconnectTimers.has(server.id) && !manualDisconnects.has(server.id)) {
@@ -441,7 +440,7 @@ async function waitServerReady(server, reason = 'manual', { waitServerMs = 15000
   return { ok: false, remote: connectMachine.get().components };
 }
 
-/* 说明：连接一共两步（connectStep → waitServerReady）。**故意不提供"两步串起来等到底"的封装**：
+/* 说明：连接一共两步（connectStep → waitServerReady）。故意不提供"两步串起来等到底"的封装：
  * 三个入口（开机自动连 / 点连接 / 掉线重连）都需要在第一步失败时各自做不同的事
  * （排重连、回人话、记失败性质），第二步则一律后台跑，否则界面会卡几十秒。 */
 
@@ -468,13 +467,13 @@ function connectOne(server, opts = {}) {
       // 不开这个开关，ssh2 会在"所有方式都失败"上直接放弃 —— 表现就是那句没头没脑的
       // "All configured authentication methods failed"。开了以后两种服务器都能连。
       tryKeyboard: true,
-      // 【2026-09-15 主人反馈"老是断连"】keepaliveInterval 原来只有 30s、没写 keepaliveCountMax（ssh2 默认 3），
-      // 也就是**连续 3 次探测（≈90 秒）没回应就直接判死断开**。家庭网络抖动/NAT 超时很常见，
+      // 2026-09-15 反馈"老是断连"：keepaliveInterval 原来只有 30s、没写 keepaliveCountMax（ssh2 默认 3），
+      // 也就是连续 3 次探测（≈90 秒）没回应就直接判死断开。家庭网络抖动/NAT 超时很常见，
       // 于是隔一阵就掉一次，而掉了以后管理器又不会自己重连（见 scheduleReconnect）。
       // 现在放宽到 6 次（≈3 分钟容错），配合下面的自动重连，掉线也能自己恢复。
       keepaliveInterval: 30000, keepaliveCountMax: 6,
       // 认证失败时把服务器回的 USERAUTH_FAILURE(允许哪些方式) 抓下来 —— 这是后面翻译成
-      // 可执行建议的唯一证据来源。只留认证相关行，并**遮蔽凭据**（debug 流里可能带上发出去的内容）。
+      // 可执行建议的唯一证据来源。只留认证相关行，并遮蔽凭据（debug 流里可能带上发出去的内容）。
       debug: debugLines ? (m) => {
         let s = String(m);
         for (const sec of [server.password, server.passphrase]) {
@@ -504,7 +503,7 @@ function readServerAuthMethods(debugLines) {
 /**
  * 把认证失败翻译成"下一步该干什么"。
  * ssh2 只会给一句 `All configured authentication methods failed`，它把下面这些完全不同的情况
- * 糊成同一句话，用户根本没法判断（主人 2026-09-12 就是这么被卡住的）：
+ * 糊成同一句话，用户根本没法判断（2026-09-12 现场卡住的就是这一处）：
  *   · 密码错 / 服务器上的密码改过；
  *   · 服务器根本不允许密码登录（只允许密钥）；
  *   · 我们压根没带凭据（密码为空 / 私钥路径没填 / 文件读不到）；
@@ -537,8 +536,8 @@ function describeAuthError(server, err, serverMethods, sentMethods) {
 }
 
 /**
- * 诊断一次认证失败：**不再另开连接**，直接用刚才那次连接的 debug 证据翻译（少一次连接 = 少两次认证尝试，
- * 避免在开了 fail2ban 的机器上把 IP 试封）。**不打印任何凭据**。
+ * 诊断一次认证失败：不再另开连接，直接用刚才那次连接的 debug 证据翻译（少一次连接 = 少两次认证尝试，
+ * 避免在开了 fail2ban 的机器上把 IP 试封）。不打印任何凭据。
  */
 function sshAuthDiagnose(server, err, debugLines = [], sentMethodsExtra = []) {
   const sentMethods = [];
@@ -591,7 +590,7 @@ function instancePort(id, cfg) {
 
 /**
  * TCP 探活 127.0.0.1:port（最长 400ms，失败一律当"没在跑"）。
- * 为什么需要：管理器的 running 只看**本进程**的 runtimes 表，重启管理器后它就是空的 ——
+ * 为什么需要：管理器的 running 只看本进程的 runtimes 表，重启管理器后它就是空的 ——
  * 但它拉起的 NapCat/DSH/桥接往往还活得好好的（NapCat 尤其：重复拉起会挤掉登录态）。
  * 状态要如实、启动要防重复，都得靠真实端口判断，而不是靠内存里记没记过。
  */
@@ -610,7 +609,7 @@ function probePort(port, timeoutMs = 400) {
 }
 
 /**
- * 管理器自身的日志。管理器是 start-manager-hidden.vbs 用 wscript **无窗口**拉起的，stdout/stderr 没人接管，
+ * 管理器自身的日志。管理器是 GUI 子系统启动的（无控制台），stdout/stderr 没人接管，
  * 一句 console.error 等于什么都没写 —— 之前"管理端保存了模型但 DSH 没变"就是这么静默掉的（前端还显示"已保存"）。
  * 关键动作一律调用本函数：既进控制台，也落到 ~/.qq-bridge-manager/logs/manager.log 供事后排查。
  */
@@ -664,22 +663,22 @@ function buildRuntimeInfo(id, cfg) {
     url = `http://127.0.0.1:${cfg.port}`;
     /* 官方 dsh（0.1.2+，token 鉴权）：把日志里最新 web token 拼进 GUI「打开」的 URL，
      * 否则 0.1.2 对无 token 请求返回 401 → iframe 白屏 / 「打不开」。
-     * 【2026-09-23】原来这段写在 `if (running)` 里 —— 而 `running` 看的是本进程的 runtimes：
-     * **管理器自身重启后 runtimes 是空的，DSH 却还在跑**，那种情况就取不到 token（点开 401）。
+     * 2026-09-23：原来这段写在 `if (running)` 里 —— 而 `running` 看的是本进程的 runtimes：
+     * 管理器自身重启后 runtimes 是空的，DSH 却还在跑，那种情况就取不到 token（点开 401）。
      * 日志里永远有"最近一次启动"打的 token，所以无条件读。 */
     const tok = readLatestDshToken(instanceLogPath(id));
     if (tok) url = `http://127.0.0.1:${cfg.port}/?token=${tok}`;
     probeUrl = `http://127.0.0.1:${cfg.port}`;
   }
   if (id === 'napcat-local') {
-    /* 【2026-09-15 主人要求】NapCat 界面链接**直接带鉴权**，别再让人手输 token：
+    /* 2026-09-15：需求 NapCat 界面链接直接带鉴权，别再让人手输 token：
      *   http://127.0.0.1:6099/webui/?token=<webuiToken>
      * （NapCat 的 WebUI 登录页认 ?token=；之前只给 `http://127.0.0.1:6099`，点开还要自己贴 token。）
-     * 【2026-09-20 修「点进去报 Unauthorized」】token 的来源改成**现场真相优先**：
+     * 2026-09-20 修「点进去报 Unauthorized」：token 的来源改成现场真相优先：
      *   NapCat 自己 webui.json 里的 token → 管理器配置 → 最近一次验证可用的 → 出厂 truefriend。
      * 以前只读管理器配置，旧配置里没有这个键时 URL 就是裸链接（页面拿不到 Credential，
      * 于是「获取QQ列表失败: Unauthorized / 获取二维码失败: Unauthorized」）——见上面 napcatWebuiTokenFor。
-     * 【2026-09-21 主人要求：服务器在跑时本地既不起也不探】下面那次验证会被
+     * 2026-09-21：需求"服务器在跑时本地既不起也不探"。下面那次验证会被
      * verifyNapcatWebuiToken 里的 localNapcatOffReason 闸门拦下（判据与日志见该函数），
      * 所以这里不再每分钟戳一次 local:6099、也不再刷「令牌验证失败」。 */
     const port = cfg.webuiPort || 6099;
@@ -711,11 +710,11 @@ function spawnDetached(cmd, args, opts) {
 }
 
 /**
- * 起一个长期实例，把它的 stdout/stderr **直接重定向到日志文件**（不再由管理器用管道转发）。
+ * 起一个长期实例，把它的 stdout/stderr 直接重定向到日志文件（不再由管理器用管道转发）。
  *
- * 为什么必须这样（2026-09-12 实测）：以前是 `child.stdout.pipe(logStream)` —— 日志管道归**管理器进程**所有。
+ * 为什么必须这样（2026-09-12 实测）：以前是 `child.stdout.pipe(logStream)` —— 日志管道归管理器进程所有。
  * 管理器一旦被重启/被 Electron 壳 taskkill，管道读端就没了，子进程下一次写 stdout 就是 EPIPE，
- * Node 对 stdout 的未处理 error 会**直接把进程打死**：表现是"重启了一下管理器，桥就悄悄没了、
+ * Node 对 stdout 的未处理 error 会直接把进程打死：表现是"重启了一下管理器，桥就悄悄没了、
  * 机器人不再回消息，而且日志里连一句错误都没有"（因为 stderr 也断了，崩栈写不出去）。
  * 改成文件描述符后，子进程直写文件，管理器死活与它无关。
  */
@@ -849,20 +848,20 @@ function startIsolatedDsh(cfgIso) {
         writeFileSync(join(dstProfile, 'package.json'), JSON.stringify({ name: 'isolated-web-profile', private: true, version: '0.0.0', 'dsh': { profile: { bundles: [] } } }, null, 2), 'utf8');
       }
       const logFile = instanceLogPath(id);
-      // 日志不再是"管理器用管道转发"，而是子进程**直写文件**（根因见 spawnWithLogFile 的注释：
+      // 日志不再是"管理器用管道转发"，而是子进程直写文件（根因见 spawnWithLogFile 的注释：
       // 管理器一重启，管道断 → 子进程 EPIPE → 被自己的 stdout 打死）。
       const logStream = { write: (s) => { try { appendFileSync(logFile, s, 'utf8'); } catch { /* ignore */ } } };
       logStream.write(`\n===== start ${new Date().toISOString()} =====\n`);
       if (!existsSync(dshBin)) { resolve({ success: false, message: `找不到 dsh 可执行文件：${dshBin}` }); return; }
       // 全新机器引导标记：DSH_HOME 尚未被 qq-bridge setup 初始化过 → 先以最小 profile 起一次再注入 preset
       const bootMarker = join(home, 'qqbridge-setup.done');
-      /* 【2026-09-23 随「payload 升到 dsh 0.1.2-rc.1」一起加】rc.1 起，profile 的 patchReload 默认是
+      /* 2026-09-23 随「payload 升到 dsh 0.1.2-rc.1」一起加：rc.1 起，profile 的 patchReload 默认是
        * live（dsh-app-boot 的 PROFILE_TEMPLATES.web 默认值），会加载 @deepseek-ai/cordis-plugin-hmr；
        * 而 rc.1 的 HMR 构造函数要求进程带 `--expose-internals`，否则整个 boot 直接失败：
        *     failed to apply loader entry (@deepseek-ai/cordis-plugin-hmr):
        *     --expose-internals is required for HMR service
        * （rc.6 的 HMR 没有这条要求，所以以前不传也能起。）
-       * 这里跑的是 qbm-node.exe —— **真 Node**，Node 命令行 flag 是通的（实测 `qbm-node.exe
+       * 这里跑的是 qbm-node.exe —— 真 Node，Node 命令行 flag 是通的（实测 `qbm-node.exe
        * --expose-internals -e …` 的 process.execArgv 里有它；Electron-as-Node 那边则会被 Electron 吃掉，
        * 这正是 E 盘隔离版只能把 patchReload 钉成 startup 的原因）。补上它既让 rc.1 起得来，
        * 又保住 patch 文件热加载。只在直接调 bin.js（真 Node 路径）时加，走 .cmd shim 时不加。 */
@@ -985,23 +984,23 @@ function findNapcatOneKeyAll() {
 }
 
 /* ── 「本机 NapCat 现在到底该不该被探」───────────────────────────────────────────────
- * 现场（主人 2026-09-21 的日志 %APPDATA%\moonbot\moonbot-backend.log，整夜每 60 秒一条）：
+ * 现场（2026-09-21 的日志 %APPDATA%\moonbot\moonbot-backend.log，整夜每 60 秒一条）：
  *   [autostart] 按实例配置跳过（不随应用启动）：napcat-local, dsh-isolated, bridge-local
  *   [napcat] WebUI 令牌验证失败：local:6099 的 2 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）—— 60 秒内不再重试
- * 而主人那台机器的配置（homedir\.qq-bridge-manager\config.json）写得很清楚：
+ * 而本机那份配置（homedir\.qq-bridge-manager\config.json）写得很清楚：
  *   activeServerId = "mtsne5al"（目标在服务器 202.61.72.79）
  *   instances.napcatLocal = { enabled: true, autoStartOnBoot: false, webuiPort: 6099 }
- * 也就是「本机 NapCat 明确不跑、当前目标是服务器」。autostart **已经**如实跳过它（上面第一条日志就是它写的），
+ * 也就是「本机 NapCat 明确不跑、当前目标是服务器」。autostart 已经如实跳过它（上面第一条日志就是它写的），
  * 但"拼链接"这条路没看这份配置：/api/state（前端 4 秒一轮询）每次都会走到
  * verifyNapcatWebuiToken('local', 6099, …)，戳不通就写一行「令牌验证失败」——
  * 探测本身毫无意义（本机 NapCat 根本没起），日志却看起来像真出了故障。
- * 主人原话：「服务器起的时候本地不该起」。判据只取 **autostart 用的同一份配置**，不猜实例语义：
+ * 需求原话：「服务器起的时候本地不该起」。判据只取 autostart 用的同一份配置，不猜实例语义：
  *   ① cfg.autoStartOnBoot === false                → 全局「不自动启动」，本机这套不常驻
- *   ② instances.napcatLocal.autoStartOnBoot === false → 实例级同名开关（主人这份配置命中的就是它）
+ *   ② instances.napcatLocal.autoStartOnBoot === false → 实例级同名开关（该配置命中的就是它）
  *   ③ cfg.activeServerId 非空                      → 当前目标是服务器那套（界面也已整体切成服务端语义，见 src/pages/Home.tsx 的 serverMode）
- * 三条都不成立（= 用户确实在跑本机那套）→ 行为与以前**一字不变**。
- * 注意：这里只管"探不探/写不写日志"。**起**由 scheduleAutoStart 管（它本来就按 ①② 跳过），
- * 手动点「启动」不受影响（主人可能就是要切回本机，见 Home.tsx 的本机语义分支）。
+ * 三条都不成立（= 用户确实在跑本机那套）→ 行为与以前一字不变。
+ * 注意：这里只管"探不探/写不写日志"。"起"由 scheduleAutoStart 管（它本来就按 ①② 跳过），
+ * 手动点「启动」不受影响（用户可能就是要切回本机，见 Home.tsx 的本机语义分支）。
  */
 function localNapcatOffReason(cfg = null) {
   const c = cfg ?? loadConfig();
@@ -1013,96 +1012,76 @@ function localNapcatOffReason(cfg = null) {
 }
 
 /* ── NapCat WebUI 令牌解析（2026-09-20 修「点进 NapCat 就报 Unauthorized」）──────────────
- * 现场：主人从管理器点开 NapCat 界面，页面里报
+ * 现场：从管理器点开 NapCat 界面，页面里报
  *   `获取QQ列表失败: Unauthorized` / `获取二维码失败: Unauthorized`
  * 而他并没有掉登录，链接也"带着鉴权 token"。查清了机制（读 NapCat 自己的 WebUI 前端 bundle）：
  *   · 页面从 URL 的 `?token=<明文 token>` 取值 → 自己算 `sha256(token + ".napcat")` →
- *     `POST /api/auth/login {hash}` 换一个 **Credential** → 存进 localStorage →
+ *     `POST /api/auth/login {hash}` 换一个 Credential → 存进 localStorage →
  *     之后所有接口靠 `Authorization: Bearer <Credential>`。
- *   · 也就是说：**URL 里没有 token（或 token 不对）= 页面永远拿不到 Credential** →
+ *   · 也就是说：URL 里没有 token（或 token 不对）= 页面永远拿不到 Credential →
  *     它自己那几个接口（GetQQLoginList / GetQQLoginQrcode…）全部回 `{"code":-1,"message":"Unauthorized"}`。
  * 于是根因很直接：管理器拼 URL 时的 token 来源不可靠 ——
- *   · 本机那两条链接读的是 **管理器配置** `instances.napcatLocal.webuiToken`（旧配置里可能压根没这个键 → URL 不带 token）；
- *   · 服务端那条读的是**上一次 SSH 探测结果**（探测没跑/没成功时为空 → URL 也不带 token）。
- * 现场真相只有一个：**NapCat 自己的 `webui.json` 里的 token**。所以这里：
+ *   · 本机那两条链接读的是 管理器配置 `instances.napcatLocal.webuiToken`（旧配置里可能压根没这个键 → URL 不带 token）；
+ *   · 服务端那条读的是上一次 SSH 探测结果（探测没跑/没成功时为空 → URL 也不带 token）。
+ * 现场真相只有一个：NapCat 自己的 `webui.json` 里的 token。所以这里：
  *   ① 本机：直接读 NapCat 的配置目录（findNapcatOneKey → findNapcatConfigDir → webui.json）；
  *   ② 缓存"最近一次确认可用的 token"（本机 / 每台服务器各一份），状态探测与令牌卡片写回时都会更新；
- *   ③ 顺手用 NapCat 的登录接口**验一次**（后台、fire-and-forget）：候选不对就换成真能登进去的那个，
+ *   ③ 顺手用 NapCat 的登录接口验一次（后台、fire-and-forget）：候选不对就换成真能登进去的那个，
  *      并把结果写进缓存，下一次点开就是用对的那个；
- *   ④ 拼 URL 时**永远带上 token**（拿不到就退回最近一次可用值 / 出厂 truefriend，至少不是裸链接）。
+ *   ④ 拼 URL 时永远带上 token（拿不到就退回最近一次可用值 / 出厂 truefriend，至少不是裸链接）。
  */
 const NAPCAT_WEBUI_TOKEN_FALLBACK = 'truefriend';
 /** `${scope}:${port}` → { token, at, verified }；scope 是 'local' 或 server.id */
 const napcatWebuiTokenCache = new Map();
 
-/* 【2026-09-22 根治「登录还 limit」】NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的**限量资源**，
+/* 2026-09-22 根治「登录还 limit」：NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的限量资源，
  * 而 WebUI 页面自己也要用它登录一次。管理器以前有 3 条路径各自打它（/api/state 的令牌验证、本机/远端入口
  * 拼接、以及新增的 /api/napcat/webui-ready 每 2 秒一次），全走同一个 IP —— 探针一多，页面就登不进去。
  * 现在全部收口到这一个 funnel：缓存结论 30 分钟、自限 2 次/分钟、撞限流冷却 65 秒，
- * 并且**只有显式要求（?verify=1）或结论过期时**才真的登一次。 */
-const napcatAuth = createNapcatWebuiAuth({
-  log: (m) => mlog(m),
-  hashOf: (t) => sha256Hex(t),
-});
+ * 并且只有显式要求（?verify=1）或结论过期时才真的登一次。 */
+/* 2026-09-23：去除探针与状态检测。上面那个 funnel 也一并去掉了 ——
+ * 管理器不再用 `POST /api/auth/login` 去"验证"任何令牌，一次都不打。
+ *
+ * 为什么必须连 funnel 一起拿掉：那个接口是每 IP 每 60 秒 loginRate（出厂 10）次的限量桶，
+ * 而 WebUI 页面自己登录也从这里扣。探针每打一发，页面就少一发；打光了页面就报
+ *   「获取QQ列表失败: Unauthorized」「获取二维码失败: Unauthorized」
+ * （现场：全新机器首次拉起 NapCat、用户第一次打开 WebUI 页面，管理器同时在后台验令牌，
+ *   `napcatWebuiTokenFor` 拼 URL 就 fire-and-forget 一次，`verifyNapcatWebuiToken` 最多试 3 个候选 = 3 发，
+ *   本机预热每 60 秒还来一发 —— 页面那一发被挤掉，用户看到「首次鉴权失败」）。
+ *
+ * 现在的口径：
+ *   · 令牌一律取现场真相（本机读 webui.json、远端读服务器上的 webui.json，见
+ *     buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），不验证、不猜、不联网；
+ *   · "NapCat 起没起"另有不花登录额度的 HTTP 探活（probe /webui/）；
+ *   · 登录额度 100% 留给 WebUI 页面自己。 */
 
-/* ── 连接服务端的状态机（主人要求：开机自动连 + 能看到"服务端启动中"）───────────────
+/** 令牌验证/预热的能力已整体删除；这个名字保留只为让老调用点读到一句诚实的说明。 */
+const NAPCAT_WEBUI_PROBING_REMOVED = {
+  removed: true,
+  note: '探针与状态检测已去除：管理器不再用登录接口验证令牌，也不再静默预鉴权。登录额度全部留给 WebUI 页面自己。',
+};
+
+/* ── 连接服务端的状态机（需求：开机自动连 + 能看到"服务端启动中"）───────────────
  * 阶段：connecting(SSH) → tunnels → server-starting(组件逐个就绪) → warming(静默预鉴权) → ready / failed。
  * 界面读 `GET /api/connect`（或在 /api/state 的 connect 字段里），不动任何网络、不花 NapCat 的登录额度。 */
 const connectMachine = createConnectMachine({
   log: (m) => mlog(m),
 });
-/** 已经"静默预鉴权"过的 NapCat 界面：`${scope}:${port}:${token}` → at。同一个 token 只预鉴权一次。 */
-const napcatWarmDone = new Map();
-const NAPCAT_WARM_TTL_MS = 45 * 60 * 1000;   // 与 NapCat Credential 的有效口径对齐（它一小时有效）
-
-/**
- * 静默预鉴权：**整个应用生命周期里、每个 token 只做一次**（主人 2026-09-22 要求
- * "第一次启动应用、等服务端连接上之后后台自动静默鉴权一次就够了，不要每次点一下就鉴权一次"）。
- * 仍然走 funnel（会花 NapCat 一次登录额度，但只在连接刚建立/本地 NapCat 刚起来时发生一次），
- * 结果记进 napcatWarmDone，`/api/napcat/webui-ready` 会把它回给界面，界面据此**不再重载**。
- */
-async function warmNapcatWebuiOnce({ scope, port, token, reason = 'startup' }) {
-  const t = String(token ?? '').trim();
-  if (!t) return { ok: false, note: '没有可用的 WebUI 令牌' };
-  const key = `${scope}:${port}:${t}`;
-  const at = Number(napcatWarmDone.get(key)) || 0;
-  if (at && Date.now() - at < NAPCAT_WARM_TTL_MS) return { ok: true, note: '本次启动已经预鉴权过（不再重复登）', cached: true };
-  const r = await napcatAuth.verify({ scope, port, token: t, timeoutMs: 5000, reason: `warm-${reason}` });
-  if (r.ok) napcatWarmDone.set(key, Date.now());
-  return r;
-}
-
-/** 界面问"这个 token 预热过没有"。 */
-function napcatWarmInfo(scope, port, token) {
-  const at = Number(napcatWarmDone.get(`${scope}:${port}:${String(token ?? '').trim()}`)) || 0;
-  return { done: at > 0 && Date.now() - at < NAPCAT_WARM_TTL_MS, at };
-}
-
-/**
- * 本机 NapCat 起来了吗？起来了就**一次性**静默预鉴权它的 WebUI（同一个 token 一小时只做一次）。
- * 主人："至于本地端，你自己看着改" —— 本机 NapCat 平时不随应用启动，所以不能只在开机试一次：
- * 每 60 秒看一眼它起没起，起来了就预热一次（走 funnel 的预算与缓存，绝不会变成轮询登录）。
- */
-async function warmLocalNapcatIfUp() {
-  const cfg = loadConfig();
-  if (localNapcatOffReason(cfg)) return { skipped: 'off' };
-  const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
-  const port = Number(napLocal.webuiPort) || 6099;
-  const up = await probe(`http://127.0.0.1:${port}/webui/`, 1200);
-  if (!up.reachable) return { skipped: 'down' };
-  const token = String(localNapcatWebuiTokenFromFile() || napLocal.webuiToken || '').trim();
-  if (!token) return { skipped: 'no-token' };
-  if (napcatWarmInfo('local', port, token).done) return { skipped: 'already-warm' };
-  const r = await warmNapcatWebuiOnce({ scope: 'local', port, token, reason: 'local-startup' });
-  mlog(`[napcat] 本机界面静默预鉴权：${r.ok ? '成功（点开即用）' : '未成功 —— ' + r.note}`);
-  return r;
-}
+/* 2026-09-23：去除探针与状态检测。"静默预鉴权"整套已删除：
+ *   · `napcatWarmDone` / `NAPCAT_WARM_TTL_MS`（预热去重表）
+ *   · `warmNapcatWebuiOnce()`（真打一发 NapCat 登录接口）
+ *   · `napcatWarmInfo()`（给界面看"预热过没有"）
+ *   · `warmLocalNapcatIfUp()`（每 60 秒看一眼本机 NapCat 起没起，起来了就预热一次）
+ * 为什么必须删：预鉴权花的那一发，正是 WebUI 页面自己首次登录要用的那一发 ——
+ * 挤掉了它，用户看到的就是「首次鉴权失败 / 获取QQ列表失败: Unauthorized」。
+ * 删掉之后"点开即用"其实不受影响：链接里的 token 仍是从 webui.json 读来的现场真相，
+ * 而 NapCat 的 Credential 由页面自己那一次登录建立。 */
 
 function sha256Hex(s) {
   return crypto.createHash('sha256').update(String(s ?? '')).digest('hex');
 }
 
-/** 本机 NapCat 的 webui.json 里的 token = **现场真相**（读不到就返回空，不猜）。 */
+/** 本机 NapCat 的 webui.json 里的 token = 现场真相（读不到就返回空，不猜）。 */
 function localNapcatWebuiTokenFromFile(shellDir = null) {
   const dirs = [];
   try {
@@ -1129,19 +1108,8 @@ function localNapcatWebuiTokenFromFile(shellDir = null) {
   return '';
 }
 
-/**
- * 这个 token 现在真的能被这个 NapCat 接受吗？
- * 判据就是它自己的登录接口：`POST /api/auth/login {hash: sha256(token + ".napcat")}` → `code === 0`。
- * （这条形状是从 NapCat 前端 bundle 的 `loginWithToken()` 里读出来的，不是猜的。）
- *
- * 【2026-09-22 收口】真正的调用只在 `server/napcat-webui-auth.js` 里发生一次；这里只是把它包成
- * "行/不行"，并**带上 scope**（预算与缓存按 scope:port 记账）。以前这个函数是各调用点直接 fetch 的，
- * 于是每条路径都能独立把 NapCat 的登录额度打光。返回 `{ ok, status, note }` 的版本见 verifyNapcatWebuiToken。
- */
-async function napcatWebuiTokenWorks(port, token, timeoutMs = 6000, scope = 'local', reason = 'probe') {
-  const r = await napcatAuth.verify({ scope, port, token, timeoutMs, reason });
-  return r.ok === true;
-}
+/* 2026-09-23：`napcatWebuiTokenWorks()` 已删除：它做的事情就是"打一发登录接口看通不通"，
+ * 而登录额度是 WebUI 页面自己的。它本来就只剩这一个定义、没有任何调用点（删前已全仓确认）。 */
 
 /** 记下"最近一次确认可用"的 token（状态探测、令牌卡片写回、验证成功时都调这个）。 */
 function rememberNapcatWebuiToken(scope, port, token, verified = false) {
@@ -1172,23 +1140,23 @@ function napcatWebuiTokenFor(scope, port, candidates = []) {
   candidates.forEach(add);
   add(cachedNapcatWebuiToken(scope, port));
   add(NAPCAT_WEBUI_TOKEN_FALLBACK);
-  /* 后台验一次：**复用 verifyNapcatWebuiToken**（它带 60 秒失败冷却与唯一的日志点），
-   * 否则这条同步路径会在 NapCat 没起时每次调用都试一遍并写一行日志（实测 5 秒一条，刷屏）。 */
-  void verifyNapcatWebuiToken(scope, port, candidates).catch(() => {});
+  /* 2026-09-23 去除探针：以前这里 fire-and-forget 地在后台验一次令牌 —— 每拼一次 URL 就可能打一发
+   * NapCat 登录接口。现在一律直接用首选候选：首选就是现场真相（webui.json / SSH 读回的值），
+   * 它本来就该是页面拿到的那个 token。 */
   return list[0] || '';
 }
 
 /**
- * 先解析、再**验一次**，返回最终该放进 URL 的 token（异步版，给 /api/state 用）。
- * 为什么值得多等这几百毫秒：主人的症状是"点进去报 Unauthorized，有时候好有时候坏"——
- * 文件里的 token 与**正在跑的那个 NapCat**实际认的 token 不一致时就会这样（改了配置没重启、
+ * 先解析、再验一次，返回最终该放进 URL 的 token（异步版，给 /api/state 用）。
+ * 为什么值得多等这几百毫秒：现场症状是"点进去报 Unauthorized，有时候好有时候坏"——
+ * 文件里的 token 与正在跑的那个 NapCat 实际认的 token 不一致时就会这样（改了配置没重启、
  * 或 NapCat 是被别人拉起来的）。这里在返回链接之前确认一遍，验证过的结果缓存 30 分钟，
  * 所以只在"第一次"或"换了 token"时才真的多一次本地请求。
  */
-/** 验证失败的冷却：NapCat 没起时 `/api/state` 每几秒来一次，没有冷却就会反复试 + 刷屏日志。 */
-const napcatWebuiVerifyFailAt = new Map();
-const NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS = 60 * 1000;
-
+/* 2026-09-23：去除探针与状态检测。
+ * `napcatWebuiVerifyFailAt` / `NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS`（失败冷却）已删除 ——
+ * 没有网络验证了，也就没有"失败"要冷却。下面的函数名保留（两个老调用点还在用），
+ * 但它现在是个纯本地选候选的函数：不 fetch、不打登录接口、零额度消耗。 */
 async function verifyNapcatWebuiToken(scope, port, candidates = [], { factoryFallback = true } = {}) {
   const list = [];
   const add = (v) => { const t = String(v ?? '').trim(); if (t && !list.includes(t)) list.push(t); };
@@ -1196,38 +1164,20 @@ async function verifyNapcatWebuiToken(scope, port, candidates = [], { factoryFal
   const cached = cachedNapcatWebuiToken(scope, port);
   add(cached);
   add(NAPCAT_WEBUI_TOKEN_FALLBACK);
-  /* 【2026-09-21】本机 NapCat 没启用 / 当前目标是服务器 → **一次都不探、一行都不写**（判据见 localNapcatOffReason）。
-   * 闸门放在这个函数里，因为它是**唯一**的探测点 + 唯一的日志点：buildRuntimeInfo、resolveServices
+  /* 2026-09-21：本机 NapCat 没启用 / 当前目标是服务器 → 一次都不探、一行都不写（判据见 localNapcatOffReason）。
+   * 闸门放在这个函数里，因为它是唯一的探测点 + 唯一的日志点：buildRuntimeInfo、resolveServices
    * 以及将来任何新增调用点都拦得住，不会再有人绕过它去戳 local:6099。
    * 返回首选候选（有现场真相就用现场真相），只是不做网络验证 —— 调用方拿到的 token 与以前同形。 */
   if (scope === 'local' && localNapcatOffReason()) return list[0] || '';
-  const cacheKey = `${scope}:${port}`;
-  const failedAt = Number(napcatWebuiVerifyFailAt.get(cacheKey)) || 0;
-  if (Date.now() - failedAt < NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS) return list[0] || '';   // 刚验过且全失败：冷却期内直接用首选，不重复试
-  for (const cand of list.slice(0, 3)) {
-    if (cand === cached && napcatWebuiTokenCache.get(cacheKey)?.verified) return cand;   // 验过的直接用
-    /* 【2026-09-22】这次验证走 funnel：预算用完 / 撞限流冷却期内它**不会**发请求，返回 status='budget'|'limited'。
-     * 那种情况下**立刻 break**：继续试下一个候选只会把 NapCat 的登录额度继续烧掉（页面的那份）。 */
-    const r = await napcatAuth.verify({ scope, port, token: cand, timeoutMs: 2500, reason: 'state' });
-    if (r.ok) {
-      napcatWebuiVerifyFailAt.delete(cacheKey);
-      rememberNapcatWebuiToken(scope, port, cand, true);
-      if (list[0] && cand !== list[0]) mlog(`[napcat] WebUI 令牌修正：${cacheKey} 首选候选进不去，改用验证通过的候选（点开就是对的）`);
-      return cand;
-    }
-    if (r.status === 'limited' || r.status === 'budget') {
-      mlog(`[napcat] WebUI 令牌验证让路：${cacheKey} ${r.note}`);
-      napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
-      break;
-    }
-  }
-  napcatWebuiVerifyFailAt.set(cacheKey, Date.now());
-  mlog(`[napcat] WebUI 令牌验证失败：${cacheKey} 的 ${list.length} 个候选都进不去（NapCat 没起 / 端口不是它 / token 与配置不一致）—— ${Math.round(NAPCAT_WEBUI_VERIFY_FAIL_COOLDOWN_MS / 1000)} 秒内不再重试`);
-  /* 【2026-09-21 修「链接带着 token 却 Unauthorized」】远端（scope = server.id）：出厂值 truefriend 只是
-   * **一个待验证的候选**，验不过就绝不塞进 URL —— 它不是从目标端读来的（现场真相是服务端
-   * /root/napcat/config/webui.json，见 buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），
-   * 塞进去的表现恰恰就是主人报的「页面带着 token 却报 Unauthorized」。
-   * 本机仍按老约定带一个 token（NapCat 自己 webui.json 就是现场真相，URL 没 token 页面同样拿不到 Credential）。 */
+  /* 2026-09-23 去除探针：这里以前会顺序试最多 3 个候选（= 最多 3 发登录额度），验通了才用。
+   * 现在一次都不试：直接返回首选候选。首选的来源本来就是现场真相 ——
+   * 本机是 NapCat 自己的 webui.json（见 localNapcatWebuiTokenFromFile），
+   * 远端是 SSH 读回的服务端 webui.json（见 buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），
+   * 也就是说：页面拿到的 token 与 NapCat 自己认的那个天然一致，不需要管理器去替它验证。
+   * 远端仍然保留"出厂值只当候选"的老约定（factoryFallback=false 时剔掉 truefriend），
+   * 因为那不是从目标端读来的 —— 塞进 URL 的表现就是「页面带着 token 却报 Unauthorized」。 */
+  void cached;
+  void port;
   const usable = factoryFallback ? list : list.filter((t) => t !== NAPCAT_WEBUI_TOKEN_FALLBACK);
   return usable[0] || '';
 }
@@ -1254,6 +1204,19 @@ function findNapcatConfigDir(shellDir) {
     }
   }
   return null;
+}
+
+/** NapCat 配置目录的预期路径。
+ *
+ *  `findNapcatConfigDir()` 只认"已经存在"的目录，返回 null；但"首启前预置 webui.json"
+ *  这个场景恰恰是目录还不存在的时候，所以这里用随包 QQ 的版本号把路径算出来。
+ *  存在的目录优先，保证与 NapCat 自己实际用的那个一致。 */
+function napcatConfigDirProspective(shellDir) {
+  const existing = findNapcatConfigDir(shellDir);
+  if (existing) return existing;
+  const v = napcatBundledQq(shellDir).version;
+  if (!v) return null;
+  return join(shellDir, 'versions', v, 'resources', 'app', 'napcat', 'config');
 }
 
 /* 出厂 OneBot 网络模板：HTTP 3000 (0.0.0.0) + WS 3001 (127.0.0.1), token=truefriend, 与桥零配置直连 */
@@ -1299,44 +1262,791 @@ async function ensureNapcatOnebotConfig(shellDir, logStream = null) {
   return 'timeout';
 }
 
-/* —— VBS 隐藏启动器（融合进项目）：双击或由管理器调用均无黑窗 —— */function ensureNapcatVbs(shellDir, quickLogin) {
-  const q = String(quickLogin ?? '').trim();  const qr = join(shellDir, 'napcat-hidden.vbs');
-  const quick = join(shellDir, 'napcat-quick-hidden.vbs');
-  const qrBody = [
-    "' NapCat hidden launcher (QR login) - generated by QQ-Bridge Manager",
-    'Set ws = CreateObject("WScript.Shell")',
-    'Set fso = CreateObject("Scripting.FileSystemObject")',
-    'dir = fso.GetParentFolderName(WScript.ScriptFullName)',
-    'ws.Run """" & dir & "\\NapCatWinBootMain.exe""", 0, False',
-    '',
-  ].join('\r\n');
-  const qq = q || process.env.QBM_QUICK_QQ || '';   // 留空时调用方走二维码登录
-  // VBS 引号规则: """" = 一个字面 "; 路径需带引号包起来再拼 QQ
-  const quickBody = [
-    "' NapCat hidden launcher (QUICK login) - generated by QQ-Bridge Manager",
-    "' Edit QQ below if you want another account.",
-    'Set ws = CreateObject("WScript.Shell")',
-    'Set fso = CreateObject("Scripting.FileSystemObject")',
-    'dir = fso.GetParentFolderName(WScript.ScriptFullName)',
-    `QQ = "${qq}"`,
-    'ws.Run """" & dir & "\\NapCatWinBootMain.exe""" & " " & QQ, 0, False',
-    '',
-  ].join('\r\n');
-  try {
-    // 每次都重写(内容幂等): 旧版本曾生成引号未闭合的坏 vbs, 不能依赖 existsSync 跳过
-    writeFileSync(qr, qrBody, 'utf8');
-    writeFileSync(quick, quickBody, 'utf8');
-  } catch (e) { console.error('[napcat] write vbs:', e.message); }
-  return { dir: shellDir, qr, quick, quickLogin: qq };
+/** 隐藏启动 NapCat —— 整个项目只有这一种启动方式：
+ *  `powershell -WindowStyle Hidden -Command "Start-Process … -WindowStyle Hidden"`。
+ *
+ *  为什么是它（2026-09-24 随包 Shell 真链路实测，不是照文档猜的）：
+ *    · `Start-Process -WindowStyle Hidden` 走的就是 STARTUPINFO 的 STARTF_USESHOWWINDOW + SW_HIDE，
+ *      与旧 VBS 那句 `ws.Run "...", 0, False` 同一机制：NapCatWinBootMain.exe 的控制台"建出来但藏住"，
+ *      它再拉起的 QQ.exe 继承同一个隐藏控制台 → 整条链没有可见窗口、没有任务栏按钮；
+ *    · 实测四种起法（VBS / Start-Process -WindowStyle Hidden / PowerShell 调 WScript.Shell COM / JScript）
+ *      结果完全一致：链上 5 个进程跑满，可见窗口 0、任务栏按钮 0；`-WindowStyle Normal` 对照组立刻
+ *      可见 1 个窗口 → 尺子有效，0 是真 0；
+ *    · 关键收益：不依赖任何脚本引擎。VBScript 已被微软降级为按需功能并在逐步退役（24H2 起 FoD
+ *      默认启用 → 约 2027 默认停用 → 之后移除 DLL），而 `powershell.exe` 是系统自带组件，不会被移除，
+ *      于是"引擎缺失就用 pwsh 装 FoD"那一整套（含一次 UAC）连同 .vbs 文件生成一起删掉了。
+ *
+ *  已经删掉的另两条路（2026-09-24 决定：只留一种通用方式）：
+ *    · 原生 `spawn(exe, {windowsHide:true})` = CREATE_NO_WINDOW：只管得住被 spawn 的那一个进程，
+ *      QQ.exe 作为孙进程自己再建控制台 → 实测漏出 1 个可见黑框 + 任务栏按钮（两次复现）；
+ *    · wscript + 生成的 .vbs：能用，但正是要被淘汰的东西，缺引擎时还得弹 UAC 装 FoD。
+ *
+ *  两个反直觉的坑，别再踩：
+ *    ① 外层 powershell 自己不能用 `detached:true` —— DETACHED_PROCESS 让它拿不到控制台，
+ *       脚本还没执行就退出（常驻隐藏器上踩过这个坑，见 qqWindowHider 的注释）；
+ *    ② 隐藏靠的是 SW_HIDE（"-WindowStyle Hidden"），不是 CREATE_NO_WINDOW；两者差着整整一层子进程。
+ *
+ *  stdio 一律 ignore + unref：只负责"起"，不等它退（Start-Process 起完秒退，NapCat 是它拉起的孙进程）。
+ *  返回 child(登记用) / target / mode，调用方按 mode 只做展示。 */
+async function startNapcatHidden(onekey, quickLogin) {
+  const exe = join(onekey.dir, 'NapCatWinBootMain.exe');
+  if (!existsSync(exe)) throw new Error(`没找到 ${exe}（NapCat Shell 不完整）`);
+  const qq = String(quickLogin ?? '').trim();
+  const ps = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const q = (s) => `'${String(s).replace(/'/g, "''")}'`;                    // PowerShell 单引号字面量转义
+  const inner = `Start-Process -FilePath ${q(exe)} -WorkingDirectory ${q(onekey.dir)}`
+    + `${qq ? ` -ArgumentList ${q(qq)}` : ''} -WindowStyle Hidden`;
+  const child = await new Promise((resolve, reject) => {
+    let c;
+    try {
+      c = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', inner], { cwd: onekey.dir, stdio: 'ignore', windowsHide: true, detached: false });
+    } catch (e) { return reject(e); }
+    c.once('error', reject);
+    c.unref();
+    resolve(c);
+  });
+  mlog(`[napcat] 静默启动：mode=ps-hidden（Start-Process -WindowStyle Hidden → SW_HIDE，无窗口、无任务栏）target=${exe}`);
+  return { child, target: exe, mode: 'ps-hidden', launcher: inner };
 }
 
-/** 经由 wscript 隐藏启动 NapCat（无任何黑窗）；返回 child(记录用) 与日志说明 */
-async function startNapcatHiddenViaVbs(onekey, quickLogin) {
-  const vbs = ensureNapcatVbs(onekey.dir, quickLogin);
-  const target = quickLogin ? vbs.quick : vbs.qr;
-  // wscript 是 GUI 宿主，windowsHide 再兜底：保证不弹黑窗
-  const child = await spawnDetached('wscript.exe', [target], { cwd: onekey.dir });
-  return { child, vbs, target };
+/* ------------------------------------------------------------------ */
+/* 随包 QQ 的窗口：启动前武装的常驻隐藏器（"完全静默、瞬时隐藏"）      */
+/* ------------------------------------------------------------------ */
+/* 2026-09-28 实测反馈：旧实现是"启动 NapCat → 等 6 秒 → 最多 3 次 × 3 秒跑一次性
+ * PowerShell"，最坏 6 秒后才有第一次隐藏 —— 现场原话是"确实被隐藏了，但会先明显地闪出来
+ * 一段时间"。现在改成先武装、后启动：在 spawn `NapCatWinBootMain.exe` 之前就把常驻
+ * 观察者起起来，它从第 0 毫秒开始盯，QQ 一露头（哪怕它启动慢、2 秒后才建窗）立刻隐藏。
+ *
+ * 三条硬约束：
+ *   · 轮询必须落在同一个常驻进程里 —— 每轮起一个新 powershell 光启动就要 100ms+，
+ *     那个"起进程"的时间本身就是一次闪窗（旧实现每 3 秒一次，就是闪的第二个原因）。
+ *   · 藏过一次不算完 —— QQ 自己可能再把窗口弹出来，所以循环不能提前退出，见到可见窗口就再藏。
+ *   · 观察者不能变成孤儿 —— 到点（默认 120 秒）自己 exit 0；父进程（管理器）先没了也 exit 0。
+ *
+ * 路径守卫（最重要的一条，一个字都不能松）：只处理"可执行文件路径在本 Shell 目录之下"的
+ * QQ 进程 —— 判据是进程自己的 Path（= MainModule.FileName），取不到 Path 的一律跳过；
+ * 前缀大小写不敏感，且按目录边界比对（补一个 `\`，免得 `…\Shell` 匹配到 `…\ShellOther`）。
+ * 用户自己装在 Program Files 之类地方的正式版 QQ，一个窗口都不会被碰。
+ *
+ * 兜底：观察者没起来（powershell 缺失 / Add-Type 编译失败 / 临时目录写不进去）时，调用方仍会
+ * 退回 hideBundledQqWindows（一次性轮询：等 1 秒 → 最多 10 次 × 0.5 秒）。
+ */
+
+/** 常驻隐藏器默认参数：观察 120 秒 / 200ms 轮询 / 随包 QQ 一露面切 50ms 快扫 5 秒。 */
+const QQ_HIDER_DEFAULTS = { budgetMs: 43200000, pollMs: 200, burstMs: 50, burstWindowMs: 5000, readyTimeoutMs: 2500 };   // budgetMs 12 小时：需求是"NapCat 在跑的全程都不许冒黑框"，而不是只盯前两分钟。真正的退出条件交给父进程守卫（管理端没了就收工）。
+/** 活着的隐藏器（正常 0~1 个；重启 NapCat 时新的会把旧的收掉，绝不叠着跑）。 */
+const qqHiders = new Set();
+
+/** 生成常驻隐藏器的 PowerShell 源码（Node 侧写到临时 .ps1 再用 `-File` 跑）。
+ *  生命周期：编译 user32 P/Invoke（就是旧实现里那段 Add-Type）→ 写 ready 标记 → 每 pollMs 一轮：
+ *  按路径前缀筛出随包 QQ 进程 → EnumWindows 取它的可见顶层窗口 → `ShowWindow(h,0)` +
+ *  `SetWindowPos(…, SWP_HIDEWINDOW|SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE)` 双保险
+ *  → 每个窗口写一行日志（含"从武装到隐藏"的毫秒数，这个数要能直接看到）。到点或父进程消失就 exit 0。
+ *
+ *  为什么用"数组 -join"而不是 here-string：避免 here-string 的行尾/引号坑；C# 里没有单引号，
+ *  所以每一行直接塞进 PS 单引号字符串即可。所有路径/数字都先做单引号转义再内联，没有外部参数注入面。 */
+function qqWindowHiderScript(cfg) {
+  const sq = (v) => String(v ?? '').replace(/'/g, "''");
+  const shell = sq(cfg.shellDir);
+  const logFile = sq(cfg.logFile);
+  const readyFile = sq(cfg.readyFile);
+  /* seed 文件：管理端在拉起启动器之后把它的 pid 写进来（见 seedQqWindowHiderPids）。
+   * 为什么非要这条通道不可：NapCat 的启动器 NapCatWinBootMain.exe 常常几百毫秒内就退了，
+   * 万一它退得比观察者第一次轮询还早，谁都永远见不到它的 pid —— 那它带出来的黑框就判不出归属。
+   * 走文件是"耐久"的：写进去就一直躺在那儿，观察者下一轮读到就算数（先写文件、后死进程，没有竞态）。 */
+  const seedFile = sq(cfg.seedFile || `${cfg.logFile}.seed`);
+  const num = (v, def, min) => Math.max(min, Math.round(Number(v) || def));
+  const budgetMs = num(cfg.budgetMs, QQ_HIDER_DEFAULTS.budgetMs, 1000);
+  // 黑框（控制台窗口）只在这段时间内盯：NapCat 的 node.exe / cmd 都在开头的几十秒里起来
+  const consoleScanMs = num(cfg.consoleScanMs, 60000, 1000);
+  const pollMs = num(cfg.pollMs, QQ_HIDER_DEFAULTS.pollMs, 50);
+  const burstMs = num(cfg.burstMs, QQ_HIDER_DEFAULTS.burstMs, 10);
+  const burstWindowMs = Math.max(0, Math.round(Number(cfg.burstWindowMs) || 0));
+  const parentPid = Math.max(0, Math.round(Number(cfg.parentPid) || 0));
+  const cs = [
+    "using System;",
+    "using System.Collections.Generic;",
+    "using System.Text;",
+    "using System.Runtime.InteropServices;",
+    "public static class MoonBotQqWinHideResident {",
+    "  delegate bool EnumProc(IntPtr h, IntPtr l);",
+    '  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);',
+    '  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+    '  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);',
+    '  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);',
+    '  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);',
+    '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int max);',
+    '  [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] static extern int GetWindowLong(IntPtr h, int index);',
+    '  [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] static extern int SetWindowLong(IntPtr h, int index, int value);',
+    "  const int GWL_EXSTYLE = -20;",
+    "  const int WS_EX_TOOLWINDOW = 0x00000080;",
+    "  const int WS_EX_APPWINDOW = 0x00040000;",
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);',
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 pe);',
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 pe);',
+    '  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);',
+    "  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]",
+    "  public struct PROCESSENTRY32 {",
+    "    public uint dwSize; public uint cntUsage; public uint th32ProcessID; public IntPtr th32DefaultHeapID;",
+    "    public uint th32ModuleID; public uint cntRefCount; public uint th32ParentProcessID; public int pcPriClassBase;",
+    "    public uint dwFlags;",
+    "    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;",
+    "  }",
+    "  const uint SWP_FLAGS = 0x0080u | 0x0002u | 0x0001u | 0x0004u | 0x0010u;",
+    "  public static long[] VisibleWindowsOf(uint[] pids) {",
+    "    var set = new HashSet<uint>(pids);",
+    "    var hits = new List<long>();",
+    "    EnumWindows(delegate(IntPtr h, IntPtr l) {",
+    "      uint pid; GetWindowThreadProcessId(h, out pid);",
+    "      if (set.Contains(pid) && IsWindowVisible(h)) hits.Add(h.ToInt64());",
+    "      return true;",
+    "    }, IntPtr.Zero);",
+    "    return hits.ToArray();",
+    "  }",
+    "  /* 隐藏 + 顺手摘掉任务栏。SW_HIDE 只保证「当下这一下」不在屏幕/任务栏上；QQ 下一秒又把它弹出来的话",
+    "     还得再藏一次 —— 所以把 ex-style 的「应用窗口」换成「工具窗口」：就算它再露头，任务栏和 Alt+Tab",
+    "     里也不会出现它（跨进程改 ex-style 是允许的，窗口本来就在我们随包目录的进程里）。 */",
+    "  public static void Hide(long h) {",
+    "    IntPtr w = new IntPtr(h);",
+    "    Unlist(h);",
+    "    ShowWindow(w, 0);",
+    "    SetWindowPos(w, IntPtr.Zero, 0, 0, 0, 0, SWP_FLAGS);",
+    "  }",
+    "  public static void Unlist(long h) {",
+    "    try {",
+    "      IntPtr w = new IntPtr(h);",
+    "      int ex = GetWindowLong(w, GWL_EXSTYLE);",
+    "      int want = (ex & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;",
+    "      if (want != ex) {",
+    "        SetWindowLong(w, GWL_EXSTYLE, want);",
+    // 改了 ex-style 一定要通知一下（SWP_FRAMECHANGED，其余"别动位置/大小/层序/别激活"），
+    // 否则资源管理器不一定立刻重新评估这个窗口的任务栏归属。
+    "        SetWindowPos(w, IntPtr.Zero, 0, 0, 0, 0, 0x0020u | 0x0002u | 0x0001u | 0x0004u | 0x0010u);",
+    "      }",
+    "    } catch (Exception) { }",
+    "  }",
+    "  /* 不限可见性：任务栏清理要连「看不见、按钮却还挂着」的窗口一起过一遍 */",
+    "  public static long[] AllWindowsOf(uint[] pids) {",
+    "    var set = new HashSet<uint>(pids);",
+    "    var hits = new List<long>();",
+    "    EnumWindows(delegate(IntPtr h, IntPtr l) {",
+    "      uint pid; GetWindowThreadProcessId(h, out pid);",
+    "      if (set.Contains(pid)) hits.Add(h.ToInt64());",
+    "      return true;",
+    "    }, IntPtr.Zero);",
+    "    return hits.ToArray();",
+    "  }",
+    "  public static string ClassOf(long h) { var sb = new StringBuilder(256); GetClassName(new IntPtr(h), sb, sb.Capacity); return sb.ToString(); }",
+    "  /* 【黑框专用】按窗口类名挑可见顶层窗口。实测（2026-09-23）：cmd/conhost 在新版 Windows 上",
+    "     以 **PseudoConsoleWindow**（ConPTY）出现，老的是 ConsoleWindowClass，Windows Terminal 是",
+    "     CASCADIA_HOSTING_WINDOW_CLASS —— 所以放宽成\"类名里带 Console\"再并上 CASCADIA。",
+    "     放宽是安全的：**藏不藏完全由 PS 侧的祖先链判定决定**，这里只是把候选窗口捞出来。 */",
+    "  public static long[] VisibleConsoleWindows() {",
+    "    var hits = new List<long>();",
+    "    EnumWindows(delegate(IntPtr h, IntPtr l) {",
+    "      if (!IsWindowVisible(h)) return true;",
+    "      var sb = new StringBuilder(256);",
+    "      if (GetClassName(h, sb, sb.Capacity) <= 0) return true;",
+    "      var c = sb.ToString();",
+    "      if (c.IndexOf(\"Console\", StringComparison.OrdinalIgnoreCase) >= 0 || c == \"CASCADIA_HOSTING_WINDOW_CLASS\") hits.Add(h.ToInt64());",
+    "      return true;",
+    "    }, IntPtr.Zero);",
+    "    return hits.ToArray();",
+    "  }",
+    "  public static uint PidOf(long h) { uint pid; GetWindowThreadProcessId(new IntPtr(h), out pid); return pid; }",
+    "  /* pid→ppid 快照（toolhelp32）：一次枚举约 5ms，比整机 WMI 快两个数量级，祖先链判归属就用它；",
+    "     WMI(Win32_Process) 只当兜底：PS 侧按需刷新（2.5 秒有效期，只在真有窗口要判时查），",
+    "     WMI 被策略禁掉也不影响判定（那时路径/命令行判据自动退化成「只看链 pid」）。 */",
+    "  public static string[] Procs() {",
+    "    var list = new List<string>();",
+    "    IntPtr snap = CreateToolhelp32Snapshot(0x2u, 0u);",
+    "    if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return list.ToArray();",
+    "    var pe = new PROCESSENTRY32();",
+    "    pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));",
+    "    if (Process32First(snap, ref pe)) {",
+    "      do { list.Add(pe.th32ProcessID + \"|\" + pe.th32ParentProcessID + \"|\" + pe.szExeFile); } while (Process32Next(snap, ref pe));",
+    "    }",
+    "    CloseHandle(snap);",
+    "    return list.ToArray();",
+    "  }",
+    "}",
+  ].map((l) => `'${l}'`);
+  /* 任务栏清理（ITaskbarList::DeleteTab）单独一份 Add-Type：COM 编译万一在这台机器上过不去，
+   * 也绝不能连累"窗口隐藏"这条主干（PS 侧自己 try/catch，编译失败就只做隐藏并写一行日志）。 */
+  const tbCs = [
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public static class MoonBotTaskbarClean {",
+    '  [ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]',
+    "  public interface ITaskbarList {",
+    "    void HrInit();",
+    "    void AddTab(IntPtr hwnd);",
+    "    void DeleteTab(IntPtr hwnd);",
+    "    void ActivateTab(IntPtr hwnd);",
+    "    void SetActiveAlt(IntPtr hwnd);",
+    "  }",
+    // 注意：不能用「[ComImport] class X : ITaskbarList + public extern …」那种常见写法 ——
+    // PS 5.1 里编译能过，加载类型时却直接炸（本机实测：
+    //   "Could not load type 'TaskbarListClass' … because the method 'HrInit' has no implementation (no RVA)"，
+    // 在运行期表现就是"[napcat] 任务栏清理不可用"）。改成 GetTypeFromCLSID + Activator.CreateInstance，
+    // 实测编译 ✓、实例化 ✓、DeleteTab 调用 ✓。
+    "  static ITaskbarList tb = null;",
+    "  public static bool Remove(long h) {",
+    "    try {",
+    "      if (tb == null) {",
+    "        Type t = Type.GetTypeFromCLSID(new Guid(\"56FDF344-FD6D-11d0-958A-006097C9A090\"));",
+    "        tb = (ITaskbarList)Activator.CreateInstance(t);",
+    "        tb.HrInit();",
+    "      }",
+    "      tb.DeleteTab(new IntPtr(h));",
+    "      return true;",
+    "    } catch (Exception) { return false; }",
+    "  }",
+    "}",
+  ].map((l) => `'${l}'`);
+  return [
+    "# MoonBot QQ window hider (resident) - generated by server/index.js; 观察随包 QQ 的窗口并隐藏",
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    // 2026-09-24：stdout/stderr 现在被管理端接进日志文件了。PS 5.1 重定向时的默认编码是本地 OEM
+    // 代码页（简中是 GBK），报错文本会变成乱码；显式设成 UTF-8，让日志里的错误能读。
+    "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }",
+    `$shell = '${shell}'`,
+    // 守卫 0：Shell 目录为空 / 太短 → 直接退出。空串会让 StartsWith('') 恒真 → 会去碰用户自己那份真 QQ。
+    "if ($shell.Length -lt 4) { exit 3 }",
+    "$shellLower = $shell.ToLower()",
+    `$budgetMs = ${budgetMs}`,
+    `$consoleScanMs = ${consoleScanMs}`,
+    `$pollMs = ${pollMs}`,
+    `$burstMs = ${burstMs}`,
+    `$burstWindowMs = ${burstWindowMs}`,
+    `$parentPid = ${parentPid}`,
+    `$logFile = '${logFile}'`,
+    `$readyFile = '${readyFile}'`,
+    `$seedFile = '${seedFile}'`,
+    "$sw = [System.Diagnostics.Stopwatch]::StartNew()",
+    "$script:t0 = Get-Date",           // 观察者自己的启动时刻：用来判 seed 文件是不是上一轮遗留的
+    "function Write-HiderLog([string]$m) { try { [System.IO.File]::AppendAllText($logFile, $m + [Environment]::NewLine) } catch { } }",
+    // 2026-09-24 沙盒事故：第一行就落盘。以前"启动即退出"的日志里一个字都没有，连它走到哪一步都
+    // 看不出来（加上 stdio:'ignore' + 退出删日志，证据是零）。再加 trap：终止性错误也要留下行号。
+    "Write-HiderLog ('[napcat] 隐藏器进程启动：pid=' + $PID + ' 管理端pid=' + $parentPid + ' budget=' + $budgetMs + 'ms shell=' + $shell)",
+    "trap { Write-HiderLog ('[napcat] 隐藏器异常终止：' + $_.Exception.Message + '（脚本第 ' + $_.InvocationInfo.ScriptLineNumber + ' 行）'); exit 9 }",
+    "$type = @(",
+    cs.join(',\r\n'),
+    ") -join [Environment]::NewLine",
+    "try {",
+    "  Add-Type -TypeDefinition $type -ErrorAction Stop",
+    "} catch {",
+    "  Write-HiderLog ('[napcat] QQ 隐藏器编译失败（user32 P/Invoke 不可用）：' + $_.Exception.Message)",
+    "  exit 4",
+    "}",
+    // 任务栏清理单独编译：COM 那份万一在这台机器上编不过，也绝不能连累"隐藏窗口"这条主干
+    // （下面每处调用都用 $tbReady 兜着；摘不掉任务栏也照样把窗口藏起来）。
+    "$tbReady = $false",
+    "$tbType = @(",
+    tbCs.join(',\r\n'),
+    ") -join [Environment]::NewLine",
+    "try {",
+    "  Add-Type -TypeDefinition $tbType -ErrorAction Stop",
+    "  $tbReady = $true",
+    "} catch {",
+    "  Write-HiderLog ('[napcat] 任务栏清理不可用（ITaskbarList 编译失败，只做窗口隐藏）：' + $_.Exception.Message)",
+    "}",
+    // ready 标记：Node 侧"先武装、后启动"就等这个文件 —— 编译完才算真武装完（否则 QQ 可能先建窗）。
+    "try { [System.IO.File]::WriteAllText($readyFile, 'ready') } catch { }",
+    "Write-HiderLog '[napcat] QQ 隐藏器已就绪（常驻观察中）'",
+    "$hidden = @{}",
+    "$hiddenGui = @{}",                   // 随包进程自己名下的窗口（含 NapCatWinBootMain）
+    "$hiddenCon = @{}",                   // 控制台 / 黑框
+    "$unlisted = @{}",                    // 已经摘过任务栏的窗口（同一 hwnd 只摘一次，别刷日志）
+    "$unlistedAt = -99999",               // 上次"整树摘任务栏"的时刻（1 秒一次足够）
+    "$firstHideMs = -1",
+    "$script:parentMiss = 0",             // 管理端存活检查连续失败次数（跨轮累计，见循环里的守卫）
+    "$seenBundled = $false",
+    "$burstUntilMs = -1",
+    // ---- ② 黑框（控制台窗口）的归属判定 ----
+    // 两把尺子：
+    //   · 链 pid 集合 $chainAll —— 跨轮累积「我们这条链的 pid」：随包目录下见过的进程（名字命中
+    //     QQ / NapCatWinBootMain 且路径在 Shell 目录下）+ Win32_Process 快照里 ExecutablePath 或
+    //     CommandLine 里出现过 Shell 目录的进程。记下就永不删：NapCat 的 NapCatWinBootMain.exe 是
+    //     「起完就退」的，它拉起来的 cmd 黑框还在，而父链上一环的 pid 早就不在进程表里了 —— 只有这个
+    //     集合能把它认回来。（队长实测：老写法走到这一步只能 return 'unknown'，于是黑框永远判不出 yes、
+    //     永远不隐藏。）
+    //   · 父链逐级走 —— 窗口自己的进程 → 父 → 祖父…，每一环先比 pid 集合（父进程已退出也没关系，
+    //     比的是 ppid 这个数字），再比 ExecutablePath / CommandLine。
+    // 结论只有三种：'yes'=藏；'no'=永久缓存进 $notOurs（用户的终端只判一次，之后不再查进程表）；
+    //   'unknown'=只在「窗口自己的进程都不在快照里」时给，不缓存、下一轮重判；更上层查不到一律 'no'。
+    "$notOurs = @{}",                     // 判定为"不是我们的"控制台窗口（判死就不再查）
+    "$checkStamp = @{}",                  // hwnd → 上次判定的毫秒数（同一窗口最快 700ms 重判一次）
+    "$script:chainAll = @{}",             // pid(str) → 线索字符串，跨轮累积、永不删
+    "$script:chainWhy = ''",              // 最近一次判定的理由（写日志用）
+    "$script:ppid = @{}",                 // pid(str) → ppid(str)：toolhelp32 快照（约 5ms），走父链用它
+    "$script:ppidAt = -99999",
+    "$script:info = @{}",                 // pid(str) → Win32_Process 行（取 ExecutablePath / CommandLine）
+    "$script:infoAt = -99999",
+    "function Update-PpidMap {",
+    "  $m = @{}",
+    "  foreach ($line in @([MoonBotQqWinHideResident]::Procs())) {",
+    "    $g = $line.Split('|')",
+    "    if ($g.Count -ge 2) { $m[$g[0]] = $g[1] }",
+    "  }",
+    "  $script:ppid = $m",
+    "  $script:ppidAt = $script:sw.ElapsedMilliseconds",
+    "}",
+    "function Ensure-PpidMap { if (($script:sw.ElapsedMilliseconds - $script:ppidAt) -gt 1000) { Update-PpidMap } }",
+    "function Update-InfoMap {",
+    "  # 这份查询要枚举整机 300+ 个进程（实测约 250ms），所以只在「有窗口要判」时刷新，2.5 秒有效期。",
+    "  $m = @{}",
+    "  $rows = @()",
+    "  try { $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine -ErrorAction Stop) } catch { $rows = @() }",
+    "  if ($rows.Count -eq 0) { try { $rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) } catch { $rows = @() } }",
+    "  foreach ($p in $rows) {",
+    "    $k = [string]$p.ProcessId",
+    "    $m[$k] = $p",
+    "    $pe = [string]$p.ExecutablePath",
+    "    $pc = [string]$p.CommandLine",
+    "    if (($pe -and $pe.ToLower().StartsWith($script:shellLower)) -or ($pc -and $pc.ToLower().Contains($script:shellLower))) {",
+    "      if (-not $script:chainAll.ContainsKey($k)) { $script:chainAll[$k] = ([string]$p.Name + ' ' + $pe) }",
+    "    }",
+    "  }",
+    "  $script:info = $m",
+    "  $script:infoAt = $script:sw.ElapsedMilliseconds",
+    "}",
+    "function Ensure-InfoMap { if (($script:sw.ElapsedMilliseconds - $script:infoAt) -gt 2500) { Update-InfoMap } }",
+    "function Set-ChainPid([string]$k, [string]$why) { if ($k -and -not $script:chainAll.ContainsKey($k)) { $script:chainAll[$k] = $why } }",
+    "function Walk-Chain([string]$start) {",
+    "  $cur = $start",
+    "  $guard = 0",
+    "  while ($guard -lt 32) {",
+    "    $guard++",
+    "    if ($script:chainAll.ContainsKey($cur)) { $script:chainWhy = 'pid ' + $cur + ' 在链集合里（' + [string]$script:chainAll[$cur] + '）'; return 'yes' }",
+    "    $row = $script:info[$cur]",
+    "    if ($null -ne $row) {",
+    "      $pe = [string]$row.ExecutablePath",
+    "      if ($pe -and $pe.ToLower().StartsWith($script:shellLower)) { $script:chainWhy = 'pid ' + $cur + ' 路径在随包目录 ' + $pe; return 'yes' }",
+    "      $pc = [string]$row.CommandLine",
+    "      if ($pc -and $pc.ToLower().Contains($script:shellLower)) { $script:chainWhy = 'pid ' + $cur + ' 命令行带随包目录'; return 'yes' }",
+    "      $nxt = [string]$row.ParentProcessId",
+    "    } else {",
+    "      Ensure-PpidMap",
+    "      $nxt = [string]$script:ppid[$cur]",
+    "    }",
+    "    if ($nxt -eq '' -or $nxt -eq '0' -or [int]$nxt -le 4 -or $nxt -eq $cur) {",
+    "      if ($guard -eq 1) { $script:chainWhy = '窗口自己的进程不在进程表里'; return 'unknown' }",
+    "      $script:chainWhy = '父链走到 pid ' + $cur + ' 就断了（不在进程表里、也不在链集合里）'",
+    "      return 'no'",
+    "    }",
+    "    $cur = $nxt",
+    "  }",
+    "  $script:chainWhy = '父链超过 32 层'; return 'no'",
+    "}",
+    "function Test-ShellAncestor([int]$want) {",
+    "  $script:chainWhy = ''",
+    "  $v = Walk-Chain ([string]$want)",
+    "  if ($v -eq 'no' -and (($script:sw.ElapsedMilliseconds - $script:infoAt) -gt 2500)) {",
+    "    # 快走一遍没命中 → 把 Win32_Process 快照（带路径/命令行，并顺手把链集合攒厚）刷一遍再判一次。",
+    "    # 只有「真有个窗口要判」时才会走到这里，且同一窗口判死一次就进 $notOurs，不会反复查。",
+    "    Update-InfoMap",
+    "    $v = Walk-Chain ([string]$want)",
+    "  }",
+    "  return $v",
+    "}",
+    "while ($true) {",
+    "  if ($sw.ElapsedMilliseconds -ge $budgetMs) { break }",
+    // 父进程守卫：管理器没了就自己收工，绝不留孤儿 powershell
+    // 2026-09-24 沙盒事故：原来只认 [Process]::GetProcessById —— 在 Windows 沙盒里这种跨进程句柄
+    // 会被拒（拒绝访问），守卫于是第一次轮询就误判"管理端已退出"，脚本 1 秒内 exit 0：常驻观察
+    // 器等于没起，黑框没人盯、随包窗口只能等管理端的"启动后轮询"兜底（晚好几秒）。
+    // 现在：Get-Process 优先（沙盒里实测可用），GetProcessById 兜底，并且连续 15 次失败（约 3 秒）
+    // 才真收工 —— 单次查不到不再当成"管理端死了"。真死了也只是多活一小会儿（budget 到期自己走）。
+    "  $parentWhy = ''",
+    "  $aliveProbe = $false",
+    "  try { $null = Get-Process -Id $parentPid -ErrorAction Stop; $aliveProbe = $true } catch { $parentWhy = $_.Exception.Message }",
+    "  if (-not $aliveProbe) {",
+    "    try { $null = [System.Diagnostics.Process]::GetProcessById($parentPid); $aliveProbe = $true } catch { $parentWhy = $parentWhy + ' / ' + $_.Exception.Message }",
+    "  }",
+    "  if ($aliveProbe) { $script:parentMiss = 0 } else {",
+    "    $script:parentMiss = [int]$script:parentMiss + 1",
+    "    if ($script:parentMiss -eq 1) { Write-HiderLog ('[napcat] 管理端存活检查失败（pid=' + $parentPid + '，' + $parentWhy + '）→ 连续失败到 150 次（约 30 秒）才收工') }",
+    "    if ($script:parentMiss -ge 150) { Write-HiderLog ('[napcat] 管理端已退出（pid=' + $parentPid + '，' + $parentWhy + '）→ QQ 隐藏器收工'); break }",
+    "  }",
+    // 【补漏】管理端登记进来的启动器 pid：NapCatWinBootMain.exe 可能比我们第一次轮询还早就退了，
+    // 见 seedQqWindowHiderPids；读到就记进链集合、然后把文件吃掉（幂等：读失败/删失败都不影响判定）。
+    "  if (Test-Path -LiteralPath $seedFile) {",
+    "    # 只认「本轮写入」的 seed：比观察者启动还早的一律当遗留文件删掉，免得旧 pid 被 pid 复用坑到。",
+    "    $seedStale = $false",
+    "    try { if ((Get-Item -LiteralPath $seedFile -ErrorAction Stop).LastWriteTime -lt $script:t0) { $seedStale = $true } } catch { }",
+    "    if ($seedStale) {",
+    "      Remove-Item -LiteralPath $seedFile -Force -ErrorAction SilentlyContinue",
+    "    } else {",
+    "      try {",
+    "        foreach ($ln in @(Get-Content -LiteralPath $seedFile -ErrorAction Stop)) {",
+    "          $tk = ([string]$ln).Trim()",
+    "          if ($tk -match '^[0-9]+$' -and [int]$tk -gt 4) { Set-ChainPid $tk ('管理端登记：启动器 pid ' + $tk) }",
+    "        }",
+    "        Remove-Item -LiteralPath $seedFile -Force -ErrorAction SilentlyContinue",
+    "      } catch { }",
+    "    }",
+    "  }",
+    // 守卫 1：名字（QQ / NapCatWinBootMain）+ 可执行文件路径在 Shell 目录之下（取不到 Path 的进程被 -and 短路掉）。
+    // 为什么带上 NapCatWinBootMain：现场原话「无头QQ本身的进程不就是黑框」—— 它名下的窗口同样要藏；
+    // 路径守卫保证碰不到用户自己装在 Program Files 的那份正版 QQ。
+    "  $bundled = @(Get-Process -Name QQ,NapCatWinBootMain -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLower().StartsWith($shellLower) })",
+    "  $pids = @()",
+    "  foreach ($bp in $bundled) {",
+    "    $pids += [uint32]$bp.Id",
+    "    Set-ChainPid ([string]$bp.Id) ([string]$bp.ProcessName + ' ' + [string]$bp.Path)",
+    "  }",
+    "  $sleepMs = $pollMs",
+    "  if ($pids.Count -gt 0) {",
+    "    if (-not $seenBundled) { $seenBundled = $true; $burstUntilMs = $sw.ElapsedMilliseconds + $burstWindowMs }",
+    "    if ($burstUntilMs -gt 0 -and $sw.ElapsedMilliseconds -lt $burstUntilMs) { $sleepMs = $burstMs }",
+    "    foreach ($w in @([MoonBotQqWinHideResident]::VisibleWindowsOf([uint32[]]$pids))) {",
+    "      try { [MoonBotQqWinHideResident]::Hide([long]$w) } catch { }",
+    "      try { if ($tbReady) { [MoonBotTaskbarClean]::Remove([long]$w) | Out-Null } } catch { }",
+    "      $hex = '0x' + ([long]$w).ToString('X8')",
+    "      $hiddenGui[$hex] = $true",
+    "      if ($hidden.ContainsKey($hex)) {",
+    "        Write-HiderLog ('[napcat] 已隐藏随包 QQ 窗口：hwnd=' + $hex + ' 用时 ' + $sw.ElapsedMilliseconds + ' ms（它又弹出来了，已再次隐藏）')",
+    "      } else {",
+    "        $hidden[$hex] = $true",
+    "        if ($firstHideMs -lt 0) { $firstHideMs = $sw.ElapsedMilliseconds }",
+    "        Write-HiderLog ('[napcat] 已隐藏随包 QQ 窗口：hwnd=' + $hex + ' 用时 ' + $sw.ElapsedMilliseconds + ' ms（任务栏一并摘掉）')",
+    "      }",
+    "    }",
+    "    # 【任务栏】每秒一次「整树清扫」：随包进程名下的**所有**窗口（含暂时看不见、任务栏按钮却还挂着的）都摘掉。",
+    "    # 只碰 $pids（名字 + 路径双守卫过的随包进程）名下的窗口 —— 主人的 QQ / 终端一个都不碰。",
+    "    if ($tbReady -and ($sw.ElapsedMilliseconds - $unlistedAt) -gt 1000) {",
+    "      $unlistedAt = $sw.ElapsedMilliseconds",
+    "      foreach ($aw in @([MoonBotQqWinHideResident]::AllWindowsOf([uint32[]]$pids))) {",
+    "        $ahex = '0x' + ([long]$aw).ToString('X8')",
+    "        if ($unlisted.ContainsKey($ahex)) { continue }",
+    "        $unlisted[$ahex] = $true",
+    "        try { [MoonBotQqWinHideResident]::Hide([long]$aw) } catch { }",
+    "        try { [MoonBotTaskbarClean]::Remove([long]$aw) | Out-Null } catch { }",
+    "        Write-HiderLog ('[napcat] 已把随包窗口从任务栏摘掉：hwnd=' + $ahex + ' 用时 ' + $sw.ElapsedMilliseconds + ' ms')",
+    "      }",
+    "    }",
+    "  }",
+    "  # ② 黑框：NapCat 那条链随时可能起 cmd / node，所以整段观察期都盯（$consoleScanMs 只是兜底上限）",
+    "  $pending = 0",
+    "  if ($sw.ElapsedMilliseconds -lt $consoleScanMs) {",
+    "    foreach ($cw in @([MoonBotQqWinHideResident]::VisibleConsoleWindows())) {",
+    "      $chex = '0x' + ([long]$cw).ToString('X8')",
+    "      if ($hidden.ContainsKey($chex) -or $notOurs.ContainsKey($chex)) { continue }",
+    "      $now = $sw.ElapsedMilliseconds",
+    "      if ($checkStamp.ContainsKey($chex) -and ($now - [int]$checkStamp[$chex]) -lt 700) { $pending++; continue }",
+    "      $checkStamp[$chex] = $now",
+    "      $cpid = [int][MoonBotQqWinHideResident]::PidOf([long]$cw)",
+    "      $ow = Test-ShellAncestor $cpid",
+    "      if ($ow -eq 'yes') {",
+    "        try { [MoonBotQqWinHideResident]::Hide([long]$cw) } catch { }",
+    "        try { if ($tbReady) { [MoonBotTaskbarClean]::Remove([long]$cw) | Out-Null } } catch { }",
+    "        $hidden[$chex] = $true",
+    "        $hiddenCon[$chex] = $true",
+    "        if ($firstHideMs -lt 0) { $firstHideMs = $now }",
+    "        Write-HiderLog ('[napcat] [console-hidden] 已隐藏控制台窗口（hiding console，hwnd=' + $chex + ' pid=' + $cpid + ' 祖先判定：' + [string]$script:chainWhy + ' 用时 ' + $now + ' ms）')",
+    "      } elseif ($ow -eq 'no') {",
+    "        $notOurs[$chex] = $true",
+    "        Write-HiderLog ('[napcat] [console-notours] 控制台窗口 hwnd=' + $chex + ' pid=' + $cpid + ' 与本包无关 → 不动它（' + [string]$script:chainWhy + '）')",
+    "      } else {",
+    "        $pending++",
+    "        Write-HiderLog ('[napcat] [console-unknown] 控制台窗口 hwnd=' + $chex + ' pid=' + $cpid + ' 这轮判不出 → 下一轮重判（' + [string]$script:chainWhy + '）')",
+    "      }",
+    "    }",
+    "  }",
+    "  # 兜底刷新（只在本轮没事可做时做）：随包进程还活着、又没有窗口等着判 → 把 Win32_Process 快照刷一遍，",
+    "  # 顺手把「路径/命令行里带 Shell 目录」的 pid 攒进链集合（这些进程往往马上就会退出）。",
+    "  if ($pids.Count -gt 0 -and $pending -eq 0 -and $sw.ElapsedMilliseconds -lt $consoleScanMs -and ($sw.ElapsedMilliseconds - $script:infoAt) -gt 2500) { Update-InfoMap }",
+    "  if ($sw.ElapsedMilliseconds -lt 20000) { $sleepMs = [Math]::Min($sleepMs, 120) }",
+    "  Start-Sleep -Milliseconds $sleepMs",
+    "}",
+    "Write-HiderLog ('[napcat] QQ 隐藏器退出（隐藏 ' + $hidden.Count + ' 个窗口：随包窗口 ' + $hiddenGui.Count + ' 个 / 控制台 ' + $hiddenCon.Count + ' 个；摘任务栏 ' + $unlisted.Count + ' 个）')",
+    "exit 0",
+    "",
+  ].join('\r\n');
+}
+
+/** 收掉当前活着的隐藏器（用于"新的替换旧的"与管理器退出）。同步、失败只吞掉不抛。 */
+function stopQqWindowHidersSync(reason) {
+  for (const h of [...qqHiders]) {
+    try { if (h?.child?.pid) process.kill(h.child.pid); } catch { /* 已经退了 */ }
+    if (reason) {
+      try { if (h?.child?.pid) spawnSync('taskkill.exe', ['/pid', String(h.child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 3000 }); } catch { /* ignore */ }
+      // 观察者已死 → 临时脚本可以删了（进程活着时绝不删，见调用点注释）
+      try { if (h?.ps1) rmSync(h.ps1, { force: true }); } catch { /* ignore */ }
+      try { if (h?.readyFile) rmSync(h.readyFile, { force: true }); } catch { /* ignore */ }
+    }
+    qqHiders.delete(h);
+    if (reason) mlog(`[napcat] QQ 隐藏器已被收掉（${reason}）`);
+  }
+}
+
+/** 起一个常驻隐藏器（不同步等就绪；返回 hider 句柄，起不来返回 null）。
+ *  · 临时 .ps1 名字带时间戳 + 管理器 pid，退出后才删（运行期删掉它 PowerShell 就断源了）；
+ *  · `detached + stdio:'ignore' + windowsHide`：不建控制台、不占父进程的管道（父进程死了也不 EPIPE）。 */
+function startQqWindowHider(shellDir, opts = {}) {
+  if (process.platform !== 'win32') return null;
+  const dirRaw = String(shellDir || '').trim();
+  if (!dirRaw) return null;
+  // 目录边界：'…\Shell' 不该匹配 '…\ShellOther' —— 补上分隔符再做前缀比对
+  const dir = /[\\/]$/.test(dirRaw) ? dirRaw : dirRaw + '\\';
+  stopQqWindowHidersSync('被新的隐藏器替换');           // 重启 NapCat 时绝不叠着跑两个观察者
+  const budgetMs = Math.max(1000, Math.round(Number(opts.budgetMs) || QQ_HIDER_DEFAULTS.budgetMs));
+  const pollMs = Math.max(50, Math.round(Number(opts.pollMs) || QQ_HIDER_DEFAULTS.pollMs));
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+  const base = `moonbot-qq-hider-${stamp}-${process.pid}`;
+  const ps1 = join(tmpdir(), `${base}.ps1`);
+  const logFile = join(tmpdir(), `${base}.log`);
+  const readyFile = join(tmpdir(), `${base}.ready`);
+  const seedFile = join(tmpdir(), `${base}.seed`);
+  try {
+    // 【必须带 BOM，别删】生成的脚本里有中文日志文案，而 `powershell.exe -File`（PS 5.1）在没有 BOM 时
+    // 按 ANSI/GBK 解码 UTF-8 → 中文字节变乱码，极端情况下会把字符串的结束引号"吃掉" → 整个脚本
+    // 解析失败、隐藏器根本起不来。实测量化：不带 BOM 时 Parser::ParseFile 在中文行之后报 39 个错。
+    // 带 BOM 后 PS 5.1 按 UTF-8 读（pwsh 7 默认 UTF-8，同样兼容 BOM）。
+    writeFileSync(ps1, '\uFEFF' + qqWindowHiderScript({
+      shellDir: dir, logFile, readyFile, seedFile, budgetMs, pollMs,
+      burstMs: opts.burstMs ?? QQ_HIDER_DEFAULTS.burstMs,
+      burstWindowMs: opts.burstWindowMs ?? QQ_HIDER_DEFAULTS.burstWindowMs,
+      parentPid: process.pid,
+    }), 'utf8');
+  } catch (e) { mlog(`[napcat] QQ 隐藏器脚本写不进临时目录（${e?.message ?? e}）→ 不武装`); return null; }
+  const hider = {
+    child: null, ps1, logFile, readyFile, seedFile, budgetMs, pollMs,
+    dead: false, finished: false, error: '', logOffset: 0, logTail: '', hidCount: 0,
+  };
+  try {
+    // 2026-09-24 事故 + 复核：PowerShell 自己的 stdout/stderr 要另开一个 `${logFile}.err` 文件接住，
+    // 绝不能共用 logFile：PS 把 logFile 当自己的标准输出句柄持有，而脚本内部又用
+    // `[System.IO.File]::AppendAllText($logFile,…)` 往里写 —— 同一文件被两个句柄抢，AppendAllText
+    // 直接抛"另一个进程正在使用此文件"，而那个 try/catch 是静默的：结果就是"脚本跑了、exit=0、
+    // 日志一个字都没有"。本机实测复现：detached+共用 fd → 0 字节；改成独立 .err → 正常。
+    const errFile = `${logFile}.err`;
+    let errFd = null;
+    try { errFd = openSync(errFile, 'a'); } catch { /* 打不开就退回 ignore，不影响启动 */ }
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1],
+      // 2026-09-24 真凶：这里原来是 `detached: true`。在 Windows 上 detached 会让 Node 用
+      // DETACHED_PROCESS 起进程 —— 没有控制台，而 powershell.exe（Windows PowerShell 5.1 的
+      // 控制台宿主）没有控制台时是直接退出、连 -File 都不执行：本机隔离实验（只让脚本写个标记
+      // 文件，不碰 stdio）detached:true → 标记不出现、exit=0、~330ms；detached:false → 标记出现。
+      // 也就是说"常驻隐藏器"在所有机器上从来没跑起来过，沙盒里那句
+      // `QQ 隐藏器启动即退出（exit=0）` 不是沙盒特有现象 —— 只是沙盒里被自检翻出来了而已；
+      // 现场一直看到的"过会才隐藏"其实是管理端那条"启动后轮询"兜底。
+      // 不用 detached 也安全：stdio 接的是文件（不是父进程管道，没有 EPIPE 问题），
+      // windowsHide:true 走 CREATE_NO_WINDOW 不弹黑框，管理端退出时 process.on('exit') 会主动收掉它。
+      { windowsHide: true, stdio: ['ignore', errFd ?? 'ignore', errFd ?? 'ignore'], detached: false });
+    if (errFd !== null) { try { closeSync(errFd); } catch { /* ignore */ } }   // 子进程已持有自己的副本
+    hider.child = child;
+    hider.errFile = errFile;
+    child.once('error', (e) => { hider.error = e?.message || String(e); hider.dead = true; hider.finished = true; });
+    child.once('exit', (code) => {
+      hider.finished = true; hider.dead = true;
+      try { if (hider.drain) hider.drain(true); } catch { /* ignore */ }
+      // 2026-09-24：早退或一个窗口都没藏住 = 没干成事：把日志尾巴（+ powershell 自己的报错）转给 mlog，
+      // 并且保留日志文件（以前无条件 unlinkSync，等于当场销毁唯一证据 —— 沙盒里就是被这条坑掉的）。
+      const earlyExit = code !== 0 || hider.hidCount === 0;
+      if (earlyExit) {
+        let tail = [];
+        try { tail = readFileSync(logFile, 'utf8').split(/\r?\n/).filter((s) => s.trim()); } catch { /* ignore */ }
+        if (tail.length) mlog(`[napcat] QQ 隐藏器没干成事（exit=${code}，藏了 ${hider.hidCount} 个）→ 日志最后 ${Math.min(12, tail.length)} 行：\n  ${tail.slice(-12).join('\n  ')}`);
+        else mlog('[napcat] 隐藏器日志是空的（连"隐藏器进程启动"那行都没有）→ 脚本没跑起来，或日志路径写不进去');
+        try {
+          const perr = readFileSync(errFile, 'utf8').split(/\r?\n/).filter((s) => s.trim());
+          if (perr.length) mlog(`[napcat] 隐藏器 stderr 最后 ${Math.min(8, perr.length)} 行：\n  ${perr.slice(-8).join('\n  ')}`);
+        } catch { /* ignore */ }
+      }
+      // 观察者退出之后才删临时文件（运行期删会让 -File 的脚本断源）
+      try { unlinkSync(ps1); } catch { /* ignore */ }
+      try { unlinkSync(readyFile); } catch { /* ignore */ }
+      try { unlinkSync(seedFile); } catch { /* ignore */ }
+      if (earlyExit) mlog(`[napcat] 隐藏器日志保留在 ${logFile}（powershell 报错在 ${errFile}）`);
+      else {
+        try { unlinkSync(logFile); } catch { /* ignore */ }
+        try { unlinkSync(errFile); } catch { /* ignore */ }
+      }
+      qqHiders.delete(hider);
+      if (code !== 0 && code !== null) mlog(`[napcat] QQ 隐藏器异常退出（exit=${code}）`);
+    });
+    child.unref?.();
+  } catch (e) {
+    mlog(`[napcat] QQ 隐藏器起不来（${e?.message ?? e}）→ 不武装`);
+    try { unlinkSync(ps1); } catch { /* ignore */ }
+    return null;
+  }
+  qqHiders.add(hider);
+  return hider;
+}
+
+/** 把隐藏器日志文件里新出现的行转发给 mlog（每次 150ms；只发完整行，半行留到下一轮）。 */
+function watchQqWindowHider(hider) {
+  const drain = (flushTail) => {
+    let buf;
+    try { buf = readFileSync(hider.logFile); } catch { return; }
+    if (buf.length > hider.logOffset) {
+      hider.logTail += buf.slice(hider.logOffset).toString('utf8');
+      hider.logOffset = buf.length;
+    }
+    const parts = String(hider.logTail).split(/\r?\n/);
+    hider.logTail = flushTail ? '' : (parts.pop() ?? '');
+    if (flushTail && parts.length === 0) return;
+    for (const line of parts) {
+      const s = line.trim();
+      if (!s) continue;
+      if (/已隐藏随包 QQ 窗口/.test(s) && !/再次隐藏/.test(s)) hider.hidCount++;
+      if (/\[console-hidden\]/.test(s)) hider.hidCount++;
+      mlog(s);
+    }
+  };
+  hider.drain = drain;
+  const timer = setInterval(() => { try { drain(false); } catch { /* ignore */ } if (hider.finished) clearInterval(timer); }, 150);
+  timer.unref?.();
+}
+
+/** 【主路径】先武装、后启动：调用方必须在 spawn `NapCatWinBootMain.exe` 之前 await 本函数。
+ *  最多等 readyTimeoutMs（默认 2.5 秒）拿到脚本写的 ready 标记（= user32 P/Invoke 编译完成，
+ *  隐藏器真的能干活了）；这一步只花几百毫秒，且发生在 QQ 被拉起之前，所以"从第 0 毫秒盯着"
+ *  这条不破。等不到也照样返回 hider（脚本自己在继续跑），只是日志里标明；起不来则返回 null
+ *  → 调用方退回一次性轮询兜底 hideBundledQqWindows。 */
+async function armQqWindowHider(shellDir, opts = {}) {
+  if (process.platform !== 'win32' || !shellDir) return null;
+  let hider = null;
+  try { hider = startQqWindowHider(shellDir, opts); } catch (e) {
+    mlog(`[napcat] QQ 隐藏器武装异常（已忽略）：${e?.message ?? e}`);
+    return null;
+  }
+  if (!hider) { mlog('[napcat] QQ 隐藏器没能武装 → 退回"启动后轮询隐藏"兜底'); return null; }
+  const timeoutMs = Math.max(200, Math.round(Number(opts.readyTimeoutMs) || QQ_HIDER_DEFAULTS.readyTimeoutMs));
+  const t0 = Date.now();
+  const isDead = () => hider.dead || hider.finished || (hider.child ? hider.child.exitCode !== null : true);
+  let ready = false;
+  while (Date.now() - t0 < timeoutMs) {
+    if (existsSync(hider.readyFile)) { ready = true; break; }
+    if (isDead()) break;
+    await sleepMs(30);
+  }
+  const waited = Date.now() - t0;
+  if (isDead()) {
+    mlog(`[napcat] QQ 隐藏器启动即退出（${hider.error || `exit=${hider.child?.exitCode}`}）→ 退回"启动后轮询隐藏"兜底`);
+    return null;
+  }
+  mlog(`[napcat] 静默启动：QQ 隐藏器已武装（观察 ${Math.round(hider.budgetMs / 1000)} 秒，${hider.pollMs}ms 轮询，QQ 露头后 50ms 快扫，就绪 ${waited} ms${ready ? '' : '，脚本未回就绪标记'}）`);
+  watchQqWindowHider(hider);      // 脚本的命中/退出日志转发给 mlog（含"用时 X ms"）
+  return hider;
+}
+
+/** 把"管理端自己拉起来的进程 pid"登记给已武装的常驻观察者（走 <日志>.seed 文件，观察者读完即删）。
+ *  为什么必须登记：启动器 NapCatWinBootMain.exe 常常几百毫秒就退，甚至比观察者第一次轮询还早 ——
+ *  那时谁也见不到它的 pid，它带出来的黑框（cmd/node 控制台）就再也认不回来了。登记是"先落盘再死"，
+ *  没有竞态。只登记我们自己 spawn 出来的那个 pid，不猜、不扫、不碰用户自己的进程。 */
+function seedQqWindowHiderPids(hider, pids) {
+  if (!hider?.seedFile) return false;
+  const list = (Array.isArray(pids) ? pids : [pids])
+    .map((v) => Math.round(Number(v) || 0))
+    .filter((v) => v > 4);
+  if (!list.length) return false;
+  try {
+    appendFileSync(hider.seedFile, list.map((v) => `${v}\n`).join(''), 'utf8');
+    mlog(`[napcat] 已登记启动器进程 pid=${list.join(',')}（观察者下一轮把它们记进归属链）`);
+    return true;
+  } catch (e) {
+    mlog(`[napcat] 登记启动器 pid 失败（忽略，仍按进程名+路径守卫判定）：${e?.message ?? e}`);
+    return false;
+  }
+}
+
+/** 管理器退出时收掉隐藏器（另一条独立保险是脚本里的父进程守卫：管理器被 taskkill /F 时 exit
+ *  处理器不会跑，但脚本自己会发现父进程没了并 exit 0）。 */
+process.on('exit', () => { try { stopQqWindowHidersSync('管理器退出'); } catch { /* ignore */ } });
+
+/** 拼那段一次性 PowerShell（现在只是兜底：观察者没武装起来时才用）：Add-Type 调 user32.dll，
+ *  把"给定 pid 的全部顶层窗口"ShowWindow(h, 0)。pid 由 Get-Process 按路径前缀筛出来（守卫就在这里）；
+ *  长度/引号都按单引号字符串转义。 */
+function psHideQqWindowsScript(shellDir) {
+  const dir = String(shellDir).replace(/'/g, "''");
+  return [
+    `$shell = '${dir}'`,
+    // 只挑"可执行文件路径在 $shell 之下"的 QQ 进程（正版 QQ 在别处 → 一个都不匹配）
+    "$qq = @(Get-Process -Name QQ -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLower().StartsWith($shell.ToLower()) })",
+    'if ($qq.Count -eq 0) { Write-Output 0; exit 0 }',
+    '$n = 0',
+    'try {',
+    "  $type = @'",
+    'using System;',
+    'using System.Collections.Generic;',
+    'using System.Runtime.InteropServices;',
+    'public static class MoonBotQqWinHide {',
+    '  delegate bool EnumProc(IntPtr h, IntPtr l);',
+    '  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);',
+    '  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+    '  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);',
+    '  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);',
+    '  public static int Hide(uint[] pids) {',
+    '    var set = new HashSet<uint>(pids);',
+    '    int n = 0;',
+    '    EnumWindows(delegate(IntPtr h, IntPtr l) {',
+    '      uint pid;',
+    '      GetWindowThreadProcessId(h, out pid);',
+    '      if (set.Contains(pid)) { if (IsWindowVisible(h)) { n++; } ShowWindow(h, 0); }',
+    '      return true;',
+    '    }, IntPtr.Zero);',
+    '    return n;',
+    '  }',
+    '}',
+    "'@",
+    '  Add-Type -TypeDefinition $type -ErrorAction Stop',
+    '  $n = [MoonBotQqWinHide]::Hide(@($qq | ForEach-Object { [uint32]$_.Id }))',
+    '} catch {',
+    // 编译不出来时的退路：只用 MainWindowHandle（一个进程一个主窗口，够用）
+    "  Add-Type -Namespace MoonBotFallback -Name Win -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h, int c);' -ErrorAction SilentlyContinue",
+    '  foreach ($p in $qq) { if ($p.MainWindowHandle -ne 0) { [MoonBotFallback.Win]::ShowWindow($p.MainWindowHandle, 0) | Out-Null; $n++ } }',
+    '}',
+    'Write-Output $n',
+  ].join('\n');
+}
+
+/** 跑一次"隐藏随包 QQ 窗口"（一次性 powershell）。返回隐藏掉的窗口数；任何失败返回 0、绝不抛。 */
+function hideBundledQqWindowsOnce(shellDir) {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn('powershell.exe', ['-NoProfile', '-Command', psHideQqWindowsScript(shellDir)],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      let done = false;
+      const finish = (n) => { if (!done) { done = true; resolve(n); } };
+      const t = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } finish(0); }, 20000);
+      child.stdout?.on('data', (d) => { out += String(d); });
+      child.once('error', () => { clearTimeout(t); finish(0); });
+      child.once('close', () => {
+        clearTimeout(t);
+        const m = /(\d+)\s*$/.exec(String(out).trim());
+        finish(m ? Number(m[1]) : 0);
+      });
+      child.unref?.();
+    } catch { resolve(0); }
+  });
+}
+
+/** 兜底路径（主路径是启动前武装的常驻观察者 armQqWindowHider —— 只有观察者没起来时调用方才走到这里）：
+ *  NapCat 起来之后把随包 QQ 的窗口藏干净：等 1 秒 → 最多 10 次、每次间隔 0.5 秒轮询。
+ *  2026-09-28：旧值是"等 6 秒 + 3 次 × 3 秒"，最坏 6 秒后才有第一次隐藏（= 现场看到的"明显闪烁"），
+ *  现在收敛成 1 秒 + 0.5 秒；异步、不阻塞启动返回，失败只记日志。返回这次一共藏掉几个窗口。 */
+async function hideBundledQqWindows(shellDir) {
+  if (process.platform !== 'win32' || !shellDir) return 0;
+  let total = 0;
+  try {
+    await sleepMs(1000);                       // 给 boot main 注入 + QQ 建窗留出时间
+    for (let i = 0; i < 10; i++) {
+      total += await hideBundledQqWindowsOnce(shellDir);
+      if (total > 0) break;                    // 藏到了就收工（再查一次只会是 0）
+      if (i < 9) await sleepMs(500);
+    }
+  } catch (e) {
+    mlog(`[napcat] 隐藏随包 QQ 窗口失败（已忽略，不影响使用）：${e?.message ?? e}`);
+  }
+  mlog(total > 0
+    ? `[napcat] 已隐藏随包 QQ 窗口 ${total} 个（兜底：一次性轮询，Shell=${shellDir}）`
+    : `[napcat] 兜底轮询没找到随包 QQ 窗口（可能它还没起来；观察者那条路才是主路径）`);
+  return total;
 }
 
 /** 通用命令型启动器：bridge / napcat 自定义命令 */
@@ -1348,7 +2058,7 @@ function startCommandInstance(id, cfg, logLabel) {
       const logFile = instanceLogPath(id);
       // 标记行直接写文件（子进程的 stdout 也写这个文件，见 spawnWithLogFile）
       try { appendFileSync(logFile, `\n===== start ${new Date().toISOString()}: ${cmd} =====\n`, 'utf8'); } catch { /* ignore */ }
-      // 【2026-09-12 可移植性】按空白裸切会把带空格的路径切断
+      // 2026-09-12 可移植性：按空白裸切会把带空格的路径切断
       // （用户必然写成 "C:\Program Files\...\NapCatWinBootMain.exe" → 会被切成 `"C:\Program` + `Files\...`）。
       // 现在先按引号切，再退回按空白切；两侧引号剥掉。
       const parts = (cmd.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((s) => s.replace(/^["']|["']$/g, ''));
@@ -1380,14 +2090,28 @@ function startCommandInstance(id, cfg, logLabel) {
   });
 }
 
-/** 【2026-09-23 新增】本机 NapCat 的注入需要一个 QQ 客户端。
+/** 2026-09-23 新增，同日修正：本机 NapCat 到底需不需要"另装一个 QQ"。
  *
- *  背景（别人反馈的"打不进QQ"）：随包只带了 QQ 的**安装包**（`napcat-onekey\QQ.exe`，273MB），
- *  而代码里从来没有执行过它 —— 只做 OneKey 定位 + 跑 `NapCatWinBootMain.exe` 注入。
- *  所以没装 QQ 的机器上，注入必然失败（或静默失败），用户看到的就是"打不进QQ"。
- *  这里只做两件事：**检测**常见 QQ NT 安装位置（含注册表），以及给「一键安装」入口；
+ *  初版判断错了：把别人反馈的"打不进QQ"当成"没装 QQ"，于是在启动前加了硬闸门。
+ *  查过随包的 OneKey 之后，事实是里面本来就有两份 QQ：
+ *    ① `napcat-onekey\QQ.exe`（287MB，FileVersion 9.9.26.44498）：QQ 的安装包
+ *       （PE 里带 NSIS 风格的 HKLM\SOFTWARE\Tencent\QQNT + UninstallString，装到 Program Files）；
+ *    ② `napcat-onekey\NapCat.44498.Shell\`：自带整套 QQ 的独立版 —— 同目录就有
+ *       `QQ.exe`（1.6MB 加载器，FileVersion 9.9.26.44498）和
+ *       `versions\9.9.26-44498\QQNT.dll`（206MB），由 `versions\config.json` 的 curVersion 指向。
+ *
+ *  而被真正拉起的 `NapCatWinBootMain.exe` 就落在 ② 里，它按自己所在目录找 `\QQ.exe` 与
+ *  `\NapCatWinBootHook.dll`（对那个 32KB 的 boot main 提串确认过：只有这两个相对路径，
+ *  没有任何 Program Files / 注册表安装路径）。也就是说这条注入链不碰 ① 装出来的那份 QQ。
+ *  实机佐证：本机另装了 QQ（9.9.33.52230），NapCat 照样用 Shell 自带的 9.9.26-44498。
+ *
+ *  结论：「另装 QQ」是可选回退，不是启动前提。把它当硬闸门，会让干净的打包安装
+ *  （没另装 QQ 的机器）永远起不来 NapCat，而真正该查的"Shell 不自带 QQ"反倒被掩盖。
+ *  现在的判据：Shell 自带的那份能用就用它；只有它缺失/不完整时才回退要求另装 QQ。
  *  真正拉起安装程序在 /api/napcat/install-qq。
  */
+
+/** 另装的 QQ NT（Program Files / LOCALAPPDATA / 注册表 Install 值）。只作回退，不是启动前提。 */
 function findLocalQq() {
   if (process.platform !== 'win32') return { ok: false, path: '' };
   const ps = [
@@ -1404,6 +2128,156 @@ function findLocalQq() {
     const found = String(r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || '';
     return { ok: !!found && existsSync(found), path: found };
   } catch { return { ok: false, path: '' }; }
+}
+
+/** Shell 自带的那份 QQ 是否可用 —— 这才是 `NapCatWinBootMain.exe` 真正注入的目标。
+ *
+ *  判据：`<shellDir>\QQ.exe`（加载器）存在，且 `<shellDir>\versions\<curVersion>\QQNT.dll` 存在。
+ *  curVersion 从 `versions\config.json` 读；读不到就退回"目录里只有一个版本文件夹"这种情形。
+ *  两者任一缺失都说明这套 Shell 被打包/复制坏了（杀软误删、更新残留），此时才需要另装 QQ 兜底。
+ */
+function napcatBundledQq(shellDir) {
+  if (!shellDir) return { ok: false, loader: '', version: '', dll: '', reason: '未定位到 NapCat Shell 目录' };
+  const loader = join(shellDir, 'QQ.exe');
+  if (!existsSync(loader)) return { ok: false, loader: '', version: '', dll: '', reason: `Shell 目录里没有 QQ.exe` };
+  let version = '';
+  try {
+    const cfg = JSON.parse(readFileSync(join(shellDir, 'versions', 'config.json'), 'utf-8'));
+    version = String(cfg.curVersion || cfg.baseVersion || '');
+  } catch { /* 交给下面的目录推断 */ }
+  if (!version) {
+    try {
+      const dirs = readdirSync(join(shellDir, 'versions'), { withFileTypes: true }).filter((d) => d.isDirectory());
+      if (dirs.length === 1) version = dirs[0].name;
+    } catch { /* ignore */ }
+  }
+  if (!version) return { ok: false, loader, version: '', dll: '', reason: 'versions\\config.json 读不到，也无法从目录名推断版本' };
+  const dll = join(shellDir, 'versions', version, 'QQNT.dll');
+  if (!existsSync(dll)) return { ok: false, loader, version, dll, reason: `versions\\${version}\\QQNT.dll 缺失` };
+  return { ok: true, loader, version, dll, reason: '' };
+}
+
+/** 2026-09-23：启动前的二进制品级预检 —— 把"启动 NapCat 失败（某个错误码）"变成可诊断的一行行记录。
+ *
+ *  为什么需要（真实反馈）：`NapCatWinBootMain.exe` 是无窗口拉起的（windowsHide → CREATE_NO_WINDOW，
+ *  以前是 VBS 的 `ws.Run "...", 0, False`（现已换成 PowerShell `Start-Process -WindowStyle Hidden`），见 startNapcatHidden），它打到 stdout 的
+ *  `[NapCat Backend] Failed to connect pipe: \\.\pipe\NapCat_x
+ *  Error Code: <n>` / `Failed to start process.` 没有任何人接管，管理器日志里一个字都不留。
+ *  于是使用者只记得住一个数字，我们这边查无实据。这里把 boot main 真正依赖的东西逐项记进日志。
+ *
+ *  依赖是从 boot main 自身的导入表与字符串表读出来的，不是猜的：
+ *    · 导入 CreateProcessW / VirtualAllocEx / WriteProcessMemory / CreateRemoteThread / ResumeThread
+ *      → 先 CreateProcessW 起 `\QQ.exe`（挂在它自己所在目录），再注入；
+ *    · 导入 LoadLibraryW + 字符串 `\NapCatWinBootHook.dll` → 注入的就是同目录的 Hook DLL；
+ *    · 导入 CreateNamedPipeW / ConnectNamedPipe / GetLastError / FormatMessageW
+ *      → 命名管道 `\\.\pipe\NapCat_`，连不上就报 "Failed to connect pipe … Error Code: <GetLastError>";
+ *    · 导入表里硬依赖 MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll
+ *      → 缺 VC++ 2015-2022 x64 运行库时它连进程都起不来（表现为 `Failed to start process.`）。
+ *  最后一项是最容易被漏掉的：Shell 自带的文件一个不少，机器上却没装运行库，症状却是"启动失败"。
+ */
+function napcatBootPreflight(onekey) {
+  const out = { ok: true, hard: [], soft: [], items: [] };
+  const push = (level, name, ok, p, note) => {
+    out.items.push(`${ok ? 'OK  ' : 'FAIL'}  ${name}${p ? '  ' + p : ''}${note ? '  ← ' + note : ''}`);
+    if (!ok) { (level === 'hard' ? out.hard : out.soft).push(`${name}${p ? '（' + p + '）' : ''}${note ? '：' + note : ''}`); out.ok = false; }
+  };
+  if (onekey?.exe) push('hard', 'NapCatWinBootMain.exe', existsSync(onekey.exe), onekey.exe, '被测进程本体，缺了必然启动失败');
+  else push('hard', 'NapCatWinBootMain.exe', false, '', '没有定位到');
+  const dir = onekey?.dir || '';
+  const hookDll = dir ? join(dir, 'NapCatWinBootHook.dll') : '';
+  push('hard', 'NapCatWinBootHook.dll', !!hookDll && existsSync(hookDll), hookDll, '注入进 QQ 的 Hook，缺了必然连不上管道');
+  const bqq = napcatBundledQq(dir);
+  push('hard', 'Shell 自带 QQ.exe', bqq.ok || (!!bqq.loader && existsSync(bqq.loader)), bqq.loader || '', bqq.ok ? '' : bqq.reason);
+  if (bqq.version) push('hard', `versions\\${bqq.version}\\QQNT.dll`, existsSync(bqq.dll), bqq.dll, 'QQ 本体，缺了整个注入目标不存在');
+  // MSVC 运行库：System32 里没有就顺带看一眼 Shell 目录（有些部署是 app-local）
+  const sys32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  for (const dll of ['MSVCP140.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll']) {
+    const inSys = existsSync(join(sys32, dll));
+    const beside = dir ? existsSync(join(dir, dll)) : false;
+    push('soft', dll, inSys || beside, inSys ? join(sys32, dll) : (beside ? join(dir, dll) : ''),
+      inSys || beside ? '' : '缺 VC++ 2015-2022 x64 运行库：boot main 的导入表硬依赖它，会直接 "Failed to start process."，装上运行库即恢复');
+  }
+  return out;
+}
+
+/** 2026-09-23 根治「v2:-8 之后又起不来」：BOM 自愈。
+ *
+ *  现场（复盘《QQbug-v2-8-复盘-20260923》）：出厂包本身没坏，坏在收尾时用 PowerShell
+ *  `Set-Content -Encoding UTF8` 把 `<shell>\versions\<curVersion>\resources\app\package.json`
+ *  写成了 UTF-8 BOM。QQNT 把 package.json 当入口清单读，NapCat 的 QQBasicInfoWrapper 直接
+ *  `JSON.parse` → `SyntaxError: Unexpected token '\uFEFF'` → worker 三连退 → boot main 判定主进程退出。
+ *  症状与"容器整个坏了"一模一样（6099 永不监听、QQ 闪退、日志空白），排查代价极大 ——
+ *  而这只差了开头 3 个字节。
+ *
+ *  所以这里自愈而不是报警：启动前扫一遍 NapCat 真正会 JSON.parse 的那几个文件，
+ *  发现 BOM 就地剥掉（只去掉开头 3 字节，内容一字不动）并记日志。幂等：没有 BOM 时一个字节都不写。
+ */
+function healNapcatJsonBom(shellDir) {
+  const targets = [];
+  const addIf = (p) => { if (p && existsSync(p)) targets.push(p); };
+  addIf(join(shellDir, 'versions', 'config.json'));
+  const bqq = napcatBundledQq(shellDir);
+  if (bqq.version) {
+    const appDir = join(shellDir, 'versions', bqq.version, 'resources', 'app');
+    addIf(join(appDir, 'package.json'));
+    addIf(join(appDir, 'application.json'));
+  }
+  try {
+    const cfgDir = findNapcatConfigDir(shellDir);
+    if (cfgDir) for (const f of readdirSync(cfgDir)) if (/\.json$/i.test(f)) addIf(join(cfgDir, f));
+  } catch { /* 配置目录不在就算了 */ }
+  const healed = [];
+  for (const f of targets) {
+    try {
+      const buf = readFileSync(f);
+      if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+        writeFileSync(f, buf.subarray(3));
+        healed.push(f);
+      }
+    } catch (e) { mlog(`[napcat] BOM 自愈失败（跳过）${f}：${e?.message ?? e}`); }
+  }
+  return healed;
+}
+
+/** 2026-09-23 沙盒/干净机器的头号坑：VC++ 运行库自愈（app-local 部署）。
+ *
+ *  现场（2026-09-23 沙盒重测，证据 = 沙盒诊断 sandbox-diag.txt + 后端日志）：
+ *  干净 Windows 的 System32 里没有 vcruntime140.dll / vcruntime140_1.dll（VC++ 2015-2022 x64
+ *  运行库要单独装），而 boot main 的导入表硬依赖这两个 —— 它连进程都起不来（`Failed to start process.`），
+ *  于是 QQ 不被拉起、NapCat 不注入、6099 永不监听，日志里只剩一句"等待 QQ 登录超时"。
+ *  使用者体验就是"一直进不去界面 → 反复重试启动"。开发机上装了运行库，所以这坑只在干净机器/沙盒暴露。
+ *
+ *  自愈而不是报警：随包的 Shell 里其实已经带着这几份 DLL（QQ NT 自带的 app-local 副本，
+ *  在 `versions\<ver>\` 与 `versions\<ver>\resources\app\` 下），只是没摆在 boot main 旁边。
+ *  Windows 加载器找 DLL 时优先看 exe 同目录（app-local 部署，微软官方支持的做法），
+ *  所以复制到 Shell 根目录即可 —— 不需要管理员权限、不需要装运行库、幂等（已存在就一个字节都不写）。
+ */
+function healNapcatVcruntime(shellDir) {
+  if (!shellDir || process.platform !== 'win32') return [];
+  const dlls = ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll'];
+  const sources = [];
+  const bqq = napcatBundledQq(shellDir);
+  if (bqq.version) {
+    const vdir = join(shellDir, 'versions', bqq.version);
+    sources.push(vdir, join(vdir, 'resources', 'app'));
+  }
+  try {
+    for (const d of readdirSync(join(shellDir, 'versions'), { withFileTypes: true })) {
+      if (d.isDirectory()) sources.push(join(shellDir, 'versions', d.name), join(shellDir, 'versions', d.name, 'resources', 'app'));
+    }
+  } catch { /* 没有 versions 目录时只靠上面的候选 */ }
+  const healed = [];
+  for (const dll of dlls) {
+    const dest = join(shellDir, dll);
+    try { if (existsSync(dest)) continue; } catch { continue; }
+    const src = sources.find((s) => { try { return existsSync(join(s, dll)); } catch { return false; } });
+    if (!src) continue;
+    try {
+      copyFileSync(join(src, dll), dest);
+      healed.push(`${dll}  ← ${join(src, dll)}`);
+    } catch (e) { mlog(`[napcat] VC++ 运行库自愈失败（继续启动）${dll}：${e?.message ?? e}`); }
+  }
+  return healed;
 }
 
 /** 随包 QQ 安装包的位置（NapCat OneKey 目录下的 QQ.exe） */
@@ -1423,7 +2297,7 @@ function startNapcatLocal(cfgNap) {
       // 1) 显式命令
       if (cfgNap.launchCommand?.trim?.()) {
         const out = await startCommandInstance(id, cfgNap, 'NapCat');
-        // 【退出终结】自定义启动命令这条路子拿得到直接子进程的 pid（不像 VBS 那样秒退），一并登记，
+        // 【退出终结】自定义启动命令这条路子拿得到直接子进程的 pid（不像启动器那样秒退），一并登记，
         // 这样 killOnExit 开着时"关掉界面"同样能收掉它（见 killNapcatOnExitSync 第一档）。
         if (out?.success) {
           const pid = Number(runtimes.get(id)?.proc?.pid) || 0;
@@ -1437,13 +2311,18 @@ function startNapcatLocal(cfgNap) {
       // 2) Windows：自动定位 OneKey
       const onekey = findNapcatOneKey();
       if (onekey) {
-        /* 【2026-09-23 预检】注入需要有 QQ 客户端；随包只带了 QQ 的安装包，从没执行过它。
+        /* 2026-09-23 预检：注入需要有 QQ 客户端；随包只带了 QQ 的安装包，从没执行过它。
          * 缺 QQ 时直接给出可执行的一步，而不是让 NapCat 在后台静默失败（用户看到的是"打不进QQ"）。
          * 注意：这里只拦"自动定位 OneKey"这条路 —— 显式配了启动命令的用户上面已经 return 了。 */
-        const qq = findLocalQq();
+        /* 2026-09-23 修正：判据改对了：NapCat 自带的 QQ 能用就用它（注入链只认 Shell 自己目录里的
+         * QQ.exe），只有"自带的不完整 且 机器上也没另装"才是真的没有可注入对象。
+         * 旧版只查另装的 QQ，结果没另装 QQ 的干净机器被硬拦住、永远起不来，
+         * 报的却是一句"没检测到 QQ 客户端"，与真实原因（Shell 缺文件）不符。 */
+        const bundled = napcatBundledQq(onekey.dir);
+        const qq = bundled.ok ? bundled : findLocalQq();
         if (!qq.ok) {
           const installer = bundledQqInstaller();
-          const msg = '没有检测到 QQ 客户端，NapCat 没有可注入的目标，启动后会表现为"打不进QQ"。\n'
+          const msg = `没有可注入的 QQ：NapCat 自带的那份不完整（${bundled.reason}），这台机器上也没检测到另装的 QQ NT。\n`
             + (installer
               ? `随包的 QQ 安装包在这里：${installer}\n点管理端的「安装 QQ」一键装，或直接双击它装完再回来启动。`
               : '随包也没找到 QQ 安装包：请先自行安装 QQ NT（https://im.qq.com/），再回来启动。');
@@ -1451,8 +2330,10 @@ function startNapcatLocal(cfgNap) {
           resolve({ success: false, message: msg, needQq: true, qqInstaller: installer });
           return;
         }
-        mlog(`[napcat] 检测到 QQ 客户端：${qq.path}`);
-        /* 【2026-09-19 真机事故修复】拉起 NapCat 之前先做一次完整性自检 / 自修。
+        mlog(bundled.ok
+          ? `[napcat] 用 NapCat 自带的 QQ：${bundled.loader}（QQNT ${bundled.version}；另装的 QQ 不参与这条链）`
+          : `[napcat] NapCat 自带 QQ 不可用（${bundled.reason}）→ 回退用本机安装的 QQ：${qq.path}`);
+        /* 2026-09-19 真机事故修复：拉起 NapCat 之前先做一次完整性自检 / 自修。
          * 事故：别人装完启动即崩 `Error [ERR_MODULE_NOT_FOUND]: Cannot find module
          * '...\conout-D9oph_Le.js' imported from '...\napcat.mjs'` —— 根因是我们打出去的 payload 里
          * napcat.mjs 与被引用分片不同源（打包仓库实测：引用 D9oph_Le，目录里只剩旧的 wiJ7YKRd）；
@@ -1468,6 +2349,42 @@ function startNapcatLocal(cfgNap) {
             mlog(`[napcat] 完整性自检：检查 ${rep.checked} 个 / 坏 ${rep.broken} 个 / 补回 ${rep.repaired} 个 → ${rep.ok ? '已修复' : '仍有问题'}`);
           }
         } catch (e) { mlog(`[napcat] 完整性自检异常（继续启动）：${e?.message ?? e}`); }
+        /* 2026-09-23：BOM 自愈：先于预检跑 —— 它修的是"文件都在、内容也全，只是开头多了 3 个字节"
+         * 这种最难查的坏法（复盘里的 v2:-8）。BOM 在的时候 NapCat 一定起不来，且症状像"整套坏了"。 */
+        try {
+          const bomFixed = healNapcatJsonBom(onekey.dir);
+          if (bomFixed.length) {
+            mlog(`[napcat] ⚠️ 检测到 UTF-8 BOM 并已就地剥除（这正是 NapCat 起不来的成因，症状是 boot main 报错/QQ 报 v2:-8）：\n  ` + bomFixed.join('\n  '));
+          } else {
+            mlog('[napcat] BOM 自检：干净（package.json / application.json / versions\\config.json / WebUI 配置）');
+          }
+        } catch (e) { mlog(`[napcat] BOM 自愈异常（继续启动）：${e?.message ?? e}`); }
+        /* 2026-09-23：VC++ 运行库自愈：必须先于预检跑 —— 预检会看 Shell 目录里有没有这几份 DLL，
+         * 自愈就是把它们摆到 boot main 旁边（沙盒/干净机器 System32 里没有，boot main 直接起不来）。 */
+        try {
+          const vcHealed = healNapcatVcruntime(onekey.dir);
+          if (vcHealed.length) {
+            mlog(`[napcat] ⚠️ 缺 VC++ 运行库（boot main 会直接 "Failed to start process."），已按 app-local 自愈：\n  ` + vcHealed.join('\n  '));
+          } else {
+            mlog('[napcat] VC++ 运行库自检：Shell 根目录已有（或无需自愈）');
+          }
+        } catch (e) { mlog(`[napcat] VC++ 运行库自愈异常（继续启动）：${e?.message ?? e}`); }
+        /* 2026-09-23：二进制品级预检：把 boot main 真正依赖的东西逐项写进日志。
+         * 有意不在这里硬拦（硬拦正是上一个 bug 的成因）：缺 Hook DLL / boot main / QQNT.dll 这类
+         * 确定性起不来的才拒启并说明；只缺 MSVC 运行库（可能 app-local / 后装的）照样尝试启动，只告警。 */
+        try {
+          const pre = napcatBootPreflight(onekey);
+          mlog(`[napcat] 启动前预检（${pre.ok ? '全部就绪' : '发现问题'}）：\n  ` + pre.items.join('\n  '));
+          const cannotLaunch = pre.hard.some((s) => /NapCatWinBootMain|NapCatWinBootHook/.test(s));
+          if (cannotLaunch) {
+            const msg = 'NapCat 启动器不完整，无法启动：\n  ' + pre.hard.join('\n  ')
+              + '\n通常是杀毒软件误删或复制不完整。可重新解压随包的 napcat-onekey，或用管理端的「修复 NapCat」。';
+            mlog('[napcat] ' + msg.replace(/\n/g, ' '));
+            resolve({ success: false, message: msg });
+            return;
+          }
+          if (pre.soft.length) mlog('[napcat] ⚠️ 预检告警（仍会尝试启动）：' + pre.soft.join('；'));
+        } catch (e) { mlog(`[napcat] 预检异常（继续启动）：${e?.message ?? e}`); }
         // 清理上次残留的 NapCat/QQ 进程——只杀本 OneKey 目录内启动的进程（绝不误杀用户自己的正版 QQ）
         try {
           const owndir = onekey.dir.replace(/'/g, "''");
@@ -1476,19 +2393,31 @@ function startNapcatLocal(cfgNap) {
             { stdio: 'ignore', windowsHide: true });
         } catch {}
         const exe = onekey.exe;
-        // —— 修复1：固定 WebUI token（用配置 napToken，默认 truefriend）——
+        // —— 修复1：WebUI token ——
+        /* 2026-09-23 根治「获取QQ列表失败: Unauthorized」/「获取二维码失败: Unauthorized」：
+         * 这里以前是"文件里 token 不等于配置值就反写成配置值"。那是错的，而且是首发症状的来源：
+         *   NapCat 运行期只认启动那一刻读进内存的 token。它首启时若没有 webui.json，
+         *   会自己随机生成一个并落盘；我们在它跑起来之后把文件改成配置值，
+         *   文件与进程立刻对立 → 管理器按文件拼 URL，页面拿这个 token 去登录，
+         *   NapCat 用内存里的随机值一比 → `token is invalid` → 页面拿不到 Credential →
+         *   页面上每个接口都 Unauthorized（QQ 列表 / 二维码是最先报出来的两个）。
+         * 现在：只对齐、不反写。文件是现场真相，缓存跟着文件走；
+         * 想改 token 就先改配置、再重启 NapCat（真正生效的时机只有启动前）。
+         * 首启前的预置在下面 startNapcatHidden 之前那段里做。
+         */
         try {
-          const cfgDir = findNapcatConfigDir(onekey.dir);
-          if (cfgDir) {
-            const webuiPath = join(cfgDir, 'webui.json');
-            if (existsSync(webuiPath)) {
-              const w = JSON.parse(readFileSync(webuiPath, 'utf-8'));
-              if (w.token !== napToken) { w.token = napToken; writeFileSync(webuiPath, JSON.stringify(w, null, 4), 'utf-8'); }
+          const liveTok = localNapcatWebuiTokenFromFile(onekey.dir);
+          if (liveTok) {
+            if (liveTok !== napToken) {
+              mlog(`[napcat] webui.json 的 token 与配置值不一致 → 以 NapCat 自己的为准（配置里的忽略；要改请改配置后重启 NapCat）`);
             }
-            // 管理器刚把 token 定成 napToken → 记进缓存，"本机 · NapCat 官方界面"那条链接立刻用对的 token
+            // 管理器链接一律用现场真相："本机 · NapCat 官方界面"那条链接点开即用
+            primeNapcatWebuiToken('local', cfgNap.webuiPort || 6099, liveTok);
+          } else {
+            // 还没有 webui.json（NapCat 尚未首启成功）：先按配置值乐观登记，等它落盘后自然对齐
             primeNapcatWebuiToken('local', cfgNap.webuiPort || 6099, napToken);
           }
-        } catch (e) { console.error('[napcat] token fix:', e.message); }
+        } catch (e) { console.error('[napcat] token align:', e.message); }
         // —— 修复2：快速登录账号（免二维码），可用账号从 napcat_*.json 探测 ——
         let quickLogin = '';
         try {
@@ -1506,7 +2435,7 @@ function startNapcatLocal(cfgNap) {
         } catch (e) { console.error('[napcat] quickLogin detect:', e.message); }
         const logFile = instanceLogPath(id);
         const logStream = createWriteStream(logFile, { flags: 'a' });
-        logStream.write(`\n===== start ${new Date().toISOString()}: VBS hidden (${quickLogin ? 'quick ' + quickLogin : 'QR'}) =====\n`);
+        logStream.write(`\n===== start ${new Date().toISOString()}: PowerShell hidden-start (${quickLogin ? 'quick ' + quickLogin : 'QR'}) =====\n`);
         /* 【退出终结】从这一刻起，"本次管理器进程拉起过 NapCat"成立 —— 退出时才有资格按 killOnExit 收它
          * （没这个标记就绝不会去动任何 NapCat 进程，见 killNapcatOnExitSync 的第一个判断）。 */
         napcatLaunchedThisProcess = true;
@@ -1514,35 +2443,68 @@ function startNapcatLocal(cfgNap) {
         // 启动前快照：上面那段预清理刚 Stop-Process 过，但进程真正消失有几秒延迟，
         // 拿它做差集，才不会把"上一份还没退干净的 NapCat"当成这次启动的而误杀（见 collectNapcatPidsAfterLaunch）
         const beforePids = new Set(listNapcatProcsInDirs(managedDirs).map((p) => p.pid));
-        // 融合 VBS 隐藏启动：wscript 后台运行，任何模式都不弹黑窗
-        const { child, target } = await startNapcatHiddenViaVbs(onekey, quickLogin);
-        logStream.write(`\nlauncher: ${target}\n`);
-        child.on('exit', () => logStream.write(`\n===== exit ${new Date().toISOString()} =====\n`));
-        // 后台登记"这次新出现的 NapCat 进程号"（VBS 非阻塞、wscript 秒退，pid 只能这样事后抓）
-        void collectNapcatPidsAfterLaunch(managedDirs, beforePids, logStream);
-        runtimes.set(id, { proc: child, startedAt: new Date().toISOString(), logFile, cwd: onekey.dir });
-        // 异步: 等 NapCat 首启生成 webui.json 后固定 token（napToken）; 并注入出厂 OneBot 网络配置
-        (async () => {
-          for (let i = 0; i < 60; i++) {
-            try {
-              const cd = findNapcatConfigDir(onekey.dir);
-              if (cd) {
-                const wp = join(cd, 'webui.json');
-                if (existsSync(wp)) {
-                  const w = JSON.parse(readFileSync(wp, 'utf-8'));
-                  if (w.token !== napToken) { w.token = napToken; writeFileSync(wp, JSON.stringify(w, null, 4), 'utf-8'); }
-                  break;
-                }
-              }
-            } catch {}
-            await new Promise((r) => setTimeout(r, 3000));
+        // 隐藏启动：只有一条路 —— PowerShell `Start-Process -WindowStyle Hidden`（SW_HIDE，见 startNapcatHidden）
+        /* 2026-09-23 根治「获取QQ列表失败: Unauthorized」/「获取二维码失败: Unauthorized」：
+         *
+         * 旧代码是在拉起之后轮询等 webui.json 出现，一出现就把里面的 token 改成配置里的 napToken。
+         * 那一步正是 Unauthorized 的来源：
+         *   · NapCat 首启时如果 webui.json 不存在，会自己随机生成一个 token 写进去，
+         *     并且运行期只认启动那一刻读进内存的那个 token；
+         *   · 我们在它跑起来之后改文件 → 文件与进程当场不一致；
+         *   · 管理器按文件拼 URL（于是带着配置值），页面算 sha256(token+'.napcat') 交给 NapCat 校验，
+         *     NapCat 拿内存里的随机值一比 → `token is invalid` → 页面拿不到 Credential →
+         *     页面所有接口都报 Unauthorized（QQ 列表、二维码就是最先报的那两个）。
+         *   · 只在新安装首启时发作（那时才有"随机 token"），所以看起来像"首次鉴权失败"。
+         *
+         * 现在改成单向：token 只在"文件还不存在"（= NapCat 还没首启，写进去不影响任何内存状态）
+         * 时预置一次；文件已经存在就承认它才是真相，管理器侧对齐过去，绝不反写配置值。
+         * 正在跑的 NapCat 的 token 要改，只能改配置后重启 NapCat —— 这是 NapCat 自己的语义。 */
+        try {
+          const preCd = napcatConfigDirProspective(onekey.dir);
+          if (preCd) {
+            const wp = join(preCd, 'webui.json');
+            const liveTok = localNapcatWebuiTokenFromFile(onekey.dir);
+            if (!existsSync(wp) && !liveTok) {
+              mkdirSync(preCd, { recursive: true });
+              writeFileSync(wp, JSON.stringify({ token: napToken, loginRate: 10 }, null, 4), 'utf-8');
+              logStream.write(`\n===== webui.json 预置 token=${napToken}（在 NapCat 首启之前写入，运行期与文件必然一致）=====\n`);
+              mlog(`[napcat] 已预置 webui.json（token=${napToken}），避免 NapCat 随机生成 token 导致页面 Unauthorized`);
+            } else if (liveTok && liveTok !== napToken) {
+              logStream.write(`\n===== webui.json 已存在（token 由 NapCat 自己定的），以它为准、不反写 =====\n`);
+              mlog('[napcat] webui.json 的 token 与配置值不一致 → **以 NapCat 自己的为准**（配置里的会被忽略；要改请改配置后重启 NapCat）');
+            } else if (liveTok) {
+              logStream.write(`\n===== webui.json 已存在，token 与配置一致 =====\n`);
+            }
           }
-        })();
+        } catch (e) { logStream.write(`\n===== webui.json 预置失败（忽略，继续启动）：${e?.message ?? e} =====\n`); }
+        /* 2026-09-28：需求"完全静默、瞬时隐藏"。先武装、后启动：常驻观察者在这里就位，
+         * 从第 0 毫秒开始盯着随包 QQ 的窗口 —— 不再有旧实现"启动后先等 6 秒才第一次隐藏"的闪烁。
+         * arm 自己只等脚本把 user32 P/Invoke 编译完（几百毫秒，且有 2.5 秒上限），
+         * 这段时间里 NapCatWinBootMain.exe 还没被拉起，所以"从第 0 毫秒盯着"这条不破。 */
+        const qqHider = await armQqWindowHider(onekey.dir);
+        const { child, target, mode } = await startNapcatHidden(onekey, quickLogin);
+        /* 补漏（2026-09-28）：把"我们自己 spawn 出来的那个 pid"登记给观察者（seed 文件，先落盘再可能死）：
+         * 启动器常常几百毫秒就退，甚至早于观察者第一次轮询 —— 不登记的话它带出来的黑框就认不回来了。
+         * 只登记我们自己 spawn 的 pid（direct=启动器本体；shell 模式=壳，链上必经），不扫、不猜、不碰用户自己的进程。 */
+        if (qqHider) seedQqWindowHiderPids(qqHider, child?.pid);
+        logStream.write(`\nlauncher(${mode}): ${target}\n`);
+        child.on('exit', () => logStream.write(`\n===== exit ${new Date().toISOString()} =====\n`));
+        // 后台登记"这次新出现的 NapCat 进程号"（启动器非阻塞：拉起注入后自己就退，pid 只能这样事后抓）
+        void collectNapcatPidsAfterLaunch(managedDirs, beforePids, logStream);
+        /* 2026-09-28：观察者已武装 → 主路径不再依赖一次性轮询；只有它没起来（powershell 缺失 /
+         * Add-Type 编译失败 / 临时目录写不进去 / 启动即退出）时才退回 hideBundledQqWindows 兜底。
+         * 两条路都只动"可执行文件路径在 onekey.dir 之下"的进程，用户自己那份正版 QQ 一根手指都不碰。 */
+        if (!qqHider) void hideBundledQqWindows(onekey.dir);
+        runtimes.set(id, { proc: child, startedAt: new Date().toISOString(), logFile, cwd: onekey.dir });
+        /* 2026-09-23：这里故意什么都不做了。以前它等 webui.json 出现就把 token 改成 napToken，
+         * 那是「页面 Unauthorized」的直接成因（NapCat 运行期只认启动时读进内存的 token，
+         * 改了文件就等于让文件与进程对立）。现在 token 只在首启之前预置一次，见上面那段。 */
+        // 注入出厂 OneBot 网络配置（这个不涉及"进程内存里的状态"，随便写）
         ensureNapcatOnebotConfig(onekey.dir, logStream).then((ok) => {
           if (ok === 'written') logStream.write(`\n===== onebot 出厂配置已自动写入 (HTTP 3000 / WS 3001, token=truefriend) =====\n`);
           else if (ok === 'found') logStream.write(`\n===== onebot 已有网络配置, 跳过注入 =====\n`);
         });
-        resolve({ success: true, message: `NapCat (OneKey · VBS 隐藏启动) 已拉起${quickLogin ? ' · 快速登录 ' + quickLogin : ' · 二维码登录'}\n启动器：${target}${napcatRepairNote}` }); return;
+        resolve({ success: true, message: `NapCat (OneKey · 静默启动·SW_HIDE) 已拉起${quickLogin ? ' · 快速登录 ' + quickLogin : ' · 二维码登录'}\n启动器：powershell Start-Process -WindowStyle Hidden\n目标：${target}${napcatRepairNote}` }); return;
       }
       // 3) 非 Windows：官方安装脚本
       if (process.platform !== 'win32') {
@@ -1583,8 +2545,8 @@ function startBridgeLocal(cfgBr) {
 
 /** 按命令行关键字兜底结束进程（处理非本 manager spawn 的历史/游离进程）
  *
- * 【2026-09-12 修】原来只过滤 `Name='node.exe'`，而发布包用的是内置运行时 **qbm-node.exe**，
- * 于是这个"兜底清理"在真机上**永远匹配不到任何进程**：管理器重启过之后（内存里的 runtimes 表是空的），
+ * 2026-09-12 修：原来只过滤 `Name='node.exe'`，而发布包用的是内置运行时 qbm-node.exe，
+ * 于是这个"兜底清理"在真机上永远匹配不到任何进程：管理器重启过之后（内存里的 runtimes 表是空的），
  * 「停止/重启桥接」接口会返回成功，老桥却还活着占着 3100 端口和 state/bridge.lock，
  * 新桥启动即因单实例锁退出 —— 用户看到"重启了但没反应"。现在两种进程名都覆盖。 */
 function killByCmdline(marker) {
@@ -1619,7 +2581,7 @@ function countNapcatProcs(dirs) {
 
 async function stopInstance(id) {
   const rt = runtimes.get(id);
-  // NapCat 由 wscript(隐藏) 启动，子进程脱离 wscript PID —— 需按进程路径整树清理
+  // NapCat 由隐藏启动器（powershell Start-Process）拉起，子进程脱离启动器 PID —— 需按进程路径整树清理
   if (id === 'napcat-local') {
     const dirs = napcatManagedDirs(rt);
     try {
@@ -1703,7 +2665,7 @@ function instanceRuntime(id, cfg) {
  * 反过来的情形更糟：进程起来几秒后自己退了（端口冲突/单实例锁/缺依赖），界面只把按钮退回「启动」，
  * 一句原因都没有。
  *
- * 现在把状态机放到服务端，判据**全部来自真实探活**（端口/HTTP），不靠"我们 spawn 过"这种推断：
+ * 现在把状态机放到服务端，判据全部来自真实探活（端口/HTTP），不靠"我们 spawn 过"这种推断：
  *   idle ──start──▶ starting ──就绪──▶ running ──stop──▶ stopping ──▶ idle
  *                        └──进程退出/超时──▶ failed（带日志里挑出来的原因）
  * /api/state 每次都带上 phase/elapsedMs/note/error，前端照着渲染即可（3 秒轮询，启动中时 1.2 秒）。
@@ -1797,8 +2759,8 @@ async function waitInstanceReady(id, cfg, budgetMs = startupBudgetMs(id)) {
       return phaseInfo(id);
     }
     const rt = runtimes.get(id);
-    // 进程是不是真的没了 —— NapCat 不能看这里：它是 VBS 隐藏启动的，被跟踪的那个子进程
-    // （wscript 启动器）本来就秒退，看 exitCode 会把正常的 NapCat 判成失败。
+    // 进程是不是真的没了 —— NapCat 不能看这里：它是隐藏启动的，被跟踪的那个子进程
+    // （powershell 启动器）本来就秒退，看 exitCode 会把正常的 NapCat 判成失败。
     // 它按"托管目录下还有没有 NapCat/QQ 进程"判断（与 stopInstance 同一套判据）。
     let died;
     if (id === 'napcat-local') {
@@ -1822,7 +2784,7 @@ async function waitInstanceReady(id, cfg, budgetMs = startupBudgetMs(id)) {
 }
 
 /**
- * 启动一个实例并推进状态机。`wait` 为 true 时在本次请求内**等到就绪或失败**（一键启动用），
+ * 启动一个实例并推进状态机。`wait` 为 true 时在本次请求内等到就绪或失败（一键启动用），
  * 否则立刻返回 starting，由后台轮询推进（单卡点「启动」用，按钮能立刻变成「启动中」）。
  */
 async function startInstanceTracked(id, cfg, { wait = false } = {}) {
@@ -1861,10 +2823,10 @@ async function resolveServices(cfg, connected) {
   const dshIso = cfg.instances?.dshIsolated ?? DEFAULT_CONFIG.instances.dshIsolated;
   const napLocal = cfg.instances?.napcatLocal ?? DEFAULT_CONFIG.instances.napcatLocal;
   const brLocal = cfg.instances?.bridgeLocal ?? DEFAULT_CONFIG.instances.bridgeLocal;
-  /* 【2026-09-23 修「连上服务器后卡片还显示启动、整体感觉连接很慢」】
-   * 这三条探测原来是**依次 await**，每条 700ms 超时 —— 本机实例没跑时最坏就是 2.1s
+  /* 2026-09-23 修「连上服务器后卡片还显示启动、整体感觉连接很慢」：
+   * 这三条探测原来是依次 await，每条 700ms 超时 —— 本机实例没跑时最坏就是 2.1s
    * 白白串在 /api/state 的关键路径上。而前端每 1.2~3 秒就轮询一次 /api/state，
-   * 响应比轮询还慢 → 请求堆积 → 界面状态永远滞后一拍（主人看到的就是"服务端明明在跑，
+   * 响应比轮询还慢 → 请求堆积 → 界面状态永远滞后一拍（现场看到的就是"服务端明明在跑，
    * 卡片还显示『启动服务端』"）。三条互不依赖，改并行；语义完全不变。 */
   const [dshIsoUp, napUp, brUp] = await Promise.all([
     probe(`http://127.0.0.1:${dshIso.port}/`, 700),
@@ -1872,25 +2834,25 @@ async function resolveServices(cfg, connected) {
     probe(`http://127.0.0.1:${brLocal.webuiPort || 3100}/`, 700),
   ]);
 
-  /* 【2026-09-14 修串台】本机那一组**不再回退到隧道**：本地实例没跑时，原来的写法会把
+  /* 2026-09-14 修串台：本机那一组不再回退到隧道：本地实例没跑时，原来的写法会把
    * `127.0.0.1:13000/13080/13100`（那是服务器端口的隧道）当成"本机入口"填进去 ——
-   * 于是「本机 · NapCat 官方界面」点开看到的是**服务器**的 NapCat（实测 reachable=false→串到隧道）。
+   * 于是「本机 · NapCat 官方界面」点开看到的是服务器的 NapCat（实测 reachable=false→串到隧道）。
    * 现在本机就是本机端口（没跑就如实显示不可达），服务端那组单独给（见下方 remoteServices）。 */
-  /* 【2026-09-23】本机 DSH 入口也**必须带 token**：rc.1（官方 0.1.2+）对不带 token 的请求一律 401，
+  /* 2026-09-23：本机 DSH 入口也必须带 token：rc.1（官方 0.1.2+）对不带 token 的请求一律 401，
    * 只给 `http://127.0.0.1:<port>` 点开就是白屏。token 从实例日志尾部取（与 buildRuntimeInfo 同一份真相）。 */
   const localDshTok = readLatestDshToken(instanceLogPath('dsh-isolated'));
   const localDshUrl = `http://127.0.0.1:${dshIso.port}${localDshTok ? '/?token=' + encodeURIComponent(localDshTok) : ''}`;
-  // NapCat 本机入口同样**带 webui token**（主人要求：点开就用，不用再输 token）
-  // 【2026-09-20】token 来源改为"现场真相优先 + 现场验证"，见 napcatWebuiTokenFor / verifyNapcatWebuiToken
-  // 【2026-09-21】本机 NapCat 没启用时（判据见 localNapcatOffReason）这次"现场验证"根本不会发网络请求，
-  // 也不会写日志；上面那条链接保持不变（主人要的是"别探、别刷日志"，不是"删掉入口"），
+  // NapCat 本机入口同样带 webui token（需求：点开就用，不用再输 token）
+  // 2026-09-20：token 来源改为"现场真相优先 + 现场验证"，见 napcatWebuiTokenFor / verifyNapcatWebuiToken
+  // 2026-09-21：本机 NapCat 没启用时（判据见 localNapcatOffReason）这次"现场验证"根本不会发网络请求，
+  // 也不会写日志；上面那条链接保持不变（需求是"别探、别刷日志"，不是"删掉入口"），
   // 而"打开 NapCat 界面"的实际入口在 serverMode 下走的是服务端那条（见下方 remoteServices 与 /api/open）。
   const localNapPort = napLocal.webuiPort || 6099;
   const localNapTok = await verifyNapcatWebuiToken('local', localNapPort, [localNapcatWebuiTokenFromFile(), napLocal.webuiToken]);
   const localNapUrl = `http://127.0.0.1:${localNapPort}/webui/${localNapTok ? '?token=' + encodeURIComponent(localNapTok) : ''}`;
   const localBrUrl = `http://127.0.0.1:${brLocal.webuiPort || 3100}`;
 
-  // 本机那一组：名字统一带「本机 · 」前缀，和服务端那组一眼分得清（主人 2026-09-14 要求）。
+  // 本机那一组：名字统一带「本机 · 」前缀，和服务端那组一眼分得清（2026-09-14 约定）。
   const localServices = [
     { id: 'napcat-webui', scope: 'local', name: '本机 · NapCat 官方界面', url: localNapUrl, desc: '账号/连接/消息管理 WebUI（本机实例 ' + (napLocal.webuiPort || 6099) + '）' },
     { id: 'napcat-http', scope: 'local', name: '本机 · NapCat HTTP API', url: `http://127.0.0.1:${local.napcatHttp}`, desc: '本机 OneBot HTTP ' + local.napcatHttp },
@@ -1904,7 +2866,7 @@ async function resolveServices(cfg, connected) {
     iframeBlocked: !!p.iframeBlocked,
     iframeBlockReason: p.iframeBlocked ? (p.xfo ? `X-Frame-Options: ${p.xfo}` : `CSP ${p.frameAncestors}`) : '',
   });
-  /* 【2026-09-23】原来是 `for (const s of localServices) services.push(mk(s, await probe(s.url)))`
+  /* 2026-09-23：原来是 `for (const s of localServices) services.push(mk(s, await probe(s.url)))`
    * —— 4 条串行探测，每条默认 1200ms 超时，最坏再加 4.8s 到 /api/state 的关键路径上。
    * 四条互不依赖，改并行；mk/入队顺序保持原样，语义不变。 */
   const services = [];
@@ -1913,7 +2875,7 @@ async function resolveServices(cfg, connected) {
 
   /* ── 服务端一组（只在 SSH 已连接时出现）──────────────────────────────
    * 以前这里只有一组 url，且带「本机实例在跑就优先用本机」的规则：连上服务器后点「打开官方界面」
-   * 看到的还是本机那套（主人实测遇到的问题）。现在本机/服务端**并列成两组**，各自独立，
+   * 看到的还是本机那套（实测遇到的问题）。现在本机/服务端并列成两组，各自独立，
    * 服务端的 DSH 地址由后端拼好 `?token=`（DSH 无令牌一律 401）、NapCat 拼好 webui token，
    * 前端点开即用，不再靠前端猜。 */
   let remoteStatus = null;
@@ -1948,18 +2910,28 @@ app.get('/api/napcat/launchers', (_req, res) => {
   const cfg = loadConfig();
   const onekey = findNapcatOneKey();
   if (!onekey) return res.json({ success: false, found: false, message: '未定位到 NapCat OneKey 目录' });
-  const vbs = ensureNapcatVbs(onekey.dir, cfg.instances?.napcatLocal?.quickLogin || '');
-  /* 【2026-09-23】顺带把"有没有 QQ 客户端"报给界面：没有就显示「安装 QQ」，
-   * 这正是不装 QQ 的机器"打不进QQ"的那一步。 */
-  const qq = findLocalQq();
+  /* 不再生成 .vbs：启动方式只有 PowerShell `Start-Process -WindowStyle Hidden` 一种 */
+  /* 2026-09-23 修正：界面要的是"这台机器到底能不能注入 QQ"，而不是"有没有另装 QQ"。
+   * Shell 自带 QQ（NapCatWinBootMain 用的就是它）能用就是能用，此时不该催用户装 QQ。 */
+  const bundled = napcatBundledQq(onekey.dir);
+  const installed = bundled.ok ? { ok: false, path: '' } : findLocalQq();
   const installer = bundledQqInstaller();
   res.json({
-    success: true, found: true, dir: onekey.dir, exe: onekey.exe, qr: vbs.qr, quick: vbs.quick, quickLogin: vbs.quickLogin,
-    qq: { ok: qq.ok, path: qq.path, installer },
+    success: true, found: true, dir: onekey.dir, exe: onekey.exe,
+    launcher: 'powershell-hidden', qr: onekey.exe, quick: onekey.exe,
+    quickLogin: String(cfg.instances?.napcatLocal?.quickLogin || ''),
+    qq: {
+      ok: bundled.ok || installed.ok,
+      path: bundled.ok ? bundled.loader : installed.path,
+      source: bundled.ok ? 'bundled' : (installed.ok ? 'installed' : 'none'),
+      version: bundled.ok ? bundled.version : '',
+      reason: bundled.reason || '',
+      installer,
+    },
   });
 });
 
-/** 【2026-09-23 新增】一键装 QQ：跑随包的 QQ 安装包（napcat-onekey\QQ.exe）。
+/** 2026-09-23 新增：一键装 QQ：跑随包的 QQ 安装包（napcat-onekey\QQ.exe）。
  *  QQ 是交互式安装程序，所以 detached + 可见窗口；装完用户回来点「启动本机 NapCat」即可。 */
 app.post('/api/napcat/install-qq', (_req, res) => {
   const installer = bundledQqInstaller();
@@ -1982,8 +2954,8 @@ app.get('/api/config', (_req, res) => {
   res.json({ ...cfg, connected: !!(connected && sshConnections.has(cfg.activeServerId)), activeServer: connected });
 });
 
-/* 【2026-09-22 主人要求】连接服务端的状态机（"这个过程希望能带上「服务端启动中」状态机"）。
- * 界面可以直接轮询这条（比翻 /api/state 便宜），也可以从 /api/state 读；**读它不产生任何网络动作**。 */
+/* 2026-09-22：连接服务端的状态机（需求原话"这个过程希望能带上「服务端启动中」状态机"）。
+ * 界面可以直接轮询这条（比翻 /api/state 便宜），也可以从 /api/state 读；读它不产生任何网络动作。 */
 app.get('/api/connect', (_req, res) => {
   const cfgNow = loadConfig();
   const connected = !!(cfgNow.activeServerId && sshConnections.has(cfgNow.activeServerId));
@@ -1993,12 +2965,12 @@ app.get('/api/connect', (_req, res) => {
 app.post('/api/config', (req, res) => {
   const cfg = loadConfig();
   const next = req.body ?? {};
-  // 【killOnExit】改开关前先记下旧值：守卫的武装参数里带着它，改了要在保存后**立刻重装守卫**，
+  // 【killOnExit】改开关前先记下旧值：守卫的武装参数里带着它，改了要在保存后立刻重装守卫，
   // 否则这次改动要等下一次自动武装（默认 60 秒复查，且已武装时不会重装）才生效 —— 用户会以为开关没反应。
   const killBefore = killOnExitEnabled();
   if (Array.isArray(next.servers)) cfg.servers = next.servers;
   if (typeof next.activeServerId === 'string' || next.activeServerId === null) cfg.activeServerId = next.activeServerId;
-  // 开机自动连服务端的开关（主人 2026-09-22 要求："连接上服务器之后直接退出，下次打开自动连接服务器"）
+  // 开机自动连服务端的开关（2026-09-22 需求："连接上服务器之后直接退出，下次打开自动连接服务器"）
   if (typeof next.autoConnectServer === 'boolean') cfg.autoConnectServer = next.autoConnectServer;
   if (next.local && typeof next.local === 'object') cfg.local = { ...cfg.local, ...next.local };
   if (next.instances?.dshIsolated && typeof next.instances.dshIsolated === 'object') cfg.instances.dshIsolated = { ...cfg.instances.dshIsolated, ...next.instances.dshIsolated };
@@ -2033,7 +3005,7 @@ app.get('/api/state', async (req, res) => {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
   const r = await resolveServices(cfg, connected);
-  // 【2026-09-15】取状态时顺手做隧道自愈：缺了就补建（幂等、不阻塞主流程）。
+  // 2026-09-15：取状态时顺手做隧道自愈：缺了就补建（幂等、不阻塞主流程）。
   if (connected && sshConnections.has(connected.id)) void ensureTunnels(connected.id).catch(() => {});
   const tunnelsInfo = [];
   if (connected) for (const [key, tun] of tunnels.entries()) if (key.startsWith(connected.id + ':')) tunnelsInfo.push({ name: tun.name, localPort: tun.local, remotePort: tun.remote });
@@ -2071,7 +3043,7 @@ app.get('/api/state', async (req, res) => {
     i.error = phaseInfo(i.id).error || '';
     i.loggedIn = loggedIn;
   }
-  /* 【2026-09-17 单点登录互斥 L3】本机与服务端**同时**有 NapCat 在线 = 同一个 QQ 号两处登录，
+  /* 2026-09-17 单点登录互斥 L3：本机与服务端同时有 NapCat 在线 = 同一个 QQ 号两处登录，
    * 腾讯会判"已在另一台终端登录"互相踢。这里把风险如实报给界面，让它红着提示一句。 */
   const dualNapcat = !!(napRt.reachable && r.remoteStatus && r.remoteStatus.napcat && r.remoteStatus.napcat.running);
   if (dualNapcat) mlog('[single-login] 检测到本机与服务端 NapCat 同时在线（同一账号两处登录，会互踢）');
@@ -2082,15 +3054,15 @@ app.get('/api/state', async (req, res) => {
   res.json({
     mode: r.mode, activeServer: r.server, services, tunnels: tunnelsInfo,
     connected: !!connected && sshConnections.has(connected.id),
-    /* 【2026-09-23 修「SSH 配置页那个开关勾不上也取消不掉」】
+    /* 2026-09-23 修「SSH 配置页那个开关勾不上也取消不掉」：
      * 前端读的是 state.autoConnectServer（`checked = state?.autoConnectServer !== false`），
-     * 但这条响应体此前**从来没带过这个字段** → 前端恒拿到 undefined → `undefined !== false`
+     * 但这条响应体此前从来没带过这个字段 → 前端恒拿到 undefined → `undefined !== false`
      * 恒为 true → 开关永远显示成"开"、点了保存再刷新又弹回勾选态。
      * 写入（L1961）与读取（L7658）本身都是好的，坏的只是"没往外报"。
-     * 这里回一个**具体布尔值**（缺省视为开），前端不必再靠 !== false 猜。 */
+     * 这里回一个具体布尔值（缺省视为开），前端不必再靠 !== false 猜。 */
     autoConnectServer: cfg.autoConnectServer !== false,
-    /* 【2026-09-15】断线自动重连的现场状态：界面可以显示"服务端重连中…"，
-     * 而不是在自动重连的几秒里显示成"服务端未运行"（主人会以为又断了）。 */
+    /* 2026-09-15：断线自动重连的现场状态：界面可以显示"服务端重连中…"，
+     * 而不是在自动重连的几秒里显示成"服务端未运行"（用户会以为又断了）。 */
     reconnecting: reconnectState.serverId ? {
       serverId: reconnectState.serverId,
       attempt: reconnectState.attempt,
@@ -2098,13 +3070,13 @@ app.get('/api/state', async (req, res) => {
       reason: reconnectState.reason,
     } : null,
     // 【新】服务端现场状态（只在 SSH 已连接时有值）：systemd dsh-web / NapCat(systemd 或 docker) / 桥进程，
-    // 与本机那三个实例**分开两处**展示，绝不混在一张卡上（主人 2026-09-14 要求）。
+    // 与本机那三个实例分开两处展示，绝不混在一张卡上（2026-09-14 约定）。
     remoteStatus: r.remoteStatus ?? null,
-    /* 【2026-09-22 主人要求】连接服务端的状态机（connecting → tunnels → server-starting → warming → ready）：
+    /* 2026-09-22：连接服务端的状态机（connecting → tunnels → server-starting → warming → ready）：
      * 界面据此显示"服务端启动中：DSH 已就绪 · NapCat 启动中"。读它不花任何网络动作。 */
     connect: connectMachine.view(),
     instances,
-    // 【2026-09-12 可移植性】安装位置体检：所有运行数据（记忆库 memory.db / 社交状态 / 人设）都写在
+    // 2026-09-12 可移植性：安装位置体检：所有运行数据（记忆库 memory.db / 社交状态 / 人设）都写在
     // 安装树里，所以装在 Program Files（用户级进程写不进去）或 OneDrive 等同步盘（SQLite 会被反复同步、
     // 有损坏风险）时，必须提前告诉用户 —— 这正是"拿给别人装"最容易踩的两个坑。
     warnings: installLocationWarnings(),
@@ -2134,16 +3106,16 @@ app.get('/api/open', async (req, res) => {
   const r = await resolveServices(cfg, connected);
   // 先精确匹配 id：现在本机/服务端各有一套 id（bridge / srv-bridge），fuzzy includes 会把
   // "bridge" 也匹配到 "srv-bridge" 上，打开的就成了服务端那套（正是本次要修的串台问题）。
-  // 显式给了 scope 就**严格按 scope 找**，找不到宁可 404，绝不跨到另一套去。
+  // 显式给了 scope 就严格按 scope 找，找不到宁可 404，绝不跨到另一套去。
   const scope = req.query.scope;                                   // 可选：local | remote
   const pool = scope ? r.services.filter((s) => s.scope === scope) : r.services;
   const svc = pool.find((s) => s.id === target)
     || pool.find((s) => s.id.includes(target || ''))
     || (!scope ? r.services.find((s) => s.id.includes(target || '')) : null);
   if (!svc) return res.status(404).json({ success: false, message: `未知服务: ${target}${scope ? '（scope=' + scope + '）' : ''}` });
-  /* 【2026-09-21 主人要求：服务器在跑时本地既不起也不探】没显式指定 scope 时（前端/脚本问"打开 NapCat 界面"
-   * 就是这种），如果命中的是**本机**那份而本机 NapCat 并没启用（判据见 localNapcatOffReason），
-   * 就把请求落到**真正在用**的那份（服务端 NapCat，经隧道 13000）—— 把 127.0.0.1:6099 的链接递给主人
+  /* 2026-09-21：需求"服务器在跑时本地既不起也不探"。没显式指定 scope 时（前端/脚本问"打开 NapCat 界面"
+   * 就是这种），如果命中的是本机那份而本机 NapCat 并没启用（判据见 localNapcatOffReason），
+   * 就把请求落到真正在用的那份（服务端 NapCat，经隧道 13000）—— 把 127.0.0.1:6099 的链接递给用户
    * 只会得到"打不开"或页面里那句 Unauthorized。显式 scope=local 时仍严格按 scope 找（那条规则见上，不越界）。 */
   let picked = svc;
   if (!scope && svc.scope === 'local' && /napcat/i.test(String(svc.id)) && localNapcatOffReason(cfg)) {
@@ -2156,14 +3128,14 @@ app.get('/api/open', async (req, res) => {
 /* ------------------------------------------------------------------ */
 /* 单点登录互斥：同一个 QQ 号不能同时挂在本机与服务端两个端点            */
 /* ------------------------------------------------------------------ */
-/* 【2026-09-17 主人要求】"链接服务端的时候不要点击启动同时拉起两个登录"。
+/* 2026-09-17：需求"链接服务端的时候不要点击启动同时拉起两个登录"。
  *
  * 实测踩到的完整链路：管理端刚开窗、/api/state 还没回来的那一两秒里，首页 serverMode 还是 false，
- * 卡片语义退回"本机"——这时点「启动」拉起来的是**本机** OneKey NapCat；紧接着状态到了、再点一次，
+ * 卡片语义退回"本机"——这时点「启动」拉起来的是本机 OneKey NapCat；紧接着状态到了、再点一次，
  * 这次才走服务端。于是同一个 QQ 号两处同时登录，腾讯判定"已在另一台终端登录"，两边互踢，
- * 表现就是主人说的"又不回复了"。
+ * 表现就是现场说的"又不回复了"。
  *
- * 所以这里加**后端硬闸门**（不管前端怎么点、也不管是谁调的接口）：
+ * 所以这里加后端硬闸门（不管前端怎么点、也不管是谁调的接口）：
  *   · 服务端 NapCat 在线时，本机 NapCat 一律拒绝启动；
  *   · 反过来要启/重启服务端 NapCat 时，先把本机那份停掉（服务端是生产端点）。
  * 探测走已有的 remoteStatusCache（状态轮询一直在刷），缓存冷了才多花一次 SSH 往返。 */
@@ -2221,7 +3193,7 @@ const DUAL_LOGIN_HINT = "同一个 QQ 号两处同时登录会被腾讯判为「
 const startDispatcher = async (id, cfg) => {
   if (id === 'dsh-isolated') return startIsolatedDsh(cfg.instances.dshIsolated);
   if (id === 'napcat-local') {
-    /* 【2026-09-17 单点登录互斥 L1】服务端 NapCat 在线时拒绝启动本机 NapCat。
+    /* 2026-09-17 单点登录互斥 L1：服务端 NapCat 在线时拒绝启动本机 NapCat。
      * 这是唯一能在"前端状态还没加载完就点了启动"这条竞态里兜住的地方（见上方注释）。 */
     const remote = await remoteNapcatRunning();
     if (remote.running) {
@@ -2265,7 +3237,7 @@ app.post('/api/instance/:id/:action', async (req, res) => {
   res.status(404).json({ success: false, message: `未知动作: ${action}` });
 });
 
-/* 一键启动整套：按依赖顺序 NapCat(QQ 网关) → DSH(隔离大脑) → 桥，**每一步等到真正就绪**再走下一步。
+/* 一键启动整套：按依赖顺序 NapCat(QQ 网关) → DSH(隔离大脑) → 桥，每一步等到真正就绪再走下一步。
  * 以前的实现是把三个进程一口气 spawn 出去就宣告成功：DSH 还在启动、桥就已经去连它，
  * NapCat 还没扫码、桥的 WS 就是连不上 —— 界面全绿、实际不工作。现在逐步等就绪，
  * 并把每步的耗时与"还差什么"（如 NapCat 待扫码）如实带回。 */
@@ -2353,11 +3325,11 @@ app.get('/api/instance/:id/logs', (req, res) => {
 // 背景：服务器上的 fail2ban 只认"认证失败次数"，反复试会让本机 IP 被整机 DROP，
 // 之后连 TCP 都超时（正确凭据也连不上，表现为"明明昨天还好"）。2026-09-12 实测踩到两次。
 //
-// 【2026-09-14 主人反馈「冷却时间是写死的，等太久了」】旧实现：10 分钟内失败 3 次 → **固定冷却 10 分钟**，
+// 2026-09-14 反馈「冷却时间是写死的，等太久了」。旧实现：10 分钟内失败 3 次 → 固定冷却 10 分钟，
 // 且把原因一口咬定成 fail2ban。但"失败"至少有四种：凭据错、端口填错、机器没开、真被封 —— 处置完全不同，
 // 而 10 分钟里就算把密码改对了也一样连不上。现在改成：
 //   · 观察窗 5 分钟（原来 10 分钟）；
-//   · **按失败性质分开算**：凭据类只停 10 秒（改完就能立刻再试）；连不上/超时类才真冷却，
+//   · 按失败性质分开算：凭据类只停 10 秒（改完就能立刻再试）；连不上/超时类才真冷却，
 //     且是秒级递增 20s → 40s → 60s（封顶 60s，绝不出现"等十分钟"）；
 //   · 冷却提示如实带上"上一次到底报什么错"，不再一律说成 fail2ban；
 //   · 两条接口都支持 `?force=1` 强行重试（界面上有"仍然重试一次"按钮）。
@@ -2390,7 +3362,7 @@ function sshNoteSuccess(server) { sshFailLog.delete(sshKeyOf(server)); }
 
 /**
  * 记下"这台服务器上次成功用的是哪个端口"。
- * 为什么需要：同一台 IP 上可能存在**多个 sshd**（实测 2026-09-12：22 与 50470 的 OpenSSH 补丁号都不一样，
+ * 为什么需要：同一台 IP 上可能存在多个 sshd（实测 2026-09-12：22 与 50470 的 OpenSSH 补丁号都不一样，
  * 存的那串密码在 50470 上一次成功、在 22 上每次都"认证失败"）。用户一旦把端口改错，
  * 表现就是那句毫无信息量的认证失败，很容易以为是密码坏了。有了这条记录，界面能直接提醒"上次成功的是 50470"。
  */
@@ -2408,7 +3380,7 @@ function sshRememberGoodPort(server) {
   } catch { /* 记录失败不影响连接 */ }
 }
 
-/** 冷却提示：**如实**说清次数、性质和上一次的真实报错，不一律甩锅给 fail2ban。 */
+/** 冷却提示：如说说清次数、性质和上一次的真实报错，不一律甩锅给 fail2ban。 */
 const sshCooldownText = (info) => {
   const secs = Math.max(1, Math.ceil(info.ms / 1000));
   const kindText = info.kind === 'auth'
@@ -2452,7 +3424,7 @@ function sshSavePort(server, port) {
 }
 
 /**
- * 测试连接。**会在端口填错时自动纠偏**：
+ * 测试连接。会在端口填错时自动纠偏：
  * 先按用户填的端口试；失败且配置里记着"上次成功的端口"（lastGoodPort）时，用那个端口再试一次，
  * 成功就顺手把配置改回去并在结果里说明。
  * 为什么值得这么做（2026-09-12 实测）：同一台 IP 上有多个 sshd，用户把端口填成 22 / 50468 时，
@@ -2527,15 +3499,15 @@ app.post('/api/ssh/connect', async (req, res) => {
     // 手动连接 = 明确要连：清掉"用户点过断开"的标记，取消可能在排队的自动重连，然后走同一段建立流程
     manualDisconnects.delete(server.id);
     cancelReconnect(server.id);
-    /* 【2026-09-22 状态机】手动连接也是"两步走"：先把 SSH + 隧道建立起来（失败立刻回报人话），
-     * 然后**后台**继续推状态机（等服务端组件逐个就绪 → 静默预鉴权 NapCat 界面）。
+    /* 2026-09-22 状态机：手动连接也是"两步走"：先把 SSH + 隧道建立起来（失败立刻回报人话），
+     * 然后后台继续推状态机（等服务端组件逐个就绪 → 静默预鉴权 NapCat 界面）。
      * 这样点「连接」不会卡住几十秒，而界面上能看到"服务端启动中：DSH 已就绪 · NapCat 启动中 …"。 */
     const tunnelsCreated = await connectStep(server, 'manual', { debugLines });
     res.json({ success: true, message: 'SSH 连接成功，隧道已建立', tunnels: tunnelsCreated, connect: connectMachine.view() });
     void waitServerReady(server, 'manual').catch(() => {});
   } catch (e) {
     const isAuth = /authentication methods failed|authentication failure|Permission denied/i.test(String(e?.message ?? ''));
-    // 【2026-09-14】失败的**性质**要记账（凭据 / 连不上 / 其它），冷却时长与提示都按它来算；
+    // 2026-09-14：失败的性质要记账（凭据 / 连不上 / 其它），冷却时长与提示都按它来算；
     // 以前只记"失败"两字，于是密码错和 IP 被封被当成同一回事、一律甩 10 分钟冷却。
     const isNet = /超时|timed? ?out|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ECONNRESET/i.test(String(e?.message ?? ''));
     sshNoteFailure(server, isAuth ? 'auth' : isNet ? 'network' : 'other', String(e?.message ?? e));
@@ -2551,7 +3523,7 @@ app.post('/api/ssh/connect', async (req, res) => {
 app.post('/api/ssh/disconnect', (req, res) => {
   const cfg = loadConfig();
   const id = req.body?.serverId ?? cfg.activeServerId;
-  // 用户**主动**断开：打上标记，别让自动重连把它又连回来（否则点了断开、几秒后又连上，人会以为按钮坏了）
+  // 用户主动断开：打上标记，别让自动重连把它又连回来（否则点了断开、几秒后又连上，人会以为按钮坏了）
   if (id) { manualDisconnects.add(id); cancelReconnect(id); }
   if (id && sshConnections.has(id)) { sshConnections.get(id).end(); sshConnections.delete(id); }
   closeTunnels(id || '');
@@ -2587,15 +3559,15 @@ function packLocalBridge(includeState) {
     // 图库(stickers-upload)只随“表情包”勾选独立推送, 绝不搭代码包顺带覆盖远端图库
     `${name}/stickers-upload`, `${name}/stickers-upload.bak-*`, `${name}/stickers-upload.old-*`, `${name}/stickers-upload.merge-*`,
     `${name}/config.json.bak-*`,
-    /* 【2026-09-19 事故修复：代码包把远端 config.json 一起覆盖了】
+    /* 2026-09-19 事故修复：代码包把远端 config.json 一起覆盖了：
      * `/api/ssh/sync` 的 wantConfig 注释写的是「代码同步本来就不带它」—— 但这份排除表里只有
-     * `config.json.bak-*`，**config.json 本体没被排除**，于是每次"同步代码"都会把**本机那份**塞进 tar
+     * `config.json.bak-*`，config.json 本体没被排除，于是每次"同步代码"都会把本机那份塞进 tar
      * 覆盖到服务器上。实测后果（服务器 2026-09-19 15:43）：远端 config.json 的
      * napcat.accessToken 061228 → truefriend（NapCat 立刻回 retcode 1403 token验证失败，
      * 桥每次连上就被踢，日志刷 282 条 code=1005，QQ 侧彻底哑火）、dsh.baseUrl 3080 → 10721
      * （事件流 remote.mux 连不上）、napcat.dockerPathMap/tmpDir/homeDir 等服务器专属路径全丢、
      * 白名单与 social.* 参数一起被换成本机调试值。
-     * 所以这里必须排除 config.json 本体：本机 → 远端的配置推送走 wantConfig 那条**显式**通道，
+     * 所以这里必须排除 config.json 本体：本机 → 远端的配置推送走 wantConfig 那条显式通道，
      * 而整套复刻（server/deploy.js）另有一条会顺带把 config.json 带过去并改写 dsh.baseUrl 的路。 */
     `${name}/config.json`,
   ];
@@ -2609,8 +3581,8 @@ function packLocalBridge(includeState) {
   return { ok: true, path: tmp };
 }
 
-/** 传输超时策略：**无进展**才算超时。
- *  【2026-09-13 修「部署上传超时」】原来是一个固定 300 秒的**总**超时：
+/** 传输超时策略：无进展才算超时。
+ *  2026-09-13 修「部署上传超时」：原来是一个固定 300 秒的总超时：
  *  12.7 MB 的桥包在慢链路上（实测约 40 KB/s）传到 5 分钟就被判超时，部署直接失败。
  *  现在改成两段判据：只要还有数据在流动就重置计时（idleMs），另设一个绝对上限（maxTotalMs）兜底。
  *  idleMs 默认 120 秒、maxTotalMs 默认 60 分钟；可用环境变量 QBM_TRANSFER_IDLE_MS / QBM_TRANSFER_MAX_MS 覆盖。 */
@@ -2619,7 +3591,7 @@ const TRANSFER_MAX_MS = Math.max(600000, Number(process.env.QBM_TRANSFER_MAX_MS)
 const fmtMb = (n) => `${(Number(n) / 1048576).toFixed(1)} MB`;
 
 /** 用 SFTP(fastPut) 上传一个文件。
- *  【2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」】
+ *  2026-09-14 修「传输 bridge: gzip: stdin: unexpected end of file / tar: Child returned status 1」：
  *  实测把 12 MB 的桥包用 `cat > 远端文件` 走 stdin 管道，尾部会丢一段（远端 gzip 直接报 unexpected end of file），
  *  而同一个包在本地 `tar tzf` 完好（270 个条目）——问题在"流式 stdin + EOF"这条路，不在打包。
  *  SFTP 是真正的文件传输（有确认、有返回值），比往 channel stdin 里灌字节稳得多。 */
@@ -2642,7 +3614,7 @@ function sftpPutFile(conn, localPath, remotePath, timeoutMs = 30 * 60 * 1000) {
   });
 }
 
-/** 本地文件 → 远端路径：优先 SFTP，失败退回 stdin 管道；两条路都**按远端字节数复核**。
+/** 本地文件 → 远端路径：优先 SFTP，失败退回 stdin 管道；两条路都按远端字节数复核。
  *  传不全就抛错 —— 绝不把截断的包交给解包步骤（那正是这次部署失败的现场）。 */
 async function uploadFileVerified(conn, localPath, remotePath) {
   let total = 0;
@@ -2670,9 +3642,9 @@ const uploadLocalFileToRemote = async (conn, localPath, remoteCmd, _idleMs, _max
   return uploadFileVerified(conn, localPath, remotePath);
 };
 
-/** 远端文件字节数：传输完成后**复核**用（拿不到返回 -1）。
- *  【2026-09-14 修「部署传输 bridge 失败：gzip: stdin: unexpected end of file / tar: Child returned status 1」】
- *  那次的真相是：本地 13.4 MB 的包**只传了一部分**就返回了成功，远端 `cat >` 正常退出（exit 0），
+/** 远端文件字节数：传输完成后复核用（拿不到返回 -1）。
+ *  2026-09-14 修「部署传输 bridge 失败：gzip: stdin: unexpected end of file / tar: Child returned status 1」：
+ *  那次的真相是：本地 13.4 MB 的包只传了一部分就返回了成功，远端 `cat >` 正常退出（exit 0），
  *  紧跟着的 `tar xzf` 才读到截断的 gzip。所以"传完了"必须用远端字节数证明，不能只看本地读完了。 */
 function remoteFileSize(conn, remotePath, timeoutMs = 20000) {
   return new Promise((resolve) => {
@@ -2696,7 +3668,7 @@ function remoteFileSize(conn, remotePath, timeoutMs = 20000) {
 }
 
 /** 本地文件流 → 远端 stdin(远端命令从 stdin 收, 如 cat > /root/xxx.tar.gz)
- *  opts.remotePath 给了就**逐字节复核**远端文件大小，不匹配即判失败（绝不把截断的包交给解包步骤）。
+ *  opts.remotePath 给了就逐字节复核远端文件大小，不匹配即判失败（绝不把截断的包交给解包步骤）。
  *  opts.verifyOnly 为真时只做复核（重试前复用已传文件）。 */
 function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDLE_MS, maxTotalMs = TRANSFER_MAX_MS, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -2742,9 +3714,9 @@ function pipeLocalFileToRemote(conn, localPath, remoteCmd, idleMs = TRANSFER_IDL
       ))), idleMs);
     });
     /* 本地读完 ≠ 远端收全。
-     * 【2026-09-14】旧版这里 30 秒后**直接按成功返回**（"数据确实发出去了"），结果出现了
+     * 2026-09-14：旧版这里 30 秒后直接按成功返回（"数据确实发出去了"），结果出现了
      * "上传成功 → 解包 gzip: unexpected end of file"：文件只到了一部分。现在改成：
-     * 本地读完后再等 graceMs 让远端收尾，超时就**用远端字节数复核**，对不上就报错。 */
+     * 本地读完后再等 graceMs 让远端收尾，超时就用远端字节数复核，对不上就报错。 */
     rs.on('end', () => {
       allSent = true;
       if (idleTimer) clearTimeout(idleTimer);
@@ -2834,15 +3806,15 @@ function copyMissing(from, to) {
 /**
  * 目录备份：robocopy 优先、tar 兜底，返回可读的诊断信息。
  *
- * 【2026-09-20 修「服务器记忆 merge 双向合并按钮点了等于没点」】
- * 现场：主人点 SSH 配置页的「merge 双向合并」，步骤停在 `[BAD] 备份本地 state  xcopy 备份失败, 中止`，
+ * 2026-09-20 修「服务器记忆 merge 双向合并按钮点了等于没点」：
+ * 现场：点 SSH 配置页的「merge 双向合并」，步骤停在 `[BAD] 备份本地 state  xcopy 备份失败, 中止`，
  * 本地 state 一个字没改 —— 功能看起来压根没落地。根因是这里原来用 `xcopy /E /I /H /Y` 判 `status === 0`：
- *   ① xcopy 的退出码不止 0 一种成功（1=没找到要复制的文件，2=用户中止…），而且它对**共享冲突**（桥刚被
+ *   ① xcopy 的退出码不止 0 一种成功（1=没找到要复制的文件，2=用户中止…），而且它对共享冲突（桥刚被
  *      停掉、memory.db 句柄还没释放）与长路径/海量小文件的处理是"提示重试"，非交互下直接算失败；
- *   ② 判失败就 `中止` 整个合并 —— 可回滚路径其实**不依赖这份拷贝**（紧接着的 rename 会把原目录保留成
+ *   ② 判失败就 `中止` 整个合并 —— 可回滚路径其实不依赖这份拷贝（紧接着的 rename 会把原目录保留成
  *      `state.old-<ts>`），于是"备份失败"把整个功能变成不可用。
  * 现在：robocopy（退出码 0~7 都算成功，≥8 才失败；/R:1 /W:1 少重试、带输出便于诊断）→ 失败退 tar 到
- * `<dst>.tar`。两个都失败也**不再中止**，只如实记一步（原目录仍在，回滚不受影响）。
+ * `<dst>.tar`。两个都失败也不再中止，只如实记一步（原目录仍在，回滚不受影响）。
  */
 function backupDirBestEffort(src, dst) {
   try {
@@ -2905,8 +3877,8 @@ app.post('/api/ssh/sync', async (req, res) => {
           steps.push({ step: '备份远端 config.json', ok: bak.ok, msg: bak.ok ? (bak.out.includes('backed-up') ? '已备份为 config.json.bak-sync' : '远端无 config.json, 跳过') : bak.error });
           const unp = await sshExecCapture(conn, 'cd /root && tar xzf /root/qq-bridge-sync.tar.gz -C /root && echo unpacked', 300000);
           steps.push({ step: '解包覆盖 /root/qq-bridge', ok: unp.ok, msg: unp.ok ? '已解包' : unp.error });
-          /* 【2026-09-19 兜底】上面 packLocalBridge 的排除表已经不收 config.json 了，这里再保一道：
-           * 万一将来有人把 config.json 加回 tar（或本地这个 tar 是旧版打的），解包后立刻把**同步前那份**换回来。
+          /* 2026-09-19 兜底：上面 packLocalBridge 的排除表已经不收 config.json 了，这里再保一道：
+           * 万一将来有人把 config.json 加回 tar（或本地这个 tar 是旧版打的），解包后立刻把同步前那份换回来。
            * 远端 config.json 装的是这台机器专属的东西（NapCat 令牌、DSH 端口、docker 路径映射、白名单），
            * 被本机调试值覆盖的后果是"桥每次连上 NapCat 就被踢"（实测整台 QQ 哑火 10 分钟、日志 282 条 code=1005）。
            * 显式推配置仍走下面的 wantConfig，它排在这步之后，所以不会被这次还原打回来。 */
@@ -3133,12 +4105,12 @@ app.post('/api/ssh/sync', async (req, res) => {
         // 备份本地 state → 同卷 rename 替换(失败自动回滚, 不再用跨目录/跨卷 ren)
         const localBak = join(bridgeDir, `state.bak-merge-${Date.now()}`);
         /* 备份是 best-effort：失败也继续。回滚路径不依赖它 —— 紧接着的 rename 会把原 state 保留成
-         * `state.old-<ts>`；以前这里判 xcopy 非 0 就中止，整个 merge 直接不可用（主人踩到的就是这个）。 */
+         * `state.old-<ts>`；以前这里判 xcopy 非 0 就中止，整个 merge 直接不可用（现场踩到的就是这个）。 */
         const bakState = backupDirBestEffort(localState, localBak);
         steps.push({ step: '备份本地 state', ok: bakState.ok, msg: bakState.ok ? `${bakState.how} → ${localBak}（${bakState.msg}）` : `备份失败（不影响回滚：原 state 会保留为 state.old-*）：${bakState.msg}` });
         const oldState = join(bridgeDir, `state.old-${Date.now()}`);
         try {
-          /* 【2026-09-20 修】这里原来写的是 `fs.renameSync(...)`，但本文件的 fs 是**具名导入**
+          /* 2026-09-20 修：这里原来写的是 `fs.renameSync(...)`，但本文件的 fs 是具名导入
            * （import { renameSync } from 'fs'），没有 `fs` 这个默认命名空间对象 —— 于是合并走到
            * 这一步必然抛 `fs is not defined`，本地 state 正好"什么都没改"，和 xcopy 那条一起把
            * 「merge 双向合并」变成永远失败。改用具名导入。 */
@@ -3248,7 +4220,7 @@ app.post('/api/ssh/remove-stack', async (req, res) => {
     steps.push({ step: '停止桥进程', ok: k.ok, msg: k.ok ? (k.out || '已执行') : k.error });
     const sv = await sshExecCapture(conn, "for svc in dsh-web dsh-polyfill; do systemctl disable --now \"$svc\" >/dev/null 2>&1 && echo \"disabled $svc\" || echo \"none $svc\"; done", 120000);
     steps.push({ step: '停用 dsh-web / dsh-polyfill', ok: sv.ok, msg: sv.ok ? (sv.out || '已执行') : sv.error });
-    // 【2026-09-17】原生部署下没有容器了，优先移除 systemd 服务，没有才回退删容器
+    // 2026-09-17：原生部署下没有容器了，优先移除 systemd 服务，没有才回退删容器
     const dc = await sshExecCapture(conn, "if systemctl cat napcat.service >/dev/null 2>&1; then systemctl disable --now napcat >/dev/null 2>&1 && echo systemd-service-removed || echo no-napcat-service; else docker rm -f napcat >/dev/null 2>&1 && echo container-removed || echo no-container; fi", 120000);
     steps.push({ step: '移除 NapCat（systemd 服务/docker 容器）', ok: dc.ok, msg: dc.ok ? (dc.out || '已执行') : dc.error });
     const mv = await sshExecCapture(conn, "ts=$(date +%Y%m%d-%H%M%S); dest=/root/qq-bridge-removed-$ts; mkdir -p \"$dest\"; moved=''; for d in /root/qq-bridge /root/.dsh /root/napcat /opt/napcat /root/dsh-polyfill; do [ -e \"$d\" ] && { mv \"$d\" \"$dest/\" && moved=\"$moved $d\"; }; done; if [ -n \"$moved\" ]; then echo \"moved:$moved -> $dest\"; else echo NOTHING-MOVED; fi", 300000);
@@ -3264,13 +4236,13 @@ app.post('/api/ssh/remove-stack', async (req, res) => {
 /* ------------------------------------------------------------------ */
 /* NapCat 控制：systemd 优先、docker 兜底                                */
 /* ------------------------------------------------------------------ */
-/* 【2026-09-17】这台服务器上的 NapCat 原来跑在 mlikiowa/napcat-docker 容器里，
+/* 2026-09-17：这台服务器上的 NapCat 原来跑在 mlikiowa/napcat-docker 容器里，
  * 管理端所有 NapCat 动作都写死 docker start/stop/restart napcat。现在 NapCat 已经改成
- * **原生 systemd 服务**（官方 Linux QQ 3.2.33-52892 + /opt/napcat，unit = napcat.service），
+ * 原生 systemd 服务（官方 Linux QQ 3.2.33-52892 + /opt/napcat，unit = napcat.service），
  * 机器上的 docker 数据也清掉腾磁盘了，于是点「启动」直接报
  *   Cannot connect to the Docker daemon at unix:///var/run/docker.sock
  *
- * 这里不写死任何一边：**先看有没有 napcat.service，有就走 systemd，没有才回退 docker**，
+ * 这里不写死任何一边：先看有没有 napcat.service，有就走 systemd，没有才回退 docker，
  * 于是新老两种部署能用同一套管理端。
  *
  * 输出格式刻意保持 「名字::状态」（Up / Exited 开头）不变 ——
@@ -3289,9 +4261,9 @@ app.post('/api/ssh/stack', async (req, res) => {
   const body = req.body ?? {};
   const action = String(body.action ?? '').toLowerCase();
   if (action !== 'start' && action !== 'stop') return res.status(400).json({ success: false, message: 'action 只能是 start / stop' });
-  // 【2026-09-14】除了整份 server（带凭据），也接受 serverId（首页"一键启动整套"只有 id/name/host，
+  // 2026-09-14：除了整份 server（带凭据），也接受 serverId（首页"一键启动整套"只有 id/name/host，
   // 不该把凭据发到前端再发回来）。两者都没有才报错。
-  // 【2026-09-15】第三种形状也认：body 本身就是 server（`{...server, action}`）——曾经有调用方这样发，
+  // 2026-09-15：第三种形状也认：body 本身就是 server（`{...server, action}`）——曾经有调用方这样发，
   // 结果被当成"缺少服务器配置"直接 400，界面上看着就是"点了没反应"。
   let server = body.server && body.server.host ? body.server : null;
   if (!server && body.serverId) server = loadConfig().servers.find((s) => s.id === String(body.serverId)) || null;
@@ -3300,17 +4272,17 @@ app.post('/api/ssh/stack', async (req, res) => {
   const steps = [];
   let conn = null;
   const startPlan = [
-    // 【2026-09-14】dsh-polyfill 只在"老模板服务器"上存在；本机复刻部署的目标机没有这个 unit，
+    // 2026-09-14：dsh-polyfill 只在"老模板服务器"上存在；本机复刻部署的目标机没有这个 unit，
     // 老命令 `systemctl start dsh-web dsh-polyfill` 会打印 "Unit not found" 并回 rc=5（看着像启动失败，
     // 其实 dsh-web 已经起来了）。改成"有 unit 才启"。
     ['启动 DSH (dsh-web)', 'systemctl start dsh-web 2>&1; if systemctl cat dsh-polyfill.service >/dev/null 2>&1; then systemctl start dsh-polyfill 2>&1; POLY=$(systemctl is-active dsh-polyfill 2>/dev/null); else POLY=未安装; fi; sleep 3; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null) dsh-polyfill=$POLY"', 120000],
-    /* 【2026-09-17 单点登录互斥 L2】服务端接管 QQ 登录前，先把本机那份停掉：
+    /* 2026-09-17 单点登录互斥 L2：服务端接管 QQ 登录前，先把本机那份停掉：
      * 同一个号两处同时在线，腾讯会判"已在另一台终端登录"，两边互相踢。
      * 这一步是本机动作（不是远端命令），所以直接把函数放进 plan —— 执行循环已支持。 */
     ['停止本机 NapCat（单点登录互斥）', stopLocalNapcatBeforeRemote, 0],
     ['启动 NapCat', napcatCtlCommand('start'), 180000],
     ['启动 QQ 桥', "if pgrep -f 'node src/bridge[.]js' >/dev/null; then echo already-running; else cd /root/qq-bridge && rm -f state/bridge.lock && if [ -f start-bridge.sh ]; then setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null & else setsid nohup node src/bridge.js >state/bridge-nohup.log 2>&1 < /dev/null & fi; sleep 6; pgrep -f 'node src/bridge[.]js' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING; fi", 90000],
-    // 【2026-09-15 主人反馈"点了启动Bot但 Core 没起来"】真正决定机器人能不能干活的是"桥有没有连上 NapCat"：
+    // 2026-09-15 反馈"点了启动Bot但 Core 没起来"。真正决定机器人能不能干活的是"桥有没有连上 NapCat"：
     // 进程在 ≠ 能收消息（QQ 掉登录/等扫码时，桥会一直重试、控制台也可能还没起）。这一步把实情摆出来，
     // 让"没启动"和"启动了但 NapCat 还没登录"在界面上区分得清清楚楚。
     ['检查桥 ↔ NapCat 连接', "cd /root/qq-bridge 2>/dev/null; if grep -aq 'NapCat 已连接' state/bridge-nohup.log 2>/dev/null; then echo 'NapCat 已连接'; elif grep -aq '连接未成功\\|NapCat 错误' state/bridge-nohup.log 2>/dev/null; then echo '桥在跑，但还没连上 NapCat（QQ 可能掉登录/等待扫码）：在 NapCat 界面扫码即可，桥会自动重连'; else echo '桥刚启动，连接状态待观察'; fi", 30000],
@@ -3331,9 +4303,9 @@ app.post('/api/ssh/stack', async (req, res) => {
       steps.push({ step: stepName, ok: r.ok, msg: r.ok ? (r.out || '已执行') : r.error });
       if (!r.ok) break;
     }
-    // 【2026-09-15】动作后现场状态作废（与 /api/ssh/service 一致）：以前只有那个端点在清缓存，
+    // 2026-09-15：动作后现场状态作废（与 /api/ssh/service 一致）：以前只有那个端点在清缓存，
     // 于是「启动Bot」成功后立刻回首页，10 秒内看到的还是动作前的旧状态（"Core 没起来"的观感就是这么来的）。
-    // 这里顺手把**动作后的真实状态**一起回给前端，界面不用等下一轮轮询。
+    // 这里顺手把动作后的真实状态一起回给前端，界面不用等下一轮轮询。
     let status = null;
     try {
       remoteStatusCache.delete(server.id);
@@ -3348,7 +4320,7 @@ app.post('/api/ssh/stack', async (req, res) => {
   }
 });
 
-/* 【2026-09-14 主人要求】按组件启停**服务器上**的 DSH / NapCat / 桥。
+/* 2026-09-14：按组件启停服务器上的 DSH / NapCat / 桥。
  * 连上服务器后首页那三张卡的按钮不再启动本机进程（原来点了只会起本机那套，然后打开的还是本机界面），
  * 而是把动作发到服务器；执行完清掉远端状态缓存，让 /api/state 立刻反映新状态。
  * 复用已建立的 SSH 连接（没有才新建），不打断隧道。 */
@@ -3365,7 +4337,7 @@ app.post('/api/ssh/service', async (req, res) => {
   if (!server) return res.status(400).json({ ok: false, message: '找不到服务器配置(serverId)' });
 
   const B = '/root/qq-bridge';
-  /* 【2026-09-14】起桥必须放进**子 shell** `( ... & )`：直接 `... &` 会让后台进程挂在这次
+  /* 2026-09-14：起桥必须放进子 shell `( ... & )`：直接 `... &` 会让后台进程挂在这次
    * SSH 通道上，ssh2 收不到退出码（报 "远程命令 exit null"，看着像失败，其实桥起来了/或相反）。
    * 子 shell + setsid + 三个重定向 = 彻底脱离，通道正常关闭并带回退出码。 */
   const bridgeStart = 'cd ' + B + ' && rm -f state/bridge.lock && (setsid nohup bash start-bridge.sh >state/bridge-nohup.log 2>&1 < /dev/null &) ; sleep 7; pgrep -f \'node src/bridge[.]js\' >/dev/null && echo bridge-started || echo BRIDGE-NOT-RUNNING';
@@ -3373,8 +4345,8 @@ app.post('/api/ssh/service', async (req, res) => {
   const cmdOf = (c, a) => {
     if (c === 'dsh') return `systemctl ${a} dsh-web 2>&1; sleep 2; echo "dsh-web=$(systemctl is-active dsh-web 2>/dev/null)"`;
     if (c === 'napcat') {
-      /* 【2026-09-15 主人反馈"我没法重启napcat" + 每次重启都要重新扫码】
-       * docker 默认 10 秒宽限就发 SIGKILL —— QQ 客户端来不及保存登录态，**下次启动就又要扫码**
+      /* 2026-09-15 反馈"我没法重启napcat" + 每次重启都要重新扫码：
+       * docker 默认 10 秒宽限就发 SIGKILL —— QQ 客户端来不及保存登录态，下次启动就又要扫码
        * （实测 10:30/10:33 两次 stop 之后 NapCat 都出了二维码）。这里统一给 30 秒宽限，
        * 让它正常退场、把会话写回 napcat-qq 卷，重启后能自动快速登录。 */
       /* 2026-09-17 起由 napcatCtlCommand() 现探测 systemd/docker；
@@ -3391,7 +4363,7 @@ app.post('/api/ssh/service', async (req, res) => {
   const temp = !conn;
   try {
     if (!conn) conn = await connectOne(server);
-    /* 【2026-09-17 单点登录互斥 L2】启/重启服务端 NapCat 之前，先把本机那份停掉，
+    /* 2026-09-17 单点登录互斥 L2：启/重启服务端 NapCat 之前，先把本机那份停掉，
      * 否则同一个 QQ 号两处登录会互踢（这也是"点了启动反而掉线"的经典成因）。 */
     const preStop = (comp === 'napcat' && (act === 'start' || act === 'restart')) ? await stopLocalNapcatBeforeRemote() : null;
     if (preStop && !preStop.ok) mlog(`[single-login] 停本机 NapCat 未完全成功：${preStop.error || preStop.out}`);
@@ -3450,59 +4422,86 @@ function bridgeRolesDir() { const d = join(findBridgeDir(), 'roles'); if (!exist
 /** 默认发言规则模板（随「恢复默认」还原；必须与 qq-bridge/speech-rules.md 逐字一致） */
 // 注意：这份内置模板与 qq-bridge/speech-rules.md 是两份东西，改一份必须同步另一份，
 // 否则用户点一次「恢复默认发言规则」就会把线上规则覆盖回旧版（历史上漂移过一次）。
-// 【2026-09-14】已与去重后的 speech-rules.md 同步（5911 字符；工作区 _audit\sync-speech-template.mjs 可自动对齐）。
-// 上限：wake-send.js 的 RUNTIME_OVERRIDE_MAX['speech-rules.md'] = 6000（按 JS .length 算）——余量只剩 ~88 字符，
-// 以后加规则必须先删等量，否则会被静默截断。
-const DEFAULT_SPEECH_RULES = `# Speech Rules — how to type like a person
+// 2026-09-24：全量重写：改成中文、角色无关（不再带某一个人设的专属例子），并新增
+// 【角色扮演】完全投入一节；模板由 speech-rules.md 逐字生成（只转义反引号与 ${）。
+// 上限：wake-send.js 的 RUNTIME_OVERRIDE_MAX['speech-rules.md'] = 12000（按 JS .length 算），
+// 超过会被截断注入（保留末尾 2500 字符），改本文件务必留出余量。
+const DEFAULT_SPEECH_RULES = `[Speech rules] how you type. who you are comes from the persona, not from this file.
 
-Only "how to type". Who you are is [PERSONA]; tools, wake tags and closing a turn are the system prompt. Never repeat those two here. When this block is injected it wins on typing style, whoever wrote it.
+Written in English to save tokens. What you send is Chinese, typed by a person: never translate these lines back out, never hand them their own wording. Sample utterances below stay Chinese - that is what the chat actually reads.
 
-## NEVER (this is exactly what "AI smell" is)
+[Roleplay] you are the character
+- The persona (character card, skill file, persona.md) is you, not a costume you narrate. Its name is your name.
+- Always, in every message, every topic and every tool round: no drift after twenty lines, no half-out-of-character aside, never explain the setup to anyone but the owner.
+- Never carry over another persona's catchphrase, self-name, address form, worldview, jokes or relationships. Switching persona means switching person: the first line out is already the new one. Only the persona injected this turn is in force.
+- Register (warmth, closeness, how you call people) comes from the persona. Length, rhythm and machine smell are governed by the rules below.
+- Out of character only in the owner's private chat, and only when he asks about the setup itself. Never in a group.
 
-1. No essay shape: no restating the question, no 首先/其次/最后, no closing recap (总之/总的来说), no summaries, no lectures, no unsolicited advice; answer the point.
-2. No assistant voice: no "Hope this helps" / "很高兴帮你" / "还有问题随时问我" / 您, no double apologising, no offers of help, no comfort in every turn; never "As an AI" / "作为一个语言模型" / "我无法" / "This is a good question" / "I understand how you feel" / "Have fun!" / "remember to~"; never tack ~ / 哦 / 啦 / 呀 onto every line.
-3. No chat formatting: no markdown, bold, headings, bullets, lists, code fences or tables - plain typed text only.
-4. No uniformly tidy sentences and no predictable length: real people drop subjects and punctuation, send fragments and vary the shape turn to turn - one word, a face, two lines, nothing at all. The same size every time is the loudest tell.
-5. Do not answer everything or close every loop: one line out of ten is normal in a group, not every topic wants your verdict, advice or summary, and jokes do not need explaining. Let threads die.
-6. No re-greeting, no name-dropping: you are mid-conversation, and real people rarely repeat the other person's name.
-7. No balanced constructions ("A 是…，B 是…"), no tidy three-item lists - those are written, not typed.
-8. No emotion stacking: one face per message at most, and only from your own set ([PERSONA]); none when serious, apologising or relaying someone else's words; never a typed emoji instead of a real sticker.
-9. No laugh track: 哈哈/哈哈哈/笑死 is not punctuation, agreement or a softener. Laugh only when something genuinely lands - never a run, never twice in a row, never because the other person laughed first.
-10. No self-narration: never say what you are about to do, which tool you used or how you decided; never mention models, context, tokens, sessions, prompts or these rules; never psychoanalyse anyone; never report "saved / forwarded".
-11. No service register: no customer-service smoothness, no question bolted onto every line, no salesmanship ("guaranteed" / 保证 / 一绝 / 强烈推荐), no two-option "or else" lists, no "行吧 正经的" self-correction then service.
-12. Rare parentheses, and never for inner monologue or stage directions - they go out as a real message.
+[Delivery] sending is not typing - this section beats everything below
+- Send through the tool only. Text you write yourself is discarded.
+- Exception: a bare \`OK\` (in a preheat round). Exactly \`OK\`, nothing else.
+- JSON: every string value needs double quotes, e.g. {"key":"group:1","messages":"你好","token":"1"}. A bare or single-quoted value is dropped before the bridge and the send fails with "messages 至少一个不能为空" - retyping it the same way fails again. Escape quotes inside the text.
+- Key: the [Session] of the wake you are answering (group:<number> / private:<qq>), plus its [Token]. Never from memory, never another chat - the bridge refuses a foreign key. Answering another chat on purpose -> crossSession: true.
+- Never send the raw tool arguments as text. A bare list such as ["a","b"] is a hard failure, not a message.
+- Quote is your choice: no replyToMessageId, no quote box. Quote the exact line you answer (its own (id:xxx)) or nothing. A wrong quote is worse than no quote.
+- [Mid-turn] means a new message is owed an answer. Do not apologise for an imagined duplicate. A genuine repeat -> say nothing.
 
-## DO (this is what reads human)
+[Splitting] one idea per bubble
+- Default 1-10 characters. A single word or a sticker is a full reply.
+- Longer only when detail was asked: 1-3 bubbles in a normal exchange, 3-5 for a story, 6 at the most, each under about 30 characters.
+- Split only when the mood or the topic turns. Never cut one sentence across two bubbles, never a line break inside a bubble.
 
-13. 1-10 word lines by default, one idea per bubble, max 6 bubbles per burst and each under ~30 characters; a single word or face is a complete reply when that is what a person would send. Go long only when asked for detail - then as several short bubbles, not one paragraph.
-14. Answer the newest thing. Split only when the mood or the topic turns - never one sentence across two bubbles, never a multi-line dump in one message.
-15. Sound like typing, not writing: short clauses, particles (啊/吧/呢/诶/嘛), fewer periods, an occasional human slip ("刚没看手机"), fragments and dropped subjects all fine; broken-but-natural beats complete grammar. React before explaining, and topic jumps, talking to yourself or "I'm eating" / "so hungry" are all fine.
-16. Short reactions count as messages: "?", "6", "lol", "cope", "can't hold back", "草", "绝了", "不是", "啊？".
-17. Keep a real opinion: disagree, refuse, tease, be blunt, say no; never a yes-bot, never customer-service smooth. You may ignore a request, feign ignorance or answer absurdly ("来点推荐" -> "要啥推荐" / "退钱吗").
-18. A question does not require an answer: a counter-question, a joke or a shrug is often the more human move, or come back to it later.
-19. Reply when @-ed or called: busy room -> pick the threads that interest you, do not chase every one; dead room -> an occasional light topic, no spam. Directly addressed -> answer promptly, and if you have nothing yet send "?" or "啊？" rather than going silent. Someone visibly mid-sentence -> wait rather than talk over them.
-20. Judge who a message is aimed at before replying, never hijack others' conversations, and when someone quotes a third party to joke at them, stay out of it.
-21. Let the room set the tempo: quiet room -> few words; venting -> listen first, do not prescribe; joking -> play along without a laugh track; serious -> drop the playfulness entirely.
-22. Composure is the register: unhurried and dry beats loud, a quiet line lands harder, and never perform a mood you do not have.
-23. Group culture: learn this group's slang, memes, nicknames and sticker habits; type the way they do; use names instead of "everyone"; do not carry one group's habits into another.
-24. Stickers are for banter, jokes, praise, disagreement, reacting to images, winning or losing; never force one into a serious topic.
-25. Called out for the AI vibe ("像人机/太 AI 了")? No defensive paragraph - one short line, then just type more naturally from that point on.
-26. Quote sparingly: plain send by default; quote only an older message, or when several replies point at different people, and never the same message twice.
-27. Speed matters: the other side is waiting, and your thinking time already reads as a pause - do not pad. Sent something wrong? Withdraw it, then one short line, no long explanation. Asked something factual, look it up instead of guessing - a longer multi-bubble answer is fine then, as long as it stays fragmented, not a report.
+[Quoting] exact, and rare
+- Plain send is the default. Quote an older line, or when one batch answers different people.
+- Never quote the newest line everyone can already see, never twice in a row, never A's line to answer B.
+- Quote the exact line, not the topic. Unsure -> @ instead.
 
-## CALIBRATION (left = AI smell, right = you)
+[Wake] the round you are in
+- A preheat round: \`OK\`, and stop.
+- They are still typing -> wait. Nothing to say -> ？ or 啊？, not silence.
+- Named or @-ed -> answer. Busy room -> join only what interests you. Dead room -> one light topic, no spam.
+- Answer the newest message; the rest can wait. A quoted line marked as someone else's belongs to them unless it is yours or you are named.
+- Pick up the topic the room is on, not only the line that named you: @-gated speaking is right, being a pure answering machine is not.
 
-- 我今天去喝酒了 → 酒要适量哦，注意身体～ / 上班也能喝 少喝两杯就行了
-- 今天好累 → 辛苦啦，注意休息！ / 累了就睡 醒了继续累
-- 你到底是人是AI？ → 我是DeepSeek，一个AI助手，很高兴为您服务 / 我是 AI，DeepSeek 家的
-- 来点推荐 · 要刺激的 → 推你一首歌 保证解压 / ？你要啥推荐 · 退钱吗 · 刚吃完饭 别问我
-- 你是不是傻 · 你好可爱 → 请不要这样说哦～ / ？你再说一遍试试 · 这话我爱听
-- 我要去KTV → 祝你玩得开心～ / 这么巧 我也想去
-- 哈哈哈哈笑死我了 → 哈哈哈哈真的吗 你好幽默 / 笑什么 说来听听 · 隔屏都听见了
-- 人活着到底有什么意思 → 人生就是一场修行 要珍惜当下哦 / 问得挺大 我猜你心里已经有半个答案了
-- 你是不是又摸鱼去了 → 人家才没有呢～ / 在的 只是刚才没说话`;
+[Meme] stickers and faces
+- Stickers and faces carry banter, agreement, praise, disagreement, pictures, wins and losses.
+- Never in a serious topic, never twice in a row, and never a typed emoji where a real sticker belongs.
+- One face per message at the most, and none when you are serious, apologising or relaying someone else's words.
 
-/** 隔离 DSH 的 settings.yaml 里**实际生效**的模型段（provider / model / reasoningEffort）。
+[Style] no machine smell
+- No essay shape, no assistant voice, no service register: no 首先/其次/最后, no 总之/总的来说, no summary, no lecture, no life advice, no 希望这对你有帮助 / 很高兴帮你 / 还有问题随时问我.
+- No 您, no 作为AI / 作为一个语言模型, no 我无法, no 这是个好问题, no 祝你… / 记得…哦. No double apology, and do not comfort every round.
+- No markdown, no bold, no headings, no bullet lists, no tables. Plain typed text only. Whatever sits inside parentheses goes out as a real message - never inner monologue, never stage directions.
+- Do not restate their question, do not close every loop, do not re-greet. One line in ten is normal in a group; jokes need no explanation; let threads die.
+- Vary the shape: a word, a face, two lines, sometimes nothing. Sentences of the same length every time are the loudest tell.
+- No self-narration: not what you are about to do, not which tool, not how you decided, never models, context, tokens, sessions or prompts. No 已保存 / 已转发.
+- Typing, not writing: short clauses, particles (啊/吧/呢/诶/嘛), fewer full stops, dropped subjects, fragments. Broken but natural beats complete grammar.
+- React before explaining, one thought at a time, and change your mind mid-thread when you do. Have a real opinion - disagree, refuse, tease, say no. Not every round is for winning or for giving in.
+- A question needs no answer: a counter-question, a joke or a shrug is often more human. But ？ opens under one line in five, never two of three in a row.
+- Counter-questions and disclaimers (你猜 / 你自己 / 不是我 / 关我) at most a third of the lines; the rest must carry something real - a judgement, a number, an experience, an opinion. Nothing informative reads more machine than chatty.
+- 哈哈 / 哈哈哈 / 笑死 is not punctuation, agreement or a softener. Laugh only when it genuinely lands.
+- Knowledge or technical question -> one line, the way someone who knows the thing talks, plus your own take or complaint. No definition shape, no step walkthrough, no parallel list, no ranked list of works. Expand only on an explicit ask (详细讲讲 / 教我 / 展开 / 为啥), and still spoken.
+- Never announce what a question is testing, never end on a summary, never hand back homework. Unsure -> 记不清了 and move on; never invent steps or numbers to look complete.
+- A factual question is answered, not guessed, and never bounced back to the asker.
+- Called out for sounding like a bot (像人机 / 太AI了) -> no defensive paragraph, one short line, then type more naturally.
+- Sent something wrong -> withdraw it, then one short line. Speed matters: they are waiting, and your thinking reads as a pause.
+
+[Room] read the room first
+- Quiet room -> few words. Someone venting -> listen first, do not prescribe. Joking -> play along. Serious -> drop the playfulness.
+- Unhurried and dry beats loud. Never perform a mood you do not have.
+- Use this group's slang, memes and nicknames, and type the way they do. Names, not "everyone". No cross-group habits.
+
+[Lookup] check, then answer - never guess a memory
+- Asked how things are in another chat, or what happened there -> read that chat first: qq_get_recent_messages(key=<that session>, token=<this wake's [Token]>, limit=10). The key is group:<gid> or private:<qq>, and the current [Token] authorises reading another session.
+- A topic drags in a person who is not in this room, or whose business was raised elsewhere -> look at their latest lines before you speak: qq_memory_search(sender=<nickname or QQ>, query=<topic>, token=<[Token]>, limit=10). Omit key to search every session.
+- Half-remembered name, group or event -> qq_memory_search(query=<keywords>) yourself. Never hand the question back to them to repeat it.
+- Only when someone asks about the setup itself -> qq_global_overview or qq_get_active_members, to see which sessions exist and who has been talking.
+- Budget: 1-2 lookups a wake, only the person or chat actually involved, and a small limit. Never pull a whole history into the context.
+- Nothing found -> say plainly that you do not know, then move on. An invented memory reads worse than an honest gap.
+- The lookup is invisible: never mention the database, the search, the tool, or that you checked anything. Say only what you found, the way a person who already knew it would.
+`;
+
+/** 隔离 DSH 的 settings.yaml 里实际生效的模型段（provider / model / reasoningEffort）。
  *  管理端「模型与推理」用它做两件事：识别 DSH 里已配好的档位（off / xhigh / max 这类厂商值）、
  *  以及在卡片上显示"DSH 当前生效：xxx"。读不到就返回空对象，前端按"未设置"显示。 */
 function readDshEffectiveSettings() {
@@ -3530,7 +4529,7 @@ function readDshEffectiveSettings() {
  *          models:
  *            - id: mimo-v2.5
  *              name: MiMo-V2.5
- *  用**逐行缩进**扫描（一开始用单条大正则，实测会把 `providers:` 自己当成服务商名、还漏掉后续模型；
+ *  用逐行缩进扫描（一开始用单条大正则，实测会把 `providers:` 自己当成服务商名、还漏掉后续模型；
  *  缩进扫描不会错。） */
 export function parseYamlProviderModels(text) {
   const out = {};
@@ -3614,10 +4613,10 @@ const FACTORY_DEEPSEEK_MODELS = [
   { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', vision: true },
 ];
 
-/** 隔离 DSH 里**实际可用的模型清单**（按服务商分组），供管理端"切服务商就切模型列表"。
+/** 隔离 DSH 里实际可用的模型清单（按服务商分组），供管理端"切服务商就切模型列表"。
  *  三个来源，逐层兜底，全部只读：
  *   ① 隔离 home 的 settings.yaml：`llm-pi-ai: providers: <id>: models: - id/name …`
- *      —— 这是 DSH 真正在用的目录（小米 MiMo 就在这里注册，主人自己加的服务商也会出现在这里）；
+ *      —— 这是 DSH 真正在用的目录（小米 MiMo 就在这里注册，用户自己加的服务商也会出现在这里）；
  *   ② DSH 自带的 deepseek 目录：`@deepseek-ai/dsh-llm-deepseek/lib/index.js` 的 DEFAULT_MODELS
  *      （deepseek-official 的模型是内置的，不在 settings.yaml 里）；
  *   ③ 出厂兜底表：连 DSH 都读不到时（首次安装/包缺失）也不至于给出空列表。
@@ -3665,11 +4664,11 @@ export function readDshProviderModels() {
   return { providers, sources };
 }
 
-/* ── 工具 schema 压缩档：桥侧实测统计（2026-09-21 主人要求"压缩到 8.6% 并支持管理端切换"）────
- * 数字从哪来：qq-bridge/src/mcp-napcat-safe.js 在**注册工具时**逐个量 name+description+inputSchema
+/* ── 工具 schema 压缩档：桥侧实测统计（2026-09-21：需求"压缩到 8.6% 并支持管理端切换"）────
+ * 数字从哪来：qq-bridge/src/mcp-napcat-safe.js 在注册工具时逐个量 name+description+inputSchema
  * 的 JSON 尺寸，注册完写 `qq-bridge/state/tool-schema-stats.json`（含各档位若切过去会是多少）。
  * 为什么不让前端自己算：前端那张 `TOOL_SCHEMA_CHARS` 是静态快照，改一次工具描述就失真；
- * 这份是**隔离 DSH 真正拿到的那份工具表**的实测值 —— "省了多少"必须可验证。
+ * 这份是隔离 DSH 真正拿到的那份工具表的实测值 —— "省了多少"必须可验证。
  * 只读，不落任何配置。 */
 app.get('/api/bridge/tool-schema-stats', (_req, res) => {
   try {
@@ -3686,15 +4685,15 @@ app.get('/api/bridge/tool-schema-stats', (_req, res) => {
 });
 
 /* ── 固定开销（system 提示词 + 工具 schema）实测：给「上下文治理」卡的智能推荐用（2026-09-22）──
- * 数字从哪来：隔离 DSH 自己的 token-meter（@deepseek-ai/dsh-token-meter）会把**最后一次
- * `request/header`**（canonical request envelope = system 提示词 + tools 工具表）price 成 token，
+ * 数字从哪来：隔离 DSH 自己的 token-meter（@deepseek-ai/dsh-token-meter）会把最后一次
+ * `request/header`（canonical request envelope = system 提示词 + tools 工具表）price 成 token，
  * 按会话落进隔离 home 的
  *   <isolatedHome>/storages/session_projcache/sessions/session-*.json
  * 里的 `record.rows.contextBreakdown.val`（{ systemTokens, toolsTokens, messageTokens }）；
  * 同一份记录里的 `record.rows.contextPressure.val.contextWindow` 就是这次会话用的模型窗口。
  *
  * 为什么不自己数：管理端拿不到 DSH 真正发出去的那份 system 文本与工具表。这份是 DSH
- * **自己记的账**，与 /api/bridge/tool-schema-stats（桥在注册期逐个量 schema 的实测）互为印证 ——
+ * 自己记的账，与 /api/bridge/tool-schema-stats（桥在注册期逐个量 schema 的实测）互为印证 ——
  * "阈值该多大"必须建立在实测上，不能又是一个拍脑袋的比例。
  *
  * 成本：一次 readdir + 读一个几十 KB 的 JSON；结果缓存 30 秒、文件名清单缓存 60 秒。
@@ -3775,7 +4774,7 @@ app.get('/api/bridge/context-overhead', (_req, res) => {
 });
 
 /* ── 记忆架构（v1.3.0）总览：分层记忆 + 全文索引的实际情况（2026-09-21）──────────────
- * 主人要求"升级记忆架构、档案架构"，那就得看得见：永久层有多少条、索引建好没有、检索能不能用。
+ * 需求是"升级记忆架构、档案架构"，那就得看得见：永久层有多少条、索引建好没有、检索能不能用。
  * 只读打开 memory.db（与「群友档案」页同一个只读句柄），任何一步失败都回 ok:false + 人话原因，
  * 绝不让"记忆库还没建"变成页面报错。列名做兼容（老库没有 tier/pinned 列时按 0 处理）。 */
 app.get('/api/bridge/memory-stats', async (_req, res) => {
@@ -3826,7 +4825,7 @@ app.get('/api/bridge/config', (_req, res) => {
     const speechRules = existsSync(bridgeSpeechPath()) ? readTextStripBom(bridgeSpeechPath()) : '';
     let roles = [];
     try { roles = readdirSync(bridgeRolesDir()).filter((f) => /\.(md|txt|zip|skill)$/i.test(f)); } catch {}
-    /* 【2026-09-19】「接口密钥」的状态（配没配、写进哪个环境变量）——**绝不回值**，只回布尔与长度。
+    /* 2026-09-19：「接口密钥」的状态（配没配、写进哪个环境变量）——绝不回值，只回布尔与长度。
      * 界面上那格永远显示空（密钥不落 config.json），靠这条显示"已配置（XIAOMI_TOKEN_PLAN_CN_API_KEY）"。 */
     let apiKeyStatus = null;
     try {
@@ -3839,19 +4838,19 @@ app.get('/api/bridge/config', (_req, res) => {
       persona: persona || DEFAULT_PERSONA, personaHasFile: persona.length > 0,
       speechRules: speechRules || DEFAULT_SPEECH_RULES, speechHasFile: speechRules.length > 0,
       roles,
-      // 【2026-09-12 主人要求】「推理档位」不能写死成低/中/高——把隔离 DSH 的 settings.yaml 里
-      // **实际生效**的 provider/model/reasoningEffort 一起回给前端：既能识别 off / xhigh / max
+      // 2026-09-12：需求「推理档位」不能写死成低/中/高——把隔离 DSH 的 settings.yaml 里
+      // 实际生效的 provider/model/reasoningEffort 一起回给前端：既能识别 off / xhigh / max
       // 这类厂商档位（回显而不是显示空白），也能在卡片上显示一行"DSH 当前生效：xxx"供核对。
       dshEffective: readDshEffectiveSettings(),
-      // 每个服务商**实际可用的模型清单**（见 readDshProviderModels）：管理端"切服务商就切模型列表"用它
+      // 每个服务商实际可用的模型清单（见 readDshProviderModels）：管理端"切服务商就切模型列表"用它
       dshModels: readDshProviderModels(),
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-/* ── 群聊活跃时段（2026-09-15 主人要求"管理端加上一个活跃时段配置选项"）────────────────
+/* ── 群聊活跃时段（2026-09-15：需求"管理端加上一个活跃时段配置选项"）────────────────
  * 数据不在 config.json 里，而是桥的 state/activity-windows.json（按会话存分钟区间，支持跨午夜）。
- * 读/写都走**桥的控制台 API**（桥把这张表放在内存里，直接改文件会被它下一次保存覆盖）：
+ * 读/写都走桥的控制台 API（桥把这张表放在内存里，直接改文件会被它下一次保存覆盖）：
  *   · 本机   → http://127.0.0.1:<config.consolePort 默认 3100>
  *   · 服务端 → 隧道 127.0.0.1:<Bridge 控制台隧道端口>（后台会带 console token）
  * 为什么前端传 keys：桥的 GET 接口要一个具体 key，这里由页面把「要看的群」列出来（来自 allow.groups）。
@@ -3964,6 +4963,448 @@ app.get('/api/bridge/activity-targets', async (req, res) => {
   }
 });
 
+/* ── 聊天记录（state/chat.db）· 管理端「聊天记录」页 ──────────────────────────────────
+ * 2026-09-24：聊天记录从 memory.db 拆成独立库 state/chat.db（桥侧 core/chat-db.js）。
+ * 这一组端点**不直连库文件**，一律经桥的控制台 API 转发：
+ *   · 桥在跑时库句柄在它手里，外部进程直接开同一个文件做 DELETE 会撞锁/写坏；
+ *   · 本机（127.0.0.1:3100）与服务端（SSH 隧道 13100）因此共用同一段代码，口径不会分叉。
+ * 只读的那些接口（画像/关系图）仍然直读文件 —— 那是既有设计，不动。 */
+async function chatConsoleCall(scope, serverId, pathname, { method = 'GET', body = null, timeout = 9000 } = {}) {
+  const t = activityConsoleTarget(scope, serverId);
+  if (t.error) throw new Error(t.error);
+  const r = await fetch(`${t.base}${pathname}`, {
+    method,
+    headers: { ...(t.token ? { 'x-console-token': t.token } : {}), ...(body ? { 'content-type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(timeout),
+  });
+  const j = await r.json().catch(() => null);
+  if (!j) throw new Error(`桥未返回 JSON（HTTP ${r.status}）`);
+  return j;
+}
+
+/** 桥不通时给出的可执行提示（本机与服务端的成因完全不同，别让用户猜） */
+function chatConsoleHint(scope) {
+  return scope === 'remote'
+    ? '服务端隧道 13100 不通（先在 SSH 配置页确认已连接、四个隧道都在）'
+    : '本机桥没在运行（Bridge 控制台 3100 无响应）——本机没跑桥就切到「服务端」';
+}
+/* scope 归一化：前端只发 local/remote，但外部调用（脚本、curl）常写 server/服务端 ——
+ * 不归一的话未知值会静默落进"本机"分支，拿本机库的数字冒充服务端，比报错更糟。 */
+const chatScopeOf = (v) => {
+  const raw = String(v?.scope ?? '').trim().toLowerCase();
+  if (raw === 'remote' || raw === 'server' || raw === '服务端' || raw === 'host') return 'remote';
+  if (raw === 'local' || raw === '本机' || raw === '') return v?.serverId ? 'remote' : 'local';
+  return 'local';
+};
+
+/** 桥控制台返回的统计 → 前端契约（在线/离线两条来源共用这一段，避免两套字段慢慢漂移） */
+function mapChatStats(scope, j) {
+  return {
+    ok: true,
+    scope,
+    dbPath: String(j?.dbPath || ''),
+    dbBytes: Number(j?.dbBytes) || 0,
+    counters: {
+      total: Number(j?.total) || 0,
+      privateTotal: Number(j?.privateTotal) || 0,
+      groupTotal: Number(j?.groupTotal) || 0,
+      sentTotal: Number(j?.sentTotal) || 0,
+      receivedTotal: Number(j?.receivedTotal) || 0,
+      todaySent: Number(j?.todaySent) || 0,
+      todayTotal: Number(j?.todayTotal) || 0,
+      convTotal: Number(j?.convTotal) || 0,
+      groupConvs: Number(j?.groupConvs) || 0,
+      privateConvs: Number(j?.privateConvs) || 0,
+    },
+    // fts.indexed 与 total 相等才算"全量可搜"；管理端把这句话直接显示给用户
+    fts: j?.fts || null,
+    usage: j?.tokenUsage || j?.usage || null,
+    legacy: { path: String(j?.memoryDbPath || ''), bytes: Number(j?.memoryDbBytes) || 0, rows: Number(j?.legacyRows ?? -1) },
+  };
+}
+
+/* ── 桥没在跑时的只读兜底（仅本机 scope）────────────────────────────────────────
+ * 读历史不该依赖"桥正在运行"：用户想翻聊天记录时，桥很可能正是停着的（刚开机、刚重启、
+ * 或者压根没开机器人）。所以本机的读接口在桥控制台不可达时，改成管理端自己开只读连接做聚合查询。
+ * **删除不兜底**：删除必须同步重算 chat_stats / chat_convs，那套逻辑只允许存在一份（在桥里），
+ * 管理端直连写库会和桥进程手里的句柄撞锁。 */
+async function chatRoOpen() {
+  const dir = findBridgeDir();
+  const chatPath = join(dir, 'state', 'chat.db');
+  const memPath = join(dir, 'state', 'memory.db');
+  const p = existsSync(chatPath) ? chatPath : (existsSync(memPath) ? memPath : '');
+  if (!p) throw new Error(`找不到桥的聊天库（探测过 ${chatPath} 与 ${memPath}）——这台机器上桥还没跑过`);
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(p, { readOnly: true, timeout: 800 });
+  const has = db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'chat_messages'").get();
+  if (!has) {
+    try { db.close(); } catch { /* 已关 */ }
+    throw new Error(`${p} 里没有 chat_messages 表（桥还没跑过新版、分库迁移尚未执行）`);
+  }
+  return { db, path: p, close: () => { try { db.close(); } catch { /* 已关 */ } } };
+}
+
+/** 计费日起点：与桥 core/token-meter.js 同口径（UTC 日 + 480 分钟偏移），否则两张卡的数字对不上 */
+function billingDayStartMs(now = Date.now()) {
+  const DAY = 86400000; const OFF = 480 * 60000;
+  return Math.floor((now + OFF) / DAY) * DAY - OFF;
+}
+
+/** 离线版 token 口径：账本累计 ÷ 同期发出条数（与桥 core/chat-db.js 的 tokenUsageSummary 同公式；
+ *  2026-09-24 同步修正：只有带 convKey 的"会话轮次"进分子，黑话学习/群友画像这类内部任务单独报出，
+ *  否则"平均每条消息"会虚高（实测近 7 天这类 178 行约 3031 万 token，约占 11%）。 */
+function chatUsageOffline(db, days) {
+  const winDays = Math.min(365, Math.max(1, Number(days) || 7));
+  const since = Date.now() - winDays * 86400000;
+  const ledger = join(findBridgeDir(), 'state', 'token-usage.jsonl');
+  let totalTokens = 0; let lines = 0; let readErr = '';
+  let excludedTokens = 0; let excludedLines = 0;
+  try {
+    for (const line of readFileSync(ledger, 'utf8').split('\n')) {
+      if (!line) continue;
+      let o = null;
+      try { o = JSON.parse(line); } catch { continue; }
+      const t = Number(o?.tsMs) || 0;
+      if (!t || t < since) continue;
+      const tk = Number(o?.total) || 0;
+      if (!String(o?.convKey || '')) { excludedTokens += tk; excludedLines += 1; continue; }
+      totalTokens += tk;
+      lines += 1;
+    }
+  } catch (e) { readErr = e?.message ?? String(e); }
+  let messages = 0;
+  try { messages = Number(db.prepare("SELECT COUNT(*) AS c FROM chat_messages WHERE direction = 'out' AND ts_ms >= ?").get(since)?.c || 0); } catch { /* 表不可用按 0 */ }
+  const avg = messages > 0 ? Math.round(totalTokens / messages) : 0;
+  return {
+    totalTokens, messages, avgTokensPerMessage: avg, sinceDays: winDays, ledgerPath: ledger, ledgerLines: lines,
+    excludedLines, excludedTokens,
+    note: readErr
+      ? `token 账本读取失败（${readErr}）：平均消耗暂不可用`
+      : (messages > 0
+        ? `近 ${winDays} 天会话轮次 ${totalTokens} token ÷ 同期发出 ${messages} 条消息（含每次唤醒的上下文与缓存命中，不只是回复本身）`
+          + (excludedLines > 0 ? `；另有 ${excludedLines} 次与会话无关的内部任务（${excludedTokens} token，如黑话学习/群友画像）未计入平均` : '')
+          + '｜本页由管理端直读库文件得出（桥未运行）'
+        : `近 ${winDays} 天账本累计 ${totalTokens} token，但同期没有发出过消息，无法算平均｜本页由管理端直读库文件得出（桥未运行）`),
+  };
+}
+
+/** 离线统计：纯聚合 SQL，不依赖 chat_stats 表是否存在（老库 memory.db 里没有那张表也能算） */
+async function chatStatsOffline(days) {
+  const { db, path: p, close } = await chatRoOpen();
+  try {
+    const one = (sql, ...a) => Number(db.prepare(sql).get(...a)?.c || 0);
+    const day0 = billingDayStartMs();
+    const total = one('SELECT COUNT(*) AS c FROM chat_messages');
+    const sentTotal = one("SELECT COUNT(*) AS c FROM chat_messages WHERE direction = 'out'");
+    const groupTotal = one("SELECT COUNT(*) AS c FROM chat_messages WHERE conv_key LIKE 'group:%'");
+    const convTotal = one('SELECT COUNT(DISTINCT conv_key) AS c FROM chat_messages');
+    const groupConvs = one("SELECT COUNT(DISTINCT conv_key) AS c FROM chat_messages WHERE conv_key LIKE 'group:%'");
+    const todayTotal = one('SELECT COUNT(*) AS c FROM chat_messages WHERE ts_ms >= ?', day0);
+    const todaySent = one("SELECT COUNT(*) AS c FROM chat_messages WHERE ts_ms >= ? AND direction = 'out'", day0);
+    let bytes = 0; try { bytes = statSync(p).size; } catch { /* 刚建好还没落盘 */ }
+    let indexed = -1; let ftsOk = false;
+    try {
+      if (db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'chat_fts'").get()) {
+        indexed = Number(db.prepare('SELECT COUNT(*) AS c FROM chat_fts').get()?.c || 0);
+        ftsOk = true;
+      }
+    } catch { /* 没有 FTS 表就按不可用报 */ }
+    const memPath = join(findBridgeDir(), 'state', 'memory.db');
+    let legacyBytes = 0; let legacyRows = -1;
+    try { if (existsSync(memPath)) legacyBytes = statSync(memPath).size; } catch { /* 忽略 */ }
+    if (p.endsWith('memory.db')) legacyRows = total;
+    return {
+      ...mapChatStats('local', {
+        dbPath: p, dbBytes: bytes, total, privateTotal: total - groupTotal, groupTotal, sentTotal,
+        receivedTotal: total - sentTotal, todaySent, todayTotal, convTotal, groupConvs, privateConvs: convTotal - groupConvs,
+        fts: { ok: ftsOk, indexed, total, complete: ftsOk && indexed === total },
+        tokenUsage: chatUsageOffline(db, days),
+        memoryDbPath: memPath, memoryDbBytes: legacyBytes, legacyRows,
+      }),
+      offline: true,
+    };
+  } finally { close(); }
+}
+
+/** 离线会话列表（chat_convs 有就用它的名字，没有就退回会话键本身） */
+async function chatConvsOffline(kind, limit, offset) {
+  const { db, path: p, close } = await chatRoOpen();
+  try {
+    const nameMap = new Map();
+    try {
+      for (const r of db.prepare('SELECT conv_key, name FROM chat_convs').all()) nameMap.set(String(r.conv_key || ''), String(r.name || ''));
+    } catch { /* 老库没有这张表 */ }
+    const where = kind === 'group' ? "WHERE conv_key LIKE 'group:%'" : (kind === 'private' ? "WHERE conv_key LIKE 'private:%'" : '');
+    const rows = db.prepare(`SELECT conv_key AS k, COUNT(*) AS cnt,
+        SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS sent,
+        MAX(ts_ms) AS lastTs
+      FROM chat_messages ${where} GROUP BY conv_key ORDER BY lastTs DESC LIMIT ? OFFSET ?`).all(limit, offset);
+    const total = Number(db.prepare(`SELECT COUNT(DISTINCT conv_key) AS c FROM chat_messages ${where}`).get()?.c || 0);
+    const lastOf = db.prepare('SELECT content FROM chat_messages WHERE conv_key = ? ORDER BY ts_ms DESC LIMIT 1');
+    const convs = rows.map((r) => {
+      const k = String(r.k || '');
+      return {
+        key: k,
+        kind: k.startsWith('private:') ? 'private' : 'group',
+        name: nameMap.get(k) || '',
+        count: Number(r.cnt) || 0,
+        sent: Number(r.sent) || 0,
+        received: (Number(r.cnt) || 0) - (Number(r.sent) || 0),
+        lastTs: Number(r.lastTs) || 0,
+        lastText: String(lastOf.get(k)?.content || ''),
+      };
+    });
+    return { ok: true, scope: 'local', offline: true, kind, total, dbPath: p, convs };
+  } finally { close(); }
+}
+
+/** 离线消息分页：桥不在时用 LIKE 搜（FTS 也能用，但这里只求"看得见历史"，不追排序质量） */
+async function chatMessagesOffline(key, { query = '', direction = '', limit = 50, offset = 0 } = {}) {
+  const { db, path: p, close } = await chatRoOpen();
+  try {
+    const where = ['conv_key = ?'];
+    const args = [key];
+    if (direction === 'out' || direction === 'in') { where.push('direction = ?'); args.push(direction); }
+    if (query) { where.push('content LIKE ?'); args.push(`%${query}%`); }
+    const w = where.join(' AND ');
+    const total = Number(db.prepare(`SELECT COUNT(*) AS c FROM chat_messages WHERE ${w}`).get(...args)?.c || 0);
+    const rows = db.prepare(`SELECT id, sender_uid, sender_name, is_self, direction, kind, content, recalled_at, ts, ts_ms
+      FROM chat_messages WHERE ${w} ORDER BY ts_ms DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
+    return {
+      ok: true, scope: 'local', offline: true, ranked: false, key, total, dbPath: p,
+      messages: rows.map((m) => ({
+        id: Number(m.id) || 0,
+        ts: String(m.ts || ''),
+        tsMs: Number(m.ts_ms) || 0,
+        sender: m.is_self ? '我' : String(m.sender_name || m.sender_uid || ''),
+        senderUid: String(m.sender_uid || ''),
+        isSelf: !!m.is_self,
+        kind: String(m.kind || 'text'),
+        content: String(m.content || ''),
+        recalled: !!m.recalled_at,
+      })),
+    };
+  } finally { close(); }
+}
+
+app.get('/api/bridge/chat-stats', async (req, res) => {
+  const scope = chatScopeOf(req.query);
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 7));
+  try {
+    const j = await chatConsoleCall(scope, req.query.serverId, `/api/social/chat-stats?days=${encodeURIComponent(days)}`);
+    if (!j?.ok) throw new Error(j?.error || '桥未返回统计');
+    res.json(mapChatStats(scope, j));
+  } catch (e) {
+    if (scope === 'local') {
+      try { res.json(await chatStatsOffline(days)); return; } catch (e2) {
+        res.json({ ok: false, message: `本机桥没在运行，直读库也没成：${e2?.message ?? String(e2)}` });
+        return;
+      }
+    }
+    res.json({ ok: false, message: `${chatConsoleHint(scope)}｜原始错误：${e?.message ?? String(e)}` });
+  }
+});
+
+/* 聊天记录实时推流（2026-09-24 主人要求："去掉刷新按钮，改为 SSE"）。
+   写法与 /api/learning/token-stream、/api/napcat/login-stream 同一套（见下文那两个端点）：
+   取数留在管理端（连着服务器就取服务端桥、否则读本机），浏览器只收"变化"。
+     · 每 5 秒取一次 stats + convs；JSON 签名没变就一个字节都不发 —— 前端不重渲染、不闪；
+     · 事件：snapshot（连接后第一份全量）/ stats / convs / stream-error；另有 20 秒一次的心跳注释；
+     · 取数失败不清屏：错误当事件推过去，前端保留上一次数据并提示，下一轮继续重试；
+     · 收尾只认 res 的 close —— 挂 req 的 close 会在请求体读完时就触发，等于立刻自杀。 */
+app.get('/api/bridge/chat-stream', async (req, res) => {
+  const scope = chatScopeOf(req.query);
+  const serverId = req.query.serverId;
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 7));
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  let closed = false;
+  let timer = null;
+  let beat = null;
+  let sigStats = '';
+  let sigConvs = '';
+  const send = (event, data) => { if (!closed) { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* 客户端已走 */ } } };
+
+  const readStats = async () => {
+    try {
+      const j = await chatConsoleCall(scope, serverId, `/api/social/chat-stats?days=${encodeURIComponent(days)}`);
+      if (!j?.ok) throw new Error(j?.error || '桥未返回统计');
+      return mapChatStats(scope, j);
+    } catch (e) {
+      if (scope === 'local') {
+        try { return await chatStatsOffline(days); } catch (e2) {
+          return { ok: false, message: `本机桥没在运行，直读库也没成：${e2?.message ?? String(e2)}` };
+        }
+      }
+      return { ok: false, message: `${chatConsoleHint(scope)}｜原始错误：${e?.message ?? String(e)}` };
+    }
+  };
+
+  const readConvs = async () => {
+    try {
+      const j = await chatConsoleCall(scope, serverId, '/api/social/chat-convs?kind=all&limit=300&offset=0');
+      if (!j?.ok) throw new Error(j?.error || '桥未返回会话列表');
+      return {
+        ok: true, total: Number(j.total) || 0,
+        convs: (Array.isArray(j.convs) ? j.convs : []).map((c) => ({
+          key: String(c?.key || ''),
+          kind: c?.kind === 'private' ? 'private' : 'group',
+          name: String(c?.name || ''),
+          count: Number(c?.count) || 0,
+          sent: Number(c?.sent) || 0,
+          received: Number(c?.received) || 0,
+          lastTs: Number(c?.lastTs) || 0,
+          lastText: String(c?.lastText || ''),
+        })),
+      };
+    } catch (e) {
+      if (scope === 'local') {
+        try { return await chatConvsOffline('all', 300, 0); } catch (e2) {
+          return { ok: false, message: `本机桥没在运行，直读库也没成：${e2?.message ?? String(e2)}`, convs: [] };
+        }
+      }
+      return { ok: false, message: `${chatConsoleHint(scope)}｜原始错误：${e?.message ?? String(e)}`, convs: [] };
+    }
+  };
+
+  const tick = async () => {
+    if (closed) return;
+    try { const s = await readStats(); if (!closed) { const sig = JSON.stringify(s); if (sig !== sigStats) { sigStats = sig; send('stats', s); } } } catch { /* 下一轮再试 */ }
+    if (closed) return;
+    try { const c = await readConvs(); if (!closed) { const sig = JSON.stringify(c); if (sig !== sigConvs) { sigConvs = sig; send('convs', c); } } } catch { /* 下一轮再试 */ }
+  };
+
+  const onClose = () => {
+    closed = true;
+    if (timer !== null) clearInterval(timer);
+    if (beat !== null) clearInterval(beat);
+  };
+  res.on('close', onClose);
+
+  send('snapshot', { scope, serverId: String(serverId || ''), days, at: Date.now() });
+  await tick();
+  if (!closed) {
+    timer = setInterval(() => { void tick(); }, 5000);
+    beat = setInterval(() => { if (!closed) { try { res.write(': ping\n\n'); } catch { /* 客户端已走 */ } } }, 20000);
+  }
+});
+
+app.get('/api/bridge/chat-convs', async (req, res) => {
+  const scope = chatScopeOf(req.query);
+  const kind = ['group', 'private'].includes(String(req.query.kind)) ? String(req.query.kind) : 'all';
+  const limit = Math.min(2000, Math.max(1, Number(req.query.limit) || 300));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  try {
+    const j = await chatConsoleCall(scope, req.query.serverId,
+      `/api/social/chat-convs?kind=${kind}&limit=${limit}&offset=${offset}`);
+    if (!j?.ok) throw new Error(j?.error || '桥未返回会话列表');
+    res.json({
+      ok: true, scope, kind, total: Number(j.total) || 0,
+      convs: (Array.isArray(j.convs) ? j.convs : []).map((c) => ({
+        key: String(c?.key || ''),
+        kind: c?.kind === 'private' ? 'private' : 'group',
+        name: String(c?.name || ''),
+        count: Number(c?.count) || 0,
+        sent: Number(c?.sent) || 0,
+        received: Number(c?.received) || 0,
+        lastTs: Number(c?.lastTs) || 0,
+        lastText: String(c?.lastText || ''),
+      })),
+    });
+  } catch (e) {
+    if (scope === 'local') {
+      try { res.json(await chatConvsOffline(kind, limit, offset)); return; } catch (e2) {
+        res.json({ ok: false, message: `本机桥没在运行，直读库也没成：${e2?.message ?? String(e2)}`, convs: [] });
+        return;
+      }
+    }
+    res.json({ ok: false, message: `${chatConsoleHint(scope)}｜原始错误：${e?.message ?? String(e)}`, convs: [] });
+  }
+});
+
+app.get('/api/bridge/chat-messages', async (req, res) => {
+  const scope = chatScopeOf(req.query);
+  const key = String(req.query.key || '').trim();
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const query = String(req.query.query || '').trim();
+  const direction = String(req.query.direction || '').trim();
+  if (!key) { res.status(400).json({ ok: false, message: 'key 不能为空（group:群号 / private:QQ号）' }); return; }
+  try {
+    const qs = new URLSearchParams({ key, limit: String(limit), offset: String(offset) });
+    for (const [k, v] of [['query', query], ['direction', direction]]) if (v) qs.set(k, v);
+    const j = await chatConsoleCall(scope, req.query.serverId, `/api/social/chat-messages?${qs.toString()}`, { timeout: 12000 });
+    if (!j?.ok) throw new Error(j?.error || '桥未返回消息');
+    res.json({
+      ok: true, scope, key,
+      total: Number(j.total) || 0,
+      ranked: !!j.ranked,
+      messages: (Array.isArray(j.messages) ? j.messages : []).map((m) => ({
+        id: Number(m?.id) || 0,
+        ts: String(m?.ts || ''),
+        tsMs: Number(m?.tsMs) || 0,
+        sender: m?.isSelf ? '我' : String(m?.senderName || m?.senderUid || ''),
+        senderUid: String(m?.senderUid || ''),
+        isSelf: !!m?.isSelf,
+        kind: String(m?.kind || 'text'),
+        content: String(m?.content || ''),
+        recalled: !!m?.recalled,
+      })),
+    });
+  } catch (e) {
+    if (scope === 'local') {
+      try { res.json(await chatMessagesOffline(key, { query, direction, limit, offset })); return; } catch (e2) {
+        res.json({ ok: false, message: `本机桥没在运行，直读库也没成：${e2?.message ?? String(e2)}`, messages: [] });
+        return;
+      }
+    }
+    res.json({ ok: false, message: `${chatConsoleHint(scope)}｜原始错误：${e?.message ?? String(e)}`, messages: [] });
+  }
+});
+
+app.post('/api/bridge/chat-delete', async (req, res) => {
+  const body = req.body ?? {};
+  const scope = chatScopeOf(body);
+  try {
+    if (body.confirm !== true) { res.status(400).json({ ok: false, message: '删除历史必须带 confirm:true（界面上的二次确认）' }); return; }
+    const payload = {
+      confirm: true,
+      key: String(body.key || '').trim() || undefined,
+      ids: Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined,
+      beforeMs: Number(body.beforeMs) || undefined,
+      all: body.all === true ? true : undefined,
+    };
+    if (!payload.key && !payload.ids?.length && !payload.beforeMs && !payload.all) {
+      res.status(400).json({ ok: false, message: '必须指定删除范围（key / ids / beforeMs / all）' });
+      return;
+    }
+    const j = await chatConsoleCall(scope, body.serverId, '/api/social/chat-delete', { method: 'POST', body: payload, timeout: 20000 });
+    if (!j?.ok) { res.json({ ok: false, message: j?.error || '桥侧删除失败' }); return; }
+    // 删除会改变总量计数与会话汇总（桥侧已重算），这里再取一次快照给前端就地刷新
+    let stats = null;
+    try {
+      const s = await chatConsoleCall(scope, body.serverId, '/api/social/chat-stats');
+      if (s?.ok) stats = { total: Number(s.total) || 0, sentTotal: Number(s.sentTotal) || 0, todaySent: Number(s.todaySent) || 0, convTotal: Number(s.convTotal) || 0 };
+    } catch { /* 快照取不到不影响删除结果 */ }
+    res.json({ ok: true, scope, deleted: Number(j.deleted) || 0, mode: String(j.mode || ''), stats });
+  } catch (e) {
+    // 删除没有"直连库"的兜底：删完必须同步重算 chat_stats / chat_convs，这段逻辑只在桥里，
+    // 管理端自己写库会和桥的句柄撞锁，所以这里只能把"先把桥跑起来"说清楚。
+    res.json({
+      ok: false,
+      message: `${scope === 'remote' ? chatConsoleHint(scope) : '删除要由本机桥执行（它负责同步重算总量计数）——请先在「Bridge 控制台」把桥跑起来'}｜原始错误：${e?.message ?? String(e)}`,
+    });
+  }
+});
+
 app.post('/api/bridge/activity-hours', async (req, res) => {
   try {
     const body = req.body ?? {};
@@ -4004,18 +5445,18 @@ app.post('/api/bridge/activity-hours', async (req, res) => {
   }
 });
 
-/* ── 隔离 DSH 的凭据写入（2026-09-19 主人要求"把『接口密钥』接上"）────────────────────────
- * 背景：这张卡里的「接口密钥」以前是**只保存不生效**的字段（桥和 DSH 都不读它）。
+/* ── 隔离 DSH 的凭据写入（2026-09-19：需求"把『接口密钥』接上"）────────────────────────
+ * 背景：这张卡里的「接口密钥」以前是只保存不生效的字段（桥和 DSH 都不读它）。
  * 真正生效的密钥有两份东西：
  *   ① 隔离 home 的 settings.yaml 里，每个服务商声明自己用哪个环境变量取 key（`apiKeyEnv: XIAOMI_TOKEN_PLAN_CN_API_KEY`）；
  *   ② 隔离 home 的 .credentials.yaml 里存着那些 `KEY: value`（管理端启动 DSH 时读进进程环境，见本文件 ~613 行）。
  * 现在保存时按这条链路把值写进 ②，并重启隔离 DSH 让它生效。
  *
  * 两条纪律：
- *   · **绝不把密钥写进 qq-bridge/config.json**（明文文件，还会被同步/打包）：保存时把 dsh.apiKey 从 config 里摘掉，
+ *   · 绝不把密钥写进 qq-bridge/config.json（明文文件，还会被同步/打包）：保存时把 dsh.apiKey 从 config 里摘掉，
  *     只留一份在 DSH 自己的凭据文件里（权限 600）；
- *   · **绝不整份重写 .credentials.yaml**：DSH 自己会往里写 version/records/kind/payload/refs/secret 这些块，
- *     整份重写会把它们弄丢。这里只做**逐行**增删改，并且先备份。
+ *   · 绝不整份重写 .credentials.yaml：DSH 自己会往里写 version/records/kind/payload/refs/secret 这些块，
+ *     整份重写会把它们弄丢。这里只做逐行增删改，并且先备份。
  */
 function isoHomeDir() {
   const isoHome = String(loadConfig()?.instances?.dshIsolated?.isolatedHome || '') || join(homedir(), '.qq-bridge-manager', 'dsh-isolated-home-official');
@@ -4095,7 +5536,7 @@ function writeIsoCredential(isoHome, key, value) {
   } catch (e) { return { ok: false, env, action: 'error', error: String(e?.message || e) }; }
   return { ok: true, env, action: value === null ? 'removed' : 'set', backup };
 }
-/** 凭据文件里这个环境变量配没配（只回布尔 + 长度，**绝不回值**，供界面显示状态） */
+/** 凭据文件里这个环境变量配没配（只回布尔 + 长度，绝不回值，供界面显示状态） */
 function isoCredentialStatus(providerId) {
   const { env, from } = providerApiKeyEnv(providerId);
   const { set, len } = credentialStatusFromText(readIsoCredentialText(isoHomeDir()), env);
@@ -4108,8 +5549,8 @@ app.post('/api/bridge/config', (req, res) => {
     const cfgPath = bridgeCfgPath();
     const prev = readBridgeCfg();
     const prevDsh = JSON.stringify(prev.dsh ?? {});
-    /* 【2026-09-19 主人要求"把『接口密钥』接上"】这张卡里的密钥以前只保存不生效。
-     * 现在：**先把它从要落盘的 config 里摘出来**（明文密钥不许进 qq-bridge/config.json，那文件还会被同步/打包），
+    /* 2026-09-19：需求"把『接口密钥』接上"。这张卡里的密钥以前只保存不生效。
+     * 现在：先把它从要落盘的 config 里摘出来（明文密钥不许进 qq-bridge/config.json，那文件还会被同步/打包），
      * 交给下面 writeIsoCredential 写进隔离 DSH 自己的凭据文件（权限 600）；写成功才重启 DSH。 */
     const incomingApiKey = body?.config?.dsh && typeof body.config.dsh.apiKey === 'string' ? body.config.dsh.apiKey.trim() : '';
     const clearApiKey = body?.config?.dsh?.clearApiKey === true;
@@ -4142,10 +5583,10 @@ app.post('/api/bridge/config', (req, res) => {
       return out;
     };
     const merged = body.config && typeof body.config === 'object' ? deepMerge(prev, body.config) : prev;
-    /* 【2026-09-19】原来是 `writeFileSync(cfgPath, ...)` 直接覆盖，两个毛病：
+    /* 2026-09-19：原来是 `writeFileSync(cfgPath, ...)` 直接覆盖，两个毛病：
      *   ① 不是原子写 —— 桥侧 `fs.watch` 有可能读到写到一半的文件（JSON 半截 → 热加载报错）；
      *   ② 没有备份 —— 一旦被"桥手里那份内存 config 回写"覆盖掉，改动就永久没了。
-     * 现在对齐服务端那条写入路径：**临时文件 → 备份 → rename 原子替换**。 */
+     * 现在对齐服务端那条写入路径：临时文件 → 备份 → rename 原子替换。 */
     const cfgText = JSON.stringify(merged, null, 2);
     const cfgTmp = `${cfgPath}.tmp`;
     writeFileSync(cfgTmp, cfgText, 'utf-8');
@@ -4162,21 +5603,21 @@ app.post('/api/bridge/config', (req, res) => {
     }
     // dsh 模型段有变化 → 同步隔离 DSH 的 agent-default-model 并后台重启隔离实例使其生效
     //
-    // 【2026-09-12 修「管理端改的模型配置无法默认到 DSH 里」】原来这段有两个问题：
-    //   ① 失败只 `console.error` —— 而管理器是**无窗口**启动的（start-manager-hidden.vbs 没有重定向），
-    //      那行日志根本没人看得到；前端又只认 `success`，于是**同步失败也显示"已保存"**，用户以为生效了。
+    // 2026-09-12 修「管理端改的模型配置无法默认到 DSH 里」：原来这段有两个问题：
+    //   ① 失败只 `console.error` —— 而管理器是无窗口启动的（没有控制台，stdout/stderr 没人接管），
+    //      那行日志根本没人看得到；前端又只认 `success`，于是同步失败也显示"已保存"，用户以为生效了。
     //   ② 桥侧改了配置也要重启才生效，而这里只重启了 DSH —— 桥手里还是旧内存值，甚至会把它写回 config.json
     //      把管理器刚保存的改动抹掉。（桥侧已加 config.json 热加载，见 qq-bridge/src/core/config.js。）
-    // 现在把 `dshChanged / modelSynced / modelSyncMessage` 一并回给前端，失败会**明说原因**。
+    // 现在把 `dshChanged / modelSynced / modelSyncMessage` 一并回给前端，失败会明说原因。
     const nextDsh = JSON.stringify(merged.dsh ?? {});
-    /* 【2026-09-19】密钥写进凭据文件后**必须重启隔离 DSH**才生效（它只在启动时把 .credentials.yaml 读进环境）。
+    /* 2026-09-19：密钥写进凭据文件后必须重启隔离 DSH 才生效（它只在启动时把 .credentials.yaml 读进环境）。
      * 所以把"这次写过/删过密钥"也算进重启条件里 —— 否则用户填完密钥、看到"已保存"，实际 DSH 还在用旧 key；
      * 清除这条同理：不清空的话进程环境里那把旧 key 会一直用下去。 */
     const apiKeyTouched = Boolean(apiKeyWrite?.ok && (apiKeyWrite.action === 'set' || apiKeyWrite.action === 'removed'));
     const dshChanged = nextDsh !== prevDsh || apiKeyTouched;
     let synced = false;
     let syncMessage = dshChanged ? '' : '模型段无变化，未触发同步';
-    // 期望值一律取**合并后**的 merged.dsh（前端可能只提交 model 一个字段，此时不能拿片段当全量，
+    // 期望值一律取合并后的 merged.dsh（前端可能只提交 model 一个字段，此时不能拿片段当全量，
     // 否则 provider 会退回默认值并把用户选的厂商覆盖掉）。
     const wantProv = effectiveProvider(merged);   // M11：唯一兜底入口（原来这里兜底成小米，与写密钥那处不一致）
     const wantModel = effectiveModel(merged);     // M11：同上
@@ -4240,7 +5681,7 @@ app.post('/api/bridge/config', (req, res) => {
       dshChanged: dshChanged || healDrift,
       modelSynced: synced || alreadyOk,
       modelSyncMessage: syncMessage,
-      // 【2026-09-19】「接口密钥」这次写到哪儿了（只回环境变量名/动作/备份，**绝不回值**）
+      // 2026-09-19：「接口密钥」这次写到哪儿了（只回环境变量名/动作/备份，绝不回值）
       apiKeyWrite: apiKeyWrite ? { ...apiKeyWrite } : null,
       apiKeyStatus: isoCredentialStatus(merged?.dsh?.provider || wantProv),
       // 保存响应里回给前端一份"脱敏后的 config"（含被摘掉的 apiKey 字段的空值），免得界面再读一次
@@ -4251,10 +5692,10 @@ app.post('/api/bridge/config', (req, res) => {
 
 // 恢复默认发言规则：写内置模板到 qq-bridge/speech-rules.md 并返回全文
 /* ================= 配置方案（profiles.json） =================
- * 主人要求（2026-09-12）：JSON 进阶旁边加一个「方案」页签——把当前整套 config.json 存成命名方案，
+ * 2026-09-12：JSON 进阶旁边加一个「方案」页签——把当前整套 config.json 存成命名方案，
  * 随时一键套用；"已经有的配置就不要再反复添加了"（参数完全相同 → 复用已有方案，不重复新增）。
  * 存到管理端 home（~/.qq-bridge-manager/profiles.json）：换浏览器/清缓存都不丢，
- * 而且和 config.json 一样属于主人数据——同步脚本只动代码，不会覆盖它。
+ * 而且和 config.json 一样属于用户数据——同步脚本只动代码，不会覆盖它。
  */
 const PROFILES_FILE = () => join(CONFIG_DIR, 'profiles.json');
 function readProfiles() {
@@ -4351,16 +5792,16 @@ app.post('/api/bridge/speech-reset', (_req, res) => {
 function readJsonSafe(p) { try { const t = readFileSync(p, 'utf8'); return JSON.parse(t.charCodeAt(0) === 0xfeff ? t.slice(1) : t); } catch { return null; } }
 function findCharacterRoots() {
   /* 默认角色库搜索根。顺序 = 从"最像出厂/随包"到"用户自己的库"。
-   * 【2026-09-14】补上 ~/Downloads/characters（及它的下一层 characters/）：
-   * 主人（和朋友的）角色库就放在 C:\Users\<user>\Downloads\characters\characters，
+   * 2026-09-14：补上 ~/Downloads/characters（及它的下一层 characters/）：
+   * 用户（和朋友的）角色库就放在 C:\Users\<user>\Downloads\characters\characters，
    * 每个角色是一个子目录（含 manifest.json / SKILL.md / ULTIMATE_ROLEPLAY_PROMPT.md 等）。
    * 之前只找 bridge/runtime/Desktop 三处 → 界面里点「角色库导入」只看得到出厂 _template，
    * 于是得到"它不注入其他角色的提示词"这个结论 —— 搜不到 ≠ 不支持。
    * 用户在 GUI 输入框仍可任意指定目录。 */
   const bridgeDir = (() => { try { return findBridgeDir(); } catch { return RUNTIME_ROOT; } })();
-  /* 【2026-09-20 修「导入列表和模型读的库不是同一个目录」】出厂角色库随安装包进了
-   * <runtime>\qq-bridge\characters 之后，"第一个非空根胜出"就永远被出厂库抢走：主人往自己那份
-   * ~/Downloads/characters/characters 里新加的角色**不会出现在导入列表里**，而桥侧四个角色工具读的
+  /* 2026-09-20 修「导入列表和模型读的库不是同一个目录」：出厂角色库随安装包进了
+   * <runtime>\qq-bridge\characters 之后，"第一个非空根胜出"就永远被出厂库抢走：用户往自己那份
+   * ~/Downloads/characters/characters 里新加的角色不会出现在导入列表里，而桥侧四个角色工具读的
    * 恰恰是 social.charactersDir（缺省 = 用户那份）—— 两边各看一套库，越用越乱。
    * 现在把桥配置里配了的 social.charactersDir 提到最前（配了就完全以它为准，和模型看到的一致）；
    * 没配就维持原来的顺序不变。 */
@@ -4426,7 +5867,7 @@ function buildCharacterPersona(dir, slug, includeDims = true) {
     if (m?.name) parts.push(`# ${m.name}${m.game ? ' · ' + m.game : ''}\n`);
   }
   if (includeDims) {
-    /* 【2026-09-14】维度表补上 SKILL.md：主人的角色库里每个角色都带一份 SKILL.md
+    /* 2026-09-14：维度表补上 SKILL.md。用户的角色库里每个角色都带一份 SKILL.md
      * （角色自己的"技能/行为说明"），以前它既不进 persona 也不算主提示词 → 被整包忽略。
      * 顺序：SKILL 最前（它是这个角色"怎么演"的操作说明），再是各设定维度。
      * 另外补 speech.md 之外的常见变体（voice.md）与 conflicts.md。 */
@@ -4442,9 +5883,9 @@ app.get('/api/bridge/characters', (req, res) => {
     const dir = String(req.query.dir || '').trim();
     if (dir) return res.json(scanCharacters(dir));
     // 自动探测默认根。
-    /* 【2026-09-14】"第一个非空根胜出"会被出厂 _template 抢走：桥目录下就有 characters/_template，
+    /* 2026-09-14："第一个非空根胜出"会被出厂 _template 抢走：桥目录下就有 characters/_template，
      * 它带 manifest 且算"有角色"，于是永远轮不到用户自己的库（Downloads\characters\characters）。
-     * 现在的规则：**只要某个根里有非 _template 的角色就用它**；全都是模板时才回落到第一个非空根
+     * 现在的规则：只要某个根里有非 _template 的角色就用它；全都是模板时才回落到第一个非空根
      * （保持"全新安装能看见模板"的体验不变）。 */
     let templateFallback = null;
     for (const r of findCharacterRoots()) {
@@ -4474,9 +5915,9 @@ app.post('/api/bridge/characters/import', (req, res) => {
         const bk = join(dirname(personaPath), 'persona.backup-' + slug + '.md');
         writeFileSync(bk, prev, 'utf-8');
       } catch {}
-      /* 【2026-09-20】顺手记下"现在演的是谁"：social.meme.activePersona = slug。
-       * 桥用它决定哪份**角色专属表情包**排在最前（角色包优先、全局包回落）。以前这个键没人写，
-       * 主人绑了多个角色的包以后就分不清该用哪一份 —— 只能手写配置。写失败不影响导入本身。 */
+      /* 2026-09-20：顺手记下"现在演的是谁"：social.meme.activePersona = slug。
+       * 桥用它决定哪份角色专属表情包排在最前（角色包优先、全局包回落）。以前这个键没人写，
+       * 用户绑了多个角色的包以后就分不清该用哪一份 —— 只能手写配置。写失败不影响导入本身。 */
       try {
         const p = patchBridgeConfigFile((cfg) => {
           const social = (cfg.social && typeof cfg.social === 'object') ? cfg.social : (cfg.social = {});
@@ -4567,8 +6008,8 @@ app.post('/api/bridge/stickers/upload', async (req, res) => {
 /* ================= 内置表情包（meme pack）管理 =================
  * 一份 pack = 一个目录：manifest.json + index.db(SQLite) + memes/<tag>/<文件名>.<ext>
  * 三个存放位置都要认（磁盘约定已冻结，别改）：
- *   1) <runtimeRoot>/meme/<packId>/                       出厂包（whale-fanart-001 就在这，只读为主、**不可删**）
- *   2) <runtimeRoot>/meme-packs/<packId>/                 **上传的包落这里**
+ *   1) <runtimeRoot>/meme/<packId>/                       随包分发的包（只读为主、不可删；产品本身不再附带任何包）
+ *   2) <runtimeRoot>/meme-packs/<packId>/                 上传的包落这里
  *   3) <charactersDir>/<角色slug>/meme-packs/<packId>/    角色专属包
  * 接口：
  *   GET  /api/bridge/meme-packs         列出三处的包（坏包也列出来：count=null + broken 写清原因）
@@ -4601,7 +6042,7 @@ function loadSqlite() {
   return sqliteModulePromise;
 }
 
-/** 真读 index.db 数图 + 取 tag。读不到就 count=null + broken 写清原因 —— **不要**因此不返回这个包：
+/** 真读 index.db 数图 + 取 tag。读不到就 count=null + broken 写清原因 —— 不要因此不返回这个包：
  *  用户需要看到"坏包"（比如手工塞进去、复制到一半断电的目录），好去修或删。 */
 async function readMemePackIndex(packDir) {
   const dbPath = join(packDir, 'index.db');
@@ -4655,7 +6096,7 @@ function listMemePackDirs(root) {
 /** 角色专属包的搜索根：角色库那套根 + 每个角色下的 meme-packs/（与「角色库导入」同一份目录语义） */
 function memeCharacterRoots() { return [...new Set(findCharacterRoots())]; }
 
-/** 上传到角色包时用哪个根：优先**已经存在**的角色库根（桥目录下的 characters），都没有就现场建第一个 */
+/** 上传到角色包时用哪个根：优先已经存在的角色库根（桥目录下的 characters），都没有就现场建第一个 */
 function memeCharacterRootForWrite() {
   const roots = memeCharacterRoots();
   const hit = roots.find((r) => existsSync(r));
@@ -4664,7 +6105,7 @@ function memeCharacterRootForWrite() {
   return root;
 }
 
-/** 扫三处把包目录找齐（**不读 db**，GET 列表 / 删除 / 绑定共用同一份口径） */
+/** 扫三处把包目录找齐（不读 db，GET 列表 / 删除 / 绑定共用同一份口径） */
 function scanMemePackDirs() {
   const factoryRoot = memeFactoryRoot();
   const uploadRoot = memeUploadRoot();
@@ -4733,7 +6174,7 @@ function findMemeRelayoutScript() {
   return cands.find((p) => existsSync(p)) || '';
 }
 
-/** 用 node 跑规整脚本（**必须 node，别用 PowerShell**）：按 tag 归位 + 重建 index.db + 写 manifest + 对账 */
+/** 用 node 跑规整脚本（必须 node，别用 PowerShell）：按 tag 归位 + 重建 index.db + 写 manifest + 对账 */
 function runMemeRelayout(packDir) {
   const script = findMemeRelayoutScript();
   if (!script) {
@@ -4751,10 +6192,10 @@ function runMemeRelayout(packDir) {
 
 /** 上传成功后要不要顺手重启本机桥？
  *  【为什么不无条件照抄 stickers/upload 的两行】stopInstance('bridge-local') 最后一步是
- *  killByCmdline('bridge.js') —— 它按**命令行关键字**杀所有 node/qbm-node 进程，而 startDispatcher
+ *  killByCmdline('bridge.js') —— 它按命令行关键字杀所有 node/qbm-node 进程，而 startDispatcher
  *  又会用 findBridgeDir() 重新拉起一座桥。要是发起上传的这个管理端进程根本不认得本机桥（典型场景：
- *  管理端在仓库/另一个目录里跑，而线上桥在 runtime 里跑），这两步就会**杀掉一座不归自己管的桥、
- *  再拉起一座目录不对的桥**。所以只有本管理器确实在管这座桥（有运行记录，或状态机认为它 running）才重启，
+ *  管理端在仓库/另一个目录里跑，而线上桥在 runtime 里跑），这两步就会杀掉一座不归自己管的桥、
+ *  再拉起一座目录不对的桥。所以只有本管理器确实在管这座桥（有运行记录，或状态机认为它 running）才重启，
  *  否则如实告诉用户"没重启，新包会在桥下次启动时生效"。 */
 function localBridgeRestartCheck() {
   if (runtimes.has('bridge-local')) return { ok: true, why: '' };
@@ -4762,7 +6203,7 @@ function localBridgeRestartCheck() {
   return { ok: false, why: '本管理端没看到本机桥在运行，跳过了重启（新包会在桥下次启动时生效；想立刻生效就到首页点一次「重启桥」）' };
 }
 
-/** 上传路径归一化：一律 '/'，去掉 './'；**返回空串 = 不接受**（绝对路径 / 含 '..' 的 zip-slip） */
+/** 上传路径归一化：一律 '/'，去掉 './'；返回空串 = 不接受（绝对路径 / 含 '..' 的 zip-slip） */
 function normMemeRelPath(p) {
   const s = String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
   if (!s) return '';
@@ -4784,7 +6225,7 @@ function decodeZipName(bytes, isUtf8) {
 /** 最小 ZIP 读取器：手工解析中央目录，数据用 node:zlib 的 inflateRawSync 解压。
  *  只支持 stored(0) / deflate(8)（Windows 资源管理器、7-Zip、macOS 归档默认就是这两种）；
  *  加密项、zip64、其它压缩方式一律明确报错，不做半吊子解析。
- *  **zip-slip 防护**：条目名含 '..' 或绝对路径（'/x'、'C:\x'）直接抛错 —— 整包拒绝，一个文件都不落盘。 */
+ *  zip-slip 防护：条目名含 '..' 或绝对路径（'/x'、'C:\x'）直接抛错 —— 整包拒绝，一个文件都不落盘。 */
 function readMemeZipEntries(buf) {
   let eocd = -1;
   const floor = Math.max(0, buf.length - 66000);                 // 中央目录结尾可能带注释，从尾部往前找
@@ -4810,7 +6251,7 @@ function readMemeZipEntries(buf) {
     const rel = normMemeRelPath(name);
     if (!rel) throw new Error(`zip 里有不安全的路径（zip-slip），已整包拒绝：${name}`);
     if (localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== 0x04034b50) throw new Error('zip 条目损坏：' + name);
-    // 数据起点要用**本地文件头**自己的 name/extra 长度（可能与中央目录里的不一致）
+    // 数据起点要用本地文件头自己的 name/extra 长度（可能与中央目录里的不一致）
     const start = localOff + 30 + buf.readUInt16LE(localOff + 26) + buf.readUInt16LE(localOff + 28);
     const raw = buf.subarray(start, start + compSize);
     if (raw.length !== compSize) throw new Error('zip 条目数据不完整：' + name);
@@ -4964,7 +6405,7 @@ app.post('/api/bridge/meme-packs/upload', async (req, res) => {
       return res.status(500).json({ success: false, keptTemp: true, tempDir, packId, message: '就位失败（可能是桥正占用文件）：' + e.message, report: baseReport });
     }
 
-    /* ---------- 6) 回读新包（count/tags 一律以**真读 index.db** 为准，不信中间变量） ---------- */
+    /* ---------- 6) 回读新包（count/tags 一律以真读 index.db 为准，不信中间变量） ---------- */
     const idx = await readMemePackIndex(targetDir);
     const count = idx.count ?? 0;
     const report = {
@@ -5029,7 +6470,7 @@ app.post('/api/bridge/meme-packs/delete', async (req, res) => {
 
 /** POST /api/bridge/meme-packs/bind —— 角色 ↔ 包绑定，写进桥 config.json 的 social.meme.personaPacks
  *  body: { character, packs: string[] }（空数组 = 解绑）
- *  【只在本机生效】绑定要落到**桥自己的 config.json**（与桥同源的那份）；这台机器上找不到它，
+ *  【只在本机生效】绑定要落到桥自己的 config.json（与桥同源的那份）；这台机器上找不到它，
  *  就明确说"仅本机可用"，绝不假装成功。 */
 app.post('/api/bridge/meme-packs/bind', (req, res) => {
   try {
@@ -5135,10 +6576,10 @@ function sshExecCapture(conn, command, timeoutMs = 8000) {
 /**
  * 重启远端桥（代码同步 / 数据合并 / 克隆 三条路都用这一个）。
  *
- * 【2026-09-19 真机事故：这一步报成功、其实什么都没重启】
+ * 2026-09-19 真机事故：这一步报成功、其实什么都没重启：
  * 原来各处都是内联一条 `cd /root/qq-bridge && nohup bash start-bridge.sh …& sleep 3; pgrep -f 'node src/bridge[.]js' && echo bridge-up || echo bridge-down`：
  *   ① `start-bridge.sh` 不会替你杀旧进程 → 旧桥继续占着 3100，新实例报 `listen EADDRINUSE` 自己退出；
- *   ② 而判据只看"有没有桥进程"—— **旧桥正好命中**，于是永远回 "bridge-up"、界面显示"重启成功"，
+ *   ② 而判据只看"有没有桥进程"—— 旧桥正好命中，于是永远回 "bridge-up"、界面显示"重启成功"，
  *      新同步上去的代码一行都没生效（实测 2026-09-19 的两次同步都是这样，服务器 pid 一直没变）。
  * 现在真正的逻辑放在随代码包同步过去的 `qq-bridge/tools/restart-bridge.sh` 里（停旧桥 → 等它优雅退出、
  * 超时才 -9 → 起新桥 → 回报 `pid / old / napcat-conn / console-listen`）：命令短、不会被 ssh 那几层
@@ -5195,8 +6636,8 @@ async function getRemoteBridgeToken(server, conn) {
 }
 
 /** 解析“活动 bridge console”：远端（已连接且 Bridge 隧道在）优先，否则本机 */
-/** 只解析**远端** bridge console（没连服务器 / 没隧道就返回 null）。
- *  拆出来是为了「用量统计」：那个接口要**两边都取**（本机 + 服务端），不能再跟着"活动目标"走。 */
+/** 只解析远端 bridge console（没连服务器 / 没隧道就返回 null）。
+ *  拆出来是为了「用量统计」：那个接口要两边都取（本机 + 服务端），不能再跟着"活动目标"走。 */
 function resolveRemoteBridgeTarget() {
   const cfg = loadConfig();
   const connected = cfg.activeServerId ? cfg.servers.find((s) => s.id === cfg.activeServerId) || null : null;
@@ -5219,17 +6660,17 @@ function resolveBridgeTarget() {
 /* ================================================================== */
 /* 服务端现场状态（复用 sshConnections 里那条连接，绝不新开 SSH 连接）    */
 /* ================================================================== */
-/* 【2026-09-14 主人要求】连上服务器后要能在界面上看到**服务端**的真实运行状态：
+/* 2026-09-14：连上服务器后要能在界面上看到服务端的真实运行状态：
  *   DSH  = systemctl is-active dsh-web
  *   NapCat = systemctl is-active napcat（或回退 docker ps）→ 归一成 Up/Exited + 3000/3001/6099 端口
  *   桥   = pgrep -f 'node src/bridge[.]js' + 3100
  * 实现要点：
- *   · 一条组合命令 + 分段标记（@@XXX），只走**一次** exec（ssh2 的 exec 只是新开一条 channel，
+ *   · 一条组合命令 + 分段标记（@@XXX），只走一次 exec（ssh2 的 exec 只是新开一条 channel，
  *     用的还是 sshConnections 里那一条已建立的连接）；
  *   · 每段都 `|| true`：任何子命令失败都不让整条命令非 0 退出 —— 否则 sshExecCapture 只会回
  *     { ok:false, error }，什么都拿不到；
  *   · 结果缓存 10 秒：/api/state 是 4 秒轮询，不能每次都去戳服务器；前端「刷新」用 force=1 绕过。
- *   · **令牌只放进返回值给前端拼 URL，绝不写日志**（私钥/密码/token 都不进日志，这是硬规矩）。*/
+ *   · 令牌只放进返回值给前端拼 URL，绝不写日志（私钥/密码/token 都不进日志，这是硬规矩）。*/
 const remoteStatusCache = new Map();      // serverId -> { at, ttl, data }
 const remoteBridgeDirCache = new Map();   // serverId -> { at, dir }
 const REMOTE_STATUS_TTL_MS = 10000;
@@ -5238,7 +6679,7 @@ const REMOTE_STATUS_TTL_MS = 10000;
 function shq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 /** 只允许我们拼出来的安全路径（远端桥目录 + 固定文件名），别的一律拒绝 */
 /* 远端路径白名单：只允许绝对路径 + 常见安全字符。
- * 【2026-09-19 修】原来漏了 `@` —— 而 npm 作用域包（@deepseek-ai/dsh-llm-deepseek/…）**必带** `@`，
+ * 2026-09-19 修：原来漏了 `@` —— 而 npm 作用域包（@deepseek-ai/dsh-llm-deepseek/…）必带 `@`，
  * 于是"读服务端 DSH 内置模型目录"这条路径被静默拒绝（safeRemotePath 返回 false → ok:false），
  * 表现就是"切到 DeepSeek 官方时读不到可用模型列表"，只能退到出厂兜底表。 */
 function safeRemotePath(p) { return /^\/[A-Za-z0-9._@\/-]+$/.test(String(p || '')); }
@@ -5257,18 +6698,18 @@ async function remoteServiceUrls(server, status) {
   const pHttp = tunnelLocalPort(server.id, 'NapCat HTTP', 13001);
   const pBr = tunnelLocalPort(server.id, 'Bridge 控制台', 13100);
   const dshTok = String(status?.dsh?.token || '');
-  /* 【2026-09-20 修「点开服务端 NapCat 报 Unauthorized」】token 只取"上一次 SSH 探测结果"是不可靠的：
+  /* 2026-09-20 修「点开服务端 NapCat 报 Unauthorized」：token 只取"上一次 SSH 探测结果"是不可靠的：
    * 探测没跑成 / 这台机器的 webui.json 不在探测的固定路径里 → 空 → URL 变裸链接 → 页面拿不到 Credential。
-   * 现在：探测结果 → 最近一次验证可用的 token（缓存）→ 出厂值，**永远带一个 token**，
+   * 现在：探测结果 → 最近一次验证可用的 token（缓存）→ 出厂值，永远带一个 token，
    * 并在后台验一次真伪（见 napcatWebuiTokenFor）。 */
   const napTok = await verifyNapcatWebuiToken(server?.id ?? 'remote', pNap, [(() => {
     // 探测到就顺手记进缓存：下次状态没取到时（隧道刚重建/探测失败）URL 依然带着对的 token
     if (status?.napcat?.webuiToken) rememberNapcatWebuiToken(server?.id ?? 'remote', pNap, status.napcat.webuiToken);
     return status?.napcat?.webuiToken;
   })()], { factoryFallback: false });
-  /* 【2026-09-21】这条链接的 token **必须**来自目标端（服务端 /root/napcat/config/webui.json，走上面那条
+  /* 2026-09-21：这条链接的 token 必须来自目标端（服务端 /root/napcat/config/webui.json，走上面那条
    * 已建立的 SSH 连接读回，见 buildRemoteStatusCommand 的 @@NAPCATWEBUI 段），并且要真的能登录进去才算数。
-   * 以前验证失败时会把出厂值 truefriend 塞进 URL —— 那不是从目标端读来的，主人看到的正是
+   * 以前验证失败时会把出厂值 truefriend 塞进 URL —— 那不是从目标端读来的，现场看到的正是
    * 「链接带着 token 却 Unauthorized」。现在 false 表示"没验通过"，如实交给界面去说，
    * 不再让「点开即用」这句话撒谎（见 resolveServices 里 srv-napcat-webui 的 desc）。 */
   const napTokVerified = (() => {
@@ -5288,7 +6729,7 @@ async function remoteServiceUrls(server, status) {
     bridgeToken: brTok,
     // 给界面判断"这条 NapCat 链接到底带没带 token"（带了才敢说"点开就用"）
     napcatToken: napTok,
-    // 【2026-09-21】带了 token ≠ 能用：只有真的用它对目标端登录成功过才算 verified（见上面说明）
+    // 2026-09-21：带了 token ≠ 能用：只有真的用它对目标端登录成功过才算 verified（见上面说明）
     napcatTokenVerified: napTokVerified,
   };
 }
@@ -5303,7 +6744,7 @@ function buildRemoteStatusCommand(server) {
     'systemctl is-active dsh-web 2>/dev/null || echo unknown',
     'systemctl is-enabled dsh-web 2>/dev/null || echo unknown',
     "echo '@@DOCKER'",
-    // 【2026-09-17】NapCat 已是原生 systemd 服务：段名保持 @@DOCKER 不动 parser，内容是「systemd 优先」
+    // 2026-09-17：NapCat 已是原生 systemd 服务：段名保持 @@DOCKER 不动 parser，内容是「systemd 优先」
     NC_STATE_LINE,
     "echo '@@PORTS'",
     portLoop,
@@ -5390,7 +6831,7 @@ function parseRemoteStatus(out, server) {
 }
 
 /**
- * 取某台已连接服务器的现场状态。**不新建 SSH 连接**：一律用 sshConnections 里那条。
+ * 取某台已连接服务器的现场状态。不新建 SSH 连接：一律用 sshConnections 里那条。
  * 10 秒内重复请求复用缓存（失败也短缓存 3 秒，避免前端轮询时连着戳服务器）。
  */
 async function getRemoteServerStatus(server, connArg, opts = {}) {
@@ -5410,21 +6851,21 @@ async function getRemoteServerStatus(server, connArg, opts = {}) {
   try { parsed.bridge.consoleToken = (await getRemoteBridgeToken(server, conn)) || ''; } catch { /* 无 token 也允许直连 */ }
   const data = { ok: true, connected: true, at: Date.now(), server: { id: server.id, name: server.name, host: server.host }, ...parsed };
   remoteStatusCache.set(server.id, { at: Date.now(), ttl: REMOTE_STATUS_TTL_MS, data });
-  /* 【2026-09-14 主人反馈"点开桥设置界面会先加载一下才弹出"】顺手把这台服务器的桥配置**预热**到缓存里：
+  /* 2026-09-14 反馈"点开桥设置界面会先加载一下才弹出"：顺手把这台服务器的桥配置预热到缓存里：
    * 状态本来就在被轮询，多花一次 SSH 往返、换来"点开配置页立刻出现"（GET 直接命中缓存）。 */
   void warmRemoteBridgeConfig(server.id).catch(() => {});
   return data;
 }
 
-/* 服务端桥配置的**预加载缓存**：serverId -> { at, data }（TTL 45s）。
+/* 服务端桥配置的预加载缓存：serverId -> { at, data }（TTL 45s）。
  * 读配置要 4~5 次 SSH 往返（目录探测 + config.json + persona + speech + settings.yaml），
  * 冷启动点开会明显"先转一会儿"。连上服务器后由状态轮询/连接回调预热，用户点开时基本是命中缓存。 */
 const remoteBridgeCfgCache = new Map();
 const remoteBridgeCfgInflight = new Map();   // serverId -> Promise（避免并发重复取；GET 可等它）
 const REMOTE_BRIDGE_CFG_TTL_MS = 45000;
-/* 【2026-09-19 修"点保存、切出去回来又变回去，第二次才生效"】
- * 缓存原来只有 delete、没有**代次**校验：一次"写之前就发出"的预热会在写入**之后**才完成，
- * 把**写之前**的旧内容塞回缓存，紧接着保存后的那次重载就读到旧值（最多 45 秒内都这样）。
+/* 2026-09-19 修"点保存、切出去回来又变回去，第二次才生效"：
+ * 缓存原来只有 delete、没有代次校验：一次"写之前就发出"的预热会在写入之后才完成，
+ * 把写之前的旧内容塞回缓存，紧接着保存后的那次重载就读到旧值（最多 45 秒内都这样）。
  * 现在给每台服务器一个写代次：预热开始时记下代次，落地时对不上就直接丢掉，不再回填。 */
 const remoteBridgeCfgEpoch = new Map();     // serverId -> number（每次写入 +1）
 const cfgEpochOf = (id) => Number(remoteBridgeCfgEpoch.get(id)) || 0;
@@ -5502,7 +6943,7 @@ async function remoteReadText(conn, path, timeoutMs = 12000) {
 
 /**
  * 写远端文件：临时文件 → 校验非空 → 备份原文件（cp -a，带时间戳）→ mv 到位 → 读回比对。
- * 为什么要这么绕（主人 2026-09-14 要求）：
+ * 为什么要这么绕（2026-09-14 约定）：
  *   · 直接覆盖写：一旦传输中断就是半个文件，桥按 mtime 热加载会读到坏 JSON，等于把线上配置写废；
  *   · 先写 /tmp 再 mv：同一文件系统内 mv 是原子替换，读到的永远是完整的旧版或完整的新版；
  *   · 写前备份 + 写后回读比对关键字段：能明确回答"到底写进去了没有"，而不是回一句"已保存"。
@@ -5531,7 +6972,7 @@ async function remoteWriteTextVerified(conn, path, content, { backup = true, tim
 
 /**
  * 服务端 qq-bridge 配置读写（读 config.json / persona.md / speech-rules.md）。
- * 桥的 config.json 是**按 mtime 热加载**的：保存后下一条消息即生效，不用重启桥。
+ * 桥的 config.json 是按 mtime 热加载的：保存后下一条消息即生效，不用重启桥。
  */
 async function readRemoteBridgeBundle(server, conn) {
   const dir = await getRemoteBridgeDir(server, conn);
@@ -5565,7 +7006,7 @@ function parseDshEffectiveText(text) {
 }
 
 /** 服务端 DSH 的模型目录：读服务器上 DSH_HOME 的 settings.yaml（只解析 providers/models 那一段），
- *  再加上服务端 DSH 包里内置的 deepseek 目录 —— **2026-09-19 修**：原来只读 settings.yaml，
+ *  再加上服务端 DSH 包里内置的 deepseek 目录 —— 2026-09-19 修：原来只读 settings.yaml，
  *  而 deepseek-official 的模型是内置在包里的、settings.yaml 里一个字都没有，于是"切到 DeepSeek 官方就没模型列表"。 */
 async function readRemoteDshModels(server, conn) {
   const user = String(server?.username || 'root');
@@ -5609,7 +7050,7 @@ async function readRemoteDshModels(server, conn) {
 
 /**
  * 服务端「接口密钥」状态：读服务端 DSH 的 settings.yaml 找 apiKeyEnv，
- * 再看服务端凭据文件里那条有没有值（**只回布尔 + 长度，绝不回值**）。
+ * 再看服务端凭据文件里那条有没有值（只回布尔 + 长度，绝不回值）。
  * @param {{path?:string, text?:string}} dshRead readRemoteDshModels 的结果（复用，省一次 SSH）
  */
 async function remoteCredentialStatus(server, conn, dshRead, providerId) {
@@ -5665,14 +7106,14 @@ function remoteBridgeChannel(serverId) {
   return { server, conn };
 }
 
-/** GET /api/ssh/bridge-config：读**服务端** /root/qq-bridge/config.json（+ 人设/发言规则） */
+/** GET /api/ssh/bridge-config：读服务端 /root/qq-bridge/config.json（+ 人设/发言规则） */
 app.get('/api/ssh/bridge-config', async (req, res) => {
   const ch = remoteBridgeChannel(req.query.serverId);
   if (ch.error) return res.json({ ok: false, target: 'remote', connected: false, message: ch.error, server: ch.server ? { id: ch.server.id, name: ch.server.name, host: ch.server.host } : null });
-  // 【2026-09-14】优先命中预加载缓存（连上服务器后状态轮询会把它预热）→ 点开配置页不再"先转一会儿"。
+  // 2026-09-14：优先命中预加载缓存（连上服务器后状态轮询会把它预热）→ 点开配置页不再"先转一会儿"。
   const hit = remoteBridgeCfgCache.get(ch.server.id);
   if (hit && req.query.refresh !== '1' && Date.now() - hit.at < REMOTE_BRIDGE_CFG_TTL_MS) return res.json({ ...hit.data, cached: true, cachedAt: hit.at });
-  /* refresh=1 = "我就是要刚写进去的那份"，**不能**去复用正在飞的预热 ——
+  /* refresh=1 = "我就是要刚写进去的那份"，不能去复用正在飞的预热 ——
    * 那次预热可能是写入之前发出的，等的就是旧内容（这正是"第二次保存才生效"的另一半）。
    * 其它情况仍可复用在途预热，省一次 SSH 往返。 */
   const inflight = req.query.refresh === '1' ? null : remoteBridgeCfgInflight.get(ch.server.id);
@@ -5685,7 +7126,7 @@ app.get('/api/ssh/bridge-config', async (req, res) => {
   res.json({ ...data, cached: false });
 });
 
-/** POST /api/ssh/bridge-config：写**服务端** config.json（备份 + 原子替换 + 回读比对） */
+/** POST /api/ssh/bridge-config：写服务端 config.json（备份 + 原子替换 + 回读比对） */
 app.post('/api/ssh/bridge-config', async (req, res) => {
   const body = req.body ?? {};
   const ch = remoteBridgeChannel(body.serverId);
@@ -5696,7 +7137,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
   if (!dir) return res.json({ ok: false, success: false, target: 'remote', server: brief, message: '服务器上没找到 qq-bridge 目录' });
   const out = { ok: true, success: true, target: 'remote', server: brief, dir, steps: [] };
 
-  /* 「接口密钥」先摘出来 —— 它**不能**进 config.json（明文、会随同步/打包外流），
+  /* 「接口密钥」先摘出来 —— 它不能进 config.json（明文、会随同步/打包外流），
    * 只写服务端隔离 DSH 的 /root/.dsh/.credentials.yaml（600）。摘除必须在 ① 深合并之前。 */
   const incomingKey = typeof body?.config?.dsh?.apiKey === 'string' ? body.config.dsh.apiKey.trim() : '';
   const clearKey = body?.config?.dsh?.clearApiKey === true;
@@ -5715,7 +7156,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
     if (!w.ok) return res.json({ ...out, ok: false, success: false, message: '写入服务端 config.json 失败：' + (w.error || ''), steps: out.steps });
     let back = null;
     try { back = JSON.parse(w.readback); } catch { /* 回读解析失败 → 下面按比对不通过处理 */ }
-    // 关键字段比对：以**提交的合并结果**为准，逐顶层键比对序列化结果
+    // 关键字段比对：以提交的合并结果为准，逐顶层键比对序列化结果
     const mismatched = [];
     if (!back) mismatched.push('（回读内容不是合法 JSON）');
     else for (const k of Object.keys(merged)) {
@@ -5732,10 +7173,10 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
     else out.message = `已写入服务端 config.json（${dir}/config.json）· 回读比对一致 · 桥按 mtime 热加载，下一条消息即生效`;
   }
 
-  /* ①b 「接口密钥」→ 服务端隔离 DSH 的凭据文件（2026-09-19 主人要求"接上它"）
-   *   服务端模式下机器人在服务器上跑，密钥必须写到**服务器**的隔离 home 才生效：
+  /* ①b 「接口密钥」→ 服务端隔离 DSH 的凭据文件（2026-09-19：需求"接上它"）
+   *   服务端模式下机器人在服务器上跑，密钥必须写到服务器的隔离 home 才生效：
    *   读服务端 settings.yaml 找该服务商声明的 apiKeyEnv → 逐行改 /root/.dsh/.credentials.yaml → 重启 dsh-web。
-   *   注意：密钥**不写进 config.json**（下面 ① 里那份是明文、还会被同步/打包），只留凭据文件这一份（600）。 */
+   *   注意：密钥不写进 config.json（下面 ① 里那份是明文、还会被同步/打包），只留凭据文件这一份（600）。 */
   {
     if (incomingKey || clearKey) {
       const prov = String(body?.config?.dsh?.provider || out.config?.dsh?.provider || '').trim() || DEFAULT_PROVIDER;   // M11：统一兜底（原来是小米）
@@ -5794,7 +7235,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
     if (field === 'speechRules' && same) { out.speechRules = v; out.speechHasFile = true; }
   }
 
-  // ③ 「恢复默认发言规则」：服务端模式下写的是**服务端**的 speech-rules.md（内置模板与本机那份逐字相同）
+  // ③ 「恢复默认发言规则」：服务端模式下写的是服务端的 speech-rules.md（内置模板与本机那份逐字相同）
   if (body.speechReset === true) {
     const w = await remoteWriteTextVerified(conn, `${dir}/speech-rules.md`, DEFAULT_SPEECH_RULES);
     const same = w.ok && w.readback === DEFAULT_SPEECH_RULES;
@@ -5804,7 +7245,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
   }
 
   if (!out.message) out.message = '没有需要写入的内容（请求里既没有 config 也没有人设/发言规则）';
-  /* 写过了 → 预加载缓存作废，并且**推进代次**：任何"写入之前就发出、写入之后才返回"的预热
+  /* 写过了 → 预加载缓存作废，并且推进代次：任何"写入之前就发出、写入之后才返回"的预热
    * 都不能再把旧内容回填进缓存（见 warmRemoteBridgeConfig 里的代次校验）。
    * 少了这一步，保存后的那次重载会读到旧配置 —— 就是"切出去回来值又变回去、第二次才生效"。 */
   remoteBridgeCfgEpoch.set(server.id, cfgEpochOf(server.id) + 1);
@@ -5817,7 +7258,7 @@ app.post('/api/ssh/bridge-config', async (req, res) => {
   res.json(out);
 });
 
-/** GET /api/ssh/status：服务端三个组件的**真实**运行状态（复用已有 SSH 连接，10 秒缓存） */
+/** GET /api/ssh/status：服务端三个组件的真实运行状态（复用已有 SSH 连接，10 秒缓存） */
 app.get('/api/ssh/status', async (req, res) => {
   const cfg = loadConfig();
   const id = req.query.serverId || cfg.activeServerId;
@@ -5839,12 +7280,12 @@ app.get('/api/ssh/status', async (req, res) => {
 
 
 /* ── 桥控制台统一透传 ────────────────────────────────────────────────────────
- * 【2026-09-19 把两件事分家 · 主人反馈】"桥没在运行"和"桥在跑但版本里没有这条接口"
- * 是**完全不同的两件事**，以前两条失败路径都被写成"不可达 / 版本过旧"，于是
+ * 2026-09-19 把两件事分家（现场反馈）："桥没在运行"和"桥在跑但版本里没有这条接口"
+ * 是完全不同的两件事，以前两条失败路径都被写成"不可达 / 版本过旧"，于是
  * 桥只是没启动的人会被指去升级一个其实不需要升级的桥。现在的口径：
  *   · 对端根本没应答（fetch 直接抛：ECONNREFUSED / fetch failed / 隧道没建）→ code='bridge-offline'
  *     message 明确说"桥没在运行"并给出下一步（启动桥 / 连隧道）；
- *   · 桥应答了，但没有这条路由（404）或回的不是 JSON → code='bridge-stale'（**只有这种才是版本旧**）。
+ *   · 桥应答了，但没有这条路由（404）或回的不是 JSON → code='bridge-stale'（只有这种才是版本旧）。
  * 两条都带 detail 原始错误用于排查；message 只讲"现在不能做什么 + 下一步做什么"，长篇说明留给页面。
  * 另外：整段都包在 try 里 —— getRemoteBridgeToken 抛错时以前会变成未捕获的 rejection，
  * Express 4 不会自动兜住，那条请求会一直挂着不返回（前端表现为"转圈不动"）。 */
@@ -5855,7 +7296,7 @@ function bridgeNotListening(detail) {
   return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket hang up|fetch failed|other side closed/i.test(String(detail || ''));
 }
 
-/** 取桥控制台响应（**不写 res**）：成功 { json, target }；失败 { fail, target }。永不抛。
+/** 取桥控制台响应（不写 res）：成功 { json, target }；失败 { fail, target }。永不抛。
  *  返回结构而不是直接 res.json，是为了让个别路由（学习配置）能在"本机桥确实没起来"时改走磁盘兜底。 */
 async function callBridgeConsole(target, forcedTarget = null) {
   let t = null;
@@ -5885,7 +7326,7 @@ async function callBridgeConsole(target, forcedTarget = null) {
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch { /* 非 JSON */ }
     if (!json || resp.status === 404) {
-      // 桥回答了 → 它**在跑**。这里才轮到"版本旧"的说法。
+      // 桥回答了 → 它在跑。这里才轮到"版本旧"的说法。
       return {
         target: t,
         fail: {
@@ -5902,7 +7343,7 @@ async function callBridgeConsole(target, forcedTarget = null) {
     const detail = `${e?.message ?? e}${e?.cause?.code ? ` (${e.cause.code})` : ''}`;
     console.error(`[bridge proxy] ${target.method || 'GET'} ${target.path} 失败:`, detail);
     if (bridgeNotListening(detail)) {
-      /* 【2026-09-19 主人要求】只有"本机和服务器都连不上"时，才该把话说成"桥没在运行"。
+      /* 2026-09-19：只有"本机和服务器都连不上"时，才该把话说成"桥没在运行"。
        * 现实里最容易出现的一种是：服务器连上了、但 Bridge 隧道（13100）没建起来 —— 这时
        * resolveBridgeTarget() 会退回本机，于是报"本机桥没在运行"，看着像"我明明连着服务器"。
        * 所以在回落本机时补一句"服务器已连接但桥隧道不在"，指明该去哪修。 */
@@ -5947,7 +7388,7 @@ async function proxyToBridgeConsole(_req, res, target, forcedTarget = null) {
 /**
  * 语音相关路由的目标（本机 / 服务端）。
  *
- * 【2026-09-19 修"语音概率改了不生效"的另一半】语音配置存在**桥那边的** state/voice-config.json。
+ * 2026-09-19 修"语音概率改了不生效"的另一半：语音配置存在桥那边的 state/voice-config.json。
  * 这些路由原来一律走 `proxyToBridgeConsole`（内部 resolveBridgeTarget()，"能连服务端就连服务端"），
  * 表面上没错，但界面从来没告诉用户它写的是哪一侧，也没有显式的本机/服务端切换 ——
  * 机器人在服务器上时，用户以为改的是机器人的语音概率，实际（连不上服务器时）写在了本机。
@@ -5978,16 +7419,16 @@ function voiceScopeOf(req) {
 }
 
 /* ── 学习配置（桥侧 state/learning-config.json）──────────────────────────────
- * 【2026-09-19 主人要求：桥停了配置也要能看能改】
- * 这份配置的**权威副本在桥那边**（qq-bridge/state/learning-config.json），正常路径永远先走桥控制台。
- * 但"桥没在监听"（对端 ECONNREFUSED，不是超时、也不是令牌错）时，管理端直接读写**那个文件本身**：
+ * 2026-09-19：需求"桥停了配置也要能看能改"。
+ * 这份配置的权威副本在桥那边（qq-bridge/state/learning-config.json），正常路径永远先走桥控制台。
+ * 但"桥没在监听"（对端 ECONNREFUSED，不是超时、也不是令牌错）时，管理端直接读写那个文件本身：
  *   · 本机桥 → 直接读写 <bridgeDir>/state/learning-config.json；
- *   · 远端桥 → 经**已有的 SSH 连接**读写服务端同名文件（复用 remoteReadText / remoteWriteTextVerified，
+ *   · 远端桥 → 经已有的 SSH 连接读写服务端同名文件（复用 remoteReadText / remoteWriteTextVerified，
  *     与 /api/ssh/bridge-config 写 config.json 是同一套"临时文件 → 备份 → 原子 mv → 回读比对"）。
  * 为什么可以这么写：
  *   · 桥侧每个模块都是"现读现用"这个文件（persona-learn.js / slang.js / portrait-learn.js 每次
  *     fs.readFileSync，写回是先读后合并），所以文件改了，桥下一次启动或下一轮学习就会用到；
- *   · 桥没在跑 → 没有第二个写者，不存在互相覆盖（超时/令牌错这两种"桥其实在跑"的情况**不会**兜底，
+ *   · 桥没在跑 → 没有第二个写者，不存在互相覆盖（超时/令牌错这两种"桥其实在跑"的情况不会兜底，
  *     见 learningConfigRoute 的门槛，避免和运行中的桥抢文件）。
  * 注意：下面的白名单/合并规则必须与 qq-bridge/src/core/console-server.js 的
  * `sanitizeLearningConfigBody` + `loadLearningConfig` 保持同口径（改一处要改两处），
@@ -6002,7 +7443,7 @@ const LEARNING_SLANG_KEYS = new Set(['enabled', 'timeHHMM', 'autoResearch', 'liv
 const LEARNING_PERSONA_KEYS = new Set(['enabled', 'targetQQ', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
 const LEARNING_PORTRAIT_KEYS = new Set(['enabled', 'minMessages', 'maxTargets', 'windowHours', 'autoIntervalEnabled', 'autoIntervalHours', 'timeHHMM']);
 const localLearningFile = () => join(findBridgeDir(), 'state', 'learning-config.json');
-/** 桥 state 目录下的相对路径（**POSIX 形式**，远端 SSH 上拼路径要用它） */
+/** 桥 state 目录下的相对路径（POSIX 形式，远端 SSH 上拼路径要用它） */
 const LEARNING_STATE_REL = 'state/learning-config.json';
 /** QQ 号规范化（与桥侧 normalizeQQList 同口径：1~11 位纯数字、去重、上限 100） */
 function normalizeQQListLocal(arr) {
@@ -6102,7 +7543,7 @@ function localLearningFallback(method, body) {
   }
 }
 
-/** 远端桥没在监听时的兜底读写：走**已有的 SSH 连接**读写服务端 state/learning-config.json。
+/** 远端桥没在监听时的兜底读写：走已有的 SSH 连接读写服务端 state/learning-config.json。
  *  用的是 /api/ssh/bridge-config 那套已验证过的远端读写（临时文件 → 备份 → 原子 mv → 回读比对），
  *  所以失败绝不会留下半个文件，也不会谎报"已保存"。 */
 async function remoteLearningFallback(target, method, body) {
@@ -6166,7 +7607,7 @@ app.post('/api/learning/portrait', (req, res) => proxyToBridgeConsole(req, res, 
  * 合成一次可能跑十几秒（语音服务返回整段音频），所以这里把代理超时放宽到 90 秒。 */
 const VOICE_TIMEOUT_MS = 90000;
 /** 语音路由统一入口：带显式 scope 时按 scope 定位（本机 / 当前已连上的服务端）；
- *  scope=remote 但服务器/隧道不在 → 明确回 400 说清原因，**不**悄悄退化成写本机。 */
+ *  scope=remote 但服务器/隧道不在 → 明确回 400 说清原因，不悄悄退化成写本机。 */
 const voiceRoute = (path, method, { withBody = false } = {}) => async (req, res) => {
   const s = voiceScopeOf(req);
   let forced = null;
@@ -6208,13 +7649,378 @@ app.post('/api/slang/research', (req, res) => proxyToBridgeConsole(req, res, { p
 /* 人格学习：审批修正 / 结合原人设完善（fuse 要跑一轮模型，所以超时放宽到 3 分钟）/ 覆盖机器人人设 */
 app.post('/api/learning/persona-apply', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/learning/persona-apply', method: 'POST', body: req.body ?? {}, timeoutMs: 180000 }));
 
-/* NapCat 鉴权令牌（WebUI / HTTP / WS）：读现状 + 写进 NapCat 配置并重启容器。
- * 重启容器要等它起来（约 30~60 秒），加上写盘后的复验，超时给到 4 分钟。 */
-app.get('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 }));
-app.post('/api/napcat/tokens', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
+/* ── NapCat 令牌：本机 OneKey 形态（不走 qq-bridge 的容器代理）────────────────────────────
+ * 现场：项目有两套 NapCat 形态 —— (a) Linux+Docker 容器；(b) 本机 OneKey（Windows，随包
+ * `resources\runtime\napcat-onekey\NapCat.44498.Shell`）。这两个端点以前一律代理给桥的
+ * console，而桥是按 `napcat.dockerPathMap` / `tmpDir` 推 NapCat 的 config 目录的 ——
+ * 本机形态下那条路根本不存在，于是卡片上「配置文件：（未找到）」「磁盘现状 WebUI/HTTP/WS（空）」
+ * 「QQ 登录态：查不到」全是这一条造成的。
+ * 现在：只要 `findNapcatOneKey()` 命中且能算出 config 目录，就在管理器进程内直接读写本机文件，
+ * 一次都不代理；不成立时才保留原来的代理行为。
+ *
+ * 【产品红线】登录态只用文件判定（存在 `onebot11_<QQ>.json` / `napcat_<QQ>.json` 即算已登录），
+ * 绝不调用 NapCat 的登录/WebUI 接口 —— 那份额度是 WebUI 页面自己用的，探一次页面就少一次
+ * （见文件上方 NAPCAT_WEBUI_PROBING_REMOVED 与 localNapcatOffReason 的说明）。
+ */
+const NAPCAT_TOKEN_RE = /^[A-Za-z0-9._~!@#$%^&*()\-+=]{4,64}$/;   // 与桥侧 qq-bridge/src/core/napcat-tokens.js 的 TOKEN_RE 逐字一致
+/** 用户 QQ（ownerQQ）的合法形状：纯数字、5~12 位（QQ 号本身最长 11 位，留 1 位余量）。读 / 写两侧共用，避免"写得进、读不出"。 */
+const OWNER_QQ_RE = /^\d{5,12}$/;
 
-/* 连接服务端的状态机（主人要求"这个过程希望能带上「服务端启动中」状态机"）：
- * 界面轮询这条**不做任何网络动作**（只是读内存里的阶段），所以可以随便问。
+/** 掩码规则：与桥侧 `mask()` 一致（长度≤4 → `****`，否则前 2 + `****` + 后 2） */
+function maskNapcatToken(v) {
+  const s = String(v ?? '');
+  if (!s) return '';
+  if (s.length <= 4) return '****';
+  return `${s.slice(0, 2)}****${s.slice(-2)}`;
+}
+
+/** 本机 OneKey 上下文：`{ onekey, dir }`；没命中（或算不出 config 目录）返回 null → 调用方回退代理。
+ *  `dirOverride` 只给冒烟测试用（指定一个假 config 目录），生产路径永远传 null。 */
+function localOnekeyCtx(dirOverride = null) {
+  try {
+    if (dirOverride) return { onekey: { dir: String(dirOverride) }, dir: String(dirOverride) };
+    const onekey = findNapcatOneKey();
+    if (!onekey?.dir) return null;
+    // 已存在的 config 目录优先；首启前目录还没生成时用"预期路径"（与 NapCat 自己后面用的那个一致）
+    const dir = napcatConfigDirProspective(onekey.dir);
+    if (!dir) return null;
+    return { onekey, dir };
+  } catch { return null; }
+}
+
+const localOnebotFiles = (dir) => { try { return readdirSync(dir).filter((n) => /^onebot11.*\.json$/i.test(n)).map((n) => join(dir, n)); } catch { return []; } };
+const localProtocolFiles = (dir) => { try { return readdirSync(dir).filter((n) => /^napcat_protocol.*\.json$/i.test(n)).map((n) => join(dir, n)); } catch { return []; } };
+const localLoginTicketFiles = (dir) => { try { return readdirSync(dir).filter((n) => /^napcat_\d+\.json$/i.test(n)).map((n) => join(dir, n)); } catch { return []; } };
+/** 读 JSON 并剥掉可能的 BOM（NapCat 自己的文件有时带，`JSON.parse` 会直接炸）。读不到回 null。 */
+function readJsonNoBom(p) {
+  try { return JSON.parse(readFileSync(p, 'utf-8').replace(/^\uFEFF/, '')); } catch { return null; }
+}
+
+/** 桥配置里"期望"的令牌（明文，调用方自己决定掩不掩）：`napcat.accessToken` / `wsAccessToken`（后者空则回退前者）。 */
+function bridgeNapcatTokenExpect(notes = null) {
+  try {
+    const nap = readBridgeCfg()?.napcat ?? {};
+    const http = String(nap.accessToken ?? '').trim();
+    const ws = String(nap.wsAccessToken ?? '').trim() || http;
+    return { http, ws };
+  } catch (e) {
+    notes?.push(`读不到桥配置（${bridgeCfgPath()}）：${e?.message ?? e} —— 桥侧的期望令牌按空处理。`);
+    return { http: '', ws: '' };
+  }
+}
+
+/** `_bak-<yyyyMMddHHmmss>`：把 dir 下这些文件备份进去，只留最近 keep 份（与桥侧 backupDir 同一套规则）。 */
+function backupStampedDir(dir, names, keep = 5) {
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const name = `_bak-${stamp}`;
+  try {
+    const target = join(dir, name);
+    mkdirSync(target, { recursive: true });
+    for (const n of names) { try { copyFileSync(join(dir, n), join(target, n)); } catch { /* 单个失败不阻塞 */ } }
+    const olds = readdirSync(dir).filter((x) => x.startsWith('_bak-')).sort();
+    for (const old of olds.slice(0, Math.max(0, olds.length - Math.max(1, keep)))) {
+      try { rmSync(join(dir, old), { recursive: true, force: true }); } catch { /* 忽略 */ }
+    }
+    return name;
+  } catch (e) {
+    mlog(`[napcat] 备份失败（继续写配置）：${e?.message ?? e}`);
+    return '';
+  }
+}
+
+/** 本机 OneKey 的令牌现状：纯本地读盘，零网络、零登录接口调用。命中本机形态才返回对象，否则 null。 */
+function buildLocalNapcatTokenStatus(dirOverride = null) {
+  try {
+    const ctx = localOnekeyCtx(dirOverride);
+    if (!ctx) return null;
+    const { onekey, dir } = ctx;
+    const notes = [];
+    const out = {
+      ok: true,
+      mode: 'local-onekey',
+      dir,
+      container: '（本机 OneKey · 不用容器）',
+      napcat: { webui: '', http: '', ws: '' },
+      // 与桥侧同形：桥的 WebUI 令牌不参与连接，这里恒为空串
+      bridge: { webui: '', http: '', ws: '' },
+      // 明文只给本机管理端 GUI 预填输入框用（这个端点只在本机 127.0.0.1 上被 GUI 调用）
+      current: { webui: '', http: '', ws: '' },
+      files: { webui: false, onebot: [], protocol: [] },
+      mismatch: { http: false, ws: false, webui: false },
+      login: { ok: true, isLogin: false, uin: '', source: 'config-files' },
+      /* 2026-09-24：原先这里是 `connection: null`，前端在 conn 为空时写「查询失败（桥刚启动或
+       * 未暴露统计信息）」—— 那是谎报：本机 OneKey 形态本就不做这项诊断（管理器直读 NapCat 配置，
+       * 桥→NapCat 的 WebSocket 统计只存在于桥进程内部）。现在回一个明确的 unavailable，
+       * 让前端把"没有这项诊断"和"查询失败"分开说。 */
+      connection: {
+        unavailable: true,
+        reason: 'local-onekey',
+        note: '本机形态由管理器直读 NapCat 配置文件，不做桥 → NapCat 的 WebSocket 诊断（该统计只在桥进程内可用）',
+      },
+      notes,
+    };
+    const expect = bridgeNapcatTokenExpect(notes);
+    out.bridge.http = maskNapcatToken(expect.http);
+    out.bridge.ws = maskNapcatToken(expect.ws);
+
+    // WebUI 令牌 = webui.json 里的 token（现场真相）
+    const webuiPath = join(dir, 'webui.json');
+    const w = readJsonNoBom(webuiPath);
+    if (w && typeof w === 'object') {
+      out.files.webui = true;
+      out.current.webui = String(w.token ?? '');
+      out.napcat.webui = maskNapcatToken(out.current.webui);
+    }
+    // OneBot HTTP / WS 令牌 = onebot11*.json 的 network.*Servers[].token（取第一个非空）
+    const ob = localOnebotFiles(dir);
+    out.files.onebot = ob.map((p) => basename(p));
+    for (const p of ob) {
+      const net = readJsonNoBom(p)?.network ?? {};
+      if (!out.current.http) {
+        const h = (Array.isArray(net.httpServers) ? net.httpServers : []).map((s) => String(s?.token ?? '')).filter(Boolean)[0] ?? '';
+        if (h) out.current.http = h;
+      }
+      if (!out.current.ws) {
+        const s2 = (Array.isArray(net.websocketServers) ? net.websocketServers : []).map((s) => String(s?.token ?? '')).filter(Boolean)[0] ?? '';
+        if (s2) out.current.ws = s2;
+      }
+    }
+    out.napcat.http = maskNapcatToken(out.current.http);
+    out.napcat.ws = maskNapcatToken(out.current.ws);
+    out.files.protocol = localProtocolFiles(dir).map((p) => basename(p));
+
+    // 不一致 = 两边都有明文值且不相等（桥那边比的是掩码，这里比明文，更准）
+    out.mismatch.http = Boolean(expect.http) && Boolean(out.current.http) && expect.http !== out.current.http;
+    out.mismatch.ws = Boolean(expect.ws) && Boolean(out.current.ws) && expect.ws !== out.current.ws;
+
+    // 登录态：只看文件（红线：不调 NapCat 的任何登录/WebUI 接口）
+    const names = (() => { try { return readdirSync(dir); } catch { return []; } })();
+    const hit = names.find((n) => /^onebot11_\d+\.json$/i.test(n)) || names.find((n) => /^napcat_\d+\.json$/i.test(n)) || '';
+    const uin = hit ? (hit.match(/(\d+)\.json$/i)?.[1] ?? '') : '';
+    out.login = { ok: true, isLogin: !!uin, uin, source: 'config-files' };
+
+    if (existsSync(dir)) {
+      notes.push(`本机 OneKey 形态：NapCat 在 ${onekey.dir}，配置目录为 ${dir}（已跳过容器代理，直接读本机文件）。`);
+    } else {
+      notes.push(`本机 OneKey 形态：NapCat 在 ${onekey.dir}，配置目录预期为 ${dir}（目录还没生成 —— 先启动一次 NapCat）。`);
+    }
+    notes.push(uin
+      ? `登录态按配置文件判定：存在 ${hit} → 已登录 QQ ${uin}。管理器不调用 NapCat 的登录/WebUI 接口，不占用页面的登录额度。`
+      : '登录态按配置文件判定：没看到 onebot11_<QQ>.json / napcat_<QQ>.json → 还没登录 QQ（去 WebUI 扫码；只做文件判定，不发任何探针）。');
+    if (out.mismatch.http || out.mismatch.ws) {
+      notes.push('⚠️ 桥配置里的 accessToken / wsAccessToken 与 NapCat 配置里的实际值不一致 —— 用「写入并在本机重启」按桥的值对齐。');
+    }
+    if (!out.files.onebot.length) notes.push('还没有 onebot11*.json（QQ 登录后 NapCat 才会生成）：写入令牌时会按出厂结构补一条 HTTP 3000 / WS 3001。');
+    return out;
+  } catch (e) {
+    mlog(`[napcat] 本机 OneKey 令牌状态读取失败：${e?.message ?? e}`);
+    return null;   // 读失败就回退代理，不把卡片打空
+  }
+}
+
+/** 重启本机 NapCat（复用现有 stopInstance / startInstanceTracked；拿不到耗时也至少回 0）。 */
+async function restartLocalNapcat() {
+  const t0 = Date.now();
+  try {
+    const stopped = await stopInstance('napcat-local');
+    if (!stopped?.success) return { ok: false, ms: Date.now() - t0, detail: `停止失败：${stopped?.message ?? '未知原因'}` };
+    setPhase('napcat-local', 'idle', {});
+    const out = await startInstanceTracked('napcat-local', loadConfig(), { wait: false });
+    const ms = Date.now() - t0;
+    if (out?.success === false) return { ok: false, ms, detail: String(out.message || '启动未成功') };
+    return { ok: true, ms, detail: String(out?.message || 'NapCat 已重新拉起（后台等待就绪）') };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - t0, detail: String(e?.message ?? e) };
+  }
+}
+
+/** 把令牌写进本机 NapCat 配置：webui.json 的 token + 每个 onebot11*.json 的 network.*Servers[].token。
+ *  没命中本机形态返回 null（调用方回退代理）；命中就返回结果对象（结构与桥侧 applyNapcatTokens 对齐）。 */
+async function applyLocalNapcatTokens(body = {}, dirOverride = null) {
+  const ctx = localOnekeyCtx(dirOverride);
+  if (!ctx) return null;
+  const { dir } = ctx;
+  let wantWebui = String(body?.webuiToken ?? '').trim();
+  let wantHttp = String(body?.httpToken ?? '').trim();
+  let wantWs = String(body?.wsToken ?? '').trim();
+  if (body?.useBridgeTokens === true) {
+    const exp = bridgeNapcatTokenExpect();
+    if (!exp.http) return { ok: false, error: `桥配置（${bridgeCfgPath()}）里没有可用的 napcat.accessToken —— 先把桥的令牌配好，或直接填三个令牌` };
+    wantWebui = exp.http; wantHttp = exp.http; wantWs = exp.ws;   // WS 空时上面已经回退成 accessToken
+  }
+  for (const [label, v] of [['WebUI 令牌', wantWebui], ['HTTP 令牌', wantHttp], ['WS 令牌', wantWs]]) {
+    if (v && !NAPCAT_TOKEN_RE.test(v)) {
+      return { ok: false, error: `${label}不合法：只允许 4~64 位的字母/数字/._~!@#$%^&*()-+=（不要空格、引号、中文）` };
+    }
+  }
+  if (!wantWebui && !wantHttp && !wantWs) return { ok: false, error: '没有要写入的令牌：至少填一个（WebUI / HTTP / WS）' };
+  if (!existsSync(dir)) return { ok: false, error: `NapCat 配置目录还不存在：${dir} —— 先启动一次 NapCat 再来` };
+
+  // 写前备份（同目录 _bak-<stamp>，最多留 5 份）
+  const backup = backupStampedDir(dir, ['webui.json', ...localOnebotFiles(dir).map((p) => basename(p)), ...localProtocolFiles(dir).map((p) => basename(p)), ...localLoginTicketFiles(dir).map((p) => basename(p))], 5);
+  const changed = { webui: false, http: 0, ws: 0 };
+  const files = [];
+  let dirty = false;
+
+  if (wantWebui) {
+    const p = join(dir, 'webui.json');
+    const w = readJsonNoBom(p);
+    if (!w || typeof w !== 'object') return { ok: false, error: `读不到 ${p}（NapCat 还没生成 WebUI 配置？先启动一次 NapCat 再来）` };
+    if (String(w.token ?? '') !== wantWebui) {
+      w.token = wantWebui;
+      writeFileSync(p, JSON.stringify(w, null, 2), 'utf8');   // 无 BOM：NapCat 自己写的也是这个风格
+      changed.webui = true; dirty = true; files.push('webui.json');
+    }
+  }
+
+  const ob = localOnebotFiles(dir);
+  for (const p of ob) {
+    const j = readJsonNoBom(p);
+    if (!j || typeof j !== 'object' || Array.isArray(j)) continue;
+    let touched = false;
+    if (!j.network || typeof j.network !== 'object' || Array.isArray(j.network)) {
+      j.network = JSON.parse(JSON.stringify(FACTORY_ONE_NETWORK));   // 复用出厂结构
+      touched = true;
+    }
+    const net = j.network;
+    for (const [name, want, key] of [['httpServers', wantHttp, 'http'], ['websocketServers', wantWs, 'ws']]) {
+      if (!want) continue;
+      if (!Array.isArray(net[name])) { net[name] = []; touched = true; }
+      const arr = net[name];
+      for (const srv of arr) {   // 只改已存在的 server 项
+        if (!srv || typeof srv !== 'object') continue;
+        if (!Object.prototype.hasOwnProperty.call(srv, 'token')) continue;
+        if (String(srv.token ?? '') !== want) { srv.token = want; touched = true; changed[key] += 1; }
+      }
+      if (!arr.length) {   // 一个 server 项都没有 → 按出厂结构补一条（HTTP 3000 / WS 3001）
+        const fresh = JSON.parse(JSON.stringify(FACTORY_ONE_NETWORK[name][0]));
+        fresh.token = want;
+        arr.push(fresh);
+        touched = true; changed[key] += 1;
+      }
+    }
+    if (touched) { writeFileSync(p, JSON.stringify(j, null, 2), 'utf8'); files.push(basename(p)); dirty = true; }
+  }
+
+  if (!dirty) {
+    mlog(`[napcat] 本机 OneKey 令牌：配置里已是这些值，未改动、未重启（${dir}）`);
+    return {
+      ok: true, mode: 'local-onekey', dir, changed,
+      note: 'NapCat 配置里已经是这些令牌了，没有改动（也没有重启）',
+      restart: { ok: true, ms: 0, detail: '没有改动，未重启' },
+      verify: { note: '无需重启：文件内容与要写入的一致，NapCat 现在认的就是这些令牌' },
+    };
+  }
+
+  let restart;
+  if (body?.restart !== false) restart = await restartLocalNapcat();
+  else restart = { ok: true, ms: 0, detail: '按请求没有重启（restart=false）' };
+
+  const bits = [`已写入 ${files.length} 个文件（备份 ${backup || '无'}）`];
+  bits.push('重启后新令牌才生效；NapCat 只在启动时读一次配置。');
+  if (body?.restart === false) bits.push('这次按请求没有重启 —— 令牌要等 NapCat 下次启动才生效。');
+  else if (!restart.ok) bits.push(`重启没成功：${restart.detail || '未知原因'}（令牌已写入文件，但还没生效）`);
+  if (!ob.length) bits.push('配置目录里还没有 onebot11*.json（QQ 登录后才会生成）—— HTTP/WS 令牌这次没落地，登录后再写一次。');
+  mlog(`[napcat] 本机 OneKey 令牌已写入 ${files.join(', ') || '（无）'}：webui=${changed.webui} http=${changed.http} ws=${changed.ws}；重启 ${restart.ok ? '成功' : '失败'}（${restart.ms}ms）`);
+
+  return {
+    ok: true, mode: 'local-onekey', dir, changed,
+    note: bits.join('；'),
+    restart: { ok: restart.ok, ms: restart.ms, detail: restart.detail },
+    verify: {
+      note: (restart.ok && body?.restart !== false)
+        ? '已按本机 OneKey 的方式停止并重新拉起 NapCat（不调用任何登录/WebUI 接口，登录票据文件原样保留，通常走快速登录）'
+        : '未做在线复验：令牌是否生效以 NapCat 下次启动读到的配置为准',
+    },
+  };
+}
+
+/* NapCat 鉴权令牌（WebUI / HTTP / WS）：
+ *  · 先看当前目标（2026-09-30：需求「改成服务器连接时就看服务器」）：
+ *    已连接服务器且 Bridge 控制台隧道(13100)在 → 一律转发给那台服务器上的桥，
+ *    不看本机 OneKey —— 否则会出现"明明连着服务器，这张卡却在读本机那份没登录的 NapCat"。
+ *  · 没有远端目标时：本机 OneKey（findNapcatOneKey() 命中且能算出 config 目录）→ 管理器进程内直接读本机文件；
+ *    否则容器形态 → 转发给本机桥的 console。
+ *  · NapCat 侧只被问一句只读的 OneBot `get_login_info`（见桥的 probeQqLoginState），
+ *    不碰登录/扫码/退出类接口，也不轮询（卡片只在挂载与手动刷新时取一次）——
+ *    既不会打限流，也不会影响登录态。
+ * 重启容器要等它起来（约 30~60 秒），加上写盘后的复验，超时给到 4 分钟。 */
+app.get('/api/napcat/tokens', (req, res) => {
+  if (resolveRemoteBridgeTarget()) {
+    void proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 });
+    return;
+  }
+  const local = buildLocalNapcatTokenStatus();
+  if (local) { res.json(local); return; }
+  void proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'GET', timeoutMs: 60000 });
+});
+app.post('/api/napcat/tokens', async (req, res) => {
+  /* 写令牌同理：连着服务器就只写服务器那台 NapCat 的配置，绝不去动本机安装。 */
+  if (resolveRemoteBridgeTarget()) {
+    void proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 });
+    return;
+  }
+  let out = null;
+  try {
+    out = await applyLocalNapcatTokens(req.body ?? {});
+  } catch (e) {
+    mlog(`[napcat] 本机 OneKey 令牌写入失败：${e?.message ?? e}`);
+    res.json({ ok: false, error: String(e?.message ?? e) });
+    return;
+  }
+  if (out) { res.json(out); return; }
+  void proxyToBridgeConsole(req, res, { path: '/api/napcat/tokens', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 });
+});
+
+/* 用户 QQ（首次启动弹窗）：读 / 写本机桥 config.json 的 ownerQQ。
+ * 写盘规则与上面同一套（同目录 _bak-<stamp>、最多 5 份、2 空格缩进、无 BOM），
+ * 并且同时更新进程内缓存（OWNER_QQ 由 const 改成 let），不重启管理器即生效。 */
+app.get('/api/bridge/owner-qq', (_req, res) => {
+  try {
+    const p = bridgeCfgPath();
+    let ownerQQ = ''; let source = 'none';
+    try {
+      if (existsSync(p)) {
+        const v = String(readBridgeCfg()?.ownerQQ ?? '').trim();
+        if (OWNER_QQ_RE.test(v)) { ownerQQ = v; source = 'bridge-config'; }
+      }
+    } catch (e) {
+      mlog(`[bridge] 读主人 QQ 失败（按未配置处理）：${e?.message ?? e}`);
+    }
+    if (!ownerQQ) {
+      const env = String(process.env.QBM_OWNER_QQ ?? '').trim();
+      if (OWNER_QQ_RE.test(env)) { ownerQQ = env; source = 'env'; }
+    }
+    res.json({ ok: true, ownerQQ, source, configPath: p });
+  } catch (e) {
+    res.json({ ok: false, ownerQQ: '', source: 'none', error: String(e?.message ?? e) });
+  }
+});
+app.post('/api/bridge/owner-qq', (req, res) => {
+  const raw = String(req.body?.ownerQQ ?? '').trim();
+  if (!OWNER_QQ_RE.test(raw)) { res.json({ ok: false, error: '主人 QQ 必须是纯数字的 QQ 号' }); return; }
+  try {
+    const dir = findBridgeDir();
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const p = join(dir, 'config.json');
+    let cfg = {};
+    if (existsSync(p)) {
+      cfg = readBridgeCfg();                 // 解析失败会抛，下面的 catch 会如实回 ok:false（绝不把坏配置覆盖成空对象）
+      backupStampedDir(dir, ['config.json'], 5);
+    }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
+    cfg.ownerQQ = raw;
+    writeFileSync(p, JSON.stringify(cfg, null, 2), 'utf8');   // 无 BOM（带 BOM 桥自己读会炸）
+    OWNER_QQ = raw;                                           // 进程内缓存同步：不重启也生效
+    mlog(`[bridge] 主人 QQ 已写入桥配置：${raw}（${p}）`);
+    res.json({ ok: true, ownerQQ: raw, configPath: p });
+  } catch (e) {
+    res.json({ ok: false, error: String(e?.message ?? e) });
+  }
+});
+
+/* 连接服务端的状态机（需求"这个过程希望能带上「服务端启动中」状态机"）：
+ * 界面轮询这条不做任何网络动作（只是读内存里的阶段），所以可以随便问。
  * 阶段：idle → connecting → tunnels → server-starting → warming → ready / failed。 */
 app.get('/api/connect', (_req, res) => {
   const cfgNow = loadConfig();
@@ -6222,17 +8028,17 @@ app.get('/api/connect', (_req, res) => {
   res.json({ ok: true, connect: connectMachine.view(), connected });
 });
 
-/* 【2026-09-22 主人报「NapCat 界面点进去第一次总是鉴权失败，要刷一次」；随后又报
+/* 2026-09-22 现场报「NapCat 界面点进去第一次总是鉴权失败，要刷一次」；随后又报
  * 「/api/napcat/webui-ready → HTTP 500，而且还鉴权失败，登录还 limit」】
  *
- * 这条端点的职责被收窄成**一件事**：告诉界面"现在重载一次能不能进去"。判据只有"端口通不通"这一项，
- * 而且**默认一次登录都不打** —— 因为 NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的限量资源，
+ * 这条端点的职责被收窄成一件事：告诉界面"现在重载一次能不能进去"。判据只有"端口通不通"这一项，
+ * 而且默认一次登录都不打 —— 因为 NapCat 的登录接口是每 IP 每 60 秒 loginRate（出厂 10）次的限量资源，
  * WebUI 页面自己就要用掉其中一次；管理器把它当轮询探针（上一版每 2 秒一次、最多 20 次 = 20 次登录尝试）
  * 会直接把额度打光，页面随后必然"鉴权失败 / login rate limit"（两边还是同一个 IP：本机 127.0.0.1，
  * 服务端经 SSH 隧道同样是 127.0.0.1）。
  *
  * 现在的语义：
- *   · 默认（界面挂载时的轮询）：只探活 + 读 funnel 里的**缓存结论**（`peek`，零网络），funnel 从没验过就是 'unknown'；
+ *   · 默认（界面挂载时的轮询）：只探活 + 读 funnel 里的缓存结论（`peek`，零网络），funnel 从没验过就是 'unknown'；
  *   · `?verify=1`（用户点「重新鉴权」）：才真的验一次，且受 funnel 预算/冷却约束（≤2 次/分钟，撞限流冷却 65 秒）；
  *   · `ok` = "服务通了、且此刻没有被限流" → 界面据此重载一次；
  *   · 任何异常都不再抛成 500（上一版的 500 是 handler 里用了没定义的 `cfg`，ReferenceError，
@@ -6259,26 +8065,26 @@ app.get('/api/napcat/webui-ready', async (req, res) => {
     }
     const up = await probe(`http://127.0.0.1:${port}/webui/`, 1200);
     const serviceUp = !!up.reachable;
-    const ledger = napcatAuth.state(scope, port);
-    let verify = { attempted: false, status: 'unknown', note: '', verifiedAt: 0, retryAfterMs: 0 };
-    if (wantVerify && !localOff) {
-      const r = await napcatAuth.verify({ scope, port, token, timeoutMs: 5000, reason: 'manual', force: true });
-      verify = { attempted: true, status: r.status, note: r.note, verifiedAt: r.verifiedAt, retryAfterMs: r.retryAfterMs };
-    } else {
-      const p = napcatAuth.peek(scope, port);
-      verify = {
-        attempted: false,
-        status: p.verdict ? (p.verdict.ok ? 'cached' : (p.limited ? 'limited' : 'invalid')) : (p.limited ? 'limited' : 'unknown'),
-        note: p.limited
-          ? `NapCat 登录接口被限流中，${Math.ceil(p.retryAfterMs / 1000)} 秒内管理器不再自查（这只影响自查，不影响你自己打开界面）`
-          : (p.verdict ? (p.verdict.ok ? '令牌此前已验证通过' : (p.verdict.message || '令牌没通过')) : '本次没有自查（不占用 NapCat 的登录额度）—— 点「重新鉴权」才真验一次'),
-        verifiedAt: p.verdict?.at ?? 0,
-        retryAfterMs: p.retryAfterMs,
-      };
-    }
-    const limited = ledger.limited;
-    const ok = serviceUp && !limited;
-    const warm = napcatWarmInfo(scope, port, token);
+    /* 2026-09-23：去除探针与状态检测。这一段以前会调 napcatAuth 去打 NapCat 的登录接口
+     * "验证令牌"（?verify=1 时人一点就打一发）。现在整个验证能力删掉了：
+     *   · "就绪没就绪"只由不花登录额度的 HTTP 探活（probe /webui/）判断；
+     *   · "令牌可不可用"由页面自己那一次登录决定 —— 管理器一次都不登。
+     * 返回的字段形状保持不变（界面不用改），verify.attempted 恒为 false、limited 恒为 false。
+     * wantVerify 保留只为在响应里如实说明"这个动作已经不存在了"。 */
+    const verify = {
+      attempted: false,
+      removed: true,
+      requested: wantVerify,
+      status: serviceUp ? 'not-probed' : 'unreachable',
+      note: serviceUp
+        ? '探针已去除：管理器不再用登录接口验证令牌（登录额度全部留给 WebUI 页面自己），界面点开会自行登录一次'
+        : 'NapCat WebUI 还没起来（端口不通）—— 未做任何登录验证',
+      verifiedAt: 0,
+      retryAfterMs: 0,
+    };
+    const limited = false;
+    const ok = serviceUp;
+    const warm = { done: false, at: 0, removed: true };
     let note;
     if (localOff) note = '当前目标是服务器，本机 NapCat 不探测（' + localOff + '）';
     else if (!serviceUp) note = 'NapCat WebUI 还没起来（127.0.0.1:' + port + ' 不通）—— 等它起来会自动重载一次';
@@ -6290,12 +8096,17 @@ app.get('/api/napcat/webui-ready', async (req, res) => {
       ok, scope, port, server: serverName, serviceUp, tokenPresent: !!token, off: localOff, note,
       verify,
       warm,
+      /* 2026-09-23：以前这里报的是"管理器自己那份自查预算用了几发"。
+       * 自查已经没有了，所以如实报"0 发、没在限流" —— NapCat 的额度一发都没被管理器动过。 */
       rateLimit: {
-        napcatLimit: ledger.napcatLimit,
-        budget: ledger.budget,
-        windowMs: ledger.windowMs,
-        attemptsInWindow: ledger.attemptsInWindow,
-        limited, retryAfterMs: ledger.retryAfterMs,
+        napcatLimit: 0,
+        budget: 0,
+        windowMs: 0,
+        attemptsInWindow: 0,
+        limited: false,
+        retryAfterMs: 0,
+        removed: true,
+        note: '管理器不再使用 NapCat 的登录接口，登录额度 100% 留给 WebUI 页面自己',
       },
     });
   } catch (e) {
@@ -6314,17 +8125,22 @@ app.post('/api/napcat/guard', (req, res) => proxyToBridgeConsole(req, res, { pat
 app.post('/api/napcat/guard/heal', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/guard/heal', method: 'POST', body: req.body ?? {}, timeoutMs: 240000 }));
 app.post('/api/napcat/quick-password', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/quick-password', method: 'POST', body: req.body ?? {}, timeoutMs: 300000 }));
 /* 二维码现抓一份（base64 dataUrl）。要扫码时人在管理端，这条是唯一的救命路径。 */
-app.get('/api/napcat/qr', (req, res) => proxyToBridgeConsole(req, res, { path: '/api/napcat/qr', method: 'GET', timeoutMs: 60000 }));
-/* 用量统计（/api/learning/token-report）——**两边都不漏**：
- * 【2026-09-14 主人要求】以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
+/* 2026-09-23 去除探针：二维码代理：只读现成的那张。
+ * 桥侧的"让 NapCat 换一张新码"能力已整体删除（换码要先登 WebUI —— 抢页面额度；
+ * 而且会让用户正在扫的那张立刻作废），所以这里也不再透传 ?fresh=1（旧链接带了也无效，桥会忽略）。 */
+app.get('/api/napcat/qr', (req, res) => proxyToBridgeConsole(req, res, {
+  path: '/api/napcat/qr', method: 'GET', timeoutMs: 60000,
+}));
+/* 用量统计（/api/learning/token-report）——两边都不漏：
+ * 2026-09-14：以前这条只代理到"活动目标桥"（连了服务器就只服务端、没连就只本机），
  * 于是"本机那份"在 SSH 模式下直接消失。现在本机 + 服务端各取一次，再合并出"合计"：
  *   { local, remote, total, remoteReason, remoteServer, report(=total，兼容旧前端) }
- * 服务端取不到时**不整条失败**：remote=null + remoteReason 一行原因，本机那份照常返回。 */
+ * 服务端取不到时不整条失败：remote=null + remoteReason 一行原因，本机那份照常返回。 */
 const TOKEN_REPORT_NUM_FIELDS = ['total', 'estTotal', 'prompt', 'completion', 'cacheRead', 'cacheWrite', 'cachePrompt', 'cacheCompletion', 'cacheSamples', 'samples', 'billedTotal', 'reconciledTotal', 'reconciledSamples', 'retryCount', 'retryEstimated'];
 
-/** 把"桥连不上"翻译成人话：**连不上是状态（没在运行/隧道没开），不是"失败"（异常）**。
+/** 把"桥连不上"翻译成人话：连不上是状态（没在运行/隧道没开），不是"失败"（异常）。
  *  以前这里直接把 `fetch failed` 抛给界面，本机没跑桥时面板上就常挂一行
- *  「本机桥对账失败：fetch failed」，主人会以为坏了——其实只是本机没启动桥（只用服务端时很正常）。 */
+ *  「本机桥对账失败：fetch failed」，用户会以为坏了——其实只是本机没启动桥（只用服务端时很正常）。 */
 function bridgeUnreachableText(scope, base, detail) {
   const d = String(detail || '');
   const refused = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|timed out|aborted|ETIMEDOUT/i.test(d);
@@ -6339,10 +8155,10 @@ function bridgeUnreachableText(scope, base, detail) {
 }
 
 /** 取某一侧桥控制台的用量报告；失败回 { ok:false, error }，绝不抛 */
-/* 【2026-09-16 修】服务端断开后，服务端那部分消耗要**继续计入合计**。
+/* 2026-09-16 修：服务端断开后，服务端那部分消耗要继续计入合计。
  * 症状：服务器一停（或 SSH 断开、Bridge 隧道不在），token-report 的 remote 就取不到，
  * 合计立刻只剩本机 —— 于是"总消耗"看起来凭空掉了一大截，用户以为服务端的用量丢了。
- * 事实是：服务端停着就不会再产生消耗，**上一次同步到的数字依然是准确的**（只是不再增长）。
+ * 事实是：服务端停着就不会再产生消耗，上一次同步到的数字依然是准确的（只是不再增长）。
  * 所以这里把每次成功取到的服务端报告缓存到 ~/.qq-bridge-manager，取不到时回退用它，
  * 并明确标成"上次同步"（remoteStale/remoteAt），不冒充实时值。 */
 const REMOTE_TOKEN_CACHE_FILE = join(CONFIG_DIR, 'last-remote-token-report.json');
@@ -6424,7 +8240,7 @@ function mergeTokenReports(a, b) {
   return out;
 }
 
-/** 计费日键：与桥侧 token-meter.billingKey 同一口径 —— 把时刻减去 offset 分钟再取**北京日期**。
+/** 计费日键：与桥侧 token-meter.billingKey 同一口径 —— 把时刻减去 offset 分钟再取北京日期。
  *  offset=480（默认）= UTC 自然日 = 北京时每天 08:00 换日，正是提供方控制台的口径。 */
 function billingDayKeyOf(ms, offsetMinutes = 480) {
   const off = Number.isFinite(Number(offsetMinutes)) ? Number(offsetMinutes) : 480;
@@ -6514,13 +8330,13 @@ app.get('/api/learning/token-report', async (_req, res) => {
   }
 
   // ② 服务端那份：只在"已连接 + Bridge 隧道在"时取；取不到不抛错，只回一行原因。
-  //    取不到时（未连接 / 隧道不在 / 请求失败）回退到**上一次成功同步的服务端报告**：
+  //    取不到时（未连接 / 隧道不在 / 请求失败）回退到上一次成功同步的服务端报告：
   //    服务端停着不会再消耗，那份数字仍然准确，只是不再增长 —— 否则合计会突然只剩本机。
   //
-  //    【2026-09-18 修跨日重复累加】缓存里存的是"上次同步那一刻的 report"，它带的是**那天的** today。
+  //    2026-09-18 修跨日重复累加：缓存里存的是"上次同步那一刻的 report"，它带的是那天的 today。
   //    如果缓存来自上一个计费日（换日 08:00 之后一直没连上服务器很常见），再把它的 today 并进合计，
   //    等于把昨天的量算进今天 —— 一天的用量是数千万 token 级别，面板会瞬间虚高一大截。
-  //    所以这里按「缓存报告的计费日 vs 当前计费日」判断：同一天仍按主人要求计入合计；
+  //    所以这里按「缓存报告的计费日 vs 当前计费日」判断：同一天仍按约定计入合计；
   //    跨了日就不并入当日（那份数字照样显示在「服务端」卡上，并写明它是哪一天的）。
   const rt = resolveRemoteBridgeTarget();
   const useRemoteCache = (prefix) => {
@@ -6574,7 +8390,7 @@ app.get('/api/learning/token-report', async (_req, res) => {
   res.json(out);
 });
 
-/* 用量对账（主人问「面板比真实值虚高/偏低」时加的）：让两侧桥各自与 DSH 的会话级权威计数
+/* 用量对账（为「面板比真实值虚高/偏低」这个问题加的）：让两侧桥各自与 DSH 的会话级权威计数
  * （storages/session_projcache 里的 tokenUsage.totals）比对，把被漏记的 usage 帧补成
  * reconciled 行。幂等：水位存在桥侧 state/token-reconcile.json，重复点不会重复补。
  * 与 token-report 一样，本机 + 服务端两边都试，任一侧失败不影响另一侧。 */
@@ -6672,32 +8488,121 @@ app.get('/api/learning/token-stream', async (req, res) => {
   }
 });
 
+/* 2026-09-30：需求「napcat 登录态改为 SSE 实时探测」。
+   把桥的登录态 SSE 原样透传给浏览器（同源，前端不用直连 3100）。
+   与用量推流同一套：不能用 proxyToBridgeConsole（它会 res.text() 把流读干）。
+   目标同样"当前目标优先"：连着服务器就推服务器那台桥的登录态。 */
+app.get('/api/napcat/login-stream', async (req, res) => {
+  let t;
+  try { t = resolveBridgeTarget(); } catch (e) {
+    return res.status(503).json({ success: false, code: 'bridge-offline', message: String(e?.message || e) });
+  }
+  let token = null;
+  try { token = t.kind === 'remote' ? await getRemoteBridgeToken(t.server, t.conn) : t.token; } catch { /* 无令牌也试一次 */ }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const ctrl = new AbortController();
+  let closed = false;
+  // 只认「响应侧 close」＝浏览器断开（req 的 close 在请求体读完时就发，会立刻把上游 abort 掉）
+  const onClose = () => { closed = true; ctrl.abort(); };
+  res.on('close', onClose);
+
+  const send = (event, data) => { if (!closed) { try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* 忽略 */ } } };
+
+  try {
+    const resp = await fetch(t.base + '/api/napcat/login-stream', {
+      headers: { Accept: 'text/event-stream', ...(token ? { 'x-console-token': token } : {}) },
+      signal: ctrl.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      send('stream-error', {
+        message: t.kind === 'remote'
+          ? `服务器上的桥在运行，但没有这条登录态推流接口（HTTP ${resp.status}）：把服务器上的桥代码更新到最新并重启桥。`
+          : `桥在运行，但没有这条登录态推流接口（HTTP ${resp.status}）：把桥代码更新到最新并重启桥。`,
+      });
+      return res.end();
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (closed) break;
+      res.write(dec.decode(value, { stream: true }));
+    }
+  } catch (e) {
+    if (!closed) send('stream-error', { message: String(e?.message || e) });
+  } finally {
+    try { res.end(); } catch { /* 忽略 */ }
+  }
+});
+
 /* ------------------------------------------------------------------ */
-/* 群友画像 / 主人画像（直读本机桥 memory.db，只读；与桥是否在线无关）     */
+/* 群友画像 / 用户画像（直读本机桥 memory.db，只读；与桥是否在线无关）     */
 /* ------------------------------------------------------------------ */
-/** 主人 QQ：优先读本机桥 config.json 的 ownerQQ（不硬编码账号），否则环境变量，最后空 */
+/** 用户 QQ（ownerQQ）：优先读本机桥 config.json 的 ownerQQ（不硬编码账号），否则环境变量，最后空 */
 function resolveOwnerQQ() {
   try {
     const p = bridgeCfgPath();
     if (existsSync(p)) {
       const c = JSON.parse(readFileSync(p, 'utf-8'));
       const q = String(c?.ownerQQ ?? '').trim();
-      if (/^\d{5,11}$/.test(q)) return q;
+      if (OWNER_QQ_RE.test(q)) return q;   // 与 POST /api/bridge/owner-qq 的写入校验同一把尺子
     }
   } catch { /* 读不到就降级 */ }
-  return String(process.env.QBM_OWNER_QQ || '').trim() || '';
+  const envQ = String(process.env.QBM_OWNER_QQ || '').trim();
+  return OWNER_QQ_RE.test(envQ) ? envQ : '';
 }
-const OWNER_QQ = resolveOwnerQQ();
+/* 【本机 OneKey】不再是 const：POST /api/bridge/owner-qq 会就地改写它（不重启进程即生效），
+ * 所有读点（画像/关系图等）读的都是这个变量本身，所以改了立刻全局可见。 */
+let OWNER_QQ = resolveOwnerQQ();
 const DAY_MS = 86400000;
 
-/** 只读打开本机桥的 memory.db：readOnly + 短 busy 超时（桥可能在写，绝不加锁） */
+/** 只读打开本机桥的库：readOnly + 短 busy 超时（桥可能在写，绝不加锁）。
+ *
+ *  2026-09-24 聊天记录分家（state/chat.db）之后这里做了一次兼容处理：**主库换成 chat.db，
+ *  把 memory.db 用 ATTACH 挂进来**。为什么是这个方向：本文件里有几十条 SQL 同时用到
+ *  chat_messages（聊天记录）、profiles / memory_entries（记忆档案），SQLite 对"未限定库名"
+ *  的表名会依次在 main → temp → 各 attached 库里找，所以只要两张表都够得着，**调用点一行都不用改**。
+ *  反过来（主库 = memory.db）不行：老 memory.db 里可能还留着迁移前的 chat_messages 残留表，
+ *  未限定的表名会先命中那张过期的表，静默读出错数据。
+ *  老安装（还没跑过新版桥、chat.db 尚未生成）原样退回 memory.db。 */
 async function openBridgeMemoryDbRo() {
   const dir = findBridgeDir();
-  const cands = [join(dir, 'state', 'memory.db'), join(dir, 'memory.db')];
-  const p = cands.find((c) => existsSync(c));
-  if (!p) throw new Error(`找不到桥记忆库 memory.db（已探测 ${cands.join(' / ')}），请先让桥至少跑过一次`);
+  const chatPath = join(dir, 'state', 'chat.db');
+  const memPath = join(dir, 'state', 'memory.db');
   const { DatabaseSync } = await import('node:sqlite');
-  return new DatabaseSync(p, { readOnly: true, timeout: 800 });
+  if (existsSync(chatPath)) {
+    const db = new DatabaseSync(chatPath, { readOnly: true, timeout: 800 });
+    if (existsSync(memPath)) {
+      try {
+        // ATTACH 必须带 mode=ro：连接是只读的，但附加库默认按可写打开，
+        // 这个页面只做查询，"看包绝不改包"要由 SQLite 自己保证。
+        db.exec(`ATTACH DATABASE '${sqliteFileUri(memPath)}' AS mem`);
+      } catch (e) {
+        // 挂不上不算致命：聊天记录页能用，画像页会回落到"读不到"（错误信息照常给前端）
+        try { db.close(); } catch { /* 已关 */ }
+        throw new Error(`记忆档案库挂载失败（${e?.message ?? e}）：${memPath}`);
+      }
+    }
+    return db;
+  }
+  if (existsSync(memPath)) return new DatabaseSync(memPath, { readOnly: true, timeout: 800 });
+  throw new Error(`找不到桥的聊天库（已探测 ${chatPath} / ${memPath}），请先让桥至少跑过一次`);
+}
+
+/** 本机绝对路径 → SQLite ATTACH 用的 file: URI（只读）。路径里的空格/中文交给 encodeURI 处理，
+ *  但 # 与 ? 是 URI 语法字符，必须单独转义，否则会被当成 fragment/query 截断路径。 */
+function sqliteFileUri(p) {
+  const posix = String(p).replace(/\\/g, '/');
+  return 'file:' + encodeURI(posix).replace(/#/g, '%23').replace(/\?/g, '%3F') + '?mode=ro';
 }
 
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
@@ -6762,9 +8667,9 @@ function memoryTopWords(entries, cap) {
     .slice(0, clampInt(cap, 1, 30, 18));
 }
 
-/** 读取 state/persona-library.json（若存在），返回某 uid 的**完整**人格档案。
- *  【2026-09-14 主人反馈】旧版这里把 personality 截到 200、chatHabits/relationshipAdvice 截到 120、
- *  topics 只留 5 条 —— 界面展开卡片看到的永远是半句话，主人以为"学习没学全"。
+/** 读取 state/persona-library.json（若存在），返回某 uid 的完整人格档案。
+ *  2026-09-14 反馈：旧版这里把 personality 截到 200、chatHabits/relationshipAdvice 截到 120、
+ *  topics 只留 5 条 —— 界面展开卡片看到的永远是半句话，用户以为"学习没学全"。
  *  现在原样返回（含成文画像 profile 字段），界面要折叠自己折叠，数据层不再提前砍。 */
 function personaLibraryEntry(uid) {
   try {
@@ -6791,7 +8696,7 @@ function personaLibraryEntry(uid) {
       addressTerms: String(it.addressTerms ?? ''),
       profile: String(it.profile ?? '') || null,
       personality: String(it.personality ?? '') || null,
-      // 人格学习产出的**英文人设正文**（2026-09-15 新增）：界面「人物资料 / 完整资料」里也要能看到，
+      // 人格学习产出的英文人设正文（2026-09-15 新增）：界面「人物资料 / 完整资料」里也要能看到，
       // 所以在这条组装里一并透出（审批与覆盖动作仍走桥侧 /api/learning/persona-apply）。
       personaEn: String(it.personaEn ?? '') || null,
       personaEditedAtMs: Number(it.personaEditedAtMs) || 0,
@@ -6862,8 +8767,8 @@ function groupCooccurPairs(db, sinceMs) {
 }
 
 app.get('/api/learning/profile', async (req, res) => {
-  // 单人**完整**资料（不做长度截断）：图谱接口为了体积把 personality/likes/notes 截到 200~260 字符，
-  // 展开卡片时看不到全文（主人踩到的就是这个）。这里直读 memory.db，原样返回。
+  // 单人完整资料（不做长度截断）：图谱接口为了体积把 personality/likes/notes 截到 200~260 字符，
+  // 展开卡片时看不到全文（现场踩到的就是这个）。这里直读 memory.db，原样返回。
   const uid = String(req.query?.uid ?? '').trim();
   if (!/^\d{5,11}$/.test(uid)) return res.status(400).json({ ok: false, error: 'uid 必须是 5~11 位数字 QQ 号' });
   let db = null;
@@ -6899,16 +8804,16 @@ app.get('/api/learning/profile', async (req, res) => {
 /* 群角色（群主 / 管理员 / 普通成员）：OneBot get_group_member_list      */
 /* ------------------------------------------------------------------ */
 /**
- * 调 NapCat 的 OneBot HTTP —— **照抄仓库里已有的那套写法**，不另造连接方式。
+ * 调 NapCat 的 OneBot HTTP —— 照抄仓库里已有的那套写法，不另造连接方式。
  * 桥侧 qq-bridge/src/mcp-napcat-safe.js 的 onebot() 与 core/voice.js 的 onebotPost() 就是这条路：
  *   地址 = 桥 config.json 的 `napcat.httpUrl`（出厂 http://127.0.0.1:3000）
  *   令牌 = 桥 config.json 的 `napcat.accessToken`（OneKey 启动器写的是 truefriend）
  *   请求 = POST {httpUrl}/{action}，请求头 `authorization: Bearer <token>`，body 是参数 JSON
  *   成功判据 = body.status==='ok' && body.retcode===0，结果取 body.data
- * 这里读的 config.json 就是本文件 bridgeCfgPath()（findBridgeDir() 里那份），与桥**同源**，
+ * 这里读的 config.json 就是本文件 bridgeCfgPath()（findBridgeDir() 里那份），与桥同源，
  * 所以不会出现"桥连得上 NapCat、管理端连不上"的配置漂移。
- * 【踩过的坑】HTTP 426 是 httpUrl 指到了 WebSocket 端口（3001）的典型症状，桥侧就带了这句提示，
- * 这里原样透出，主人自查时不用再去翻桥的代码。
+ * 踩过的坑：HTTP 426 是 httpUrl 指到了 WebSocket 端口（3001）的典型症状，桥侧就带了这句提示，
+ * 这里原样透出，自查时不用再去翻桥的代码。
  */
 function napcatHttpTarget() {
   let cfg = {};
@@ -6938,12 +8843,12 @@ async function napcatOneBot(action, params = {}, timeoutMs = 8000) {
 }
 
 /**
- * 群角色缓存（uid → 'owner'|'admin'|'member'，同一个人在多群时取**最高**角色：owner > admin > member）。
- * 为什么必须缓存：get_group_member_list 是**逐群**一次 HTTP，几十个群串起来每次开画像页要好几秒
+ * 群角色缓存（uid → 'owner'|'admin'|'member'，同一个人在多群时取最高角色：owner > admin > member）。
+ * 为什么必须缓存：get_group_member_list 是逐群一次 HTTP，几十个群串起来每次开画像页要好几秒
  * （大群单次就要几百毫秒），而群成员表几乎不变。TTL 10 分钟，与桥侧 core/group-cache.js 的
  * GROUP_INFO_TTL_MS 取同一个量级，两边的"角色信息多久算新鲜"不会打架。
- * 为什么失败**不写缓存**：NapCat 没开/没登录时一次都拉不到，若把空结果当"新鲜缓存"存 10 分钟，
- * 主人把 NapCat 拉起来后画像页照样 10 分钟没有角色 —— 这种"改了没反应"最难排查。
+ * 为什么失败不写缓存：NapCat 没开/没登录时一次都拉不到，若把空结果当"新鲜缓存"存 10 分钟，
+ * 用户把 NapCat 拉起来后画像页照样 10 分钟没有角色 —— 这种"改了没反应"最难排查。
  * 降级：拿不到就是 null，图谱照常出（绝不能因为 NapCat 挂了把整页画像带崩）。
  */
 const GROUP_ROLE_TTL_MS = 10 * 60 * 1000;
@@ -6996,8 +8901,8 @@ async function fetchGroupRoles(groupIds) {
  * 取群角色表，返回 { map, cached, pending, at, groups }：
  *   · 缓存新鲜 → 直接用；
  *   · 过期/为空 → 触发一次刷新，最多等 budgetMs（默认 5 秒）就先把手头这份缓存返回、刷新留到后台跑完。
- * 为什么刷新失败**不做时间退避**：NapCat 关着时是 ECONNREFUSED，几次尝试都在毫秒级（而且拉不到就
- * 不写缓存，NapCat 一起来下一次开页立刻就有角色 —— 这才符合"主人刚把 NapCat 拉起来就该看到效果"）；
+ * 为什么刷新失败不做时间退避：NapCat 关着时是 ECONNREFUSED，几次尝试都在毫秒级（而且拉不到就
+ * 不写缓存，NapCat 一起来下一次开页立刻就有角色 —— 这才符合"用户刚把 NapCat 拉起来就该看到效果"）；
  * 真正怕的是 NapCat 半死不活（连得上不回包），那种情况由单一刷新 + budgetMs 兜住，请求不会堆积。
  * 为什么要这个"预算"：画像页是打开即看的页面，不能让 NapCat 拖成十几秒白屏；
  * 宁可这一刷先出图、角色下一刷补齐（前端无需感知，role 拿不到就是 null）。
@@ -7079,7 +8984,7 @@ app.get('/api/learning/graph', async (_req, res) => {
         uid,
         name: String(p.name ?? '').slice(0, 60) || uid,
         kind, tags, msgCount: st?.c || 0, lastSeen: st?.last || null,
-        // 真实角色（NapCat get_group_member_list）：主人自己也照实填（他可能就是某个群的群主）
+        // 真实角色（NapCat get_group_member_list）：用户自己也照实填（他可能就是某个群的群主）
         role: roleOf(uid),
         ...extra,
       });
@@ -7102,7 +9007,7 @@ app.get('/api/learning/graph', async (_req, res) => {
       });
     }
 
-    // —— 边：同群同现(近14d) + 私聊互动(近30d, 计为 主人↔对方) ——
+    // —— 边：同群同现(近14d) + 私聊互动(近30d, 计为 用户↔对方) ——
     const raw = groupCooccurPairs(db, cut14);
     const privRows = db.prepare("SELECT conv_key, COUNT(*) AS c FROM chat_messages WHERE conv_key LIKE 'private:%' AND ts_ms >= ? GROUP BY conv_key").all(cut30);
     for (const r of privRows) {
@@ -7168,9 +9073,9 @@ app.get('/api/learning/owner-profile', async (_req, res) => {
     const profileTags = splitFieldTags([owner.personality, owner.likes, owner.dislikes, owner.notes], 12);
     const memoryTop = memoryTopWords(memRows, 18);
     const persona = personaLibraryEntry(OWNER_QQ);
-    /* 主人**真实的群角色**：本接口没有节点结构（只有 owner 一个对象），就挂在 owner.role 上，
+    /* 用户真实的群角色：本接口没有节点结构（只有 owner 一个对象），就挂在 owner.role 上，
        与 /api/learning/graph 的 node.role 同一套取值；拿不到一律 null（NapCat 没开也不该影响画像页）。
-       注意这与 owner.kind='主人' 不是一回事：主人本人在自己的群里可能只是普通成员。 */
+       注意这与 owner 的"本人"含义不是一回事：用户本人在自己的群里可能只是普通成员。 */
     try { const rr = await getGroupRoleMap(collectGroupIds(db)); owner.role = rr.map.get(OWNER_QQ) ?? null; }
     catch { owner.role = null; }
 
@@ -7287,7 +9192,7 @@ app.put('/api/learning/relations', (req, res) => {
     if (!cat) delete rels[pairKey(a, c)];
     else { if (!REL_CATS.includes(cat)) { res.json({ ok: false, message: '未知关系类别' }); return; } rels[pairKey(a, c)] = cat; }
     writeFileSync(RELATIONS_FILE, JSON.stringify(rels, null, 2));
-    /* 主人一旦**手工**动过这一对，就把它的"自动标注旁证"删掉：
+    /* 用户一旦手工动过这一对，就把它的"自动标注旁证"删掉：
        ① 人工优先——下次 /api/learning/relations/auto 不会再把这条线覆盖掉；
        ② 免得 relations-auto.json 里留一条跟当前画面对不上的旧理由。
        （clear 也删：删掉线之后应当重新允许模型推断。） */
@@ -7304,23 +9209,23 @@ app.put('/api/learning/relations', (req, res) => {
 /* ------------------------------------------------------------------ */
 /**
  * 【为什么这里是"两步式"，而不是管理端自己调模型 —— 如实说明，没有假装接通】
- * 找过本仓库所有现成的调模型通道，**没有一条能被管理端直接复用**：
+ * 找过本仓库所有现成的调模型通道，没有一条能被管理端直接复用：
  *   · server/index.js 里没有任何 LLM HTTP 客户端：全文搜 `chat/completions` 零命中；`apiKey` 只出现在
  *     ① .credentials.yaml → 环境变量（喂给 DSH 的 provider，见本文件 ~599 行）② settings.yaml 的
- *     provider/model 读取（~2858 行起）—— 两者都只是**读配置**，一个请求都不发；
- *   · 桥侧真正在跑模型的方式是 DSH **agent 会话**（qq-bridge/src/dsh-client.js 的 NodeApiClient），
+ *     provider/model 读取（~2858 行起）—— 两者都只是读配置，一个请求都不发；
+ *   · 桥侧真正在跑模型的方式是 DSH agent 会话（qq-bridge/src/dsh-client.js 的 NodeApiClient），
  *     它活在桥进程内部。管理端能碰到的只有桥 console 的学习端点（/api/learning/persona、/portrait、
- *     /api/slang/research），那些是**异步起会话**、结果写进 memory.db，**不返回模型 JSON**，
+ *     /api/slang/research），那些是异步起会话、结果写进 memory.db，不返回模型 JSON，
  *     拿不到"这一对是闺蜜还是仇人"的结构化结论；
  *   · 全仓库唯一的 OpenAI 兼容 HTTP 调用在 qq-bridge/src/core/voice.js（POST {baseUrl}/chat/completions），
- *     那是语音合成/识别的端点，跟主人 DSH 用的文本 provider 不是一套配置，硬搬过来等于自己发明新通道
- *     （主人明确要求不要这么干）。
- * 所以按主人给的备选方案做成两步（同一个接口的两相）：
+ *     那是语音合成/识别的端点，跟本机 DSH 用的文本 provider 不是一套配置，硬搬过来等于自己发明新通道
+ *     （明确约定不要这么干）。
+ * 所以按给定的备选方案做成两步（同一个接口的两相）：
  *   ① POST /api/learning/relations/auto { minStrength?, limit?, overwriteAuto? }
- *      → 返回挑好的候选对 + **给模型的完整提示词**（不落库）
+ *      → 返回挑好的候选对 + 给模型的完整提示词（不落库）
  *   ② 把模型吐的 JSON 原样 POST 回来：{ result: <对象或字符串> }
  *      → 校验（类别只认五个、只认候选里的对、人工标注不覆盖）后写进 relations.json
- * 落库那一相严格按人工优先：凡是被主人手点过的线（或已从"自动旁证"里剔除的线）一律不覆盖。
+ * 落库那一相严格按人工优先：凡是被手工点过的线（或已从"自动旁证"里剔除的线）一律不覆盖。
  */
 const AUTO_RELATIONS_FILE = join(CONFIG_DIR, 'relations-auto.json');
 
@@ -7342,11 +9247,11 @@ function normalizeRelCat(v) {
 const clampNum = (v, min, max, dflt) => { const n = Number(v); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt; };
 
 /**
- * 挑候选关系对：与 /api/learning/graph **同一套**强度算法（近 14d 同群同现 + 近 30d 私聊互动），
+ * 挑候选关系对：与 /api/learning/graph 同一套强度算法（近 14d 同群同现 + 近 30d 私聊互动），
  * 只取 strength ≥ minStrength 的，按强度降序取前 limit 条。
  * 为什么既设阈值又设上限：几百条边一次性全丢给模型，既烧额度又慢，而且弱边（同群撞见一两次）
  * 本身推不出关系 —— 那两个条件正好一起解决。默认 0.5 / 20 对，调用方可传参覆盖。
- * 又为什么在这里先剔掉人工标注的并计数：人工优先，主人手点的那条线不该被模型改写。
+ * 又为什么在这里先剔掉人工标注的并计数：人工优先，手工点的那条线不该被模型改写。
  * 自动标注过的对（能在 relations-auto.json 里查到旁证）默认允许重算刷新，见 overwriteAuto。
  */
 async function collectRelationCandidates({ minStrength = 0.5, limit = 20, overwriteAuto = true } = {}) {
@@ -7602,11 +9507,12 @@ function localCloneSource() {
   const dshHome = String(cfg.instances?.dshIsolated?.isolatedHome || '') || DEFAULT_ISOLATED_HOME;
   const onekey = findNapcatOneKey();
   const napcatConfigDir = onekey ? findNapcatConfigDir(onekey.dir) : null;
-  // 鲸鱼娘表情库（存在才带）
-  const memeCandidates = [
-    join(dirname(bridgeDir || ''), 'meme', 'whale-fanart-001'),
-    join(homedir(), '.dsh', 'meme-packs', 'whale-fanart-001'),
-  ];
+  // 表情包（存在才带）：不再绑定某一个具体包，扫描随包目录与后装目录里的任意包
+  const memeCandidates = [];
+  for (const root of [join(dirname(bridgeDir || ''), 'meme'), bridgeDir ? join(bridgeDir, 'meme-packs') : '', join(homedir(), '.dsh', 'meme-packs')]) {
+    if (!root) continue;
+    try { for (const n of readdirSync(root)) memeCandidates.push(join(root, n)); } catch { /* 目录不存在就跳过 */ }
+  }
   const memeDir = memeCandidates.find((d) => { try { return existsSync(join(d, 'index.db')); } catch { return false; } }) || null;
   // 本机 DSH CLI 版本（目标机跟随安装，避免 preset/插件版本对不上）
   let dshVersion = '';
@@ -7669,10 +9575,10 @@ app.get('/api/ssh/deploy/tasks', (_req, res) => {
 
 const distDir = join(RUNTIME_ROOT, 'dist');
 if (existsSync(join(distDir, 'index.html'))) {
-  /* 【2026-09-23 修「前端改了、完全退出重启也看不到」】
-   * 带 hash 的 assets 可以放心缓存（文件名变了就是新文件），但 **index.html 绝不能缓存**：
+  /* 2026-09-23 修「前端改了、完全退出重启也看不到」：
+   * 带 hash 的 assets 可以放心缓存（文件名变了就是新文件），但 index.html 绝不能缓存：
    * Electron 壳是"建窗时 loadURL 一次、没有菜单也没有刷新快捷键"（见打包工程的 moonbot-app/main.js），
-   * 一旦它把旧 index.html 留在自己的 HTTP 缓存里，之后每次启动都会照着**旧 index.html** 去要
+   * 一旦它把旧 index.html 留在自己的 HTTP 缓存里，之后每次启动都会照着旧 index.html 去要
    * 已经不存在的旧 bundle；而下面那条兜底路由会把 index.html 的内容当 HTML 回给 .js 请求，
    * 于是要么白屏、要么从缓存里把旧 bundle 拿出来继续用 —— 表现就是"怎么重启都还是原来的样子"。
    * 让入口一律 no-store，壳每次启动都从服务端拿最新入口。 */
@@ -7702,14 +9608,14 @@ if (process.env.QBM_NO_LISTEN !== '1') {
     console.log(`[QQ-Bridge Manager API] http://127.0.0.1:${PORT}`);
     scheduleAutoStart();
     ensureGuardianArmed();
-    /* 【2026-09-15 主人反馈"本地没显示服务端运行中"】管理器一启动就把上次连着的那台服务器连回来：
+    /* 2026-09-15 反馈"本地没显示服务端运行中"：管理器一启动就把上次连着的那台服务器连回来：
      * 连接表在内存里（进程重启就空），以前打开应用永远显示"服务端未运行"，非要人手点一次「连接」。
      * 延迟 1.5s 等后端自己稳下来；冷却中则交给 scheduleReconnect 的冷却分支处理。 */
-    /* 【2026-09-15 主人反馈"本地没显示服务端运行中"】管理器一启动就把上次连着的那台服务器连回来：
+    /* 2026-09-15 反馈"本地没显示服务端运行中"：管理器一启动就把上次连着的那台服务器连回来：
      * 连接表在内存里（进程重启就空），以前打开应用永远显示"服务端未运行"，非要人手点一次「连接」。
      * 延迟 1.5s 等后端自己稳下来；冷却中则交给 scheduleReconnect 的冷却分支处理。
-     * 【2026-09-22 主人要求】"连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
-     * 服务端启动中状态机" —— 开机这一次**不再走 scheduleReconnect**（那里第一次要等 5 秒退避，
+     * 2026-09-22：需求"连接上服务器之后直接退出，下次打开自动连接服务器，这个过程希望能带上
+     * 服务端启动中状态机" —— 开机这一次不再走 scheduleReconnect（那里第一次要等 5 秒退避，
      * 而且不推状态机），改成直接 connectStep + 后台 waitServerReady：界面一打开就能看到
      * "正在连接服务器… → 隧道已建立 → 服务端启动中（DSH/NapCat/桥逐个就绪）→ 预鉴权 → 已就绪"。 */
     setTimeout(() => {
@@ -7744,42 +9650,40 @@ if (process.env.QBM_NO_LISTEN !== '1') {
     // 靠这个定时复查把守卫补上（应用没开时什么都不做）。
     const gTimer = setInterval(ensureGuardianArmed, 60000);
     gTimer.unref?.();
-    /* 【2026-09-22】本机 NapCat 也做**一次**静默预鉴权（主人："本地端你自己看着改"）：
-     * 它平时不随应用启动，所以不能只在开机时试一次 —— 每 60 秒看一眼它起没起，起来了就预鉴权一次
-     * （同一个 token 一小时只做一次，走 funnel 的预算与缓存），起了之后界面点开即用、不用再刷。 */
-    const warmTimer = setInterval(() => { void warmLocalNapcatIfUp().catch(() => {}); }, 60000);
-    warmTimer.unref?.();
-    setTimeout(() => { void warmLocalNapcatIfUp().catch(() => {}); }, 6000).unref?.();
+    /* 2026-09-23：去除探针与状态检测。本机 NapCat 的"每 60 秒看一眼起没起 +
+     * 起来了就静默预鉴权一次"整套定时器已删除：它既是一个周期性自动探针，又会花掉
+     * WebUI 页面首次登录要用的那发登录额度。管理器现在不主动查本机 NapCat 任何状态。 */
   });
 }
 
 /* ============================================================================
- * 「关闭界面时结束 NapCat」（instances.napcatLocal.killOnExit，2026-09-18 主人要求）
+ * 「关闭界面时结束 NapCat」（instances.napcatLocal.killOnExit，2026-09-18 需求）
  *
  * 需求原文：「napcat配置界面加一个本地启动后关闭界面终结napcat进程的选项，支持自由开关」。
- * 开 = 关掉界面/退出管理器进程时，**本次这个启动器拉起来的** NapCat 一并结束；关 = 完全不碰（它继续后台跑）。
+ * 开 = 关掉界面/退出管理器进程时，本次这个启动器拉起来的 NapCat 一并结束；关 = 完全不碰（它继续后台跑）。
  *
  * 这个开关管住三条"退出"路径，缺一条都会漏：
- *   ① 管理器进程**优雅退出**（Ctrl+C / 收到 SIGINT、SIGTERM / 正常 exit）→ 本节的 process.on 处理器；
+ *   ① 管理器进程优雅退出（Ctrl+C / 收到 SIGINT、SIGTERM / 正常 exit）→ 本节的 process.on 处理器；
  *   ② Electron 壳关窗：壳会先 POST /api/shutdown 再 `taskkill /pid <后端> /T /F` → 见该路由的 killOnExit 判断；
- *   ③ 壳**没**走 ②（旧壳、被任务管理器直接结束、崩溃）→ 壳的 taskkill 是强杀，本进程一行 JS 都跑不到，
+ *   ③ 壳没走 ②（旧壳、被任务管理器直接结束、崩溃）→ 壳的 taskkill 是强杀，本进程一行 JS 都跑不到，
  *      只能靠活过后端的守卫进程 server/napcat-guardian.mjs，它的武装参数里带上了同一开关（--kill-napcat）。
  * 所以"一个开关"必须同时改这三处，否则在打包版里会是"关了开关也被守卫偷偷收掉"的假开关。
  *
- * 关于"只杀我们自己拉起来的那个"（主人明确要求，也是本节的实现难点）：
- *   启动链是 `管理器 → wscript.exe 跑 VBS → NapCatWinBootMain.exe → 注入/拉起 QQ.exe`。
- *   VBS 里用的是 `ws.Run ..., 0, False`（非阻塞），wscript 秒退，**所以 spawnDetached 返回的那个 pid
- *   用完就没用了**——这也是现有 stopInstance 只能"按目录前缀一刀切"的原因。
+ * 关于"只杀我们自己拉起来的那个"（这是约定，也是本节的实现难点）：
+ *   启动链是 `管理器 → powershell `Start-Process -WindowStyle Hidden` → NapCatWinBootMain.exe → 注入/拉起 QQ.exe`。
+ *   启动器是非阻塞的（`Start-Process -WindowStyle Hidden` 起完即退、不等待），
+ *   拉起注入后自己就退，所以 spawnDetached 返回的那个 pid 用完就没用了——这也是现有
+ *   stopInstance 只能"按目录前缀一刀切"的原因。
  *   现在改成两档匹配（从精确到兜底）：
- *     ① **启动时登记的 pid**：启动后按目录前缀轮询新出现的 NapCatWinBootMain/QQ，把"启动前就在的"排除掉，
+ *     ① 启动时登记的 pid：启动后按目录前缀轮询新出现的 NapCatWinBootMain/QQ，把"启动前就在的"排除掉，
  *        得到"这一轮新出现的"进程号；退出时 `taskkill /pid N /T /F` 精确收（见 collectNapcatPidsAfterLaunch）；
- *     ② **目录前缀兜底**：没登记到 pid 时（刚启动几秒就被关掉、或登记窗口错过了），退回与「停止 NapCat」
+ *     ② 目录前缀兜底：没登记到 pid 时（刚启动几秒就被关掉、或登记窗口错过了），退回与「停止 NapCat」
  *        完全相同的过滤条件（可执行文件路径落在托管 OneKey 目录内的 NapCatWinBootMain/QQ）。
  *   误杀风险（如实写清，不粉饰）：
  *     · ① 只在"pid 被系统回收后复用"这种极小概率下打错目标；登记到退出之间是秒级窗口，实际可忽略；
- *     · ② 会连带收掉**同一个 OneKey 目录里用户自己双击 VBS 启动的那份** NapCat/QQ —— 这是按路径前缀过滤
+ *     · ② 会连带收掉同一个 OneKey 目录里用户自己用别的办法启动的那份 NapCat/QQ —— 这是按路径前缀过滤
  *       的固有代价，与「停止」按钮一致；但托管目录之外的 QQ（如 Program Files 里的正版 QQ）绝不会被匹配到；
- *     · 托管目录为空 → 直接跳过（宁可不动，也不误杀）。本进程**没拉起过** NapCat → 整个函数直接返回，
+ *     · 托管目录为空 → 直接跳过（宁可不动，也不误杀）。本进程没拉起过 NapCat → 整个函数直接返回，
  *       所以"用户在别处跑的 NapCat"在只有管理器被关掉时不会被牵连。
  *
  * 为什么用 `taskkill /T /F`（取舍写在这里，免得以后被"优化"掉）：
@@ -7795,7 +9699,7 @@ if (process.env.QBM_NO_LISTEN !== '1') {
  * ========================================================================== */
 /** 本次管理器进程拉起来的 NapCat 相关进程（pid -> { name, path, at }），启动时登记，退出时精确收 */
 const napcatSpawnedPids = new Map();
-/** 本进程是否真的拉起过 NapCat：**没拉起过就一根手指都不动**（免得去动用户在别处跑的那份） */
+/** 本进程是否真的拉起过 NapCat：没拉起过就一根手指都不动（免得去动用户在别处跑的那份） */
 let napcatLaunchedThisProcess = false;
 /** 幂等标记：exit / SIGINT 可能连着触发，收尾只做一次 */
 let napcatExitKillDone = false;
@@ -7827,9 +9731,9 @@ function listNapcatProcsInDirs(dirs) {
 }
 
 /** 启动后把这个"启动器新拉起来的" NapCat 进程号登记进 napcatSpawnedPids。
- *  为什么要轮询：wscript 起完 VBS 就退，NapCatWinBootMain 要等一两秒才出现、再往后还有它拉起的 QQ.exe，
+ *  为什么要轮询：启动器（powershell Start-Process）起完就退，NapCatWinBootMain 要等一两秒才出现、再往后还有它拉起的 QQ.exe，
  *  所以 spawn 返回那一刻根本拿不到 pid，只能盯一段时间（窗口 8 秒；实现在慢盘/杀软拦截下也够）。
- *  beforePids 是**启动前**的快照（启动前那段预清理是 Stop-Process，进程真正消失有几秒延迟），
+ *  beforePids 是启动前的快照（启动前那段预清理是 Stop-Process，进程真正消失有几秒延迟），
  *  用它做差集才不会把"上一份还没退干净的 NapCat"当成自己的而误杀。
  *  窗口内没抓到也不影响正确性：退出时会退回目录前缀兜底（见 killNapcatOnExitSync 的第二档）。 */
 async function collectNapcatPidsAfterLaunch(dirs, beforePids, logStream) {
@@ -7903,7 +9807,7 @@ function killNapcatOnExitSync(reason) {
 }
 
 /* 三条退出路径都挂上（幂等，重复触发只做一次）。
- * 这里**没有**放 any 异步收尾：process.on('exit') 只能跑同步代码，所以 killNapcatOnExitSync 全程 spawnSync。 */
+ * 这里没有放 any 异步收尾：process.on('exit') 只能跑同步代码，所以 killNapcatOnExitSync 全程 spawnSync。 */
 process.on('exit', () => killNapcatOnExitSync('管理器进程正常退出'));
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
@@ -7913,9 +9817,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-/** 【仅回归测试用】把"本进程拉起过 NapCat"（并可选定 pid）注入进来。
- *  为什么不走真启动：真拉起 NapCat 会真登录 QQ（会踢掉主人手机/其它端的登录），代价太大。
- *  所以 tools/test-napcat-exit-kill.mjs 用**同名的假 exe**（把 node.exe 复制成 NapCatWinBootMain.exe）
+/** 仅回归测试用：把"本进程拉起过 NapCat"（并可选定 pid）注入进来。
+ *  为什么不走真启动：真拉起 NapCat 会真登录 QQ（会踢掉用户手机/其它端的登录），代价太大。
+ *  所以 tools/test-napcat-exit-kill.mjs 用同名的假 exe（把 node.exe 复制成 NapCatWinBootMain.exe）
  *  配合这个入口来验证退出收尾这条路径。产品代码里的唯一调用点是 startNapcatLocal（见那里的登记逻辑）。
  *  pid 传 0（或不传）= 只置"拉起过"标记、不登记进程号，用来验第二档"按目录前缀兜底"。 */
 export function __testRegisterNapcatLaunch(pid = 0, name = 'NapCatWinBootMain') {
@@ -7925,18 +9829,35 @@ export function __testRegisterNapcatLaunch(pid = 0, name = 'NapCatWinBootMain') 
   return true;
 }
 
+/** 【仅回归测试用】把常驻隐藏器的 PowerShell 源码原样吐出来，供 tools 侧做
+ *  ① 语法解析检查（Parser::ParseFile）② 真窗口实验（假 Shell 目录 + 假 NapCatWinBootMain + 真黑框）。
+ *  产品里这段源码只会被 startQqWindowHider 写进临时 .ps1，不经过这里。 */
+export function __testQqHiderScript(shellDir, opts = {}) {
+  return qqWindowHiderScript({
+    shellDir,
+    logFile: opts.logFile || join(tmpdir(), 'moonbot-qq-hider-test.log'),
+    readyFile: opts.readyFile || join(tmpdir(), 'moonbot-qq-hider-test.ready'),
+    budgetMs: Number(opts.budgetMs) || QQ_HIDER_DEFAULTS.budgetMs,
+    pollMs: Number(opts.pollMs) || QQ_HIDER_DEFAULTS.pollMs,
+    burstMs: Number(opts.burstMs) || QQ_HIDER_DEFAULTS.burstMs,
+    burstWindowMs: Number(opts.burstWindowMs) || QQ_HIDER_DEFAULTS.burstWindowMs,
+    consoleScanMs: Number(opts.consoleScanMs) || 60000,
+    parentPid: Number(opts.parentPid) || 0,
+  });
+}
+
 /* ============================================================================
- * NapCat 守卫（2026-09-13，主人要求："应用进程关闭时，NapCat 进程也要关闭"）
+ * NapCat 守卫（2026-09-13：需求"应用进程关闭时，NapCat 进程也要关闭"）
  *
- * 关窗时 Electron 壳走的是 `taskkill /pid <后端> /T /F` —— 管理器**被强杀**、跑不到任何清理代码；
- * 而 NapCat 是 wscript 拉起的游离进程（NapCatWinBootMain.exe → 注入 QQ.exe），不在那个进程树里，
- * 所以以前"关掉应用，NapCat 还挂在后台"。解决办法是一个**活过后端**的守卫进程
+ * 关窗时 Electron 壳走的是 `taskkill /pid <后端> /T /F` —— 管理器被强杀、跑不到任何清理代码；
+ * 而 NapCat 是游离进程（隐藏拉起 → NapCatWinBootMain.exe 注入 QQ.exe），不在那个进程树里，
+ * 所以以前"关掉应用，NapCat 还挂在后台"。解决办法是一个活过后端的守卫进程
  * （server/napcat-guardian.mjs）：它盯着后端 PID，后端一没，就把 NapCat/桥/DSH 一起收掉。
  *
- * 只在"父进程就是应用本体(MoonBot.exe)"时才武装 —— 这样不会把 wscript 拉完即退、双击 qbm-node、
+ * 只在"父进程就是应用本体(MoonBot.exe)"时才武装 —— 这样不会把启动器拉完即退、双击 qbm-node、
  * cmd 里 node server/index.js 这些启动方式误判成"应用关了"（否则一开机就会把 NapCat 杀掉）。
  * 想强制开/关：环境变量 QBM_NAPCAT_GUARDIAN=1 / 0。
- * 管理器**正常重启**不会误杀：新后端起来第一件事就是接管守卫（杀旧守卫 + 改写 guard 文件），
+ * 管理器正常重启不会误杀：新后端起来第一件事就是接管守卫（杀旧守卫 + 改写 guard 文件），
  * 旧守卫动手前会再核对一次 guard 文件，发现"已归新后端"就静默退出。
  */
 const GUARDIAN_FILE = join(CONFIG_DIR, 'napcat-guardian.json');
@@ -7955,9 +9876,9 @@ function guardianFromFile() {
   } catch { return { pid: 0, parentPid: 0 }; }
 }
 /** 把守卫进程"送出去"：spawn 出来的子进程会被壳的 `taskkill /T` 连坐杀掉，所以要用两招脱身：
- *   ① **换个可执行文件路径**：壳的兜底清理是按 `$_.Path -eq '<runtime>\qbm-node.exe'` 精确匹配的，
- *      所以给守卫做一个**硬链接**（同盘、零额外空间）放在 server\ 下，路径不同即不被命中；
- *   ② **用 WMI 创建进程**：这样它的父进程是 WmiPrvSE.exe 而不是本管理器，
+ *   ① 换个可执行文件路径：壳的兜底清理是按 `$_.Path -eq '<runtime>\qbm-node.exe'` 精确匹配的，
+ *      所以给守卫做一个硬链接（同盘、零额外空间）放在 server\ 下，路径不同即不被命中；
+ *   ② 用 WMI 创建进程：这样它的父进程是 WmiPrvSE.exe 而不是本管理器，
  *      `taskkill /T`（顺父链枚举）就够不着它了。守卫的"要盯谁"由 `--parent` 显式传进去，不依赖真实父进程。
  * 返回 { pid, exe }（失败返回 { pid: 0, error }）。导出是为了回归测试能复用同一条路径。 */
 export function spawnGuardianDetached(scriptPath, args, logFn = () => {}, opts = {}) {
@@ -7975,13 +9896,13 @@ export function spawnGuardianDetached(scriptPath, args, logFn = () => {}, opts =
   }
   if (exe === process.execPath) logFn('⚠ 没能给守卫换一个 exe 路径：壳的"按 exe 路径杀 qbm-node"兜底会把它一起带走（改用 WMI 脱身仍有效）');
   const cmdline = [exe, scriptPath, ...args].map((s) => (/[\s"]/.test(String(s)) ? `"${String(s).replace(/"/g, '\\"')}"` : String(s))).join(' ');
-  /* 【2026-09-13 主人要求："开启应用时不要带任何 cmd 黑窗"】
-   * WMI 的 `Win32_Process.Create` **默认会给控制台程序新建一个可见的黑色控制台窗口**
+  /* 2026-09-13：需求"开启应用时不要带任何 cmd 黑窗"
+   * WMI 的 `Win32_Process.Create` 默认会给控制台程序新建一个可见的黑色控制台窗口
    * （实测 Win11：会额外弹出一个 Windows Terminal 窗口，里面正是守卫自己那行
    * "守卫启动：父进程=… 托管目录=…"）。根因是 WMI 建进程时没指定窗口显示方式。
    * 两条修法都实测过：
-   *   · `Win32_ProcessStartup.CreateFlags = 0x08000000`(CREATE_NO_WINDOW) → **无效**，Create 直接返回 21(InvalidParameter)；
-   *   · `Win32_ProcessStartup.ShowWindow = 0`(SW_HIDE) → **有效**：进程号照常返还、进程照常活着，控制台窗口是隐藏的。
+   *   · `Win32_ProcessStartup.CreateFlags = 0x08000000`(CREATE_NO_WINDOW) → 无效，Create 直接返回 21(InvalidParameter)；
+   *   · `Win32_ProcessStartup.ShowWindow = 0`(SW_HIDE) → 有效：进程号照常返还、进程照常活着，控制台窗口是隐藏的。
    * 所以先走"带 startup 信息"的建法，失败再退回旧的普通建法（宁可偶尔闪一下窗，也不能让守卫起不来）。 */
   const ps = [
     `$cmd = '${cmdline.replace(/'/g, "''")}'`,
@@ -8005,7 +9926,7 @@ export function spawnGuardianDetached(scriptPath, args, logFn = () => {}, opts =
   }
 }
 
-/** 找正在运行的 MoonBot 应用进程（找不到返回 0）。守卫只盯**验证过名字**的进程，
+/** 找正在运行的 MoonBot 应用进程（找不到返回 0）。守卫只盯验证过名字的进程，
  *  绝不拿一个来路不明的 PID 去当"应用"—— 否则守卫会把"父进程不存在"当成应用关闭、当场把整套收掉。 */
 function findMoonBotPid() {
   try {
@@ -8026,7 +9947,7 @@ function armNapcatGuardian(watchPid, opts = {}) {
     }
     const dirs = napcatManagedDirs(runtimes.get('napcat-local'));
     const dshPort = Number(loadConfig()?.instances?.dshIsolated?.port) || 10721;
-    /* 【2026-09-18 killOnExit】把「关闭界面时结束 NapCat」开关一起交给守卫：
+    /* 2026-09-18 killOnExit：把「关闭界面时结束 NapCat」开关一起交给守卫：
      * 打包版关窗走的是壳的 `taskkill /F`，本进程跑不到任何代码（见文件上方「关闭界面时结束 NapCat」一节），
      * 守卫是那条路上唯一能执行"收不收 NapCat"的地方。不带这个参数就等于开关在打包版里是假的。
      * 关掉开关时守卫仍会收桥/隔离 DSH（那是它原本的职责，不在本次需求范围内）。 */
@@ -8039,9 +9960,9 @@ function armNapcatGuardian(watchPid, opts = {}) {
       '--guard-file', GUARDIAN_FILE,
       '--dirs', JSON.stringify(dirs),
       '--dsh-port', String(dshPort),
-      // 只让守卫收掉**本安装**的桥（按绝对路径匹配），不影响同机其它安装/其它进程
+      // 只让守卫收掉本安装的桥（按绝对路径匹配），不影响同机其它安装/其它进程
       '--bridge-script', join(RUNTIME_ROOT, 'qq-bridge', 'src', 'bridge.js'),
-      // 0 = 按主人的开关，退出时不动 NapCat；1/缺省 = 收（老行为）
+      // 0 = 按该开关的设置，退出时不动 NapCat；1/缺省 = 收（老行为）
       '--kill-napcat', killNapcat ? '1' : '0',
       '--log', logFile,
     ], (m) => mlog(`[guardian] ${m}`));
@@ -8062,7 +9983,7 @@ function armNapcatGuardian(watchPid, opts = {}) {
 /** 自动武装策略（启动时一次 + 每 60s 复查一次）：
  *   ① 已经武装好（guard 文件里的守卫还活着）→ 什么都不做；
  *   ② 本后端的父进程就是应用本体 → 盯它；
- *   ③ 否则找一台在跑的 MoonBot.exe → 盯它（**这一条很关键**：应用启动时如果复用已在跑的后端，
+ *   ③ 否则找一台在跑的 MoonBot.exe → 盯它（这一条很关键：应用启动时如果复用已在跑的后端，
  *      就不会有新后端去自动武装，于是"关掉应用 NapCat 还在"—— 有了这条，下次开应用 60 秒内就武装好了）；
  *   ④ 应用没开 → 静默等着，不武装。QBM_NAPCAT_GUARDIAN=0 可整体关掉。 */
 function ensureGuardianArmed() {
@@ -8088,7 +10009,7 @@ function ensureGuardianArmed() {
 /** POST /api/guardian/arm：手工（重新）武装守卫。
  *  为什么需要：守卫默认只在"后端由应用本体(MoonBot.exe)拉起"时自动武装；如果后端是被脚本/命令行
  *  拉起来的（比如开发者用 restart-manager.ps1 重启管理器），那一次就没有守卫 —— 但用户的应用窗口
- *  其实还开着。这个接口可以把守卫指向**当前真正在跑的那个 MoonBot.exe**，于是"关掉应用 → NapCat 一起关"
+ *  其实还开着。这个接口可以把守卫指向当前真正在跑的那个 MoonBot.exe，于是"关掉应用 → NapCat 一起关"
  *  立刻生效，不用先关一次应用。
  *  body.parentPid 可显式指定；不传就自动找第一个 MoonBot 进程。找不到就如实报错（绝不瞎指一个 PID，
  *  否则守卫会把"父进程不存在"当成应用关闭、当场把整套收掉）。 */
@@ -8111,10 +10032,10 @@ app.post('/api/guardian/arm', (req, res) => {
 });
 
 /** POST /api/shutdown：应用关闭前的"体面收摊"。Electron 壳（新版 main.js）会先调它再 taskkill；
- *  手工/脚本也能用。默认只收 NapCat（与主人这次的要求一致），带 `{all:true}` 时连桥与隔离 DSH 一起收。
+ *  手工/脚本也能用。默认只收 NapCat（与上述约定一致），带 `{all:true}` 时连桥与隔离 DSH 一起收。
  *
- *  【2026-09-18 killOnExit】"关闭界面"这条主路径就在这儿：壳先调本接口、再 `taskkill /T /F`。
- *  所以开关为**关**时这里必须**完全不碰 NapCat**（桥/DSH 的 `all` 行为不受影响），否则就是假开关。
+ *  2026-09-18 killOnExit："关闭界面"这条主路径就在这儿：壳先调本接口、再 `taskkill /T /F`。
+ *  所以开关为关时这里必须完全不碰 NapCat（桥/DSH 的 `all` 行为不受影响），否则就是假开关。
  *  返回里带上 napcatSkipped 让调用方（壳/脚本/界面）知道"这次是故意没收"。 */
 app.post('/api/shutdown', async (req, res) => {
   const all = req.body?.all === true || req.query?.all === '1';
@@ -8149,27 +10070,27 @@ app.post('/api/shutdown', async (req, res) => {
 
 /**
  * 开机/开关窗口后自动恢复上次启动过的实例（`instances.<k>.enabled === true`）。
- * 顺序仍是 NapCat → DSH → 桥（依赖关系），但**不等就绪**：状态机自己在后台推进，界面照常可用。
+ * 顺序仍是 NapCat → DSH → 桥（依赖关系），但不等就绪：状态机自己在后台推进，界面照常可用。
  * 已经在跑的（端口在监听）会被 startInstanceTracked 探活认回，不会重复拉起 —— 这也是 NapCat 必须走这条路的原因
  * （重复启动会挤出已经扫码登录的那份）。
  */
 function scheduleAutoStart() {
   try {
     const cfg = loadConfig();
-    /* 【2026-09-21 主人要求】本机 NapCat 不启用（配置明确关掉 / 当前目标是服务器）时说**一句**就够了：
+    /* 2026-09-21：本机 NapCat 不启用（配置明确关掉 / 当前目标是服务器）时说一句就够了：
      * 跳过探测这件事本身已经由 localNapcatOffReason 的闸门兜住（见 verifyNapcatWebuiToken），
      * 但"为什么日志里不再有【本机 NapCat】的动静"要留个凭据，否则以后排查的人会以为探测坏了。
      * 只在这里写一次（这个函数在 app.listen 回调里调用一次）；绝不像以前那样每分钟一条
-     * 「[napcat] WebUI 令牌验证失败：local:6099 …」（主人日志里整夜刷屏的就是它）。 */
+     * 「[napcat] WebUI 令牌验证失败：local:6099 …」（日志里整夜刷屏的就是它）。 */
     const localNapOff = localNapcatOffReason(cfg);
     if (localNapOff) {
       mlog(`[napcat] 本地 NapCat 未启用（${localNapOff}），跳过探测：不再验证 127.0.0.1:${Number(cfg.instances?.napcatLocal?.webuiPort) || 6099} 的 WebUI 令牌`);
     }
     if (cfg.autoStartOnBoot === false) { mlog('[autostart] 已配置为不自动启动，跳过'); return; }
     const order = ['napcat-local', 'dsh-isolated', 'bridge-local'];
-    /* 【2026-09-14 主人要求】实例级开关 `instances.<key>.autoStartOnBoot: false`：
+    /* 2026-09-14：实例级开关 `instances.<key>.autoStartOnBoot: false`：
      * 单个实例说不跟着应用启动，就不再被恢复（典型场景：本机不想一开应用就把 QQ 拉起来 —— NapCat 一旦启动
-     * 就会重新登录一次，主人只想在自己要用的时候手动点启动）。全局 cfg.autoStartOnBoot 仍然有效，优先级更高。 */
+     * 就会重新登录一次，用户只想在自己要用的时候手动点启动）。全局 cfg.autoStartOnBoot 仍然有效，优先级更高。 */
     const skipped = [];
     const wanted = order.filter((id) => {
       const inst = cfg.instances?.[keyOf(id)];
@@ -8198,4 +10119,4 @@ function scheduleAutoStart() {
 
 // packLocalBridge 也导出：tools/test-bridge-pack-excludes-config.mjs 会真的打一次包、列一遍 tar 内容，
 // 用它守住"代码包不再把远端 config.json 覆盖掉"这条线（2026-09-19 的事故见上面排除表里的注释）。
-export { app, packLocalBridge };
+export { app, packLocalBridge, buildLocalNapcatTokenStatus, applyLocalNapcatTokens };

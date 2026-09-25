@@ -2,9 +2,9 @@
 /* Pixiv 一次性登录引导 / 登录态自检（2026-09-20 新增，无第三方依赖）。
  *
  * 为什么要有这个脚本：桥的「按名字搜画师」需要一个长期登录态，而 pixiv 只给两条路 ——
- *   ① PHPSESSID（短命、要人手动维护）；② OAuth（长期，但要有人**第一次**去换）。
- * 这个脚本就是那个"第一次"：主人贴一次 PHPSESSID，它换成 refresh_token 落盘（state/pixiv-token.json），
- * 之后桥自己每 50 分钟轮换 access_token，主人再也不用管（见 src/lib/pixiv-auth.js）。
+ *   ① PHPSESSID（短命、要人手动维护）；② OAuth（长期，但要有人第一次去换）。
+ * 这个脚本就是那个"第一次"：手动贴一次 PHPSESSID，它换成 refresh_token 落盘（state/pixiv-token.json），
+ * 之后桥自己每 50 分钟轮换 access_token，不需要再人工干预（见 src/lib/pixiv-auth.js）。
  *
  * 用法：
  *   node tools/pixiv-login.mjs --cookie "PHPSESSID=xxxx"        # 整条 cookie 串 / 只给会话值都认
@@ -12,8 +12,8 @@
  *   node tools/pixiv-login.mjs --refresh-token <token>          # 手上已经有 refresh_token
  *   node tools/pixiv-login.mjs --status                         # 看现在的登录态 + 实时探测 app-api
  *
- * 纪律：**绝不回显任何凭证**（cookie / code / verifier / access_token / refresh_token 只报长度）。
- *   换 code 的那两步失败时会**原样**打印每个形状的 HTTP 状态与响应体（已脱敏），方便照着实测改。
+ * 纪律：绝不回显任何凭证（cookie / code / verifier / access_token / refresh_token 只报长度）。
+ *   换 code 的那两步失败时会原样打印每个形状的 HTTP 状态与响应体（已脱敏），方便照着实测改。
  */
 import fs from 'node:fs';
 import {

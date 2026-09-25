@@ -1,8 +1,8 @@
 // 试一把本机已有的 SSH 私钥能不能登上这台服务器（只读探测，不改任何东西）。
-// 动机：主人报"密码认证：All configured authentication methods failed"，而服务器通告的是 publickey,password。
+// 动机：用户报"密码认证：All configured authentication methods failed"，而服务器通告的是 publickey,password。
 // 如果他平时是用密钥登录的（很常见，尤其是 root 密码被锁的机器 —— 那种情况下 sshd 照样列出 password，
 // 但任何密码都必然被拒），那正确解法不是猜密码，而是把管理器也切到密钥认证。
-// 本脚本把 ~/.ssh 下所有私钥都试一遍，只打印"哪把能用"，**不打印任何密钥内容**。
+// 本脚本把 ~/.ssh 下所有私钥都试一遍，只打印"哪把能用"，不打印任何密钥内容。
 //
 // 用法：node tools/diag-ssh-keys.mjs [host] [user] [port]
 import { readFileSync, readdirSync, existsSync } from 'node:fs';

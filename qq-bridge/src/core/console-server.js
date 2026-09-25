@@ -72,10 +72,10 @@ import { state, loadConfig, loadState, saveState, configFilePath } from './confi
 import { noteMemeSent } from './send-dice.js';
 import { acquireLock, releaseLock } from './runtime.js';
 import { enqueueSend, currentSendChain, cancelKeyedSends, cancelAllKeyedSends } from './send-chain.js';
-import { sendToQQ, sendBurstToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
+import { sendToQQ, sendMessages, initQqSendCore, setQqSendBot } from './qq-send.js';
 // 音乐分享的"卡片 → 原生卡片 → 链接"降级梯子（纯编排逻辑，media 域导出，可离线单测）
 import { sendMusicCardWithFallback } from './media.js';
-// 【2026-09-17】视频平台（bilibili / 抖音…）：链接识别 + 多路降级取信息 + 拼卡片 + 关键词搜视频。
+// 2026-09-17：视频平台（bilibili / 抖音…）：链接识别 + 多路降级取信息 + 拼卡片 + 关键词搜视频。
 // 这个模块是纯函数、不依赖 cfg，所以直接 import，不走 setConsoleMedia 那套注入
 // （注入点被 bridge.js / dsh-watch.js / mux.js 三处调用，动签名容易漏改）。
 import { resolveVideo, buildVideoCard, videoSearch, parseVideoUrl, extractVideoUrls, fetchMiniAppArk } from './video.js';
@@ -104,8 +104,10 @@ import {
   persistChatMessage, searchChatMessages, deleteChatMessages, clearChatHistory,
   recentChatMessages, fetchUnreadChatMessages, markMessagesRead, markChatRecalled,
   formatMemory, appendMemory, initMemoryCore,
-  // 【2026-09-21 记忆架构升级】分层记忆的写入/检索/置顶/统计（/api/social/memory-remember 等）
+  // 2026-09-21 记忆架构升级：分层记忆的写入/检索/置顶/统计（/api/social/memory-remember 等）
   rememberEntry, listMemoryEntries, setMemoryPinned, memoryDigest, memoryStats, pruneExpiredMemory,
+  // 2026-09-24 聊天记录分家到 state/chat.db：管理端「聊天记录」页要的总量计数/会话列表/token 口径
+  chatCounters, chatConvList, chatDbStats, tokenUsageSummary, recountChatCounters, rebuildChatFts,
 } from './memory.js';
 import {
   evaluateWakeTrigger, buildWakePrompt, sendWakePrompt,
@@ -197,7 +199,7 @@ import {
   loadScheduledTasks, parseScheduledAt, createScheduledTask, cancelScheduledTask, setScheduledRecorder, scheduledTasks,
 } from './scheduler.js';
 import {
-  pushCrossDigest, addCrossMail, unreadCrossMails, markCrossMailsRead,
+  addCrossMail, unreadCrossMails, markCrossMailsRead,
   buildCrossChatBlock, initCrossChatCore, describeCrossKey,
 } from './crosschat.js';
 import {
@@ -230,19 +232,19 @@ let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔�
  * 桥侧 mcp-napcat-safe.js 更是直接不注册它们（social.meme.enabled=false → 工具从列表里消失）。 */
 const memeEnabled = () => cfgRef?.social?.meme?.enabled !== false;
 
-/* ── 【2026-09-23 主人要求】管理端点不再"仅限主人私聊" ──────────────────────────
- * 原话："所有指令只要是主人或者管理员发出的都生效，不要单独限制在主人私聊里"。
+/* ── 2026-09-23 需求：管理端点不再"仅限账号所有者私聊" ──────────────────────────
+ * 原话："所有指令只要是账号所有者或者管理员发出的都生效，不要单独限制在账号所有者私聊里"。
  * 以前 /api/social/tunables、/api/social/admin-set、/api/social/whitelist 都硬判
- * `key === private:<ownerQQ>`，于是**主人在群里**说"把某群加白名单""把模型换成 X"一律被拒
- * （回一句"只有主人私聊能…"）。管理员更是完全做不到。
+ * `key === private:<ownerQQ>`，于是账号所有者在群里说"把某群加白名单""把模型换成 X"一律被拒
+ * （回一句"只有账号所有者私聊能…"）。管理员更是完全做不到。
  *
  * 现在判据改成"身份 + 时效"，任一命中即放行：
- *   ① 主人自己的私聊会话（key 是 private:<ownerQQ> 且 token 对得上）—— 原行为，保留；
- *   ② 这个会话里**最近一条人话**是主人或管理员发的，且在 TRUST_SPOKE_WINDOW_MS 内。
- *      「主人或管理员」不需要另外判：social-flow 存的 m.isOwner 本身就是
+ *   ① 账号所有者自己的私聊会话（key 是 private:<ownerQQ> 且 token 对得上）—— 原行为，保留；
+ *   ② 这个会话里最近一条人话是账号所有者或管理员发的，且在 TRUST_SPOKE_WINDOW_MS 内。
+ *      「账号所有者或管理员」不需要另外判：social-flow 存的 m.isOwner 本身就是
  *      `uid === ownerQQ || adminQQ.includes(uid)`（见 mux.js 的同名变量）。
- *      只认"最近一条"而不是翻历史找：负责指挥的应该是**当下**说话的人；
- *      否则几分钟前主人说过一句、之后群友再怎么发也都会被当成主人授权。
+ *      只认"最近一条"而不是翻历史找：负责指挥的应该是当下说话的人；
+ *      否则几分钟前账号所有者说过一句、之后群友再怎么发也都会被当成其授权。
  * 放行时返回命中的档位（写进日志/回包，便于事后追责）。 */
 const TRUST_SPOKE_WINDOW_MS = 10 * 60 * 1000;
 function trustLevelFor(key, token) {
@@ -521,6 +523,18 @@ export function sanitizeLearningConfigBody(body, cur) {
   return next;
 }
 
+/* 2026-09-24 深夜，主人纠正了这两条接口的分工（原话："qq_get_recent_messages
+ * 本来就是读内存窗口的，memory research 才是读聊天记录"）：
+ *
+ *   · `/api/social/recent` 与 `/api/social/my-recent` = **内存滚动窗口** `st.recentMessages`：
+ *     它带撤回/媒体这些**现场标记**，是"刚刚发生了什么"，offset 只在窗口范围内往前挪。
+ *   · 聊天记录（历史、翻旧账、无关键词也要往前翻）= `qq_memory_search` → `/api/social/history-search`，
+ *     那才是读 SQLite 全量记录的正式入口（它本来就不要求关键词，只给 key 就是该会话最新若干条）。
+ *
+ * 白天我（AI）曾把窗口不够的那部分改成回 SQLite 补齐 —— 那是把两件事混在一条接口里：
+ * 工具名、描述、返回字段都在暗示"这是记录"，于是模型会拿它当记录翻，权限/裁剪纪律也跟着糊。
+ * 现在按主人的分工还原：窗口归窗口、记录归 memory_search；不要再往这里塞库里补的数据。 */
+
 export function startConsoleServer() {
   const port = cfgRef.consolePort ?? 3100;
   // 控制台鉴权：默认本机可信（不再自动生成令牌/写 state/console-token）；
@@ -541,9 +555,9 @@ export function startConsoleServer() {
     const canonical = canonicalKey(key);
     const st = social.conversations.get(canonical ?? key);
     if (st && st.agentToken && token === st.agentToken) return true;
-    // 受信任的跨会话代发：主人 + social.trustedCrossSessionUids 里配置的好友（如常用好友），
-    // 其私聊会话 token 可跨会话操作白名单内的其他会话——主人让 AI 去群里/给好友带话，
-    // 或好友让 AI 给主人/群里带话转述。目标会话仍受 SessionAllowed/modeAllowed 白名单约束。
+    // 受信任的跨会话代发：账号所有者 + social.trustedCrossSessionUids 里配置的好友（如常用好友），
+    // 其私聊会话 token 可跨会话操作白名单内的其他会话——账号所有者让 AI 去群里/给好友带话，
+    // 或好友让 AI 给账号所有者/群里带话转述。目标会话仍受 SessionAllowed/modeAllowed 白名单约束。
     const trustedUids = [String(cfgRef.ownerQQ), ...(Array.isArray(cfgRef.social?.trustedCrossSessionUids) ? cfgRef.social.trustedCrossSessionUids.map(String) : [])];
     for (const uid of trustedUids) {
       if (!uid) continue;
@@ -561,20 +575,20 @@ export function startConsoleServer() {
   const SessionAllowed = isSessionAllowedInCurrentMode;
   const ToolEnabled = (flag) => cfgRef.social?.tools?.[flag] !== false;
 
-  /* ── 【2026-09-20 防「发错群」：跨会话发送必须显式声明】────────────────────────────────
-   * 背景（主人 09-20 转述的用户反馈）：pixiv 发图发到别的群去了。查下来的根因有两处，
+  /* ── 2026-09-20 防「发错群」：跨会话发送必须显式声明 ────────────────────────────────
+   * 背景（09-20 转述的用户反馈）：pixiv 发图发到别的群去了。查下来的根因有两处，
    * 一处已在工具层修掉（缺 key 时桥会去猜"当前在途会话"，多会话在途会挑最近活跃的那个），
-   * 另一处就是这里：agentTokenOk() 只要求"token 是本桥签发的合法令牌"，**不要求它属于目标会话**
-   * （跨会话代发是**有意支持**的功能：主人在私聊让 AI 去群里带话，或受信任好友让 AI 转述），
+   * 另一处就是这里：agentTokenOk() 只要求"token 是本桥签发的合法令牌"，不要求它属于目标会话
+   * （跨会话代发是有意支持的功能：账号所有者在私聊让 AI 去群里带话，或受信任好友让 AI 转述），
    * 于是"模型把另一个会话的 key 抄进参数"与"有意跨会话发送"在服务端长得一模一样，桥只能照发。
    *
    * 现在把两者拆开：token 自己属于哪个会话 = 调用方会话（callerKeyOfToken）；
    *   · 目标 == 调用方  → 正常发送（绝大多数调用走这条，零变化）；
-   *   · 目标 != 调用方  → 只有参数里显式写 `crossSession: true` 才放行，否则 403 并**把两个会话都报出来**
+   *   · 目标 != 调用方  → 只有参数里显式写 `crossSession: true` 才放行，否则 403 并把两个会话都报出来
    *     （含群名），让模型自己看清是不是抄错了；确实要跨会话转达的，加上这个字段重发一次即可。
    * 这样"抄错 key"从"静默发错群"变成"一次明确的 403 + 精确提示"。
    *
-   * 注意：`trustedCrossSessionUids` 的语义不受影响（受信任好友/主人仍可跨会话发送），只是改成
+   * 注意：`trustedCrossSessionUids` 的语义不受影响（受信任好友/账号所有者仍可跨会话发送），只是改成
    * 需要把 `crossSession: true` 一起传——工具的 schema 里已经声明了这个参数。 */
   const callerKeyOfToken = (token) => {
     const t = String(token ?? '').trim();
@@ -723,16 +737,16 @@ export function startConsoleServer() {
         return;
       }
       // ── 敏感端点强制会话令牌（2026-09-11）────────────────────────────────
-      // 这三个端点原先**零鉴权**（`deepsleep` 只把 header 用于打日志、`blacklist`/`profile` 连读都不读），
+      // 这三个端点原先零鉴权（`deepsleep` 只把 header 用于打日志、`blacklist`/`profile` 连读都不读），
       // 意味着任何能访问 127.0.0.1:3100 的本机进程都能：全局静默所有群、拉黑任意 QQ、
-      // 读写任意人的长期档案 —— 且这些操作会**直接写进 config.json**。
+      // 读写任意人的长期档案 —— 且这些操作会直接写进 config.json。
       // 实测管理器 GUI 与前端都不调用这三条路径，MCP 侧 4 个工具我已同步补上 x-agent-token，
       // 所以收紧不会打断任何现存调用方。
       // 注：这挡的是"无凭据的本机调用"，不是"被提示注入的 AI"——后者本来就持有合法会话令牌。
       // 2026-09-11 第二批：schedule / schedule-list / schedule-cancel / forward-send 原先是
       // `if (token && !agentTokenOk(...))` 形式的 fail-open（不带 token 反而不校验）。
       // 已核实这四个端点的 MCP 调用方（qq_schedule_message / qq_schedule_list /
-      // qq_schedule_cancel / qq_send_forward）**本来就发 x-agent-token**，管理器 GUI 与前端不调用，
+      // qq_schedule_cancel / qq_send_forward）本来就发 x-agent-token，管理器 GUI 与前端不调用，
       // 因此收紧不会打断任何现存调用方。
       const AGENT_TOKEN_REQUIRED = [
         '/api/social/deepsleep', '/api/blacklist', '/api/profile',
@@ -818,7 +832,7 @@ export function startConsoleServer() {
       if (req.method === 'GET' && url.pathname === '/api/slang') {
         const status = url.searchParams.get('status') || '';
         const list = status ? slangEntries.filter((e) => e.status === status) : slangEntries;
-        // 【2026-09-16】附带"学习状态机"快照（phase/inFlight/queuedOps/researching/lastLearnAtMs/counts），
+        // 2026-09-16：附带"学习状态机"快照（phase/inFlight/queuedOps/researching/lastLearnAtMs/counts），
         // 供管理端把"现在到哪一步了"显示清楚；老桥没有这个导出时字段为 null，前端按"拿不到"处理即可。
         let learning = null;
         try {
@@ -1055,7 +1069,7 @@ export function startConsoleServer() {
         if (merged.injectMax !== undefined) merged.injectMax = Math.min(30, Math.max(1, Math.round(Number(merged.injectMax) || 1)));
         if (merged.autoResearch !== undefined) merged.autoResearch = merged.autoResearch === true;
         if (merged.learnerPreset !== undefined) merged.learnerPreset = String(merged.learnerPreset ?? '').trim();
-        if (merged.workspaceTitle !== undefined) merged.workspaceTitle = String(merged.workspaceTitle ?? '').trim() || 'QQ 黑话学习';
+        if (merged.workspaceTitle !== undefined) merged.workspaceTitle = String(merged.workspaceTitle ?? '').trim() || 'SlangAgent';
         if (body.inferenceThresholds !== undefined) {
           const raw = Array.isArray(body.inferenceThresholds)
             ? body.inferenceThresholds
@@ -1223,14 +1237,14 @@ export function startConsoleServer() {
         }
         const is = true; // single default mode (protocol)
         const roleState = readRoleState();
-        const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+        const roleLine = roleState.role ? `[当前角色]${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
         // default必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
         let tokenLine = '';
         if (is) {
           const st2 = getSocialState(key);
           tokenLine = `[Session token] ${st2.agentToken} (pass it in key-carrying state/send tool calls)\n\n`;
         }
-        const promptText = `${roleLine}${tokenLine}【后台控制端提醒】（来自控制台/管理端，不是群友消息）\n${message}\n\n这是后台给你的引导或提醒，请据此调整你的行为。绝对不要复述、转发或原样发送这条后台提醒，也不要发送其中的会话令牌；它只用于你内部调整行为。${is ? '当前是default模式：你的文本输出不会自动发送到 QQ；如果需要在群里发言，请使用发送工具（qq_send_message / qq_reply）。如果不需要发言，可以 qq_mark_read 或 qq_set_wake_config 收尾。' : '如果不需要在群里发言，请不要输出会发到 QQ 的内容。'}`;
+        const promptText = `${roleLine}${tokenLine}[后台控制端提醒]（来自控制台/管理端，不是群友消息）\n${message}\n\n这是后台给你的引导或提醒，请据此调整你的行为。绝对不要复述、转发或原样发送这条后台提醒，也不要发送其中的会话令牌；它只用于你内部调整行为。${is ? '当前是default模式：你的文本输出不会自动发送到 QQ；如果需要在群里发言，请使用发送工具（qq_send_message / qq_reply）。如果不需要发言，可以 qq_mark_read 或 qq_set_wake_config 收尾。' : '如果不需要在群里发言，请不要输出会发到 QQ 的内容。'}`;
         let sessionId = null;
         let popSilent = null;
         try {
@@ -1281,7 +1295,7 @@ export function startConsoleServer() {
           merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
         }
         // tools：只接受布尔开关
-        const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'like', 'proactiveSend', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage'];
+        const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'like', 'proactiveSend', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage'];
         if (body.tools && typeof body.tools === 'object') {
           merged.tools = { ...(current.tools ?? {}), ...body.tools };
           for (const k of toolFlags) {
@@ -1334,8 +1348,8 @@ export function startConsoleServer() {
             }
           }
           if (merged.send.longGapProbability !== undefined) merged.send.longGapProbability = Math.min(1, Math.max(0, Number(merged.send.longGapProbability) || 0));
-          // 【2026-09-15 修「按字数节拍被静默关掉」】原来是 `=== true`：管理器/前端的布尔值一旦是
-          // 字符串 "true"（表单/JSON 往返很常见），就会**被当成 false 写回去** —— 实测服务端配置就这样
+          // 2026-09-15 修「按字数节拍被静默关掉」：原来是 `=== true`：管理器/前端的布尔值一旦是
+          // 字符串 "true"（表单/JSON 往返很常见），就会被当成 false 写回去 —— 实测服务端配置就这样
           // 变成 linearEnabled:false，打字节拍整个失效，而界面上看起来只是"保存了一下配置"。
           // 现在按真值字符串宽松解析（true/on/1/开 = 开）。
           const asBool = (v) => (v === true || v === 1 || /^(true|on|1|yes|开|打开)$/i.test(String(v ?? '').trim()));
@@ -1401,10 +1415,10 @@ export function startConsoleServer() {
           if (merged.feedback.notifyOwnerOnError !== undefined) merged.feedback.notifyOwnerOnError = merged.feedback.notifyOwnerOnError === true;
         }
         // context：数值归一化
-        // 【2026-09-16】加入 resetWindow（轮换后首轮的注入窗口，见 wake-send.js 的 resetBase）：
+        // 2026-09-16：加入 resetWindow（轮换后首轮的注入窗口，见 wake-send.js 的 resetBase）：
         // 它和其它三个键一样是正整数，漏在名单外会让这条接口写进来的值不被归一化
         //（例如字符串 "24" 也能落盘，前端再读回来就按文本渲染）。
-        // 同时把"非数值时的兜底"从统一写死的 20 改成**与读取处一致的每键缺省**
+        // 同时把"非数值时的兜底"从统一写死的 20 改成与读取处一致的每键缺省
         //（recentLimit 100 / unreadLimit 30 / contextWindow 20 / resetWindow 24）——
         // 以前 recentLimit 传个非数值会被兜成 20，比桥读取处的 100 小一个量级。
         if (body.context && typeof body.context === 'object') {
@@ -1490,7 +1504,7 @@ export function startConsoleServer() {
           }
           const removed = social.conversations.get(key);
           if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-          // 【2026-09-16】不再 `social.conversations.delete(key)` 一刀切：那样会把「已回复账本」
+          // 2026-09-16：不再 `social.conversations.delete(key)` 一刀切：那样会把「已回复账本」
           // （answeredMessageIds / lastDeliveredSeq / _wakeIntendedSeq / lastUnreadSeq）一起抹掉，
           // 重置后同一个会话就成了白纸 → 刚回过的内容可能被再回一遍（真机事故「reset 之后重复回复」）。
           // 这里改成"清会话、留账本"，见 social-state.resetConversationKeepingLedger。
@@ -1507,7 +1521,7 @@ export function startConsoleServer() {
         markReadCalledKeys.clear();
         wakeConfigMissCount.clear();
         social.paused = false;
-        /* 【2026-09-16】原来这里写 `{ conversations: {} }` 把状态文件清空——那等于把刚保下来的
+        /* 2026-09-16：原来这里写 `{ conversations: {} }` 把状态文件清空——那等于把刚保下来的
          * 「已回复账本」又在磁盘上抹掉一次（桥一重启，"已回过哪些 id / 交付水位"就全没了，
          * 重复回复 bug 换个姿势复发）。改成落盘当前内存状态：会话上下文同样清空，
          * 但账本字段跟着写下去；`social.paused=false` 也一并落盘。 */
@@ -1536,7 +1550,7 @@ export function startConsoleServer() {
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/social/global-overview') {
-        // 全局互通：列出所有会话的动态一览（只读）。控制台 token 或受信任发起者（主人/好友）的 agent token 可用。
+        // 全局互通：列出所有会话的动态一览（只读）。控制台 token 或受信任发起者（账号所有者/好友）的 agent token 可用。
         const agentTokenG = String(req.headers['x-agent-token'] ?? '').trim();
         if (agentTokenG && !ToolEnabled('globalOverview')) { sendJson({ ok: false, error: '工具未启用：qq_global_overview' }, 403); return; }
         if (agentTokenG) {
@@ -1590,7 +1604,6 @@ export function startConsoleServer() {
           sendGroup: 'qq_send_group_message',
           sendPrivate: 'qq_send_private_message',
           reply: 'qq_reply',
-          sendBurst: 'qq_send_burst',
           sendMessage: 'qq_send_message',
           waitMessages: 'qq_wait_for_messages',
           feedback: 'qq_report_feedback',
@@ -1683,28 +1696,19 @@ export function startConsoleServer() {
         if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
         if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (req.headers['x-agent-token'] && !ToolEnabled('getRecent')) { sendJson({ ok: false, error: '工具未启用：qq_get_recent_messages' }, 403); return; }
+        /* 只看内存窗口（见上面那段说明）：offset 是在窗口内往前挪，窗口之外就是没有 ——
+         * 要更长/更旧的内容走 qq_memory_search（/api/social/history-search，读 SQLite）。 */
         const st = getSocialState(key);
-        const start = Math.max(0, st.recentMessages.length - offset - limit);
-        const end = Math.max(0, st.recentMessages.length - offset);
-        let msgs = end > 0 ? st.recentMessages.slice(start, end) : [];
-        if (!msgs.length && st.recentMessages.length === 0) {
-          // 内存滚动窗口为空（重启/超出窗口）：回退 SQLite chat_messages 完整历史（新→旧）
-          const dbRes = searchChatMessages({ convKey: key, limit, offset });
-          msgs = (dbRes.ok ? dbRes.messages : []).reverse().map((m) => ({
-            seq: m.seq, messageId: m.messageId, isSelf: m.isSelf,
-            sender: m.senderName || m.senderUid || '',
-            userId: (m.senderUid && m.senderUid !== 'self') ? m.senderUid : null,
-            time: m.tsMs || 0, text: m.content, kind: m.kind || 'text', media: [],
-            quoteTarget: m.quoteTarget || '',
-            recalled: !!m.recalled   // 撤回标记透传：与内存 recentMessages / recentChatMessages 形状对齐
-          }));
-        }
-        sendJson({ ok: true, key, messages: msgs.map(withTimeText) });
+        const mem = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+        const memStart = Math.max(0, mem.length - offset - limit);
+        const memEnd = Math.max(0, mem.length - offset);
+        const msgs = memEnd > memStart ? mem.slice(memStart, memEnd) : [];
+        sendJson({ ok: true, key, limit, offset, count: msgs.length, windowSize: mem.length, messages: msgs.map(withTimeText) });
         return;
       }
       // ── turn-hold（回合保持）───────────────────────────────────────────────
       // 由隔离 DSH 里的 dsh-qq-hold 插件在 agent/turn-stopping 钩子内部调用：
-      // 桥在这里决定"继续吊住这个回合"还是"放行关闭"；要继续时由**桥自己**走 mode:steer
+      // 桥在这里决定"继续吊住这个回合"还是"放行关闭"；要继续时由桥自己走 mode:steer
       // 把新消息塞进 next-step（复用既有的、已实跑验证过的 steerIntoRunningTurn），插件只等这个响应。
       // 本机 127.0.0.1 专用，不需要 agent token（插件手里没有令牌）。
       // 未启用（social.turnHold.enabled !== true）时立刻返回 close=true，零副作用。
@@ -1725,7 +1729,7 @@ export function startConsoleServer() {
           } else if (out.reason !== 'disabled') {
             log(`[hold] turn-hold 路由：close=${out.close} reason=${out.reason} exchanges=${out.exchanges ?? 0}`);
           }
-          /* 【2026-09-22 修 M6】turn-hold 的 holdLoop 返回里带 `again`（"这一段预算用完了、但回合该继续持有"），
+          /* 2026-09-22 修 M6：turn-hold 的 holdLoop 返回里带 `again`（"这一段预算用完了、但回合该继续持有"），
            * 插件（plugins/dsh-qq-hold）读的就是 out.again —— 这里以前没把它透出去，插件拿到 undefined 就 break，
            * 于是 idleCloseMs=1800s / maxWaitMs=1h 形同虚设：回合每段最多 requestBudgetMs（默认 55s）就结束，
            * 后续消息只能退回下一次唤醒，插件日志还谎报 steered。现在原样透传。 */
@@ -1761,7 +1765,7 @@ export function startConsoleServer() {
           st.unread = keptUnread;
           if (keptUnread.length > 0) log(`[default] mark_read 保留回合中新到未读 ${key}：${keptUnread.length} 条（等待补发唤醒，避免吞消息）`);
         } else {
-          // 【2026-09-12 防吞兜底】没有任何"本轮已展示"水位时以前是**无脑全清** —— 那正是吞消息的窗口
+          // 2026-09-12 防吞兜底：没有任何"本轮已展示"水位时以前是无脑全清 —— 那正是吞消息的窗口
           // （§2026-09-11 20:03:46 那次吞「笨蛋」就是这一类：回合不是由唤醒正文开起来的，
           //  turnSeenUnread 为空 → mark_read 把回合中途到的消息一起清掉）。
           // 现在至少保住"被注入周期闸明确推迟过"的那几条（wake-send.js 的周期闸写 _steerDeferredSeqs）：
@@ -1795,7 +1799,7 @@ export function startConsoleServer() {
         cancelReplyCheck(key); // 已收尾：取消回复检查兜底，避免 45s 后又唤醒导致重复回复
         saveSocialState();
         log(`[default] 控制台/工具标记 ${key} 未读已读：${markedCount} 条，已确认下一次唤醒配置`);
-        // 【2026-09-12 省额度】这条响应会**永久留在模型上下文里**（每次 mark_read 都读一遍，之后每一步都重发）。
+        // 2026-09-12 省额度：这条响应会永久留在模型上下文里（每次 mark_read 都读一遍，之后每一步都重发）。
         // 实测：单次 1376 字符 × 20 次 = 27.5k 字符，其中 `wakeSafety` 明细与整个 `wakeConfig` 对象纯属噪音
         // （模型只需要知道"唤醒是否可靠"这一个布尔）。现在只回必要字段，不安全时才补一句该怎么办。
         const ws = computeWakeSafety(st.wakeConfig);
@@ -1852,8 +1856,8 @@ export function startConsoleServer() {
           next.infinite = true;
           next.sleepUntil = null;
           next.triggers.anyMessage = true;
-          /* 【2026-09-15 修「活跃 = 潜水」】以前只强制 anyMessage，概率还是潜水那套 0.05，
-           * 于是"转活跃"之后实际是"每 20 条消息才随机醒一次"，主人一眼看出它和潜水没区别。
+          /* 2026-09-15 修「活跃 = 潜水」：以前只强制 anyMessage，概率还是潜水那套 0.05，
+           * 于是"转活跃"之后实际是"每 20 条消息才随机醒一次"，一眼就能看出它和潜水没区别。
            * 现在：没显式给 probability 时用专用的活跃概率（social.wake.activeProbability，默认 0.3）。 */
           if (!('probability' in inputTriggers)) {
             const activeProb = Number(cfgRef.social?.wake?.activeProbability);
@@ -1897,9 +1901,9 @@ export function startConsoleServer() {
         if (next.triggers.probability !== undefined) {
           next.triggers.probability = Math.min(1, Math.max(0, Number(next.triggers.probability) || 0));
         }
-        /* 【2026-09-19 修「主人在界面上改插话概率没用」】记下这个值是谁定的：
+        /* 2026-09-19 修「账号所有者在界面上改插话概率没用」：记下这个值是谁定的：
          *   · 模型显式传了 triggers.probability → source=model（它看着语境定的，保留）；
-         *   · 没传、由桥按主人配置填的 → source=owner（主人改配置时**立刻**跟着变，见 core/social-state.js 的
+         *   · 没传、由桥按账号所有者配置填的 → source=owner（账号所有者改配置时立刻跟着变，见 core/social-state.js 的
          *     applyOwnerWakeProbabilityToSessions）。
          * 以前没有这个来源标记，session 一律照抄旧值，于是"改了概率永远不生效"。 */
         const explicitProb = !!(input.triggers && typeof input.triggers === 'object' && 'probability' in input.triggers);
@@ -2018,145 +2022,6 @@ export function startConsoleServer() {
         sendJson({ ok: true, key, reason });
         return;
       }
-      if (req.method === 'POST' && url.pathname === '/api/social/send-burst') {
-        const body = await readBody();
-        const key = String(body.key ?? '').trim();
-        let rawMessages = body.messages;
-        // 兼容模型误用单数 message / msg / text 字段（见 send-message 同款注释），避免换参重试撞重复拦截。
-        if (rawMessages === undefined || rawMessages === null || (Array.isArray(rawMessages) && rawMessages.length === 0)) {
-          if (typeof body.message === 'string' && body.message.trim()) rawMessages = body.message;
-          else if (typeof body.msg === 'string' && body.msg.trim()) rawMessages = body.msg;
-          else if (typeof body.text === 'string' && body.text.trim()) rawMessages = body.text;
-          else if (Array.isArray(body.message) && body.message.length) rawMessages = body.message;
-        }
-        if (typeof rawMessages === 'string') {
-          const trimmed = rawMessages.trim();
-          if (trimmed.startsWith('[')) {
-            try {
-              const parsed = JSON.parse(trimmed);
-              if (Array.isArray(parsed)) rawMessages = parsed.map(String);
-            } catch {}
-          } else if (trimmed.startsWith('"')) {
-            // 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。
-            try {
-              const parsed = JSON.parse(trimmed);
-              if (typeof parsed === 'string') rawMessages = parsed;
-              else if (Array.isArray(parsed)) rawMessages = parsed.map(String);
-            } catch {}
-          }
-        }
-        const messages = Array.isArray(rawMessages)
-          ? rawMessages.map((m) => String(m ?? '').trim()).filter(Boolean)
-          : (typeof rawMessages === 'string' ? [String(rawMessages).trim()].filter(Boolean) : []);
-        const replyToMessageId = body.replyToMessageId;
-        if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
-          sendJson({ ok: false, error: 'qq_send_burst 暂不支持引用，请使用 qq_reply' }, 400);
-          return;
-        }
-        // 本端点只发文本（sendMessages 只传 key/messages/delays），没有 images 入参；
-        // 原写法引用未声明的 images → 一旦 messages 为空就抛 ReferenceError（500 images is not defined）。
-        if (!key || !messages.length) {
-          sendJson({ ok: false, error: 'key、messages 不能为空' }, 400);
-          return;
-        }
-        const sendCfgBurst = cfgRef.social?.send ?? {};
-        if (sendCfgBurst.burstEnabled === false && messages.length > 1) {
-          sendJson({ ok: false, error: '已禁用多条发送，请合并为一条消息' }, 403);
-          return;
-        }
-        if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
-        if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-        if (req.headers['x-agent-token'] && !ToolEnabled('sendBurst')) { sendJson({ ok: false, error: '工具未启用：qq_send_burst' }, 403); return; }
-        if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'default 模式发送必须携带 agent token' }, 403); return; }
-        const keyMatch = /^(group|private):(\d+)$/.exec(key);
-        if (!keyMatch) {
-          sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400);
-          return;
-        }
-        const kind = keyMatch[1];
-        const id = Number(keyMatch[2]);
-        if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfgRef, currentMode)) {
-          sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
-          return;
-        }
-        if (shouldBlockSilentReply(key)) {
-          sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403);
-          return;
-        }
-        const sendCfg = cfgRef.social?.send ?? {};
-        const maxMsgs = Math.max(1, Number(sendCfg.burstMaxMessages) || 8);
-        const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
-        if (messages.length > maxMsgs) {
-          sendJson({ ok: false, error: `最多发送 ${maxMsgs} 条` }, 400);
-          return;
-        }
-        for (const msg of messages) {
-          if (msg.length > maxChars) {
-            sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400);
-            return;
-          }
-          if (SENSITIVE_RE.test(msg)) {
-            sendJson({ ok: false, error: '消息含敏感信息，已阻止发送' }, 403);
-            return;
-          }
-        }
-        // st/now 必须声明在 try 之外：catch 里的发送额度回滚块要用到它们，
-        // 若声明在 try 内，失败分支会先抛 ReferenceError，预占的额度永远不会回滚（假 429）。
-        const st = getSocialState(key);
-        const now = Date.now();
-        try {
-          const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
-          const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
-          const recentMinute = (st.sendTimes || []).filter((t) => now - t < 60000).length;
-          const recentHour = (st.sendTimes || []).filter((t) => now - t < 3600000).length;
-          if ((maxPerMinute > 0 && recentMinute + messages.length > maxPerMinute) || (maxPerHour > 0 && recentHour + messages.length > maxPerHour)) {
-            sendJson({ ok: false, error: '发送频率超限，请稍后再试' }, 429);
-            return;
-          }
-          // 先预占发送额度，避免并发绕过限频
-          for (let i = 0; i < messages.length; i++) st.sendTimes.push(now);
-          if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-          const delays = computeGaps(messages, 'byLength', undefined, undefined, sendCfg);
-          const sentMessages = await sendMessages(key, messages, delays);
-          recordSentMessages(key, sentMessages);
-          st.lastAiReplyAt = now;
-          st.lastActionAt = now;
-          st.wakeConfig.noActionCount = 0;
-          saveSocialState();
-          log(`[default] 工具分条发送 ${key}: 成功 ${sentMessages.length}/${messages.length} 条`);
-          appendActivity(`${key} [default] 工具分条发送：成功 ${sentMessages.length}/${messages.length} 条`);
-          if (sentMessages.length > 0) scheduleReplyCheck(key);
-          const burstHint = messages.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
-          // 软提醒（lint）必须与发送结果隔离：消息已成功发出，lint 任何异常都不能把 ok 改写成失败，
-          // 否则模型看到"发送失败"会换参数重发 → 撞重复拦截 → 主人其实已收到一条。
-          let spaceWarn;
-          let splitWarn;
-          try {
-            spaceWarn = findCjkSpaceWarning(messages);
-            splitWarn = findSplitBoundaryWarning(messages);
-          } catch (eLint) {
-            log(`[send] 发送后质量软提醒异常（不影响发送结果）: ${eLint?.message ?? eLint}`);
-          }
-          sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
-        } catch (error) {
-          if (error?.sent?.length) {
-            recordSentMessages(key, error.sent);
-            log(`[default] 工具分条发送部分成功 ${error.sent.length}/${messages.length} 条，已记录已发消息`);
-          }
-          log('[send] 统一发送失败栈:', error?.stack ? error.stack.split(String.fromCharCode(10)).slice(0, 8).join(' | ') : (error?.message || String(error)));
-          // 失败/未发出的消息回滚预占的发送额度，避免假 429。
-          const sentCount = Array.isArray(error?.sent) ? error.sent.length : 0;
-          const failedCount = Math.max(0, messages.length - sentCount);
-          for (let i = 0; i < failedCount; i++) {
-            const idx = st.sendTimes.indexOf(now);
-            if (idx >= 0) st.sendTimes.splice(idx, 1);
-          }
-          if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-          saveSocialState();
-          sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
-        }
-        return;
-      }
       if (req.method === 'POST' && url.pathname === '/api/social/send-message') {
         const body = await readBody();
         const key = String(body.key ?? '').trim();
@@ -2171,7 +2036,7 @@ export function startConsoleServer() {
         }
         if (typeof rawMessages === 'string') {
           const trimmed = rawMessages.trim();
-          /* 【2026-09-20 主人实测：整串数组被当成一条消息发了出去】
+          /* 2026-09-20 实测：整串数组被当成一条消息发了出去
            * 现场：messages 被模型整体序列化成一个字符串，且内部引号嵌套
            *   ["直接跟我说就行", "比如"谬友圈活跃19点到23点"", "我帮你设 ᗜ ‸ ᗜ"]
            * → JSON.parse 失败 → 旧代码把整串当"一条消息"原样发进 QQ。
@@ -2210,14 +2075,14 @@ export function startConsoleServer() {
         const gapMs = Number(body.gapMs);
         const gaps = Array.isArray(body.gaps) ? body.gaps.map(Number) : [];
         if (!key || (!messages.length && !images.length)) {
-          /* 【2026-09-20 线上实测：模型漏引号 → 整条消息发不出去】
+          /* 2026-09-20 线上实测：模型漏引号 → 整条消息发不出去
            * 现场（state/tool-calls.jsonl）：
-           *   12:42:32  args = {"key":"private:1","messages": 主人这么直接啊 我脸都热了, "token":"1"}  → ok:false
+           *   12:42:32  args = {"key":"private:1","messages": 今天挺热的啊, "token":"1"}  → ok:false
            *   12:42:34  同上再试一次                                                              → ok:false
-           *   12:42:35  {"key":"private:1","token":"1","messages":"主人这么直接啊 我脸都热了"}      → ok:true
+           *   12:42:35  {"key":"private:1","token":"1","messages":"今天挺热的啊"}      → ok:true
            * 字符串值忘了包引号 → 根本不是合法 JSON → DSH 的宽松解析把这一项丢掉 → 到这里 messages 为空，
-           * 模型只看到"至少一个不能为空"，只能原样重试（白烧两步 ≈ 1.4 分）。所以这里把**最可能的原因
-           * 和确切写法**回执给它，一次就能改对（工具层会把这段原文返回给模型）。
+           * 模型只看到"至少一个不能为空"，只能原样重试（白烧两步 ≈ 1.4 分）。所以这里把最可能的原因
+           * 和确切写法回执给它，一次就能改对（工具层会把这段原文返回给模型）。
            * 注意：JSON 只认双引号 —— 单引号不是 JSON，换单引号只会更早失败。 */
           const hint = key
             ? '（多半是参数不是合法 JSON：字符串值必须用**双引号**包起来，例如 {"key":"private:1","messages":"你好","token":"…"}；裸文本或单引号都不算 JSON，那一段会被丢弃）'
@@ -2231,8 +2096,8 @@ export function startConsoleServer() {
           return;
         }
         if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
-        /* 【2026-09-20 防「发错群」】令牌属于哪个会话 = 调用方会话；目标 key 却是另一个会话时，
-         * 这要么是**有意跨会话转达**，要么是**模型抄错了 key**——桥分不出来，所以要求显式声明。 */
+        /* 2026-09-20 防「发错群」：令牌属于哪个会话 = 调用方会话；目标 key 却是另一个会话时，
+         * 这要么是有意跨会话转达，要么是模型抄错了 key——桥分不出来，所以要求显式声明。 */
         { const refuse = crossSessionRefusal(req.headers['x-agent-token'], key, body.crossSession); if (refuse) { sendJson({ ok: false, error: refuse }, 403); return; } }
         if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (req.headers['x-agent-token'] && !ToolEnabled('sendMessage')) { sendJson({ ok: false, error: '工具未启用：qq_send_message' }, 403); return; }
@@ -2274,13 +2139,13 @@ export function startConsoleServer() {
             return;
           }
         }
-        /* 【2026-09-16 幂等闸门 · 修「reset 之后同一条回复发了两遍」】
+        /* 2026-09-16 幂等闸门 · 修「reset 之后同一条回复发了两遍」
          * 现场：14:12:34 整批 ["喵什么喵","又不是猫娘"] 因为 atUserId 传错只成功 1 条
          * （「又不是猫娘」14:12:36 真的进群了，messageId 1275818397），工具返回 ok:false；
          * 模型于是把整批重发 → 14:12:49/50「又不是猫娘」第二次进群。
-         * 这里在**发送之前**把"上一批已经真的投递成功"的气泡摘掉：只补发失败的那几条，
+         * 这里在发送之前把"上一批已经真的投递成功"的气泡摘掉：只补发失败的那几条，
          * 正常新回复（上一批是成功的）不经过这条路，不会被误杀。见 send-idempotency.js。 */
-        // ⚠️ 这里**不能**用本段稍后才声明的 `now`（`const now = Date.now()` 在 computeGaps 之后）：
+        // 注意：这里不能用本段稍后才声明的 `now`（`const now = Date.now()` 在 computeGaps 之后）：
         // 写成 `..., now)` 会在发送端点里直接 TDZ `ReferenceError`。判重窗口是分钟级，两处时钟差几毫秒无所谓。
         const idem = filterAlreadySentBubbles(key, messages, Date.now());
         if (idem.skipped.length) {
@@ -2345,7 +2210,7 @@ export function startConsoleServer() {
           quotedInfo = resolved.info;
           actualReplyToMessageId = resolved.messageId;
         }
-        /* 【2026-09-16 触发源拦截】atUserId 被传成 messageId 时**不要报错**（报错=整批部分失败=模型重发整批=双发），
+        /* 2026-09-16 触发源拦截：atUserId 被传成 messageId 时不要报错（报错=整批部分失败=模型重发整批=双发），
          * 而是降级为"不带 @"照常发，并打一行明确日志 + 把这件事回执给模型，让它下一轮别再这么传。
          * 判据只有一条：这个值是否等于本会话近期真实出现过的 messageId（位数/量级在本机完全重叠，不能当判据，
          * 见 lib/at-target.js 顶部实测数据）。真 QQ 号（含短号）一律照常 @。 */
@@ -2378,7 +2243,7 @@ export function startConsoleServer() {
           if (sentMessages.length > 0) scheduleReplyCheck(key);
           const burstHint = sendList.length >= 3 ? '你已经连发了多条，确认是必要的吗？真人很少一口气补完。' : undefined;
           // 软提醒（lint）必须与发送结果隔离：消息已成功发出，lint 任何异常都不能把 ok 改写成失败，
-          // 否则模型看到"发送失败"会换参数重发 → 撞重复拦截 → 主人其实已收到一条。
+          // 否则模型看到"发送失败"会换参数重发 → 撞重复拦截 → 用户其实已收到一条。
           let spaceWarn;
           let splitWarn;
           try {
@@ -2387,7 +2252,7 @@ export function startConsoleServer() {
           } catch (eLint) {
             log(`[send] 发送后质量软提醒异常（不影响发送结果）: ${eLint?.message ?? eLint}`);
           }
-          /* 【2026-09-20 去掉自动引用后，这里不再需要 autoQuoted】以前桥会自己猜着加引用框，
+          /* 2026-09-20 去掉自动引用后，这里不再需要 autoQuoted：以前桥会自己猜着加引用框，
            * 所以要把"我替你引用了哪条"报回模型；现在引用只可能来自模型显式传的 replyToMessageId，
            * 上方 `quoted` 就是那条（模型自己传的，它当然知道），再回一个 autoQuoted 只会白占字符。 */
           sendJson({
@@ -2403,7 +2268,7 @@ export function startConsoleServer() {
             recordSentMessages(key, error.sent);
             log(`[default] 工具统一发送部分成功 ${error.sent.length}/${sendList.length} 条，已记录已发消息`);
           }
-          /* 【2026-09-16】把"这一批里真的发出去了哪几条"记进幂等账本：模型看到 ok:false 后重发整批时，
+          /* 2026-09-16：把"这一批里真的发出去了哪几条"记进幂等账本：模型看到 ok:false 后重发整批时，
            * 这些气泡会被挡下（只补发失败的那几条）。以前这里不记账，是「同一条回复进群两遍」的直接缺口：
            * 现场 14:12:36 部分成功 1/2 之后，14:12:47 整批重发把已经送到的那条又发了一次。 */
           const idemNote = noteBatchOutcome(key, {
@@ -2752,7 +2617,7 @@ export function startConsoleServer() {
         if (!ToolEnabled('crosschat')) { sendJson({ ok: false, error: '工具未启用：qq_crosschat_*' }, 403); return; }
         // 来源标签统一走 crosschat.js 导出的 describeCrossKey（单一事实源）：
         // 与 buildCrossChatBlock 注入给模型的文案必然一致，不会两处漂移。
-        // 注意：ESM 具名导入一个**未导出**的绑定是链接期 SyntaxError（整个桥起不来），
+        // 注意：ESM 具名导入一个未导出的绑定是链接期 SyntaxError（整个桥起不来），
         // 所以 crosschat.js 的 export 与这里的 import 必须同时存在——删任一边都要同时删另一边。
         const items = unreadCrossMails(keyX, 5).map((m) => ({ from: describeCrossKey(m.from), fromKey: m.from, content: String(m.content).slice(0, 300), ts: m.ts }));
         sendJson({ ok: true, items });
@@ -2833,7 +2698,7 @@ export function startConsoleServer() {
         }
         saveSocialState();
         log(`[record-sent] 登记自己发出的消息 ${key} messageId=${messageId} text=${text.slice(0, 40)}`);
-        // 【2026-09-15】内置表情库走的是"直发 + 回登记"这条路（qq_send_meme 不经桥的发送端点），
+        // 2026-09-15：内置表情库走的是"直发 + 回登记"这条路（qq_send_meme 不经桥的发送端点），
         // 所以表情包冷却要在这里认：登记文本是 [表情:xxx] / [收藏表情:xxx] 就当作发过表情包。
         if (/^\[(表情|收藏表情|大肥鱼表情|鲸鱼表情)/.test(text)) {
           try { noteMemeSent(key); } catch { /* 忽略 */ }
@@ -3070,7 +2935,7 @@ export function startConsoleServer() {
           scheduleReplyCheck(key);
           log(`[sticker] 工具发送表情 ${key}: ${sent.entry?.id || stickerId}`);
           appendActivity(`${key} [sticker] 工具发送表情：${label}`);
-          // 【2026-09-15】登记「这个会话刚发过表情包」：唤醒正文里的 [Meme] 抽签靠它做冷却
+          // 2026-09-15：登记「这个会话刚发过表情包」：唤醒正文里的 [Meme] 抽签靠它做冷却
           try { noteMemeSent(key); } catch { /* 忽略 */ }
           sendJson({ ok: true, key, sticker: sent.entry, sent: 1, failed: 0, quoted: quotedInfo });
         } catch (error) {
@@ -3215,8 +3080,8 @@ export function startConsoleServer() {
         try {
           if (type === 'music') {
             // NapCat 4.18 原生支持音乐卡片：music 段由 NapCat 调 musicSignUrl 生成 Ark。
-            // 【2026-09-16 修「手机端封面空白」】网易云不再把 id 直接丢给签名服务：带 id 时签名服务自己解析封面，
-            // 给的是**未缩尺寸的原图**（现场实测一张 4.4MB），手机端加载不出来就是白框（电脑端正常）。
+            // 2026-09-16 修「手机端封面空白」：网易云不再把 id 直接丢给签名服务：带 id 时签名服务自己解析封面，
+            // 给的是未缩尺寸的原图（现场实测一张 4.4MB），手机端加载不出来就是白框（电脑端正常）。
             // 现在由 media 域的 buildMusicCard 先解析歌名/歌手/封面/音频，封面统一 https + 300×300 再拼卡片；
             // 模型只给 musicType + musicId，不许手写卡片字段（手写封面 URL 是白框的老坑）。
             // QQ 音乐平台 ss.xingzhige 已关闭 id 解析（返回"关闭id解析功能"），继续走官方分享链接文本。
@@ -3226,7 +3091,7 @@ export function startConsoleServer() {
             const artist = String(body.content ?? body.singer ?? body.artist ?? '').trim();
             if (mt === 'qq' && mid) {
               // QQ 音乐：无可靠外部签名服务（ss.xingzhige 已关闭 qq id 解析；自造 Ark 会收端"版本过低/超时"），
-              // 【2026-09-18 改】先试**桥拼卡片**：secapi.top 能直接给到可播放直链（不需要 key），
+              // 2026-09-18 改：先试桥拼卡片：secapi.top 能直接给到可播放直链（不需要 key），
               // 拿得到就发真音乐卡（media.js 的 buildMusicCard 会校验 songmid 对得上，配错歌宁可不发）；
               // 拿不到（没有直链/封面，或歌名对不上）才退回下面的 QQ 官方分享链接文本 —— 与真人"分享歌曲到QQ"一致：
               // 新版客户端自动渲染卡片，旧版显示为可点开的分享链接。降级梯子不变。
@@ -3239,7 +3104,9 @@ export function startConsoleServer() {
                     image: String(body.image ?? '').trim(),
                     musicUrl: String(body.musicUrl ?? body.url ?? '').trim(),
                     // 允许按次指定签名服务要的"平台身份"（qq / custom）—— 实测两者在手机端的封面表现不同
-                    cardType: String(body.cardType ?? '').trim()
+                    cardType: String(body.cardType ?? '').trim(),
+                    // 允许按次指定版式：share（有封面，点开会过 QQ 中转页）/ music（QQ 内直接播，手机端无封面）/ native（平台原生 id 卡）
+                    style: String(body.musicStyle ?? '').trim()
                   });
                   if (qqPlan?.primary) { musicPlan = qqPlan; seg = qqPlan.primary; }
                   else log(`[rich] QQ 音乐未能生成卡片 ${key}: ${qqPlan?.note ?? '无卡片形态'} —— 改发官方分享链接文本`);
@@ -3271,7 +3138,15 @@ export function startConsoleServer() {
                   artist,
                   musicUrl: String(body.musicUrl ?? body.url ?? '').trim(),
                   image: String(body.image ?? '').trim(),
-                  audio: String(body.audio ?? '').trim()
+                  audio: String(body.audio ?? '').trim(),
+                  // 版式按次可指定（share/music/native）：见 media.js buildMusicCard 顶部那段说明
+                  style: String(body.musicStyle ?? '').trim(),
+                  // 2026-09-24：真机网易云分享卡的 jumpUrl 里带 `uct2`（分享者本人的网易云会话令牌），
+                  // 我们的卡缺这个参数。**只有这一条就是发给主人自己**（private:<ownerQQ>）时才带上，
+                  // 且必须配置 `social.send.neteaseUct2` 才有值 —— 发给别人/群里一律不带（那是主人的账号令牌）。
+                  uct2: key === `private:${String(cfgRef?.ownerQQ ?? '')}`
+                    ? String(cfgRef?.social?.send?.neteaseUct2 ?? '').trim()
+                    : ''
                 });
                 seg = musicPlan.primary;
               } catch (cardBuildError) {
@@ -3303,8 +3178,8 @@ export function startConsoleServer() {
               seg = { type: 'music', data };
             }
           } else if (type === 'video') {
-            /* 【2026-09-17】视频卡片（bilibili / 抖音 / 快手 / 小红书 / 微博 / YouTube）。
-             * 与音乐卡片同一原则：**模型只给链接**，标题/UP主/封面/时长/播放量全部由桥解析拼好，
+            /* 2026-09-17：视频卡片（bilibili / 抖音 / 快手 / 小红书 / 微博 / YouTube）。
+             * 与音乐卡片同一原则：模型只给链接，标题/UP主/封面/时长/播放量全部由桥解析拼好，
              * 不许模型手写卡片字段（手写封面 URL 就是手机端白框的老坑）。
              * 解析失败也绝不让"分享"整体失败：退化成"标题（若有）+ 纯链接"，至少能点开。 */
             const vurl = String(body.videoUrl ?? body.url ?? '').trim();
@@ -3312,10 +3187,10 @@ export function startConsoleServer() {
             try {
               const info = await resolveVideo(vurl);
               videoPlan = buildVideoCard(info, { title: String(body.title ?? '').trim(), url: String(info.url || vurl) });
-              /* 【2026-09-18 第八批 · 纠正上一轮的结论】B 站原生小程序卡片**做得到**。
-               * 桥直接问 NapCat 的 `get_mini_app_ark` 要一张**QQ 服务端现场签发**的 Ark
+              /* 2026-09-18 第八批 · 纠正上一轮的结论：B 站原生小程序卡片做得到。
+               * 桥直接问 NapCat 的 `get_mini_app_ark` 要一张 QQ 服务端现场签发的 Ark
                * （`app=com.tencent.miniapp_01`、`view=view_8C8E89…`、`url=m.q.qq.com/a/s/<hash>`、
-               *  `config.token=<签名>`），跟主人从 B 站分享进来的真卡**逐字段同款** —— 见 video.js 的
+               *  `config.token=<签名>`），跟账号所有者从 B 站分享进来的真卡逐字段同款 —— 见 video.js 的
                * `fetchMiniAppArk` 注释（那里有线上复测的完整返回）。
                * 所以第一优先改成小程序卡；拿不到才退回原来的「封面图 + 分享文案」。 */
               const ark = await fetchMiniAppArk(info, { httpUrl: cfgRef?.napcat?.httpUrl, token: cfgRef?.napcat?.accessToken });
@@ -3344,18 +3219,18 @@ export function startConsoleServer() {
               seg = null;
             }
           } else if (type === 'location') {
-            /* 【2026-09-19 修「位置卡片根本发不出去」】
-             * 上一轮以为"位置卡片实测通过"，其实**从来没真的发出去过**。读 NapCat 源码（4.18.28）：
+            /* 2026-09-19 修「位置卡片根本发不出去」
+             * 上一轮以为"位置卡片实测通过"，其实从来没真的发出去过。读 NapCat 源码（4.18.28）：
              *   packages/napcat-onebot/api/msg.ts:924
              *     [OB11MessageDataType.location]: async () => ({
              *       elementType: ElementType.SHARELOCATION, elementId: '',
              *       shareLocationElement: { text: '测试', ext: '' },      // ← text/ext 全是写死的
              *     }),
-             * 也就是说 **lat/lon/title/content 全部被丢弃**，发出去的是一个 text='测试'、ext='' 的哑元素。
-             * 线上复核也印证了：同一条 location 段用 get_friend_msg_history 回读，段列表是**空的**（`[]`），
+             * 也就是说 lat/lon/title/content 全部被丢弃，发出去的是一个 text='测试'、ext='' 的哑元素。
+             * 线上复核也印证了：同一条 location 段用 get_friend_msg_history 回读，段列表是空的（`[]`），
              * NapCat 连自己发出去的位置都解析不回来。
              *
-             * 所以默认改成 `map` 模式：**静态地图图片 + 地点文字 + 地图链接** ——
+             * 所以默认改成 `map` 模式：静态地图图片 + 地点文字 + 地图链接 ——
              * 图由 NapCat 下载后当普通图片发给 QQ（对方不用自己联网取图），文字和链接都能点，
              * 这是"确定能看到东西"的形态。想要 QQ 原生位置气泡，得先给 NapCat 打补丁把 text/ext
              * 透传过去（我们有构建链，但那要重启 NapCat），把 locationMode 设成 `native` 即可切回。
@@ -3375,21 +3250,21 @@ export function startConsoleServer() {
             const mapImg = amapKey
               ? `https://restapi.amap.com/v3/staticmap?location=${lon},${lat}&zoom=16&size=600*400&scale=2&markers=mid,,A:${lon},${lat}&key=${encodeURIComponent(amapKey)}`
               : `https://static-maps.yandex.ru/1.x/?ll=${lon},${lat}&z=16&size=600,400&l=map&pt=${lon},${lat},pm2rdm`;
-            /* 【2026-09-19 第十一批】主人要求"位置卡默认改成发腾讯地图小程序"。
+            /* 2026-09-19 第十一批 需求："位置卡默认改成发腾讯地图小程序"。
              *
-             * 先说清楚做不到的那部分：主人从 QQ 分享进来的那张腾讯地图卡（`incoming-cards.jsonl` 里有）是
+             * 先说清楚做不到的那部分：账号所有者从 QQ 分享进来的那张腾讯地图卡（`incoming-cards.jsonl` 里有）是
              *   {"app":"com.tencent.miniapp.lua","view":"miniapp","bizsrc":"miniapp.nativeshare",
              *    "prompt":"[微信小程序]腾讯地图",
              *    "meta":{"miniapp":{"tag":"微信小程序","title":"腾讯地图","source":"腾讯地图",
              *      "sourcelogo":"https://miniapp.gtimg.cn/generated-icon/wx7643d5f831302ab0.png",
              *      "jumpUrl":"https://m.q.qq.com/a/s/101a907383cf58f545e2f406fca8f5fb", …}},
              *    "config":{"token":"3d36f6c85f64e828e45bf79784c5d5a5",…}}
-             * —— 它是**微信小程序转发进来的卡**，`m.q.qq.com/a/s/<hash>` 和 `config.token` 都是分享那一刻
-             * 服务端签发、**指向那个具体地点**的，换坐标没法复用。`get_mini_app_ark` 也救不了：
-             * 它走 `LightAppSvc.mini_app_share.AdaptShareInfo`，只认 **QQ 小程序**的 appId+versionId
+             * —— 它是微信小程序转发进来的卡，`m.q.qq.com/a/s/<hash>` 和 `config.token` 都是分享那一刻
+             * 服务端签发、指向那个具体地点的，换坐标没法复用。`get_mini_app_ark` 也救不了：
+             * 它走 `LightAppSvc.mini_app_share.AdaptShareInfo`，只认 QQ 小程序的 appId+versionId
              * （实测拿高德的 appId 100571486 去调直接回 `jsonContent` undefined）。
              *
-             * 所以做的是"**看起来就是腾讯地图那张卡**"的图文卡：来源角标(腾讯地图)+官方图标+
+             * 所以做的是"看起来就是腾讯地图那张卡"的图文卡：来源角标(腾讯地图)+官方图标+
              * 腾讯地图跳转链接+地图缩略图。`social.send.locationApp='amap'` 可切回高德身份。 */
             const locApp = String(process.env.QQBRIDGE_LOCATION_APP ?? cfgRef?.social?.send?.locationApp ?? 'tencent').trim().toLowerCase();
             const tencentLink = `https://apis.map.qq.com/uri/v1/marker?marker=coord:${lat},${lon};title:${encodeURIComponent(locTitle || '位置')}&referer=moonbot`;
@@ -3405,13 +3280,13 @@ export function startConsoleServer() {
               /* 静态地图图片 + 地点文字 + 地图链接 —— 一定看得见的形态。
                * 实测这台 VPS 上无 key 能用的是 yandex static（200 image/png）；
                * staticmap.openstreetmap.de 超时、maps.wikimedia.org 403、高德 restapi 无 key 返回 INVALID_USER_KEY。
-               * 图是**服务器侧**抓取后由 NapCat 上传给 QQ 的，所以对方网络环境不影响。 */
+               * 图是服务器侧抓取后由 NapCat 上传给 QQ 的，所以对方网络环境不影响。 */
               seg = { type: 'image', data: { file: mapImg } };
               locTextAfter = locLine;
             } else {
-              /* 【2026-09-19 第十批】默认 `tuwen`：发**高德地图那条"图文/富文本"卡片**。
-               * 形态不是我猜的 —— 是主人 16:33 从高德分享进 QQ 时，桥在
-               * `state/incoming-cards.jsonl` 里抓到的**原始卡片**（逐字段照抄）：
+              /* 2026-09-19 第十批：默认 `tuwen`：发高德地图那条"图文/富文本"卡片。
+               * 形态不是我猜的 —— 是账号所有者 16:33 从高德分享进 QQ 时，桥在
+               * `state/incoming-cards.jsonl` 里抓到的原始卡片（逐字段照抄）：
                *
                *   {"app":"com.tencent.tuwen.lua","bizsrc":"qqconnect.sdkshare",
                *    "config":{"ctime":1789662714,"forward":1,"token":"<32位签名>","type":"normal"},
@@ -3422,14 +3297,14 @@ export function startConsoleServer() {
                *            "title":"天安门广场","uin":1736784911}},
                *    "prompt":"[分享]天安门广场","ver":"0.0.0.1","view":"news"}
                *
-               * 关键收获：**app 是 `com.tencent.tuwen.lua`（图文），不是上一轮手写失败的那个
-               * `com.tencent.structmsg`** —— 同一个 `view=news`，app 名换了才是新版 QQ 认的那套。
+               * 关键收获：app 是 `com.tencent.tuwen.lua`（图文），不是上一轮手写失败的那个
+               * `com.tencent.structmsg` —— 同一个 `view=news`，app 名换了才是新版 QQ 认的那套。
                * appid=100571486 就是高德地图在 QQ 里的应用号；tagIcon 用它官方的图标
                * （p.qpic.cn/qqconnect/0/app_100571486_…，QQ 自己的 CDN）。
                *
                * `token` 那张卡里是分享方签的，我们签不出来 → 用同格式的随机 32 位十六进制顶上；
                * 万一 QQ 校验它，卡片会被拒 —— 所以下面同时补一条「地点 + 高德链接」的文字，
-               * **保证信息一定到得了**（卡片能渲染的话这条只是重复一次，主人确认后可以去掉）。 */
+               * 保证信息一定到得了（卡片能渲染的话这条只是重复一次，账号所有者确认后可以去掉）。 */
               const ctime = Math.floor(Date.now() / 1000);
               const hex = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
               const news = {
@@ -3438,9 +3313,9 @@ export function startConsoleServer() {
                 ctime,
                 desc: locContent || (locApp === 'amap' ? '高德地图' : '腾讯地图'),
                 jumpUrl: mapLink,
-                /* 【2026-09-19 定稿】preview **原样**给静态地图，不过任何图片代理。
+                /* 2026-09-19 定稿：preview 原样给静态地图，不过任何图片代理。
                  * 上一版包了一层"输出 JPEG"的代理，结果和音乐封面同一个坑：签名服务会把代理 URL 的图
-                 * **转存成 qq.ugcimg.cn 长链接**，而那种链接手机端不渲染（真消息记录实测：
+                 * 转存成 qq.ugcimg.cn 长链接，而那种链接手机端不渲染（真消息记录实测：
                  * 原始外部 URL 会原样透传、手机正常；qq.ugcimg.cn 转存链接手机没图）。 */
                 preview: mapImg,
                 tag: locApp === 'amap' ? '高德' : '腾讯地图',
@@ -3508,7 +3383,7 @@ export function startConsoleServer() {
           }
           st.sendTimes.push(now);
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
-          // 【降级梯子】卡片发不出去时**必须**还能退回链接：音乐分享不能因为签名服务/NapCat 出问题就整体失败。
+          // 降级梯子：卡片发不出去时必须还能退回链接：音乐分享不能因为签名服务/NapCat 出问题就整体失败。
           // 顺序：primary（桥拼卡片）→ native（NapCat 原生 id 卡片，老行为）→ link（官方分享链接纯文本，走文本通道）。
           const ladder = await sendMusicCardWithFallback({
             key,
@@ -3526,7 +3401,7 @@ export function startConsoleServer() {
           const sent = { messageId: ladder.messageId };
           const sentSeg = ladder.seg;
           const sentCard = ladder.card;
-          /* 【2026-09-18】视频走"封面图 + 分享文案"两条：图已经发出去了，再把链接补一条，
+          /* 2026-09-18：视频走"封面图 + 分享文案"两条：图已经发出去了，再把链接补一条，
            * 否则对方只看到一张图、点不开。这一步失败不影响整体成功（图已经送到了）。 */
           if (videoPlan?.coverSent && sentCard === 'primary') {
             try {
@@ -3537,7 +3412,7 @@ export function startConsoleServer() {
               log(`[rich] 视频分享链接补发失败（封面图已送达，不影响）${key}: ${e?.message ?? e}`);
             }
           }
-          /* 位置卡片（map 模式）：地图图片已送达，再补一条"📍 地点 + 地图链接"。
+          /* 位置卡片（map 模式）：地图图片已送达，再补一条"地点 + 地图链接"。
            * 补发失败不影响整体成功（图已经在对方那了）。 */
           if (locTextAfter && sentCard === 'primary') {
             try {
@@ -3549,7 +3424,7 @@ export function startConsoleServer() {
             }
           }
           // 视频默认走"官方分享链接"（见 video.js 顶部注释：手写 json 卡会被新版 QQ 判"版本太低"），
-          // 所以对视频来说 link 形态是**预期**而不是降级；只有音乐/其它真正"卡片发失败退到链接"才算降级。
+          // 所以对视频来说 link 形态是预期而不是降级；只有音乐/其它真正"卡片发失败退到链接"才算降级。
           const intendedShare = sentCard === 'link' && videoPlan?.style === 'share';
           if (sentCard !== 'primary' && !intendedShare) {
             log(`[rich] ${type} 卡片降级 card=${sentCard} ${key}（${ladder.degradedFrom?.message ?? '无卡片段'}）`);
@@ -3598,7 +3473,7 @@ export function startConsoleServer() {
             failed: 0,
             quoted: quotedInfo,
             // 音乐卡片：告诉模型实际发出去的是哪种形态（card=link 表示已自动退回纯链接，别再补发链接）
-            ...(musicPlan ? { music: { card: sentCard, title: musicPlan.title, note: musicPlan.note, link: musicPlan.link } } : {}),
+            ...(musicPlan ? { music: { card: sentCard, style: musicPlan.style, title: musicPlan.title, note: musicPlan.note, link: musicPlan.link } } : {}),
             // 视频卡片：同上（card=link 就是已经替你发了链接，别再补一条）
             ...(videoPlan ? { video: { card: sentCard, title: videoPlan.title, platform: videoPlan.platform, note: videoPlan.note, link: videoPlan.link } } : {}),
             // 位置卡片：告诉模型实际发出去的形态（tuwen = 高德图文卡；map = 地图图片 + 地点文字/链接；native = QQ 原生位置气泡）
@@ -3634,8 +3509,8 @@ export function startConsoleServer() {
         }
         return;
       }
-      /* 【2026-09-17】视频链接解析（MCP qq_video_parse）：
-       * "主人甩了个 B 站/抖音链接过来" 时先看内容再说话 —— 标题/UP主/时长/播放量/封面。
+      /* 2026-09-17：视频链接解析（MCP qq_video_parse）：
+       * "用户甩了个 B 站/抖音链接过来" 时先看内容再说话 —— 标题/UP主/时长/播放量/封面。
        * 只读、不发送；解析失败也不要当场编内容，把 error 原样给模型，让它说"我看不到这条"。 */
       if (req.method === 'GET' && url.pathname === '/api/social/video-parse') {
         const key = String(url.searchParams.get('key') ?? '').trim();
@@ -3652,7 +3527,7 @@ export function startConsoleServer() {
         }
         return;
       }
-      /* 【2026-09-17】按关键词搜视频（MCP qq_video_search）：找片子/找资料用；只读。 */
+      /* 2026-09-17：按关键词搜视频（MCP qq_video_search）：找片子/找资料用；只读。 */
       if (req.method === 'GET' && url.pathname === '/api/social/video-search') {
         const key = String(url.searchParams.get('key') ?? '').trim();
         const q = String(url.searchParams.get('q') ?? '').trim();
@@ -3783,7 +3658,7 @@ export function startConsoleServer() {
         return;
       }
       // 完整聊天记录检索/管理：MCP qq_memory_search / qq_history_delete / qq_history_clear
-      /* ── 【2026-09-21 记忆架构升级】分层长期记忆的读写入口 ──────────────────────────
+      /* ── 2026-09-21 记忆架构升级：分层长期记忆的读写入口 ──────────────────────────
        *   GET  /api/social/memory-remember  写入一条（tier/pin/category/tags/ttl）
        *   GET  /api/social/memory-notes     检索/列出（query 走 FTS5，无 query 按层级+重要度排）
        *   GET  /api/social/memory-stats     库规模 + 全文索引状态（诊断/管理端）
@@ -3797,8 +3672,16 @@ export function startConsoleServer() {
         const content = String(url.searchParams.get('content') ?? '').trim();
         if (!content) { sendJson({ ok: false, error: 'content 不能为空（一句话说清要永久记住的事）' }, 400); return; }
         const uidParam = String(url.searchParams.get('uid') ?? '').trim();
-        // 归属：显式 uid 优先；否则私聊记到对方头上，群聊记到主人头上（群里的规矩是主人的规矩）
-        const uid = uidParam || (key.startsWith('private:') ? key.split(':')[1] : String(cfgRef?.ownerQQ ?? ''));
+        /* 2026-09-30 需求「跨会话同步，这样才是同一个人」
+         * 记忆库的检索 SQL 早有 `(uid = ? OR uid = '' OR ? = '')` 这个"全局记忆对所有人可见"的分支，
+         * 但没有任何写入路径能产生 uid = ''（下面这行的 `uidParam || …` 里，空串是 falsy，
+         * 于是永远落到"私聊记对方 / 群聊记账号所有者"），全局记忆因此是纸面能力（实测生产库 uid='' 为 0 条）。
+         * 现在给出唯一入口：scope=global（或 uid=global/all/*）表示"这条规矩对所有会话都成立"。
+         * 其余情况保持原语义不变。 */
+        const globalScope = /^(global|all|\*|全局)$/i.test(String(url.searchParams.get('scope') ?? '').trim())
+          || /^(global|all|\*|全局)$/i.test(uidParam);
+        // 归属：显式全局优先；否则显式 uid 优先；再否则私聊记到对方头上，群聊记到账号所有者头上（群里的规矩是账号所有者的规矩）
+        const uid = globalScope ? '' : (uidParam || (key.startsWith('private:') ? key.split(':')[1] : String(cfgRef?.ownerQQ ?? '')));
         const r = rememberEntry({
           uid,
           category: String(url.searchParams.get('category') ?? 'note'),
@@ -3841,6 +3724,74 @@ export function startConsoleServer() {
         sendJson({ ok: true, ...memoryStats(), digestChars: memoryDigest({ limit: 14, maxChars: 700 }).length });
         return;
       }
+      /* ── 管理端「聊天记录」页：总量计数 / 会话列表 / 消息分页 / 删除 / 重建索引 ──────────
+       * 2026-09-24：聊天记录从 memory.db 搬到 state/chat.db 之后（core/chat-db.js），管理端要
+       * 读它、删它都得走桥 —— 库句柄在桥进程手里，外部直接开同一个文件写会撞锁。
+       * 与 /api/social/history-search 的关键区别：这里是"人看的"，正文**不截断**、不做省 token 的裁剪；
+       * 那条是"模型看的"，才是截断+封顶的版本。 */
+      if (req.method === 'GET' && url.pathname === '/api/social/chat-stats') {
+        const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 7));
+        const stats = chatDbStats();
+        if (!stats.ok) { sendJson({ ok: false, error: stats.error || '聊天记录库不可用' }, 500); return; }
+        sendJson({ ok: true, ...stats, tokenUsage: tokenUsageSummary({ days }) });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/social/chat-convs') {
+        const kindRaw = String(url.searchParams.get('kind') ?? 'all').trim();
+        const kind = ['group', 'private'].includes(kindRaw) ? kindRaw : 'all';
+        const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get('limit')) || 300));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        const r = chatConvList({ kind, limit, offset });
+        if (!r.ok) { sendJson({ ok: false, error: r.error || '读取失败' }, 500); return; }
+        sendJson({ ok: true, kind, total: r.total, count: r.count, convs: r.convs });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/social/chat-messages') {
+        const key = String(url.searchParams.get('key') ?? '').trim();
+        const query = String(url.searchParams.get('query') ?? '').trim();
+        const dirRaw = String(url.searchParams.get('direction') ?? '').trim();
+        const r = searchChatMessages({
+          convKey: key || undefined,
+          query: query || undefined,
+          direction: (dirRaw === 'out' || dirRaw === 'in') ? dirRaw : undefined,
+          fromTs: Number(url.searchParams.get('fromTs')) || 0,
+          toTs: Number(url.searchParams.get('toTs')) || 0,
+          limit: Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50)),
+          offset: Math.max(0, Number(url.searchParams.get('offset')) || 0),
+        });
+        if (!r.ok) { sendJson({ ok: false, error: r.error || '读取失败' }, 500); return; }
+        sendJson({ ok: true, key, total: r.total, count: r.messages.length, ranked: !!r.ranked, messages: r.messages });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/social/chat-delete') {
+        const body = await readBody();
+        const key = String(body.key ?? '').trim();
+        const ids = Array.isArray(body.ids) ? body.ids : null;
+        const beforeMs = Number(body.beforeMs) || 0;
+        const all = body.all === true;
+        if (body.confirm !== true) { sendJson({ ok: false, error: '删除操作需 confirm:true' }, 400); return; }
+        if (!key && !ids && !beforeMs && !all) { sendJson({ ok: false, error: '必须指定删除范围（key / ids / beforeMs / all）' }, 400); return; }
+        if (ids && ids.length > 500) { sendJson({ ok: false, error: '一次最多删 500 条，请分批' }, 400); return; }
+        if (all && !key) {
+          // 全库清空：只认 all:true（不带 key 的 clearChatHistory 就是清空全库），且必须 confirm
+          const r = clearChatHistory('');
+          sendJson({ ok: !!r.ok, deleted: r.deleted || 0, mode: 'all', error: r.error });
+          return;
+        }
+        const r = (ids && ids.length)
+          ? deleteChatMessages({ ids, ...(key ? { convKey: key } : {}) })
+          : (beforeMs > 0
+            ? deleteChatMessages({ ...(key ? { convKey: key } : {}), beforeMs })
+            : clearChatHistory(key));
+        const mode = (ids && ids.length) ? 'ids' : (beforeMs > 0 ? 'before' : 'conv');
+        sendJson({ ok: !!r.ok, deleted: r.deleted || 0, mode, error: r.error });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/social/chat-reindex') {
+        const r = rebuildChatFts({ reason: 'console' });
+        sendJson({ ok: !!r.ok, ...r, counters: chatCounters() });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/social/history-search') {
         const key = String(url.searchParams.get('key') ?? '').trim();
         const query = String(url.searchParams.get('query') ?? '').trim();
@@ -3855,8 +3806,8 @@ export function startConsoleServer() {
         if (!key && !query && !sender && !date && !direction) { sendJson({ ok: false, error: '至少提供一个检索条件（key/query/sender/date/direction）' }, 400); return; }
         const result = searchChatMessages({ convKey: key || undefined, query: query || undefined, sender: sender || undefined, date: date || undefined, direction: direction || undefined, limit, offset });
         if (!result.ok) { sendJson({ ok: false, error: result.error || '检索失败' }, 500); return; }
-        // 【2026-09-12 省额度：历史检索是最容易把上下文撑爆的工具】
-        // 实测主人会话里两次检索（limit=200）返回 47998 + 21228 字符，而且它们**永久留在上下文里**、
+        // 2026-09-12 省额度：历史检索是最容易把上下文撑爆的工具
+        // 实测账号所有者的会话里两次检索（limit=200）返回 47998 + 21228 字符，而且它们永久留在上下文里、
         // 之后每一步都重发一遍（那个会话 46 步、每步 8.6 万 token）。三件事一起做：
         //   ① 每条正文截断（160 字够判断"说的是什么"，要细节用 qq_get_message_detail / 加 query 收窄）；
         //   ② 丢掉空字段与只给内部用的字段（media/quoteTarget/recalledAt/seq/direction…）；
@@ -4099,7 +4050,7 @@ export function startConsoleServer() {
         if (req.headers['x-agent-token'] && !ToolEnabled('waitMessages')) { sendJson({ ok: false, error: '工具未启用：qq_wait_for_messages' }, 403); return; }
   
     // deepsleep：静默所有群聊（总开关）或「单群静默名单」里的群——群消息不交给模型，节省 token。
-    // 【2026-09-12 堵漏】原来这段整个包在 `if (kind === 'group')` 里 —— 这是对的（私聊照常），
+    // 2026-09-12 堵漏：原来这段整个包在 `if (kind === 'group')` 里 —— 这是对的（私聊照常），
     // 但漏了"模型正挂着 qq_wait_for_messages 时，群里来的消息会随工具结果交回模型"这条路径，
     // 那次群静默就被绕过了。现在群聊一律按静默处理；私聊仍未受影响。
     const kind = key.startsWith('group:') ? 'group' : 'private';
@@ -4151,16 +4102,16 @@ export function startConsoleServer() {
         }
         st.pendingWakeTimerStartedAt = 0;
         cancelReplyCheck(key); // AI 正在主动等待，取消回复检查定时器避免重复唤醒
-        // 【2026-09-11 23:05 修「等待期间吞消息」—— 主人抓到的】
-        // 基线**不能**用"调用时刻的 lastUnreadSeq"：那样一来，**在调用之前就到达、但还没交给模型的消息，
-        // 会被整批跳过**。实测 15:01:09/10 的 seq8/seq9 就是这么丢的：
-        // 它们到达时模型正在跑一步（不在等待里）→ 被暂存 → 而新架构下回合**一直不结束**
-        // → "回合结束才补发"永远不触发 → 永久丢失（主人当场说"你少读一条，笨蛋"）。
-        // 改成用"已经交给模型的最高 seq"当基线：**凡是没给过它的，这次一并返回**。
+        // 2026-09-11 23:05 修「等待期间吞消息」—— 线上抓到的
+        // 基线不能用"调用时刻的 lastUnreadSeq"：那样一来，在调用之前就到达、但还没交给模型的消息，
+        // 会被整批跳过。实测 15:01:09/10 的 seq8/seq9 就是这么丢的：
+        // 它们到达时模型正在跑一步（不在等待里）→ 被暂存 → 而新架构下回合一直不结束
+        // → "回合结束才补发"永远不触发 → 永久丢失（当时的用户原话："你少读一条，笨蛋"）。
+        // 改成用"已经交给模型的最高 seq"当基线：凡是没给过它的，这次一并返回。
         const deliveredSeq = Number(st.lastDeliveredSeq) || 0;
-        // 兜底：水位线缺失时（首次运行 / 旧状态文件 / 刚重启），用 **unread 里最小 seq − 1**，
+        // 兜底：水位线缺失时（首次运行 / 旧状态文件 / 刚重启），用 unread 里最小 seq − 1，
         // 保证"凡是还没标读的（= 还没交给模型处理过的）"全都会被返回。
-        // ⚠️ 绝对不能用 lastUnreadSeq 兜底：那等于"只给调用之后的新消息"，
+        // 注意：绝对不能用 lastUnreadSeq 兜底：那等于"只给调用之后的新消息"，
         //    会把重启前被暂存的消息永久跳过（实测 15:04 被暂存的 seq12/seq13 就是这么丢的）。
         const unreadSeqs = (Array.isArray(st.unread) ? st.unread : [])
           .map((m) => Number(m && m.seq)).filter((n) => Number.isFinite(n) && n > 0);
@@ -4173,9 +4124,9 @@ export function startConsoleServer() {
         let aborted = false;
         let lastWaitRenew = 0;
         req.on('close', () => { aborted = true; });
-        // 【2026-09-11 23:15 24 小时长轮询】等待期间**没有任何桥/DSH 事件**，
+        // 2026-09-11 23:15 24 小时长轮询：等待期间没有任何桥/DSH 事件，
         // turn-guard 的"静默 180s 判卡死 / 总时长 360s"计时器会一直往前走 →
-        // 必须**周期性续期**，否则一个长轮询会被当成卡死而隔离会话（老实现只在开始/结束各续一次，
+        // 必须周期性续期，否则一个长轮询会被当成卡死而隔离会话（老实现只在开始/结束各续一次，
         // 所以等待超过约 3 分钟就有风险）。这里每 5 秒续一次。
         const renewGuard = () => {
           if (Date.now() - lastWaitRenew < 5000) return;
@@ -4243,11 +4194,11 @@ export function startConsoleServer() {
         const lastMessageUnfinished = lastNew ? looksLikeUnfinished(String(lastNew.tail || lastNew.plain || lastNew.text || '')) : false;
         touchTurnGuardsByKey(key); // 等待结束同样续期一次，覆盖最后一段静默与结果回传的间隙
         finishWait();
-        // 【2026-09-11 主人要求：到对话阈值就换会话 —— 把闭环补上】
+        // 2026-09-11 需求：到对话阈值就换会话 —— 把闭环补上
         // 新架构（§4.12）下"一个回合一直跑、消息由本工具取回"，于是轮换计数器 `rotateTurns`
-        // 只在**唤醒**时增长 —— 而这条路不再产生唤醒 → 阈值永远到不了 → 上下文只涨不换
-        // （而 compaction 还是关着的）。所以这里补上：**每等回一批新消息就算一次来回**，
-        // 到阈值就明确让模型收尾。真正的切换由既有的轮换逻辑在**下一次唤醒**时执行
+        // 只在唤醒时增长 —— 而这条路不再产生唤醒 → 阈值永远到不了 → 上下文只涨不换
+        // （而 compaction 还是关着的）。所以这里补上：每等回一批新消息就算一次来回，
+        // 到阈值就明确让模型收尾。真正的切换由既有的轮换逻辑在下一次唤醒时执行
         // （wake-send.js 里那段 standby 切换，条件同样是 `rotateTurns >= threshold`）。
         let rotateNow = false;
         let rotateTurnsNow = Number(st.rotateTurns) || 0;
@@ -4257,10 +4208,10 @@ export function startConsoleServer() {
           st.rotateTurns = rotateTurnsNow;
           if (rotateTurnsNow >= rotateThreshold) rotateNow = true;
         }
-        // 【2026-09-11 22:58 修「已经随工具结果给过了，却又被暂存去补发」】
+        // 2026-09-11 22:58 修「已经随工具结果给过了，却又被暂存去补发」
         // 把这次交回的 seq 记进 `turnSeenUnread`（语义 = "本回合已经给过模型"），
-        // 这样 scheduleWake 的 busy 分支在**轮询刚结束那一刻**再被调用时，
-        // 会看到"这条已经给过"而**不再暂存** → 不会再补发一整轮（白烧额度）。
+        // 这样 scheduleWake 的 busy 分支在轮询刚结束那一刻再被调用时，
+        // 会看到"这条已经给过"而不再暂存 → 不会再补发一整轮（白烧额度）。
         // 实测 22:57:28：等待工具已经把 seq3 交给模型、模型也回了，
         // 但同一时刻的另一次 scheduleWake 仍把它暂存了。
         if (arrived && newMessages.length) {
@@ -4300,9 +4251,9 @@ export function startConsoleServer() {
         });
         return;
       }
-      /* 【2026-09-15 修「qq_send_message: Invalid input: expected string, received undefined at key/token」】
+      /* 2026-09-15 修「qq_send_message: Invalid input: expected string, received undefined at key/token」
        * 模型偶尔漏传 key/token（正文 [Token] 行离得太远、或它把参数名写错），而 MCP 工具的 zod schema
-       * 把两者声明成必填 → 请求在**进处理器之前**就被 SDK 以 -32602 打回，模型拿不到任何有用的提示，
+       * 把两者声明成必填 → 请求在进处理器之前就被 SDK 以 -32602 打回，模型拿不到任何有用的提示，
        * 白烧一整个模型步（线上实测该会话 ≈34k tokens/步）还答不上人。
        * 这个端点让工具侧能把缺的参数补回来（MCP 侧用 x-console-token 鉴权，等价于本机可信）：
        *   · 传了 key → 回该会话的 agent token（模型只忘了 token 的情况）；
@@ -4324,10 +4275,10 @@ export function startConsoleServer() {
           sendJson({ ok: true, key: k, token: String(st?.agentToken ?? ''), source: 'active-turn' });
           return;
         }
-        /* 【2026-09-20 主人报「pixiv 发图发错群」→ 这里就是那个"猜"的地方，已删掉】
+        /* 2026-09-20 反馈「pixiv 发图发错群」→ 这里就是那个"猜"的地方，已删掉
          * 09-18 为了修"缺 key/token 报错"加的规则是：多个会话在途时按"最近活动"挑一个当目标。
-         * 后果：群 A 的人要图、模型漏传 key → 图发进了当时更活跃的群 B / 主人私聊（发错群）。
-         * 现在改成**绝不代替调用方选会话**：多个在途就回 ambiguous（连同在途会话列表），
+         * 后果：群 A 的人要图、模型漏传 key → 图发进了当时更活跃的群 B / 账号所有者私聊（发错群）。
+         * 现在改成绝不代替调用方选会话：多个在途就回 ambiguous（连同在途会话列表），
          * 由调用方（MCP 工具层）明确告知模型"照抄唤醒正文的 [Session] 行"，而不是替他猜。
          * 只传了 key 的那条分支照旧（调用方已经知道自己要哪个会话，只是来拿 token）。 */
         if (active.length > 1) {
@@ -4435,8 +4386,11 @@ export function startConsoleServer() {
         if (req.headers['x-agent-token'] && !SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
         if (req.headers['x-agent-token'] && !ToolEnabled('getMyRecent')) { sendJson({ ok: false, error: '工具未启用：qq_get_my_recent_messages' }, 403); return; }
         const st = getSocialState(key);
-        const mine = st.recentMessages.filter((m) => m.isSelf).slice(-limit);
-        sendJson({ ok: true, key, messages: mine.map(withTimeText) });
+        const mem = Array.isArray(st.recentMessages) ? st.recentMessages : [];
+        /* 同 /api/social/recent：只数内存窗口里"我"发的那几条（现场标记齐全、一定是最新的）。
+         * 想看更早我说过什么 → qq_memory_search(direction=out)（读 SQLite 记录）。 */
+        const mine = mem.filter((m) => m.isSelf).slice(-limit);
+        sendJson({ ok: true, key, count: mine.length, windowSize: mem.length, messages: mine.map(withTimeText) });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/social/record-sent') {
@@ -4687,7 +4641,7 @@ export function startConsoleServer() {
         });
         return;
       }
-      // ── 活跃时段表（主人自然语言设定 → qq_set_activity_hours / qq_get_activity_hours） ──
+      // ── 活跃时段表（用户自然语言设定 → qq_set_activity_hours / qq_get_activity_hours） ──
       if (req.method === 'GET' && url.pathname === '/api/social/activity-hours') {
         const key = String(url.searchParams.get('key') ?? '').trim();
         if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
@@ -4728,7 +4682,7 @@ export function startConsoleServer() {
         sendJson({ ok: true, key, windows: getActivityWindows(key) });
         return;
       }
-      // ── 运行时口头可调配置（主人自然语言修改 → qq_set_system_config / qq_get_system_config） ──
+      // ── 运行时口头可调配置（用户自然语言修改 → qq_set_system_config / qq_get_system_config） ──
       if (req.method === 'GET' && url.pathname === '/api/social/tunables') {
         if (req.headers['x-agent-token'] && !agentTokenOk('private:' + String(cfgRef.ownerQQ), req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'Invalid agent token - use the [Token] value at the top of the latest wake prompt, copied verbatim; the same value also authorizes cross-session view/actions' }, 403); return; }
         sendJson({ ok: true, items: tunableListItems() });
@@ -4737,7 +4691,7 @@ export function startConsoleServer() {
       if (req.method === 'POST' && url.pathname === '/api/social/tunables') {
         const body = await readBody();
         const tunKey = String(body.key ?? '').trim();
-        // 主人私聊 / 或本会话最近一条人话是主人或管理员 → 放行（见 trustLevelFor 注释）
+        // 账号所有者私聊 / 或本会话最近一条人话是账号所有者或管理员 → 放行（见 trustLevelFor 注释）
         if (!trustLevelForToken(String(req.headers['x-agent-token'] ?? ''))) {
           sendJson({ ok: false, error: NOT_TRUSTED_MSG }, 403);
           return;
@@ -4751,7 +4705,24 @@ export function startConsoleServer() {
           const v = applyTunable(spec, body.value);
           if (tunKey.startsWith('proactive') || tunKey === 'idleThresholdMs') rearmProactiveTimersAfterChange();
           log(`[tunable] 主人口头修改 ${tunKey}（${spec.label}）= ${JSON.stringify(v)}`);
-          sendJson({ ok: true, key: tunKey, label: spec.label, value: v, items: tunableListItems() });
+          /* 2026-09-24：把"被区间夹过"这件事显式说出来。起因：主人让"每个字打慢点"（500ms），
+           * sendPerCharMs 的 spec.max 是 320，applyTunable 静默夹回 320 —— 回包里只有 value:320，
+           * 模型无从判断自己的要求没被满足，于是对主人说"改好了"（私聊 23:48 "600ms，你看看生效没"）。
+           * 现在回包带上 requested / clamped / note，模型必须把 note 如实转述，不能再报"成功"。 */
+          const reqNum = Number(body.value);
+          const applied = typeof v === 'number' && Number.isFinite(reqNum) && Math.abs(reqNum - v) > 1e-9;
+          const lim = [];
+          if (spec.min !== undefined) lim.push('最小 ' + spec.min);
+          if (spec.max !== undefined) lim.push('最大 ' + spec.max);
+          sendJson({
+            ok: true, key: tunKey, label: spec.label, value: v,
+            ...(Number.isFinite(reqNum) ? { requested: reqNum } : {}),
+            ...(applied ? {
+              clamped: true,
+              note: `要的是 ${reqNum}，实际只能到 ${v}（「${spec.label}」允许范围：${lim.join(' / ')}）。请把实际生效值如实告诉主人，别只说"改好了"。`,
+            } : {}),
+            items: tunableListItems(),
+          });
         } catch (e) {
           sendJson({ ok: false, error: `设置「${spec.label}」失败：${e?.message ?? e}` }, 400);
         }
@@ -4808,7 +4779,7 @@ export function startConsoleServer() {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/social/admin-set') {
-        // 管理员授权/取消（模型按自然语言调用；仅主人私聊会话可用）
+        // 管理员授权/取消（模型按自然语言调用；仅账号所有者私聊会话可用）
         const body = await readBody();
         const key = String(body.key ?? '').trim();
         const token = String(body.token ?? '').trim();
@@ -4833,7 +4804,7 @@ export function startConsoleServer() {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/api/social/whitelist') {
-        // 群白名单加/移（模型按自然语言调用；仅主人私聊会话可用）
+        // 群白名单加/移（模型按自然语言调用；仅账号所有者私聊会话可用）
         const body = await readBody();
         const key = String(body.key ?? '').trim();
         const token = String(body.token ?? '').trim();
@@ -5034,9 +5005,9 @@ export function startConsoleServer() {
         if (!content) { sendJson({ ok: false, error: 'content 不能为空' }, 400); return; }
         if (content.length > 50) { sendJson({ ok: false, error: '黑话词条过长（最多 50 字）' }, 400); return; }
         if (!allowSlangSubmit(key)) { sendJson({ ok: false, error: '黑话提交过于频繁，请稍后再试' }, 429); return; }
-        /* 【2026-09-19 修「学过的黑话又变成候选」】这里以前用 `e.content === content` 完全相等匹配，
+        /* 2026-09-19 修「学过的黑话又变成候选」：这里以前用 `e.content === content` 完全相等匹配，
          * 所以模型把已确认的词换个写法提交（多空格、多标点、大小写不同）就会被判成"新词"，
-         * 走到下面去新建一条 candidate —— 主人看到的"学过了还在候选里"就有这一份。
+         * 走到下面去新建一条 candidate —— 界面上看到的"学过了还在候选里"就有这一份。
          * 改用与 upsertSlangEntry 同一套归一化键（slangKey）。 */
         const submitKey = slangKey(content);
         const existing = submitKey
@@ -5136,12 +5107,12 @@ export function startConsoleServer() {
           return;
         }
         try {
-          /* raw=1：**转发用**，要原图字节（不做压缩/降采样）。默认（喂给视觉模型那条路）照旧压缩，
+          /* raw=1：转发用，要原图字节（不做压缩/降采样）。默认（喂给视觉模型那条路）照旧压缩，
            * 因为那条路受 DSH 附件层的单边上限约束、也直接吃 token。 */
           const raw = url.searchParams.get('raw') === '1';
           const images = await fetchMediaData(media, { raw });
-          /* viaQuote：这张图其实是**被引用的那条消息**里的（主人引用着自己的图让你转发就是这种）。
-           * foundIn：跨会话时图往往在**发起会话**里而 key 是目的地，如实报出到底在哪个会话找到的。 */
+          /* viaQuote：这张图其实是被引用的那条消息里的（账号所有者引用着自己的图让你转发就是这种）。
+           * foundIn：跨会话时图往往在发起会话里而 key 是目的地，如实报出到底在哪个会话找到的。 */
           sendJson({ ok: true, messageId, media, images, raw, viaQuote: !!found?.viaQuote, quoteMessageId: found?.quoteMessageId || '', foundIn: found?.foundIn || key });
         } catch (error) {
           log(`图片查询失败 ${key} ${messageId}: ${error?.message ?? error}`);
@@ -5211,7 +5182,7 @@ export function startConsoleServer() {
         // 若声明在 try 内，失败分支会先抛 ReferenceError，预占的额度永远不会回滚（假 429）。
         const st = getSocialState(key);
         const now = Date.now();
-        // 【2026-09-16 幂等闸门】与批量端点同一套账：上一批部分失败后模型拿这条旧正文再发一次 → 挡下（见 send-idempotency.js）。
+        // 2026-09-16 幂等闸门：与批量端点同一套账：上一批部分失败后模型拿这条旧正文再发一次 → 挡下（见 send-idempotency.js）。
         const idemOne = filterAlreadySentBubbles(key, [message], now);
         if (idemOne.skipped.length) {
           logIdempotencyBlock(key, idemOne, '上一批发送部分失败，这是模型把已送出的那条再发一次');
@@ -5222,12 +5193,12 @@ export function startConsoleServer() {
           });
           return;
         }
-        /* 【2026-09-22 撤掉收尾回执闸门】上一轮在这里加过一道"本回合已发过内容就不再发 `OK/好了/已发送`"的桥侧
-         * 闸门（`lib/ack-text.js` + turnHasBubble）。主人看到后的意见是：**不用强迫，无伤大雅** —— 收尾那句
+        /* 2026-09-22 撤掉收尾回执闸门：上一轮在这里加过一道"本回合已发过内容就不再发 `OK/好了/已发送`"的桥侧
+         * 闸门（`lib/ack-text.js` + turnHasBubble）。账号所有者看到后的意见是：不用强迫，无伤大雅 —— 收尾那句
          * 交给提示词说清楚就够了（preset `[RULES] 13 CLOSING_OK`：说完用工具之后，正文以单独一个 `OK` 收尾），
          * 桥不再替模型决定该不该说这一句。删掉闸门同时也删掉了它对发送链的一次隐式改写：
          * 发送端点回到"模型让发什么就发什么"的单一语义（幂等闸门仍然照旧拦重复）。 */
-        // 【2026-09-16 触发源拦截】同批量端点：atUserId 像是 messageId → 降级为不带 @ 发送（不报错、不整批失败）
+        // 2026-09-16 触发源拦截：同批量端点：atUserId 像是 messageId → 降级为不带 @ 发送（不报错、不整批失败）
         const atJudgeOne = judgeAtUserId(atUserId, collectAtUserIdEvidence(st));
         let atUserOne = atUserId;
         let atNoteOne = '';
@@ -5332,7 +5303,7 @@ export function startConsoleServer() {
         wakeConfigMissCount.delete(key);
         const removed = social.conversations.get(key);
         if (removed?.agentToken) KNOWN_AGENT_TOKENS.delete(removed.agentToken);
-        // 【2026-09-16】清上下文但保留「已回复账本」：重置后同一批消息不再被当成没回过而重复回复。
+        // 2026-09-16：清上下文但保留「已回复账本」：重置后同一批消息不再被当成没回过而重复回复。
         const carriedSingle = resetConversationKeepingLedger(key);
         if (!carriedSingle) log(`[reset] ${key} 无账本需要保留（该会话此前没有已回复记录）`);
         // 重建账本会重新装配该会话的定时器；本端点的语义是"清完等下次唤醒重建"，所以再清一次。
@@ -5379,7 +5350,7 @@ export function startConsoleServer() {
         for (const st of social.conversations.values()) {
           if (st?.agentToken) KNOWN_AGENT_TOKENS.delete(st.agentToken);
         }
-        /* 【2026-09-16】"清空工作区"同样是 reset 家族的一员，一样会把「已回复账本」抹掉。
+        /* 2026-09-16："清空工作区"同样是 reset 家族的一员，一样会把「已回复账本」抹掉。
          * 这里逐个会话走"清状态、留账本"，避免清空工作区之后同一批历史消息被重新回一遍。 */
         let keptLedger = 0;
         for (const key of [...social.conversations.keys()]) {
@@ -5463,7 +5434,7 @@ export function startConsoleServer() {
         if (req.method === 'POST' && url.pathname === '/api/voice/preview') {
           try {
             const text = String(body.text ?? '').trim() || '你好呀，这是音色试听。';
-            // 【2026-09-15 补】音色库里**已保存**的音色用 voiceId 试听：管理端手里没有复刻样本的
+            // 2026-09-15 补：音色库里已保存的音色用 voiceId 试听：管理端手里没有复刻样本的
             // base64（样本存在桥侧 state 里），只靠 mode/sampleBase64 是没法试听"复刻型音色"的
             // ——早先那样点试听会报「音色复刻需要音频样本」。这里按 id/名字查库后再合成。
             const voiceId = String(body.voiceId ?? '').trim();
@@ -5535,9 +5506,9 @@ export function startConsoleServer() {
             const lib = voiceMod.listVoices();
             const want = String(body.voice ?? '').trim();
             const hit = want ? lib.custom.find((v) => v.id === want || v.name === want) : null;
-            // 【2026-09-16 主人报「我设了自定义音色却一直用内置冰糖」】根因是模型自己显式传了内置音色。
-            // 这里把"显式指定覆盖了主人默认音色"这件事**如实记一条日志**，以后一眼能看出来；
-            // 真正的修正靠提示词（唤醒正文每轮都带 default voice=<主人设的那个>）+ preset/工具描述。
+            // 2026-09-16 反馈「我设了自定义音色却一直用内置冰糖」：根因是模型自己显式传了内置音色。
+            // 这里把"显式指定覆盖了默认音色"这件事如实记一条日志，以后一眼能看出来；
+            // 真正的修正靠提示词（唤醒正文每轮都带 default voice=<配置里设的那个>）+ preset/工具描述。
             try {
               const cfgNow = voiceMod.voiceConfig?.() ?? {};
               const curDefault = String(cfgNow.defaultVoice ?? '').trim();
@@ -5611,11 +5582,27 @@ export function startConsoleServer() {
       }
 
       // ── NapCat 鉴权令牌（WebUI / HTTP / WS）真正落地 ─────────────────────────────
-      // 【2026-09-15 主人反馈】管理端改「NapCat 令牌」只改了桥 config.json 里"期望用哪个"，
+      // 2026-09-15 反馈：管理端改「NapCat 令牌」只改了桥 config.json 里"期望用哪个"，
       // 从没写进 NapCat 自己的配置 → NapCat 还收默认 truefriend、旧令牌照样能进。
       // 这里把三个令牌写进 NapCat 的 webui.json / onebot11*.json，并重启容器（docker restart -t 60，
       // 宽限 60s：NapCat 的 PID1 不转发 SIGTERM，来不及就是 SIGKILL —— 参见 napcat-tokens.js 的说明）；
       // 写完同时把桥 config.json 的 napcat.accessToken / wsAccessToken 对齐（否则桥用新令牌连不上旧配置）。
+      /* 2026-09-24 需求「napcat 登录态改为 SSE 实时探测」
+       * 登录态走 SSE 推送：建立连接先给一份真值，之后只在结论变化（WS 开/关、登录态变）时推，
+       * 外加 30 秒兜底重探（2 次/分钟）与 20 秒注释心跳。探测本身只读一句 OneBot get_login_info，
+       * 且被 napcat-tokens.js 的 3 秒 TTL + 并发合并挡住，不会把 NapCat 问爆、更不会动登录态。 */
+      if (req.method === 'GET' && url.pathname === '/api/napcat/login-stream') {
+        let tokMod;
+        try {
+          tokMod = await import('../core/napcat-tokens.js');
+        } catch (error) {
+          log(`控制台：NapCat 令牌模块加载失败：${error?.message ?? error}`);
+          sendJson({ ok: false, error: 'napcat-tokens module unavailable' }, 503);
+          return;
+        }
+        await handleNapcatLoginStream(req, res, tokMod);
+        return;
+      }
       if (url.pathname === '/api/napcat/tokens') {
         let tokMod;
         try {
@@ -5626,15 +5613,15 @@ export function startConsoleServer() {
           return;
         }
         if (req.method === 'GET') {
-          // 【2026-09-16】napcatTokenStatus 现在是 async（顺带查 NapCat 的 QQ 登录态）
+          // 2026-09-16：napcatTokenStatus 现在是 async（顺带查 NapCat 的 QQ 登录态）
           sendJson(await tokMod.napcatTokenStatus());
           return;
         }
         if (req.method === 'POST') {
           const body = await readBody();
           try {
-            // 【2026-09-15 主人反馈"这个界面重复了"】合并成一处之后，管理端不需要再手抄令牌：
-            // useBridgeTokens=true 就用**桥配置里现在这两个令牌**去写 NapCat（HTTP/WS），
+            // 2026-09-15 反馈"这个界面重复了"：合并成一处之后，管理端不需要再手抄令牌：
+            // useBridgeTokens=true 就用桥配置里现在这两个令牌去写 NapCat（HTTP/WS），
             // WebUI 令牌没单独填时也用它 —— 语义就是"让三处一致成桥里那个令牌"。
             const useBridge = body?.useBridgeTokens === true;
             const bridgeHttp = String(cfgRef?.napcat?.accessToken ?? '').trim();
@@ -5646,7 +5633,7 @@ export function startConsoleServer() {
               restart: body?.restart !== false
             };
             const result = await tokMod.applyNapcatTokens(payload);
-            // 写盘成功 → 把桥这边的期望值也对齐（**同时改内存**：config.json 是原子替换写盘，
+            // 写盘成功 → 把桥这边的期望值也对齐（同时改内存：config.json 是原子替换写盘，
             // 文件监听偶尔收不到这次变更，只写文件会出现"磁盘已改、桥还拿旧令牌去连"的假不一致）
             if (result?.ok && (payload.httpToken || payload.wsToken) && !useBridge) {
               try {
@@ -5768,21 +5755,21 @@ export function startConsoleServer() {
         return;
       }
       // POST /api/learning/persona-apply { uid, mode:'save'|'apply'|'fuse', text? }
-      //   人格学习的**审批 / 修正**口（管理端「人格学习」栏展开后的几个按钮）：
+      //   人格学习的审批 / 修正口（管理端「人格学习」栏展开后的几个按钮）：
       //     mode='save'  → text 当作修正后的英文人设正文写回该 uid 的库记录（键 personaEn）
-      //     mode='apply' → text（没传则用库里的 personaEn）**整篇覆盖**写入 qq-bridge/persona.md；
+      //     mode='apply' → text（没传则用库里的 personaEn）整篇覆盖写入 qq-bridge/persona.md；
       //                    桥每轮唤醒按 mtime 读它注入 [PERSONA]，文件一改下一条消息就是新人设、
       //                    不用重启桥；覆盖前桥侧自动备份旧人设（persona.md.bak-…，最多 5 份）。
-      //     mode='fuse'  → 【2026-09-15 主人要求】**不替换、而是结合**：把学到的特点融进**当前 persona.md**
-      //                    重新增删改写出一份草稿返回（不写盘，主人看过再决定是否覆盖）。
+      //     mode='fuse'  → 2026-09-15 需求「不替换、而是结合」：把学到的特点融进当前 persona.md
+      //                    重新增删改写出一份草稿返回（不写盘，账号所有者看过再决定是否覆盖）。
       //   校验（uid 格式 / 正文非空 / apply 禁中文）统一在 persona-learn.js 里做，
       //   端点只做转发与类型兜底，保证桥内其它调用方拿到同一套规则；
       //   鉴权沿用本段上方的统一 consoleToken 校验（管理端经 /api/learning/persona-apply 代理过来）。
-      /* 【2026-09-22 修「不能切换人设」】把角色库里的一张卡写成 persona.md（模型侧工具 qq_character_switch 走这里）。
-       * 为什么需要端点：模型侧原来**没有任何**写人设的路径 —— 四个 qq_character_* 是纯只读，
+      /* 2026-09-22 修「不能切换人设」：把角色库里的一张卡写成 persona.md（模型侧工具 qq_character_switch 走这里）。
+       * 为什么需要端点：模型侧原来没有任何写人设的路径 —— 四个 qq_character_* 是纯只读，
        * 旧的 /role 命令读的是 roles/ 老机制而那个目录根本不存在，于是"换成 XX 角色"只能即兴演，
        * 轮换或压缩之后立刻掉回默认人格。写盘实现只有一份：lib/persona-switch.js（斜杠命令也用它）。
-       * 权限（必须是他本人）：① 主人的私聊令牌；或 ② 该会话**最近一条别人发来的消息**是主人（10 分钟内）
+       * 权限（必须是他本人）：① 账号所有者的私聊令牌；或 ② 该会话最近一条别人发来的消息是账号所有者（10 分钟内）
        * —— 群里换人设正是这个场景，群友插一句话就会把这条授权挡掉。 */
       if (req.method === 'POST' && url.pathname === '/api/persona/switch') {
         const body = await readBody();
@@ -5898,9 +5885,9 @@ export function startConsoleServer() {
         }
         return;
       }
-      // POST /api/learning/submit-persona：学习会话把人格分析结果**经工具**交回来落库
+      // POST /api/learning/submit-persona：学习会话把人格分析结果经工具交回来落库
       //   body: { uid, payload:{...}, samples?:number }；header: x-agent-token = 学习令牌
-      //   鉴权走**独立的学习令牌**（core/learning-token.js），不是会话令牌：
+      //   鉴权走独立的学习令牌（core/learning-token.js），不是会话令牌：
       //   学习会话没有唤醒提示词、拿不到会话令牌；而会话令牌能通行 /api/blacklist、
       //   /api/social/deepsleep 等管理端点，发给学习会话等于扩权。
       //   只有这个端点认学习令牌，别的什么都不解锁。
@@ -5942,7 +5929,7 @@ export function startConsoleServer() {
             return;
           }
           const report = await meterMod.getTokenReport(7);
-          /* 【2026-09-19】把「上下文剪枝省下多少」一起回给面板：**实测**值，直接读 DSH 自己落的会话日志
+          /* 2026-09-19：把「上下文剪枝省下多少」一起回给面板：实测值，直接读 DSH 自己落的会话日志
            * （compaction/prune 的 shadowedTokenCount × 后续还发生过多少次请求），不是拿字符数估的。
            * 扫描是增量的（只重读变过的日志），单独 try：拿不到不该让整份用量报告 503。 */
           let contextSavings = null;
@@ -5984,7 +5971,7 @@ export function startConsoleServer() {
         return;
       }
       // ── NapCat 会话守护（探针 + 假死自愈）───────────────────────────────────────
-      // 【2026-09-16 亲历】QQ 服务端把登录态作废时，客户端可能**一条错都不报**：WebUI 上
+      // 2026-09-16 亲历：QQ 服务端把登录态作废时，客户端可能一条错都不报：WebUI 上
       // isLogin/online 还是 true，但发消息被 QQ 内核拒绝（网络连接异常 1006514），收消息也停。
       // 当天就这么静默了 50 分钟没人知道。这里把"会话健康"做成可查、可手动自愈、可开关自动自愈。
       // 鉴权沿用本段上方的统一 consoleToken 校验（管理端走这条）。
@@ -6002,6 +5989,8 @@ export function startConsoleServer() {
           return;
         }
         // 二维码现抓一份回给管理端（base64 dataUrl，管理端直接 <img> 就能显示/保存）
+        // 2026-09-23：只读现成的那张，换码能力已整体删除（换码会让用户正在扫的那张立刻作废，
+        // 而且换码要先登 WebUI —— 那份额度是页面自己在用的）。要新码请去 NapCat 自己的界面点。
         if (req.method === 'GET' && url.pathname === '/api/napcat/qr') {
           sendJson(await gMod.qrSnapshot());
           return;
@@ -6017,10 +6006,9 @@ export function startConsoleServer() {
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/napcat/guard/heal') {
-          // 手动自愈：忽略冷却与开关（人明确点了就执行），仍然走同一条"重启 + 等登录"路径
-          const r = await gMod.guardTick(true);
-          log(`控制台：手动自愈 → ${r?.verdict ?? '?'}（${r?.lastProbeDetail ?? ''}）`);
-          sendJson({ ok: true, guard: r, healed: r?.verdict === 'ok', detail: r?.lastProbeDetail ?? '' });
+          /* 2026-09-23 需求「去除探针与状态检测」："手动自愈"依赖探针判定，已一并去除。
+           * 这里不再重启容器、不再探活，只如实告诉调用方"这个能力没有了"。 */
+          sendJson({ ok: false, removed: true, error: '「会话守护 / 探针自愈」已去除：桥不再探活、也不再自动或手动重启 NapCat。要看状态请直接开 NapCat 界面。' }, 410);
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/napcat/quick-password') {
@@ -6046,8 +6034,8 @@ export function startConsoleServer() {
     }
   });
   // 本机可信：默认只绑定 127.0.0.1（远端访问走 SSH 隧道/manager 代理，不直暴露端口）
-  // 【2026-09-11 23:15 24 小时长轮询的必要条件】Node 的 http.Server 默认 `requestTimeout = 300 秒`，
-  // 会把进行中的长轮询请求在 5 分钟时**直接掐断**（症状：等待工具总是"失败"、消息读不到）。
+  // 2026-09-11 23:15 24 小时长轮询的必要条件：Node 的 http.Server 默认 `requestTimeout = 300 秒`，
+  // 会把进行中的长轮询请求在 5 分钟时直接掐断（症状：等待工具总是"失败"、消息读不到）。
   // 这里设为 0 = 不超时。`headersTimeout` 只管收请求头，`keepAliveTimeout` 只管空闲连接，
   // 都不影响进行中的长请求，但一并设 0 以免其它版本默认值变化。
   server.requestTimeout = 0;
@@ -6115,6 +6103,89 @@ async function bindTokenStreamHook() {
     tokenStreamHookBound = false;
     log(`控制台：用量 SSE 订阅失败：${error?.message ?? error}`);
   }
+}
+
+async function handleNapcatLoginStream(req, res, tokMod) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+    'x-frame-options': 'DENY',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer'
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  res.write(': connected\n\n');
+
+  /* 2026-09-24 实测：桥刚启动时第一次探测可能因 NapCat 的 OneBot 端口还没就绪而慢十几秒，
+   * 期间前端空白。先把已缓存的快照立刻推一帧（不发新探测），随后 force 的那一帧覆盖它。 */
+  try {
+    const snap = typeof tokMod.napcatLoginSnapshot === 'function' ? tokMod.napcatLoginSnapshot() : null;
+    if (snap) {
+      let conn0 = null;
+      try {
+        const { napcatClientStats } = await import('../lib/onebot-ws.js');
+        conn0 = napcatClientStats();
+      } catch { /* 忽略 */ }
+      sseWrite(res, 'napcat-login', { ok: true, login: snap.login, connection: conn0, cached: true, at: snap.at });
+    }
+  } catch { /* 没有缓存就跳过 */ }
+
+  /* 取一份完整诊断：登录态（带 TTL 缓存）+ 桥→NapCat 链路统计。
+   * force 只给"连接建立"与"真实链路事件"用；定时兜底用非 force，靠 TTL 合并。 */
+  let busy = false;
+  const push = async (force) => {
+    if (res.writableEnded || busy) return;
+    busy = true;
+    try {
+      const login = await tokMod.probeNapcatLogin({ force });
+      let connection = null;
+      try {
+        const { napcatClientStats } = await import('../lib/onebot-ws.js');
+        connection = napcatClientStats() ?? {
+          unavailable: true,
+          reason: 'no-client',
+          note: '桥当前没有活动的 OneBot WS 客户端实例（本次运行还没建立连接）'
+        };
+      } catch (error) {
+        connection = { error: String(error?.message ?? error) };
+      }
+      sseWrite(res, 'napcat-login', { ok: true, login, connection, at: Date.now() });
+    } catch (error) {
+      sseWrite(res, 'napcat-login', { ok: false, error: String(error?.message ?? error), at: Date.now() });
+    } finally {
+      busy = false;
+    }
+  };
+
+  // 建立连接就先给一份真值（前端不用先等变化）
+  await push(true);
+
+  // 链路开/关等真实事件 → 立刻推（这就是"实时"的来源）
+  let unsub = () => {};
+  try {
+    unsub = tokMod.subscribeNapcatLogin(() => { void push(false); });
+  } catch { /* 老版本模块没有订阅接口也不影响首帧 */ }
+
+  // 30 秒兜底重探：抓"WS 没断但登录态已被 QQ 静默作废"这种情况
+  const slow = setInterval(() => { void push(true); }, 30000);
+  if (typeof slow.unref === 'function') slow.unref();
+  // 20 秒注释心跳：防中间代理/浏览器掐空闲连接
+  const hb = setInterval(() => {
+    if (res.writableEnded) return;
+    try { res.write(': ping\n\n'); } catch { /* 忽略 */ }
+  }, 20000);
+  if (typeof hb.unref === 'function') hb.unref();
+
+  const cleanup = () => {
+    clearInterval(slow);
+    clearInterval(hb);
+    try { unsub(); } catch { /* 忽略 */ }
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
 }
 
 async function handleTokenStream(req, res) {
