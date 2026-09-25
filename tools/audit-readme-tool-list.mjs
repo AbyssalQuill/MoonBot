@@ -13,7 +13,7 @@
  *                     only registered in the owner's private chat). Reported for context.
  *
  * Where the list lives: 2026-09-25 起唯一 README 只作索引与实现细节，工具全表在
- * `docs/CAPABILITIES.md` 附录 A（napcat 侧 91 条）与附录 B（宿主侧 5 条）；脚本默认读该文件。
+ * `docs/TECHNICAL.md` 附录 A（napcat 侧 91 条）与附录 B（宿主侧 5 条 + 联网检索侧 2 条）；脚本默认读该文件。
  * 传第二/第三个参数可指向其它文档（例如根 README.md），提取方式相同：文档中所有反引号包裹的
  * 工具名。文档里若存在 `## MCP 工具` 或 `## 附录 A MCP 工具全表` 这样的章节标题，则只在从该标题
  * 到下一个二级标题的范围内提取；没有该标题时退回全文提取。
@@ -29,7 +29,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 const BRIDGE = path.resolve(process.argv[2] || path.join(REPO, 'qq-bridge'));
-const README = path.resolve(process.argv[3] || path.join(REPO, 'docs', 'CAPABILITIES.md'));
+const README = path.resolve(process.argv[3] || path.join(REPO, 'docs', 'TECHNICAL.md'));
 const FILES = ['mcp-napcat-safe.js', 'mcp-host-server.js', 'mcp-web-search-safe.js'];
 
 /** Every tool name the source defines, per file. */

@@ -1,6 +1,6 @@
 // dsh-compaction-math.mjs —— 桌面端 DSH「永久会话」下的最优压缩阈值
 //
-// 模型与 MoonBot 的 docs/COMPACTION-MATH.md 同源，但**参数按桌面端自己的实测数据标定**：
+// 模型与 MoonBot 的 docs/TECHNICAL.md 同源，但**参数按桌面端自己的实测数据标定**：
 //   每次请求成本 = a₀ + b·C     （C = 本次上下文；b ≈ 缓存读价，因为 98.8% 的输入是缓存读）
 //   每天成本     = steps·(a₀ + b·(R+T)/2) + (steps·g/(T−R))·rebuildCost
 // 对 T 求导令零：(T−R)² = 2·g·rebuildCost / b

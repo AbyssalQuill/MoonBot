@@ -48,10 +48,8 @@ tsconfig.tsbuildinfo
 
 # ---- 本机专用：内部交接文档 / 运维笔记（含服务器 IP、QQ 号）----
 /docs/*
-# 正式知识文档（开源学习框架的门面）—— 这四份要进仓库；/docs/ 下其余是本机工作笔记，继续忽略
-!/docs/ARCHITECTURE.md
-!/docs/CAPABILITIES.md
-!/docs/COMPACTION-MATH.md
+# 正式知识文档（开源学习框架的门面）—— 这两份要进仓库；/docs/ 下其余是本机工作笔记，继续忽略
+!/docs/TECHNICAL.md
 !/docs/PIXIV-AND-QZONE.md
 # 桌面端 DSH 的那一套（与 COMPACTION-MATH.md 姊妹：同一个模型，参数各自标定）
 !/docs/DSH-COMPACTION.md
