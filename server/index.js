@@ -2889,7 +2889,13 @@ async function resolveServices(cfg, connected) {
       { id: 'srv-napcat-http', scope: 'remote', name: '服务端 NapCat HTTP API', url: u.napcatHttp, desc: '服务器 OneBot HTTP · 隧道 ' + u.ports.napcatHttp },
       { id: 'srv-bridge', scope: 'remote', name: '服务端桥控制台', url: u.bridge, desc: '服务器 qq-bridge 控制台 · 隧道 ' + u.ports.bridge + (u.bridgeToken ? ' · 已带 console token' : '') },
     ];
-    for (const s of remoteServices) services.push(mk(s, await probe(s.url, 1500)));
+    /* 2026-09-25 修「连上服务器之后整体感觉慢、状态永远滞后一拍」：
+     * 这四条远端探测原来是串行 await，每条 1500ms 超时 —— 最坏 6 秒全压在一次 /api/state 上，
+     * 而连接期间界面每 1.2 秒就轮询一次：响应比轮询还慢，状态自然永远差一拍
+     * （2026-09-23 本机那组是同样成因、同样改法，见上面的注释）。
+     * 四条互不依赖，改并行；mk/入队顺序保持原样，语义不变。 */
+    const remoteProbes = await Promise.all(remoteServices.map((s) => probe(s.url, 1500)));
+    remoteServices.forEach((s, i) => services.push(mk(s, remoteProbes[i])));
   }
 
   return {
