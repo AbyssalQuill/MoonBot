@@ -6,6 +6,7 @@
 
 ### 变更与不兼容
 
+- **管理端部件命名与说明字体统一**：首页第三张卡片为 `Core`（内置核心层），但新手教程、实例配置页与控制台端口标签里仍写作旧称 `QQ-Bridge` / `Bridge`，本轮一并改为 `Core`；新手教程与说明文档弹窗正文里的 `<code>` 片段（`.credentials.yaml`、路径、端口、命令）随 2026-09-24「说明文字也要可爱字体」的要求改用 `AaCute` 圆体（此前这两处仍是 `JetBrains Mono`，整段呈「一半可爱一半代码」）。教程中「NapCat 走 `docker`」的表述更正为 systemd 优先、仅在容器部署时走 `docker`，与 `server/index.js` 的 `napcatCtlCommand`、`NC_STATE_LINE` 一致。
 - **文档收敛为单一 README**：`qq-bridge/README.md`、`qq-bridge/README.en.md`、`qq-bridge/plugins/dsh-memory/README.md`、`qq-bridge/plugins/dsh-memory/lmemory/README.md` 及本地未跟踪的 `qq-bridge/roles/README.md` 一并删除，其安装前置条件、五步启动顺序与判据、桥接命令与三条运行约束、`/lmemory` 命令表、角色卡字段表、发送白名单强制与 `[CQ:` 注入拒绝等条目全部并入仓库根 `README.md`（705 行 / 19 张表，章节为 `## 1.` 至 `## 11.`）。英文版正文不再单独维护，其独有技术条目已转写为中文并入第 5 章。指向上述文件的历史链接改指根 `README.md` 对应章节（`qq-bridge/docs/PROJECT_GUIDE.md` 第 3 章目录树、`qq-bridge/RULES.md:72`）。
 
 ### 内部与工程
@@ -18,7 +19,7 @@
 - **表格排版缺陷修复**：`docs/COMPACTION-MATH.md` 表 25 表头中 `$|X'|$`、`$|X|$` 的竖线与 Markdown 分隔符冲突导致该表结构错误，改用 `$\lvert X'\rvert$`、`$\lvert X\rvert$`。
 - **README 精简**：`README.md` 由 705 行 / 19 张表 / 11 章压缩为 230 行 / 6 张表 / 8 章（简介、安装与首次启动、快速开始、主要能力、配置要点、常用命令与故障处置、文档索引、许可与致谢）。删除四段式套话与元叙述、与 `docs/` 重复的推导与测量旁证、生产事件复盘段落与 14 张表的载体；测量性参数（成本回归式、档位百分比、压缩阈值稳健区间、pixiv 时延区间）改由技术文档承载，README 只保留可操作信息与行为默认值；MCP 工具以名称清单保留在「主要能力」下（98 条按用途分 18 行列出，含宿主与联网检索两组，参数、档位与功能表述见 `docs/TECHNICAL.md` 附录 A/B）。原「当前版本 1.3.0」的版本声明一并移除（与 `CHANGELOG.md`、`release/发行说明.md` 三处不一致）。
 - **三份技术文档合并为 `docs/TECHNICAL.md`**：`docs/ARCHITECTURE.md`（1,761 行）、`docs/CAPABILITIES.md`（2,863 行）、`docs/COMPACTION-MATH.md`（2,073 行）合并压缩为单份 2,491 行（三份合计的 37%），重排为第 1–37 章加附录 A–E。合并只做去重、同名章节归并与交叉引用统一（三个旧文件名一律改为「章名／节名」指代），不新增事实；附录 A（napcat 侧 91 条）、附录 B（宿主 5 条 + 联网检索 2 条）、附录 C（管理端 93 条路由）随文档保留，`$$` 块级公式 44 对与全部 `path:line` 引用逐字保真。原三份文件删除，指向它们的引用改指新文件（`README.md` 文档索引、`docs/DSH-COMPACTION.md`、`docs/dsh-compaction-math.mjs`），`tools/audit-readme-tool-list.mjs` 默认目标改为该文件，实测 `defined in source=98 / documented=98` 通过。
-- **GitHub Release 收敛为单一 release**：删除 v1.0.0 至 v1.2.5 共 9 个 release；保留的 v2.0.0（显示名 `MoonBot Pro`）说明改写为全部历史的合并稿（271 行），资产替换为 2026-09-25 构建的完整版安装包 `MoonBot.Pro.Setup.exe`（854,708,173 字节，SHA-256 `3A3BFA751FF925D03A89928DAE6B1764A1D23438A4C74C23CFC0871F90D0D3EA`）；管理端单包不再发布，只随包提供完整版安装包。
+- **GitHub Release 收敛为单一 release**：删除 v1.0.0 至 v1.2.5 共 9 个 release；保留的 v2.0.0（显示名 `MoonBot Pro`）说明改写为全部历史的合并稿（271 行），资产为 2026-09-25 构建并重打包的完整版安装包 `MoonBot.Pro.Setup.exe`（854,709,469 字节，SHA-256 `2BEBAC98805B8D25CEB6FE4589369B48708BBDFDC1C482469BFE9C928BDF2D8F`）；管理端单包不再发布，只随包提供完整版安装包。
 - **回归复验**：`cd qq-bridge && npm run check` → exit 0，全部套件 ALL PASS。
 
 ## 2.0.2 — 2026-09-25
