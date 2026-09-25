@@ -41,7 +41,7 @@ MoonBot Pro 是运行于 QQ 平台的对话机器人系统。**NapCat / OneBot v
 | 文档 | 内容范围 | 适用场景 |
 | --- | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 分层结构、单条 QQ 消息的处理路径、唤醒 / 在途注入 / 回合保持的协作方式、状态落盘位置、线上部署目录 | 阅读源码、修改行为、定位数据存放位置 |
-| [docs/CAPABILITIES.md](docs/CAPABILITIES.md) | 能力域清单、各能力的实现工具与 `path:line` 位置、生产环境中出现的非显然约束 | 判定某项能力是否存在、调整工具配置 |
+| [docs/CAPABILITIES.md](docs/CAPABILITIES.md) | 能力域清单、各能力的实现工具与 `path:line` 位置、生产环境中出现的非显然约束；附录 A 为 91 条 napcat 侧 MCP 工具表（按 16 组），附录 B 为宿主侧 5 条与联网检索侧 2 条，合计 98 条 | 判定某项能力是否存在、查某个 MCP 工具的必填与可选参数及最低保留档位、调整工具配置 |
 | [docs/COMPACTION-MATH.md](docs/COMPACTION-MATH.md) | 成本构成、上下文压缩阈值 0.16 的推导过程、永久会话与轮换会话的成本比较 | 成本核对、参数重新标定 |
 | [docs/PIXIV-AND-QZONE.md](docs/PIXIV-AND-QZONE.md) | pixiv 原图发送链路的构成、QQ 空间配图不落盘的原因 | 图片链路维护、缩略图问题定位 |
 

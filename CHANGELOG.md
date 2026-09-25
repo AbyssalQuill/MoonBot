@@ -11,7 +11,7 @@
 ### 内部与工程
 
 - **三份技术文档二次重写为学术技术文体并分块**：`docs/ARCHITECTURE.md` 1,490 → 1,762 行 / 129 张表（`## 1.` – `## 12.` 加目录）；`docs/CAPABILITIES.md` 1,764 → 2,854 行 / 146 张表（`§0` – `§16` 加附录 A–D）；`docs/COMPACTION-MATH.md` 1,676 → 2,074 行 / 46 张表（`## 0.` – `## 11.` 加附录 A–B，原 §4.5 生产复算记录升格为第 5 章并逐字保留，$0.16$ 出厂值推导、$T^\*=137{,}300$ 与 $\tau^\*=13.7\%$ 复算结论不变）。
-- **补齐 MCP 工具全表**：`docs/CAPABILITIES.md` 附录 A 收 91 条 napcat 侧工具（工具名、必填与可选参数、最低保留档位、功能表述，按 16 组分表），附录 B 收 5 条宿主侧工具；数据取自 MCP 协议 `tools/list` 实取结果（启动时注入 `QQB_SLIM_TOOLS_OFF=1` 以取得完整注册表），并新增附录 A.1 记录导出与复现方法。
+- **补齐 MCP 工具全表**：`docs/CAPABILITIES.md` 附录 A 收 91 条 napcat 侧工具（工具名、必填与可选参数、最低保留档位、功能表述，按 16 组分表），附录 B 收宿主侧 5 条与联网检索侧 2 条（`web_search` / `web_fetch`），合计 98 条与源码静态扫描一致；数据取自 MCP 协议 `tools/list` 实取结果（启动时注入 `QQB_SLIM_TOOLS_OFF=1` 以取得完整注册表），并新增附录 A.1 记录三个服务各自的导出与复现方法。配套 `tools/audit-readme-tool-list.mjs` 的默认目标改为该文件（`## 附录 A MCP 工具全表` 至 `## 附录 C` 区间提取），实测 `defined in source=98 / documented=98` 通过。
 - **工具表统计口径更新**：`tool-schema-stats.json` 的现行值记入 `docs/ARCHITECTURE.md` —— `totalChars = 95,595`、`approxTokensPerStep = 31,675`、四档 `share` 为 `0.8281 / 0.4189 / 0.3488 / 0.0680`（对应保留 68 / 42 / 33 / 9 条），与压缩代理实测（相对完整工具表 `38.8% / 14.0% / 6.2% / 3.6%`）为两个不同测量对象，文档中已分别标注口径。
 - **README 行号引用整体对齐**：`qq-bridge/tools/align-readme-lines.mjs` 以仓库根 `README.md` 为目标文件，本轮以 `--write` 校正 47 处「工具名（`:行号`）」漂移（如 `qq_send_message :1323 → :1314`、`qq_reply :937 → :969`），复查为 0 处待对齐；余 17 处 `:NNNN` 指向非注册行，脚本只报告不改写。
 - **其余公开文档语域规范化**：`docs/PIXIV-AND-QZONE.md`（505 → 661 行 / 30 表）、`docs/release-1.0.0.md`（106 → 218 行 / 7 表）、`docs/NEXT-SESSION.md`（195 → 433 行 / 29 表，本地未跟踪）、`qq-bridge/docs/DSH_SETUP.md`（93 → 180 行 / 7 表）、`qq-bridge/docs/PROJECT_GUIDE.md`（362 → 483 行 / 21 表）统一为第三人称技术文体，情节化段落改写为「现象 / 机制 / 现行实现与判据」，并各自新增未核验声明章节。

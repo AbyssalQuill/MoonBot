@@ -24,7 +24,7 @@
 | §15 | 安全模型与信任边界 | 敏感内容拦截、脱敏、SSRF 防护、信任等级、工具白名单 |
 | §16 | 常量与阈值总表 | 全文常量、区间、上限的汇总表 |
 | 附录 A | MCP 工具全表（napcat，91 条） | 工具名、必填与可选参数、最低保留档位、功能表述；16 张分组表（表 A-1 至表 A-16） |
-| 附录 B | MCP 宿主服务工具表（5 条） | 宿主侧（`mcp-host-server.js`）注册的 5 个工具；宿主工具不参与裁剪 |
+| 附录 B | MCP 宿主服务与联网检索工具表（7 条） | 宿主侧（`mcp-host-server.js`）5 个工具与联网检索侧（`mcp-web-search-safe.js`）2 个只读工具 |
 | 附录 C | 管理端路由表（93 条） | `server/index.js` 全部 `app.<method>('<path>')` 注册 |
 | 附录 D | 证据等级与未核验清单 | 未逐行核实项、未复现项、已确认缺陷 |
 
@@ -2569,6 +2569,8 @@ JSON.stringify({ type, title: title.slice(0,100), desc: desc.slice(0,100), picUr
 
 导出方式二，宿主侧工具表：在 `qq-bridge/src/mcp-host-server.js` 中定位 `server.tool(` 注册处，共五处，依次为 `qq_learning_corpus`（`qq-bridge/src/mcp-host-server.js:142-147`）、`qq_learning_submit`（`qq-bridge/src/mcp-host-server.js:198-210`）、`napcat_status`（`qq-bridge/src/mcp-host-server.js:247-250`）、`start_napcat`（`qq-bridge/src/mcp-host-server.js:264-267`）、`stop_napcat`（`qq-bridge/src/mcp-host-server.js:314-317`）；宿主服务的 MCP 服务名与版本在 `qq-bridge/src/mcp-host-server.js:140` 给出【已核验】。必填参数取 zod 参数表中不带 `.optional()` 的字段，可选参数取其余字段。
 
+导出方式三，联网检索侧工具表：在 `qq-bridge/src/mcp-web-search-safe.js` 中定位 `server.tool(` 注册处，共两处，依次为 `web_search`（`qq-bridge/src/mcp-web-search-safe.js:943-947`）与 `web_fetch`（`qq-bridge/src/mcp-web-search-safe.js:980-983`）；必填参数为 `query` 与 `url`，可选参数为 `maxResults`、`platforms`、`raw`、`maxChars`，取值域取自 zod 链式声明（`qq-bridge/src/mcp-web-search-safe.js:951-957` 与 `qq-bridge/src/mcp-web-search-safe.js:985-988`）【已核验】。该服务同样不参与工具裁剪档，故表 B-2 的`最低保留档位`记 `—`。
+
 档位判定：`minTier` 由 `qq-bridge/src/lib/tool-tiers.js` 的 `toolAllowedByTier`（`qq-bridge/src/lib/tool-tiers.js:192-200`）逐档试算得到。判定顺序取裁剪强度由强到弱，即 `extreme`、`high`、`medium`、`low`、`off`，首个判定为真的档位即该工具的 `minTier`；`qq_status` 在该函数首行恒真（`qq-bridge/src/lib/tool-tiers.js:193`），故其 `minTier` 恒为 `extreme`。各档位名单与语义定义见 `TOOL_TIERS`（`qq-bridge/src/lib/tool-tiers.js:103-151`）；档位名到中文标签的对应为 `extreme` 极限、`high` 高、`medium` 中、`low` 低、`off` 不裁剪【已核验】。
 
 复现步骤以三条命令等价描述。
@@ -2592,9 +2594,9 @@ Select-String -Path 'qq-bridge\src\mcp-host-server.js' -Pattern 'server\.tool\('
 
 ---
 
-## 附录 B MCP 宿主服务工具表（5 条）
+## 附录 B MCP 宿主服务与联网检索工具表（7 条）
 
-本附录界定宿主服务 MCP 工具：由 `qq-bridge/src/mcp-host-server.js` 注册，进程名为 `napcat-host`，与 napcat 工具分属两个 MCP 服务组。宿主工具不参与工具裁剪档，故`最低保留档位`一列一律记 `—`【已核验】。
+本附录界定另外两个 MCP 服务组的工具：宿主服务由 `qq-bridge/src/mcp-host-server.js` 注册，进程名为 `napcat-host`；联网检索服务由 `qq-bridge/src/mcp-web-search-safe.js` 注册，进程名为 web-search 安全版。两者与 napcat 的 91 条分属不同服务组，且都不参与工具裁剪档，故`最低保留档位`一列一律记 `—`【已核验】。
 
 表 B-1：MCP 宿主服务工具（5 条；按源码注册顺序排列；`最低保留档位`不适用，记 `—`；`start_napcat` 与 `stop_napcat` 仅当 `napcat.allowProcessControl` 开启时注册【已核验】）。
 
@@ -2605,6 +2607,14 @@ Select-String -Path 'qq-bridge\src\mcp-host-server.js' -Pattern 'server\.tool\('
 | `napcat_status` | — | — | — | 探测 NapCat 网关是否可达并返回 QQ 在线状态与账号信息。 |
 | `start_napcat` | — | — | — | 启动 NapCat 并等待网关就绪，最长等待九十秒。 |
 | `stop_napcat` | — | — | — | 停止 NapCat 进程，会断开当前 QQ 连接。 |
+
+表 B-2：联网检索服务工具（2 条；只读，无本地文件与命令能力；`web_search` 的 `platforms` 枚举含 18 个平台标识【已核验】）。
+
+| 工具名 | 必填参数 | 可选参数 | 最低保留档位 | 功能（正式表述） |
+| --- | --- | --- | --- | --- |
+| `web_search` | `query` | `maxResults`（3–30，默认 12），`platforms`（18 个平台标识，缺省为全部可用平台） | — | 多平台并行聚合检索并按 URL 去重，结果按平台轮转交错返回；同查询五分钟内命中缓存。 |
+| `web_fetch` | `url` | `raw`（返回原始标记而非正文），`maxChars`（500–50000，默认 12000） | — | 读取单个 http(s) 页面并抽取可读正文（标题、描述、图片、正文、链接、截断标记）；拒绝内网与环回地址，逐跳校验重定向。 |
+
 ---
 
 ## 附录 C 管理端路由表（93 条）
