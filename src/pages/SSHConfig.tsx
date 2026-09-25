@@ -14,7 +14,7 @@ const RP_LABELS: [RPKey, string][] = [
   ['napcatWebui', 'NapCat WebUI 端口'],
   ['napcatHttp', 'NapCat HTTP 端口'],
   ['dshWeb', 'DSH Web 端口'],
-  ['bridge', 'Bridge 控制台端口'],
+  ['bridge', 'Core 控制台端口'],
 ];
 
 interface EditDraft {
@@ -341,7 +341,7 @@ export default function SSHConfig({ state, onBack, onRefresh }: Props) {
         const bits = [
           `DSH ${st.dsh?.running ? '运行中' : '未运行'}`,
           `NapCat ${st.napcat?.running ? '运行中' : '未运行'}`,
-          `桥 ${st.bridge?.running ? '运行中' : '未运行'}`
+          `核心层 ${st.bridge?.running ? '运行中' : '未运行'}`
         ];
         setSyncLog((prev) => [...(prev ?? []), `— 服务端状态：${bits.join(' · ')}`]);
       }

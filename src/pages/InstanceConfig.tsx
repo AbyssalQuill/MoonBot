@@ -184,7 +184,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button className="btn btn-sm" onClick={onBack}><ArrowLeft size={14} /> 返回</button>
           <div>
-            <div className="page-title">{isDsh ? 'DeepSeek Harness' : instanceId === 'napcat-local' ? 'NapCat' : 'Bridge'}</div>
+            <div className="page-title">{isDsh ? 'DeepSeek Harness' : instanceId === 'napcat-local' ? 'NapCat' : 'Core'}</div>
             <div className="page-subtitle">本机应用内拉起 · {running ? <b>运行中</b> : state ? '未启动' : '状态读取中'}</div>
           </div>
         </div>
@@ -242,7 +242,7 @@ export default function InstanceConfig({ state, instanceId, onBack, onRefresh }:
             : (
               <>
                 <div className="card-title">
-                  {instanceId === 'napcat-local' ? 'NapCat 启动方式' : 'Bridge 启动命令'}
+                  {instanceId === 'napcat-local' ? 'NapCat 启动方式' : 'Core 启动命令'}
                 </div>
                 <div className="field-hint">
                   {instanceId === 'napcat-local'

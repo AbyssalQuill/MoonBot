@@ -468,16 +468,16 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
                 <ol>
                   <li>先启动 <b>NapCat</b>：登录后它自行写入 OneBot 配置（HTTP 3000 / WS 3001，token=truefriend）。</li>
                   <li>再启动 <b>DeepSeek Harness</b>：待其状态变为「运行中」。</li>
-                  <li>最后启动 <b>QQ-Bridge</b>（桥）：由它将 QQ 消息转交 DSH 的 AI 处理。</li>
-                  <li>亦可直接点上方 <b>「一键启动整套」</b>，程序按 NapCat → DSH → 桥 的顺序自动拉起（NapCat 首次仍需扫码）。</li>
+                  <li>最后启动 <b>Core</b>（内置核心层）：由它判断该不该回应、组装提示词与工具调用，再把 QQ 消息转交 DSH 处理。</li>
+                  <li>亦可直接点上方 <b>「一键启动整套」</b>，程序按 NapCat → DSH → Core 的顺序自动拉起（NapCat 首次仍需扫码）。</li>
                 </ol>
               </TutorialSection>
               <TutorialSection title="③ SSH 远程服务器配置">
                 <ol>
                   <li>在首页点 <b>SSH 配置</b> 卡 → 「添加服务器」，填写名称、主机 IP、端口、用户名（如 <code>root</code>）、密码或密钥，随后点「测试」，通过后点「连接」。</li>
-                  <li><b>连上之后，首页那三张卡即代表服务器那套</b>：状态行显示 <b>服务端运行中 / 服务端未运行</b>，「启动 / 重启 / 停止」直接操作服务器（DSH 走 <code>systemctl dsh-web</code>、NapCat 走 <code>docker</code>、桥走其自身的启动脚本），「一键启动整套」亦为拉起服务器上的整套。未连接服务器时，这些按钮仍操作本机实例。</li>
+                  <li><b>连上之后，首页那三张卡即代表服务器那套</b>：状态行显示 <b>服务端运行中 / 服务端未运行</b>，「启动 / 重启 / 停止」直接操作服务器（DSH 走 <code>systemctl dsh-web</code>、NapCat 走 <code>systemctl napcat</code>（容器部署时走 <code>docker</code>）、Core 走 <code>/root/qq-bridge</code> 下的 <code>node src/bridge.js</code>），「一键启动整套」亦为拉起服务器上的整套。未连接服务器时，这些按钮仍操作本机实例。</li>
                   <li><b>打开界面</b>：NapCat / DeepSeek Harness 卡点「打开」，经隧道打开<b>服务器上</b>的界面（自动携带该机的访问令牌），可在应用内直接查看。隧道映射：NapCat WebUI 6099→13000、NapCat HTTP 3000→13001、DSH 3080→13080、桥控制台 3100→13100（桥控制台设有安全响应头，只能「新窗口打开」）。</li>
-                  <li><b>修改服务器上的桥配置</b>：连上服务器时，功能配置页读写的是服务器 <code>/root/qq-bridge/config.json</code>（页首有醒目横幅）。保存流程为：先备份 <code>config.json.bak-时间戳</code> → 原子替换 → 回读比对关键字段；桥按 mtime 热加载，故<b>不必重启桥即可生效</b>；人设与发言规则亦可一并写入服务端。</li>
+                  <li><b>修改服务器上的核心层配置</b>：连上服务器时，功能配置页读写的是服务器 <code>/root/qq-bridge/config.json</code>（页首有醒目横幅）。保存流程为：先备份 <code>config.json.bak-时间戳</code> → 原子替换 → 回读比对关键字段；桥按 mtime 热加载，故<b>不必重启桥即可生效</b>；人设与发言规则亦可一并写入服务端。</li>
                   <li><b>用量按两侧分别统计</b>：「学习与用量」页同时给出 <b>本机 / 服务端 / 合计</b>；服务器未连接时只显示本机那份，并注明原因。</li>
                   <li><b>关于失败与冷却</b>：连续测试失败会短暂冷却（<b>连不上 / 超时类：20 秒 → 40 秒 → 60 秒</b>；<b>凭据类仅停 10 秒</b>），提示中写明具体的报错内容，并提供「仍然重试一次」按钮以跳过冷却。<b>但不可反复点击测试</b>：服务器上的 fail2ban 只统计认证失败次数，点击过多会将本机 IP 整机封禁（届时正确密码亦无法连接，表现为连接超时）——若已被封禁，请在服务器上执行 <code>fail2ban-client set sshd unbanip &lt;本机IP&gt;</code>。</li>
                   <li>每台服务器行另设「同步」（将本地桥代码推送至服务器）与「清整套」（删除远端整套并备份）按钮。</li>
@@ -485,14 +485,14 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
               </TutorialSection>
               <TutorialSection title="④ 常用设置入口">
                 <ul>
-                  <li><b>NapCat / DSH / Bridge</b> 三张卡右下角齿轮为各自的启动配置；<b>QQ-Bridge 卡</b>点开后直接进入「功能配置」页。</li>
+                  <li><b>NapCat / DeepSeek Harness / Core</b> 三张卡右下角齿轮为各自的启动配置；<b>Core 卡</b>点开后直接进入「功能配置」页。</li>
                   <li>功能配置页含：<b>常用设置</b>（模型 / 连接 / 白名单 / 主动闲聊）、<b>工具与规则</b>（MCP 工具开关）、<b>人设与发言规则</b>（可上传 .md 或从角色库导入）、<b>JSON 进阶</b>。</li>
-                  <li>桥运行后，右上角「群友画像 / 学习与用量」需经过一段时间的交流才会逐渐产生数据。</li>
+                  <li>Core 运行后，右上角「群友画像 / 学习与用量」需经过一段时间的交流才会逐渐产生数据。</li>
                 </ul>
               </TutorialSection>
               <TutorialSection title="⑤ 端口一览与返回方式">
                 <p style={{ margin: 0 }}>
-                  所有端口：管理端 1921 · NapCat 6099/3000/3001 · 隔离 DSH {instPortOf(state, 'dsh-isolated')} · 桥 {instPortOf(state, 'bridge-local')}。任一页按 <b>Esc</b> 返回首页。
+                  所有端口：管理端 1921 · NapCat 6099/3000/3001 · 隔离 DSH {instPortOf(state, 'dsh-isolated')} · Core {instPortOf(state, 'bridge-local')}。任一页按 <b>Esc</b> 返回首页。
                 </p>
               </TutorialSection>
             </div>

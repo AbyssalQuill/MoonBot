@@ -1412,7 +1412,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
         )}
         {target === 'local' && remote && !loading && (
           <div className="notice-bar" style={{ fontSize: 12 }}>
-            已连上服务器 <b>{remote.name}</b>，但本页仍在读写<b>本机</b>的 qq-bridge 配置（服务端配置读取失败时会这样回退，避免误写）。
+            已连上服务器 <b>{remote.name}</b>，但本页仍在读写<b>本机</b>的核心层配置（服务端配置读取失败时会这样回退，避免误写）。
           </div>
         )}
         {/* 2026-09-24 主人要求（原话）："不要有正在核实的状态机和不能点的卡片状态机，
@@ -1870,7 +1870,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
 
               <DocSection title="常见问题">
                 <ul>
-                  <li><b>提示「桥没在运行」</b>（学习、语音、NapCat 等页读取桥侧数据时）：该数据须从桥获取。先确认 NapCat 已登录（QQ 在线）、DSH 已启动，再启动 QQ-Bridge，或直接使用首页「一键启动整套」。
+                  <li><b>提示「桥没在运行」</b>（学习、语音、NapCat 等页读取桥侧数据时）：该数据须从桥获取。先确认 NapCat 已登录（QQ 在线）、DSH 已启动，再启动 Core，或直接使用首页「一键启动整套」。
                     本页配置读自磁盘上的 config.json，<b>不受影响</b>，桥停止运行时同样可查看与修改。</li>
                   <li><b>提示「桥在运行，但没有这条接口」</b>：<b>这才是版本过旧</b>（桥返回 404 或非 JSON）。将桥代码更新至最新并重启桥即可；与上一条不同，桥未启动时无需更新。</li>
                   <li><b>模型不回话</b>：检查隔离 DSH 日志与隔离 home 的 .credentials.yaml 是否已配置 DEEPSEEK_API_KEY；确认 NapCat 在线。</li>
@@ -3244,7 +3244,7 @@ function SlimToolsCard({ cfg, ch, onSave }: { cfg: any; ch: (p: string) => (v: a
           {busy === 'both' ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存并重启（推荐）
         </button>
         <button className="btn btn-soft btn-sm" disabled={!!busy} onClick={() => saveAndRestart('dsh')}>只重启隔离 DSH</button>
-        <button className="btn btn-soft btn-sm" disabled={!!busy} onClick={() => saveAndRestart('bridge')}>只重启桥接</button>
+        <button className="btn btn-soft btn-sm" disabled={!!busy} onClick={() => saveAndRestart('bridge')}>只重启 Core</button>
         {msg && <span style={{ fontSize: 13 }}>{msg}</span>}
       </div>
     </div>

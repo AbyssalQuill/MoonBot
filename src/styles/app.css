@@ -368,7 +368,14 @@
 .tutorial-sec-body { font-size: 13px; line-height: 1.75; color: var(--nc-foreground-700); }
 .tutorial-sec-body ol, .tutorial-sec-body ul { margin: 0; padding-left: 20px; }
 .tutorial-sec-body li { margin: 4px 0; }
-.tutorial-sec-body code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
+/* ===== 2026-09-25 变更要求：新手教程的说明字体与 qq-bridge 字样都还没跟上 =====================
+ * ① 字体：教程整段都是说明文字，但里面的 <code>（`.credentials.yaml`、路径、端口、命令）仍是等宽字体，
+ *    与 2026-09-24「说明文字也要可爱字体」同一条要求冲突（整段看着一半可爱一半代码）。全局
+ *    `body code { font-family: 'JetBrains Mono' !important }` 盖在前面，所以这里必须同样带 !important。
+ *    说明文档弹窗（.doc-dialog-body code，见下方）同理一并压回可爱圆体。
+ * ② 文案：教程里的部件名沿用旧称（QQ-Bridge / Bridge 卡），已统一为首页卡片上的 Core（内置核心层）；
+ *    NapCat 的远端启停也早已是 systemd 优先、容器部署才走 docker，教程里的旧说法一并更正。 */
+.tutorial-sec-body code { font-family: 'AaCute', 'AaCute-full', sans-serif !important; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
 
 /* 说明文档弹窗（BridgeConfig JSON 旁「说明文档」）与 tabs 右对齐按钮 */
 .doc-open-btn { white-space: nowrap; margin-left: 8px; }
@@ -376,7 +383,7 @@
 /* 说明文档弹窗正文的列表与代码样式 */
 .doc-dialog-body ul, .doc-dialog-body ol { margin: 2px 0 6px; padding-left: 20px; }
 .doc-dialog-body li { margin: 4px 0; }
-.doc-dialog-body code { font-family: 'JetBrains Mono', monospace; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
+.doc-dialog-body code { font-family: 'AaCute', 'AaCute-full', sans-serif !important; font-size: 12px; background: hsl(339.13 92% 96%); padding: 0 5px; border-radius: 5px; }
 
 
 /* ===== v3.6：配置卡片 3 列等宽 · 纵向紧凑 · 列对齐 ===== */
