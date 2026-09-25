@@ -69,7 +69,7 @@
   ```json
   { "role": "傲娇助手", "mode": "active" }   // active=正常, silent=静默
   ```
-- 角色文件放 `qq-bridge/roles/<角色名>.md`（格式见 `roles/README.md`）
+- 角色文件放 `qq-bridge/roles/<角色名>.md`（格式见仓库根 `README.md` 第 5.15 节）
 
 ### 查看 QQ 活动
 
