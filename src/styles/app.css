@@ -159,6 +159,12 @@
 .stagger-in > :nth-child(4) { animation-delay: .15s; }
 .stagger-in > :nth-child(5) { animation-delay: .2s; }
 .stagger-in > :nth-child(n+6) { animation-delay: .25s; }
+/* 内嵌页面（iframe：官方 DSH 界面 / NapCat 官方界面）明确不走换页动效（见 App.tsx 的 swap(opts)）：
+   进场动画、入场光带与全屏遮罩全部关掉。这里带上 ::after 与 .view-veil 两道，
+   是因为它们都是"由动画负责消失"的层，动画一关就必须本来就不可见。 */
+.view-swap.no-anim, .view-swap.no-anim::after { animation: none !important; }
+.view-swap.no-anim::after { opacity: 0; }
+.view-swap.no-anim .view-veil { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .view-swap, .view-swap::after, .view-veil, .bridge-body > *, .stagger-in > * { animation: none !important; }
   /* 遮罩与光带都是"由动画负责消失"的层：动画一关就得显式归零（.view-veil 的 base 现在也是 opacity:0，

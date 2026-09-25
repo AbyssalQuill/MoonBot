@@ -906,8 +906,16 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
   const [tab, setTab] = useState<'common' | 'tools' | 'persona' | 'json' | 'profiles'>('common');
   /* 2026-09-14 修改要求：SSH 模式下这一页读写的是服务端 /root/qq-bridge/config.json：
    *  · target 记录本页当前编辑的是哪一套（local / remote）—— 横幅必须一眼看见，别让人以为在改本机；
-   *  · remoteMeta 存服务端路径/说明/写入校验结果，供横幅与保存提示使用。 */
-  const [target, setTarget] = useState<'local' | 'remote'>('local');
+   *  · remoteMeta 存服务端路径/说明/写入校验结果，供横幅与保存提示使用。
+   *  target 的初值改为按当前目标起底：连上服务器时页面重挂（换页、切回本页）不再先
+   *  落回 'local' 一闪 —— 那一闪正是"横幅有时消失"的观感来源（读回配置前一直按本机显示）。 */
+  const [target, setTarget] = useState<'local' | 'remote'>(() => (remote ? 'remote' : 'local'));
+  /* 横幅不随连接状态抖动而消失：轮询里 connected 短暂为假（重连中）时 `remote` 会变 null，
+     而 target 仍是 'remote'（本页读的就是服务端那份配置）。此时沿用最近一次已知的服务端身份，
+     横幅继续挂着；真读不到配置时另有红条与自动重读提示，不会让人误以为正在改本机。 */
+  const remoteRef = useRef<Props['remote']>(remote);
+  useEffect(() => { if (remote) remoteRef.current = remote; }, [remote]);
+  const shownRemote = remote ?? remoteRef.current ?? null;
   const [remoteMeta, setRemoteMeta] = useState<{ dir?: string; path?: string; notes?: string[]; message?: string }>({});
   /* 2026-09-23：cfg 的初值先取模块级缓存（上次成功读到的那份，按 local / remote 分开存）：
    *  切走再切回来时，页面上直接是上次读到的真实配置，不会再出现"先闪一下默认值"。
@@ -1382,7 +1390,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
             没有这条横幅，用户很容易以为在改本机（两套实例并存时这正是最容易踩的坑）。 */}
         {/* 2026-09-14 修改要求：横幅配色跟新手文档一致（不再自己写死蓝色），
             里面的路径/命令一律按行内代码渲染：说明文字干净、技术名词一眼可辨。 */}
-        {target === 'remote' && remote && (
+        {target === 'remote' && shownRemote && (
           <div className="notice-bar server-config-banner" style={{ borderColor: 'var(--nc-primary-400)', display: 'block' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700 }}>
               <Server size={15} /> 服务端模式 · 正在修改服务器上的桥配置
@@ -1390,7 +1398,7 @@ export default function BridgeConfig({ onBack, onRefresh, onOpenLearning, onOpen
             </div>
             {/* 2026-09-19 修改要求：这里只说明"改的是服务器上那份配置"；原子写/备份/热加载这些原理不再堆在页面上。 */}
             <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.7 }}>
-              {remote.name}（{remote.host}）· 保存后立即生效，不用重启桥。
+              {shownRemote.name}（{shownRemote.host}）· 保存后立即生效，不用重启桥。
             </div>
           </div>
         )}

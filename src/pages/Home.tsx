@@ -227,11 +227,20 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
 /** 服务端某组件的运行状态：已连接服务器且已取得远程状态时返回 boolean；否则返回 null
    *（null 表示仍按本机那份文案显示，界面不会出现空白）。 */
   const serverUpOf = (id: SvcId): boolean | null => {
+    if (!sshConn) return null;
     const rs: any = (state as any)?.remoteStatus;
-    if (!sshConn || !rs) return null;
-    if (id === 'dsh-isolated') return rs.dsh ? !!rs.dsh.running : null;
-    if (id === 'napcat-local') return rs.napcat ? !!rs.napcat.running : null;
-    if (id === 'bridge-local') return rs.bridge ? !!rs.bridge.running : null;
+    const key: 'dsh' | 'napcat' | 'bridge' = remoteCompOf(id);
+    /* 2026-10-01 修「服务端其实在跑，首页却写未运行」：remoteStatus 这一轮取不到（探测失败、
+       缓存冷、刚重连）时原先直接返回 null，卡片便落回本机那份文案「服务端未运行」——
+       把"没读到"说成了"没在跑"。现在两层兜底，且只有拿到明确结论才敢说未运行：
+         ① remoteStatus.ok 且该组件字段在 → 用它；
+         ② 否则看连接状态机里同一组件的就绪度（server/index.js 的 connectMachine：
+            ready = 该组件已探测就绪，down = 明确不可用），ready 记运行、down 记未运行；
+         ③ 两者都没有 → null，界面显示「正在读取服务端状态…」而不是下结论。 */
+    if (rs && rs.ok !== false && rs[key]) return !!rs[key].running;
+    const comp = ((state as any)?.connect?.components ?? []).find((c: any) => c?.id === key);
+    if (comp?.state === 'ready') return true;
+    if (comp?.state === 'down') return false;
     return null;
   };
 
@@ -408,7 +417,11 @@ export default function Home({ state, onOpenSSH, onOpenConfig, onOpenWeb, onRefr
                       /* 服务端未运行 + 上一轮动作 / 整套启动失败 → 先说明是哪一次失败、原因何在 */
                       : (!remoteUp && footErrText
                         ? <><span className="status-dot offline" /><AlertTriangle size={12} /><span>{footErrText}</span></>
-                        : <><span className={`status-dot ${remoteUp ? 'online' : 'offline'}`} /><span>{remoteUp ? '服务端运行中' : '服务端未运行'}</span></>))
+                        /* remoteUp === null：这一轮没拿到服务端状态（既非 running，也非明确的
+                           down）。此前会写成「服务端未运行」——把"没读到"说成了"没在跑"。如实写"正在读取"。 */
+                        : remoteUp === null
+                          ? <><span className="status-dot loading" /><span>正在读取服务端状态…</span></>
+                          : <><span className={`status-dot ${remoteUp ? 'online' : 'offline'}`} /><span>{remoteUp ? '服务端运行中' : '服务端未运行'}</span></>))
                     /* 本机：仅当状态机未给出结论（idle）时使用动作失败原因，不得覆盖 starting / failed 的真实阶段 */
                     : (footErrText && phase === 'idle'
                       ? <><span className="status-dot offline" /><AlertTriangle size={12} /><span>{footErrText}</span></>

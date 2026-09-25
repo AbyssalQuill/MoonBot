@@ -157,14 +157,18 @@ export default function App() {
   const viewKey = view.name === 'web' ? `web:${view.url}`
     : view.name === 'cfg' ? `cfg:${view.id}`
     : view.name;
-  const swap = (node: ReactNode) => (
-    <div className="view-swap" key={viewKey}>
+  /* 内嵌页面（iframe：官方 DSH 界面 / NapCat 官方界面）不再套换页动效：
+   *  iframe 首帧本身是白的，再叠「淡入 + 上浮 + 去模糊」与全屏柔光遮罩，观感是这一页在闪，
+   *  而不是顺滑地推过去；这两页也不需要过渡层（目标页面自己铺满）。
+   *  其余视图（服务器配置 / 桥配置 / 聊天 / 语音 / 学习 / 实例配置 / 启动器）保持原动效。 */
+  const swap = (node: ReactNode, opts?: { instant?: boolean }) => (
+    <div className={opts?.instant ? 'view-swap no-anim' : 'view-swap'} key={viewKey}>
       {node}
-      <div className="view-veil" />
+      {opts?.instant ? null : <div className="view-veil" />}
     </div>
   );
 
-  if (view.name === 'web') return swap(<WebView url={view.url} title={view.title} onBack={back} />);
+  if (view.name === 'web') return swap(<WebView url={view.url} title={view.title} onBack={back} />, { instant: true });
   if (view.name === 'ssh') return swap(<SSHConfig state={state} onBack={back} onRefresh={refresh} />);
   if (view.name === 'learning') return swap(<Learning onBack={() => setView({ name: 'bridge' })} />);
   if (view.name === 'portrait') return swap(<GroupPortrait onBack={() => setView({ name: 'bridge' })} />);
